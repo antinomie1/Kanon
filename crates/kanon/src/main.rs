@@ -1,9 +1,13 @@
-//! Standalone Kanon node: microkernel engine plus management gateway.
+//! Kanon node entrypoint: the project's single node binary.
 //!
-//! This binary is the composition root for a headless deployment. It starts the core IPC server
-//! (`core.sock`), the pipeline worker, the process supervisor and the Axum management gateway in
-//! one process, wiring the observability hub into both the `tracing` pipeline and the lifecycle
-//! trace bus.
+//! This crate owns *assembly only*, and it is the only place in the workspace that turns the
+//! libraries into a running node. The microkernel ([`kanon_core`]), the management gateway
+//! ([`kanon_api`]) and the platform adapter ([`kanon_adapter_milky`]) are libraries with no
+//! entrypoints of their own; `kanon-dev` is the separate developer CLI and never runs a node.
+//!
+//! As the composition root it starts the core IPC server (`core.sock`), the pipeline worker, the
+//! process supervisor and the Axum management gateway in one process, wiring the observability hub
+//! into both the `tracing` pipeline and the lifecycle trace bus.
 //!
 //! # Environment
 //! - `KANON_API_ADDR` — management gateway bind address (default `127.0.0.1:8080`).
@@ -345,9 +349,7 @@ fn bootstrap_provider() -> StartupResult<Option<(LlmProviderConfig, &'static str
 /// be a worse failure than reporting it and staying disabled. A malformed *stored* document is
 /// still a hard error, because that file is the node's own state and silently ignoring it would
 /// start a node that does not do what its configuration says.
-async fn register_milky_adapter(
-    supervisor: &Arc<Supervisor>,
-) -> StartupResult<Arc<MilkyAdapter>> {
+async fn register_milky_adapter(supervisor: &Arc<Supervisor>) -> StartupResult<Arc<MilkyAdapter>> {
     let store = SystemConfigStore::default();
     let persisted = store.load_milky().map_err(|err| {
         format!(

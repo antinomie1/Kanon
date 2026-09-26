@@ -27,7 +27,7 @@
 
 Kanon 是基于 Rust 2024 构建的高性能多平台聊天机器人微内核，支持 **Rust / Python / TypeScript** 插件接入。详细架构请参阅项目内相对路径：[./docs/ARCHITECTURE.md](./docs/ARCHITECTURE.md)。
 
-- **零外部硬依赖**：核心是 100% 自包含单一二进制程序，无 Python/Node 即可在纯净系统上独立运行（常驻内存 < 20MB）。Python/TS 仅为按需惰性探测的扩展运行时。
+- **零外部硬依赖**：节点二进制 `kanon` 是 100% 自包含的单一程序，无 Python/Node 即可在纯净系统上独立运行（常驻内存 < 20MB）。Python/TS 仅为按需惰性探测的扩展运行时。
 - **物理故障隔离**：生产环境各插件运行于独立子进程，杜绝单插件阻塞或崩溃（SegFault/OOM）拖垮全盘。
 - **强契约通信**：跨进程统一走 gRPC（HTTP/2 + Protobuf）。富媒体用强类型 `oneof`，Tool Calling 用 `google.protobuf.Struct` 双模载荷，禁止平铺字符串 Map 与冗余序列化。
 - **前后端解耦**：无头微内核专注调度与 REST/WebSocket API 网关，WebUI 保持独立。
@@ -44,13 +44,14 @@ Kanon 是基于 Rust 2024 构建的高性能多平台聊天机器人微内核，
 ├── docs/ARCHITECTURE.md            # 全景架构设计规范文档
 ├── proto/kanon/v1/plugin.proto     # gRPC 契约 IDL
 ├── crates/                         # 核心 Rust 模块
-│   ├── kanon-proto/                # gRPC 桩代码 (tonic-build + prost-types)
-│   ├── kanon-transport/            # 跨平台 IPC (UDS / Windows 认证 Loopback TCP)
-│   ├── kanon-storage/              # 嵌入式 KV 存储与数据目录隔离
-│   ├── kanon-llm/                  # 模型网关、会话上下文与 Tool 状态机
-│   ├── kanon-core/                 # 事件循环、流水线调度、Supervisor 进程监管
-│   ├── kanon-api/                  # RESTful API 与 WebSocket 实时网关
-│   └── kanon-dev/                  # 官方 CLI（项目管理、热重载、沙盒测试）
+│   ├── kanon/                      # 程序入口：唯一节点二进制 kanon（组合根，仅负责装配）
+│   ├── kanon-proto/                # gRPC 桩代码 (tonic-build + prost-types)（库）
+│   ├── kanon-transport/            # 跨平台 IPC (UDS / Windows 认证 Loopback TCP)（库）
+│   ├── kanon-storage/              # 嵌入式 KV 存储与数据目录隔离（库）
+│   ├── kanon-llm/                  # 模型网关、会话上下文与 Tool 状态机（库）
+│   ├── kanon-core/                 # 事件循环、流水线调度、Supervisor 进程监管（库）
+│   ├── kanon-api/                  # RESTful API 与 WebSocket 实时网关（库）
+│   └── kanon-dev/                  # 官方 CLI（项目管理、热重载、沙盒测试）→ kanon-dev 二进制
 ├── sdks/                           # 多语言 SDK 与宿主
 │   ├── rust/                       # Rust 插件 SDK (kanon-sdk)
 │   ├── python/                     # Python 插件 SDK (kanon-sdk-python)
@@ -66,6 +67,8 @@ Kanon 是基于 Rust 2024 构建的高性能多平台聊天机器人微内核，
 - **异步入站防锁步**：`BotApiService.IngestEvent` 必须非阻塞推入带高水位线的 Tokio MPSC 通道并立即 Fast-ACK（< 50µs），绝不同步等待 LLM，彻底切断反压链，保障 IM 心跳永不掉线。
 - **Windows 本地安全**：TCP Loopback 握手必须在首包 HTTP/2 HEADERS 中携带 32-Byte CSPRNG 随机 Token（`x-kanon-auth-token`），核心恒定时间校验。
 - **数据访问防放大**：只读配置 Host 内存缓存；复杂业务持久化直接在专属目录 `./data/plugins/<id>/` 本地读写 SQLite/DuckDB。
+- **程序入口唯一**：全工程仅 `crates/kanon` 提供节点可执行文件 `kanon`；其余 crate 一律为库，禁止新增 `src/main.rs` 或 `[[bin]]`（`crates/kanon-dev` 的 `kanon-dev` 开发者 CLI 为唯一例外）。
+- **构建产物收敛**：根 `default-members` 仅含 `crates/kanon` 与 `crates/kanon-dev`，一次默认构建（`cargo build` / `cargo test`）只产出 `kanon` 与 `kanon-dev` 两个可执行文件；全仓校验必须显式 `--workspace`（示例插件宿主属测试夹具，需先 `cargo build -p demo-weather -p demo-rust-plugin` 才能运行插件宿主用例）。
 - **Rust 标准**：统一 **Rust 2024 Edition**，异步基于 Tokio/Tonic/Axum。错误用 `thiserror`/`anyhow` 显式追踪。`cargo check --workspace` 必须保持 **0 错误、0 警告**。
 - **测试隔离规范**：所有测试代码必须从业务代码中独立剥离至 `tests/` 目录，禁止在 `src/` 中内联测试，确保逻辑代码零冗余。
 
@@ -91,7 +94,7 @@ Kanon 是基于 Rust 2024 构建的高性能多平台聊天机器人微内核，
   <type>(<scope>): <short description>
   ```
 - **Allowed Types**: `feat`, `fix`, `docs`, `refactor`, `perf`, `test`, `chore`
-- **Common Scopes**: `proto`, `core`, `transport`, `storage`, `llm`, `api`, `dev`, `sdk-rust`, `sdk-py`, `sdk-ts`
+- **Common Scopes**: `kanon`, `proto`, `core`, `transport`, `storage`, `llm`, `api`, `dev`, `sdk-rust`, `sdk-py`, `sdk-ts`
 - **Examples**:
   - `feat(transport): add loopback tcp auth handshake for windows`
   - `fix(core): ensure fast-ack mpsc queue non-blocking`

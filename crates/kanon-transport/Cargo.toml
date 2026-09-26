@@ -2,6 +2,7 @@
 name = "kanon-transport"
 version = "0.1.0"
 edition = "2024"
+license = "GPL-3.0-only"
 description = "Cross-platform IPC transport abstraction (UDS and authenticated loopback) for Kanon"
 
 [dependencies]

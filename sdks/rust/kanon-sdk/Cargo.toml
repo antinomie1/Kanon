@@ -2,6 +2,7 @@
 name = "kanon-sdk"
 version = "0.1.0"
 edition = "2024"
+license = "GPL-3.0-only"
 description = "Official Rust SDK for developing Kanon plugins and adapters"
 
 [dependencies]

@@ -117,12 +117,13 @@ kanon/
 ├── proto/
 │   └── kanon/v1/plugin.proto       # 跨语言通用 gRPC 协议契约 (强类型 oneof & Struct 双模载荷)
 ├── crates/
+│   ├── kanon/                      # 程序入口：唯一节点二进制 kanon（组合根，仅负责装配）
 │   ├── kanon-proto/                # gRPC 契约与 Tonic 桩代码生成 (含 prost-types)
 │   ├── kanon-transport/            # 跨平台 IPC 传输层抽象 (UDS / 认证 Loopback TCP)
-│   ├── kanon-core/                 # 核心事件循环、消息流水线、Supervisor 进程监管
-│   ├── kanon-storage/              # 嵌入式持久化支持与插件安全目录隔离管理器
-│   ├── kanon-llm/                  # LLM 多端点路由、Token 滑动窗口与 Tool Calling 状态机
-│   ├── kanon-api/                  # Axum RESTful API 与实时 WebSocket 驱动（供独立前端连接）
+│   ├── kanon-core/                 # 核心事件循环、消息流水线、Supervisor 进程监管 (库)
+│   ├── kanon-storage/              # 嵌入式持久化支持与插件安全目录隔离管理器 (库)
+│   ├── kanon-llm/                  # LLM 多端点路由、Token 滑动窗口与 Tool Calling 状态机 (库)
+│   ├── kanon-api/                  # Axum RESTful API 与实时 WebSocket 驱动 (库，供独立前端连接)
 │   └── kanon-dev/                  # 官方专用 CLI：项目管理、模板脚手架、开发热重载与沙盒测试
 ├── sdks/
 │   ├── rust/                       # Rust 插件开发 SDK (kanon-sdk)
@@ -130,6 +131,12 @@ kanon/
 │   └── typescript/                 # TypeScript 插件开发 SDK (kanon-sdk-ts)
 └── webui/                          # 前后端完全独立的现代 Web 控制台 (Vue 3 / React SPA)
 ```
+
+**构建产物与程序入口 (Build Outputs)**：
+- 全工程只有两个可执行文件：节点二进制 `kanon`（由 `crates/kanon` 产出）与开发者 CLI `kanon-dev`（由 `crates/kanon-dev` 产出）；
+- 根 `Cargo.toml` 的 `default-members` 仅包含上述两个 crate，因此一次默认构建（`cargo build` / `cargo test`）恰好只产出这两个可执行文件；
+- 其余 crate 一律为纯库、不提供任何入口：`crates/kanon-api` 只导出网关库，微内核 `crates/kanon-core` 只导出引擎与 Supervisor 库；
+- 示例插件宿主（`plugins/demo_weather`、`sdks/rust/plugins/demo_rust_plugin`）是插件 IPC 环路的可运行夹具，不属节点产物，需显式 `cargo build -p demo-weather -p demo-rust-plugin`（或用 `--workspace`）构建。
 
 ### 2.5 运行时设计原则：零外部硬依赖与按需惰性激活 (Zero Hard Dependency Principle)
 
@@ -641,7 +648,7 @@ sequenceDiagram
 
 ### 9.1 解耦部署架构
 为保持 Rust 核心代码库的专精与纯粹，系统采用 **前后端解耦部署 (Decoupled Services)** 架构：
-- **Rust Core (Backend)**：纯粹的无头服务（Headless Engine），专注于协议接入、事件调度、高频 IPC 与安全审计。通过 Axum 暴露轻量高性能的 OpenAPI/RESTful 接口与 WebSocket 实时推送信道。
+- **Rust Core (Backend)**：纯粹的节点进程（Headless Engine，二进制名 `kanon`），专注于协议接入、事件调度、高频 IPC 与安全审计。通过 Axum 暴露轻量高性能的 OpenAPI/RESTful 接口与 WebSocket 实时推送信道。
 - **WebUI (Frontend)**：作为独立的前端工程单独维护、构建与分发，用户可通过 Docker Compose、Vercel 或静态托管一键部署。
 
 ### 9.2 核心 RESTful 端点定义
@@ -690,10 +697,12 @@ sequenceDiagram
   控制台既可订阅 `kind=pipeline` 观察全链路，也可按 `kind=ingested` 等单阶段精确过滤；LLM 与 Tool Calling 阶段由 `EventBus` 本身作为
   `AgentHook` 注入 Agent，与流水线阶段共用同一条有序事件流。
 
-### 9.4 无头节点运行形态 (`kanon-api` 二进制)
+### 9.4 节点运行形态 (`kanon` 二进制)
 
-`crates/kanon-api` 同时提供 `kanon-api` 可执行文件，作为无头节点的组合根：同一进程内启动
+`crates/kanon` 是全工程唯一的节点入口，产出 `kanon` 可执行文件：作为组合根，它在同一进程内启动
 `core.sock` IPC 服务、流水线工作循环、Supervisor 与 Axum 管理网关，并将可观测性中心同时接入 `tracing` 与控制台广播信道。
+微内核（`crates/kanon-core`）与网关（`crates/kanon-api`）在此仅以库形式被装配 —— 二者自身不再提供任何可执行文件，
+整个工程的可执行产物只有 `kanon` 与开发者 CLI `kanon-dev`。
 
 | 环境变量 | 默认值 | 说明 |
 | :--- | :--- | :--- |
@@ -818,7 +827,7 @@ sequenceDiagram
   - **会话运行时状态瞬态性 (`RuntimeSessionMetadata`)**：`SessionMetadata`（即 `RuntimeSessionMetadata`，包含动态局部变量 `variables`、活跃轮次计数 `turn_count`、空闲超时探测状态）由 `SessionManager` 在内存（DashMap）中维护，为运行期瞬态数据。微内核重启时运行时活跃会话计数与内存变量将平滑重置，而底层对话消息历史完整保留。
 
 ### 12.2 宿主环境与语言运行时依赖 (Language Host Runtime Dependencies)
-- **Rust 核心自包含**：`kanon-core` 与 `kanon-api` 编译产物为零动态外部依赖的单一原生二进制。
+- **Rust 核心自包含**：节点二进制 `kanon`（以及开发者 CLI `kanon-dev`）为零动态外部依赖的单一原生二进制；`kanon-core` / `kanon-api` 等 crate 仅提供库，不产出可执行文件。
 - **外部多语言宿主依赖宿主环境**：Python 插件需要主机安装 Python 3.10+ 及包管理器（如 `uv` / `pip`）；TypeScript 插件需要系统安装 `bun` 或 `node`/`tsx`。若系统未安装相应运行时，核心在尝试拉起外部宿主时会显式记录错误并拒绝激活该插件，但不会影响 Rust 原生插件与核心流水线的持续运行。
 
 ### 12.3 单机有界队列与背压行为 (Single-Node Bounded Queue & Backpressure)

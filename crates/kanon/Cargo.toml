@@ -1,0 +1,18 @@
+[package]
+name = "kanon"
+version = "0.1.0"
+edition = "2024"
+license = "GPL-3.0-only"
+description = "Kanon node entrypoint: microkernel engine, process supervisor and management gateway"
+
+[[bin]]
+name = "kanon"
+path = "src/main.rs"
+
+[dependencies]
+kanon-adapter-milky = { path = "../kanon-adapter-milky" }
+kanon-api = { path = "../kanon-api" }
+kanon-core = { path = "../kanon-core" }
+tokio = { version = "1.40", features = ["full"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt", "registry"] }

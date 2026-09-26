@@ -4,6 +4,9 @@
 //! RESTful endpoints and real-time WebSocket channels for external WebUI consoles and
 //! management clients.
 //!
+//! This crate is a **library only**: it owns no process entrypoint. [`crate::ApiServer`] and
+//! [`crate::ApiState`] are assembled into a running node by the `kanon` binary in `crates/kanon`.
+//!
 //! ## Endpoints
 //! - `GET  /api/v1/health` — liveness, uptime and memory footprint;
 //! - `GET  /api/v1/metrics` — Prometheus text exposition;

@@ -1,6 +1,10 @@
 [workspace]
+# Rust 2024 workspace. `crates/kanon` is the node entrypoint; every other crate under `crates/` and
+# `sdks/` is a library, except the two example plugin hosts, which exist as runnable hosts for the
+# plugin IPC loop (they are shipped as examples, not as node binaries).
 resolver = "2"
 members = [
+    "crates/kanon",
     "crates/kanon-proto",
     "crates/kanon-transport",
     "crates/kanon-storage",
@@ -13,3 +17,9 @@ members = [
     "sdks/rust/plugins/demo_rust_plugin",
     "plugins/demo_weather",
 ]
+
+# A bare `cargo build` / `cargo test` at the workspace root targets the product only: the `kanon`
+# node and the `kanon-dev` developer CLI — exactly the two shipped executables. Example plugin hosts
+# and the remaining libraries are still covered by explicit `--workspace` commands, so the default
+# build stays free of example artifacts.
+default-members = ["crates/kanon", "crates/kanon-dev"]

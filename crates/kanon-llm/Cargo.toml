@@ -2,6 +2,7 @@
 name = "kanon-llm"
 version = "0.1.0"
 edition = "2024"
+license = "GPL-3.0-only"
 description = "LLM gateway, context memory manager, and tool calling router for Kanon"
 
 [dependencies]

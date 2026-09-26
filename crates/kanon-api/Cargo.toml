@@ -2,11 +2,8 @@
 name = "kanon-api"
 version = "0.1.0"
 edition = "2024"
+license = "GPL-3.0-only"
 description = "Decoupled RESTful API and WebSocket gateway for Kanon"
-
-[[bin]]
-name = "kanon-api"
-path = "src/main.rs"
 
 [dependencies]
 kanon-core = { path = "../kanon-core" }

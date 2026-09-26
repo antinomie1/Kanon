@@ -2,6 +2,7 @@
 name = "kanon-dev"
 version = "0.1.0"
 edition = "2024"
+license = "GPL-3.0-only"
 description = "CLI tool for Kanon plugin project management, scaffolding, and testing"
 
 [dependencies]

@@ -4,6 +4,10 @@
 //! static manifest parser, process supervisor for managing out-of-process
 //! plugin hosts, and the platform adapter contract that connects the
 //! microkernel to chat platforms.
+//!
+//! This crate is a **library only**: it owns no process entrypoint. The node
+//! executable that assembles this engine with the management gateway lives in
+//! `crates/kanon`.
 
 pub mod adapter;
 pub mod instance;
