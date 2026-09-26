@@ -12,6 +12,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Instant;
 
+use kanon_adapter_milky::MilkyAdapter;
 use kanon_core::{
     EventIngress, InstanceRegistry, McpConfigStore, McpPool, SkillStore, Supervisor, ToggleStore,
 };
@@ -67,6 +68,12 @@ struct ApiStateInner {
     config_store: Arc<PluginConfigStore>,
     /// Persistence for node-level system settings, including the console-selected provider.
     system_config: Arc<SystemConfigStore>,
+    /// Milky platform adapter owned by this node, absent when the composition root registered none.
+    ///
+    /// Held as the concrete type rather than through the registry's `dyn PlatformAdapter`, because
+    /// the console reconfigures it and reads its connection status — neither of which the generic
+    /// adapter contract exposes.
+    milky: Option<Arc<MilkyAdapter>>,
     /// Real-time log and trace channels plus the metrics registry.
     observability: Arc<Observability>,
     /// Fast-ACK ingest handle driving the inbound data plane, absent when no pipeline is attached.
@@ -196,6 +203,11 @@ impl ApiState {
         &self.inner.system_config
     }
 
+    /// Milky platform adapter handle, when this node hosts one.
+    pub fn milky(&self) -> Option<&Arc<MilkyAdapter>> {
+        self.inner.milky.as_ref()
+    }
+
     /// Observability hub handle.
     pub fn observability(&self) -> &Arc<Observability> {
         &self.inner.observability
@@ -230,6 +242,7 @@ pub struct ApiStateBuilder {
     mcp_config: Option<Arc<McpConfigStore>>,
     skills: Option<Arc<SkillStore>>,
     system_config: Option<Arc<SystemConfigStore>>,
+    milky: Option<Arc<MilkyAdapter>>,
     config_base_dir: Option<PathBuf>,
     observability: Option<Arc<Observability>>,
     ingress: Option<EventIngress>,
@@ -263,6 +276,7 @@ impl ApiStateBuilder {
             mcp_config: None,
             skills: None,
             system_config: None,
+            milky: None,
             config_base_dir: None,
             observability: None,
             ingress: None,
@@ -393,6 +407,16 @@ impl ApiStateBuilder {
         self
     }
 
+    /// Shares the Milky platform adapter this node registered.
+    ///
+    /// The gateway never constructs the adapter itself: registration must happen before
+    /// `start_all` hands it the ingest queue, so the composition root owns its life cycle and only
+    /// lends it to the management routes.
+    pub fn with_milky_adapter(mut self, adapter: Arc<MilkyAdapter>) -> Self {
+        self.milky = Some(adapter);
+        self
+    }
+
     /// Overrides the base directory used to persist plugin configuration.
     pub fn with_config_dir(mut self, dir: impl Into<PathBuf>) -> Self {
         self.config_base_dir = Some(dir.into());
@@ -499,6 +523,7 @@ impl ApiStateBuilder {
                 skills,
                 config_store,
                 system_config,
+                milky: self.milky,
                 observability,
                 ingress: self.ingress,
                 plugins_dir,

@@ -1,0 +1,688 @@
+//! The Milky platform adapter: Kanon's in-process bridge to a Milky protocol implementation.
+//!
+//! # Inbound
+//! [`PlatformAdapter::start`] receives the core's Fast-ACK ingest handle and spawns one event
+//! stream (SSE or WebSocket, per configuration) whose decoded events are translated by
+//! [`crate::mapping`] and pushed into that queue with a non-blocking `try_send`. The adapter never
+//! awaits downstream reasoning, so a slow model cannot make the QQ connection look dead.
+//!
+//! # Outbound
+//! [`PlatformAdapter::deliver`] resolves the Kanon `channel_id` back into a Milky conversation and
+//! calls `send_group_message` or `send_private_message`. Every failure path — a disabled adapter,
+//! an undecodable channel identifier, a segment Kanon can express but Milky cannot — returns an
+//! [`AdapterError`] instead of reporting a delivery that never happened.
+//!
+//! # Why the runtime lives behind one lock
+//! Configuration is hot-reloadable, so the client and the stream task are replaced while requests
+//! may be in flight. Both are held in a single [`RwLock`] guarded state that is only ever locked
+//! for the duration of a clone or a field assignment: the guard is never held across an `await`,
+//! which is what keeps `is_connected` synchronous for the registry while `apply` stays async.
+//!
+//! # Non-message events
+//! Milky pushes 21 event types; only `message_receive` is a conversational turn. The remaining 20
+//! (a recall, a nudge, a group rename, a member joining) are counted and reflected in the status,
+//! but deliberately *not* ingested: feeding them to the pipeline as if a user had typed them would
+//! make the bot answer events nobody addressed to it. Exposing them to plugins would need a
+//! core-side primitive that does not exist yet, so the adapter does not pretend it has one.
+
+use std::sync::{Arc, RwLock};
+use std::time::{Instant, SystemTime, UNIX_EPOCH};
+
+use async_trait::async_trait;
+use kanon_core::{AdapterError, EventIngress, PlatformAdapter};
+use kanon_proto::v1::{DeliverMessageRequest, DeliverMessageResponse, IngestEventRequest};
+use serde::Serialize;
+
+use crate::client::{MilkyClient, MilkyError};
+use crate::config::{ConfigError, MilkyConfig, TransportKind};
+use crate::event_source::{EventSource, EventSourceHandle, StreamEvent};
+use crate::mapping::{self, ChannelScene};
+use crate::protocol::{Event, SendGroupMessageInput, SendPrivateMessageInput};
+
+/// Connection state of the adapter, as shown in the management console.
+///
+/// Reported as a state machine rather than a boolean because "disabled by an operator" and "cannot
+/// reach the protocol implementation" demand completely different reactions, and collapsing them
+/// into `connected: false` would hide which one is happening.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ConnectionState {
+    /// No configuration is enabled; the adapter holds no connection by design.
+    #[default]
+    Disabled,
+    /// A stream is being established or re-established.
+    Connecting,
+    /// The event stream is up and events are arriving.
+    Connected,
+    /// The last attempt failed; the transport keeps retrying with backoff.
+    Error,
+}
+
+/// Login information of the account the protocol implementation is signed in as.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct MilkyLogin {
+    /// Logged-in QQ number.
+    pub uin: i64,
+    /// Logged-in nickname.
+    pub nickname: String,
+}
+
+/// Description of the protocol implementation behind the endpoint.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct MilkyImplementation {
+    /// Protocol implementation name (for example `Lagrange.Milky`).
+    pub impl_name: String,
+    /// Protocol implementation version.
+    pub impl_version: String,
+    /// QQ protocol version the implementation reports.
+    pub qq_protocol_version: String,
+    /// QQ protocol platform the implementation reports.
+    pub qq_protocol_type: String,
+    /// Milky protocol version the implementation implements.
+    pub milky_version: String,
+}
+
+/// Point-in-time status of the adapter.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct MilkyStatus {
+    /// Platform identifier owned by the adapter.
+    pub platform: String,
+    /// Console-facing adapter name.
+    pub display_name: String,
+    /// Whether the stored configuration asks for a connection.
+    pub enabled: bool,
+    /// Base URL of the protocol implementation.
+    pub base_url: String,
+    /// Configured inbound transport.
+    pub transport: TransportKind,
+    /// Whether an `access_token` is stored (the value itself is never reported).
+    pub token_configured: bool,
+    /// Current connection state.
+    pub state: ConnectionState,
+    /// Convenience flag derived from [`MilkyStatus::state`].
+    pub connected: bool,
+    /// Reason of the most recent failure, cleared once a connection succeeds.
+    pub last_error: Option<String>,
+    /// Number of protocol events seen since the node started.
+    pub events_received: u64,
+    /// Number of messages accepted into the core pipeline.
+    pub messages_ingested: u64,
+    /// Number of messages the core refused because its ingest queue was saturated or closed.
+    pub messages_rejected: u64,
+    /// Number of messages successfully delivered to the platform.
+    pub messages_delivered: u64,
+    /// Unix timestamp in milliseconds of the most recent protocol event.
+    pub last_event_at_unix_ms: Option<u64>,
+    /// Cached login information, once known.
+    pub login: Option<MilkyLogin>,
+    /// Cached protocol implementation description, once known.
+    pub implementation: Option<MilkyImplementation>,
+}
+
+/// Result of an explicit connectivity test.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct MilkyTestReport {
+    /// Round-trip time of the two probe calls, in milliseconds.
+    pub latency_ms: u64,
+    /// Login information reported by the endpoint.
+    pub login: MilkyLogin,
+    /// Implementation description reported by the endpoint.
+    pub implementation: MilkyImplementation,
+}
+
+/// Mutable connection-scoped state, protected by one lock.
+struct State {
+    /// Stored configuration (the credential included; never reported verbatim).
+    config: MilkyConfig,
+    /// Client used for outbound calls, present while a configuration is enabled and installed.
+    client: Option<Arc<MilkyClient>>,
+    /// Running event stream, present while a stream is installed.
+    source: Option<EventSourceHandle>,
+    /// Fast-ACK ingest handle, captured when the core starts the adapter.
+    ingress: Option<EventIngress>,
+    /// Live status.
+    status: StatusData,
+}
+
+/// Counters and cached identity behind [`MilkyStatus`].
+#[derive(Debug, Default)]
+struct StatusData {
+    /// Current connection state.
+    state: ConnectionState,
+    /// Most recent failure reason.
+    last_error: Option<String>,
+    /// Protocol events seen.
+    events_received: u64,
+    /// Messages accepted by the core.
+    messages_ingested: u64,
+    /// Messages refused by the core.
+    messages_rejected: u64,
+    /// Messages delivered to the platform.
+    messages_delivered: u64,
+    /// Unix timestamp in milliseconds of the most recent event.
+    last_event_at_unix_ms: Option<u64>,
+    /// Cached login information.
+    login: Option<MilkyLogin>,
+    /// Cached implementation description.
+    implementation: Option<MilkyImplementation>,
+}
+
+/// Kanon platform adapter for the Milky protocol.
+pub struct MilkyAdapter {
+    /// Platform identifier owned by the adapter, fixed for the process lifetime.
+    platform: String,
+    /// Console-facing name, fixed for the process lifetime because the registry reports `&str`.
+    display_name: String,
+    /// Connection state shared with the event pump task.
+    state: Arc<RwLock<State>>,
+}
+
+impl MilkyAdapter {
+    /// Builds an adapter for a configuration.
+    ///
+    /// The configuration is validated here even when it is disabled, so a node can never start
+    /// holding a configuration that would fail the moment an operator switches it on.
+    pub fn new(config: MilkyConfig) -> Result<Self, AdapterError> {
+        let platform = config.platform.trim().to_string();
+        let config = config
+            .prepare()
+            .map_err(|err| configuration_error(&platform, err))?;
+        let display_name = config.effective_display_name();
+
+        Ok(Self {
+            platform,
+            display_name,
+            state: Arc::new(RwLock::new(State {
+                config,
+                client: None,
+                source: None,
+                ingress: None,
+                status: StatusData::default(),
+            })),
+        })
+    }
+
+    /// Returns a copy of the stored configuration, credential included.
+    pub fn config(&self) -> MilkyConfig {
+        self.state
+            .read()
+            .expect("adapter state poisoned")
+            .config
+            .clone()
+    }
+
+    /// Returns the platform identifier owned by this adapter.
+    pub fn identity(&self) -> &str {
+        &self.platform
+    }
+
+    /// Builds the current status report.
+    pub fn status(&self) -> MilkyStatus {
+        let state = self.state.read().expect("adapter state poisoned");
+        let status = &state.status;
+
+        MilkyStatus {
+            platform: self.platform.clone(),
+            display_name: self.display_name.clone(),
+            enabled: state.config.enabled,
+            base_url: state.config.base_url.clone(),
+            transport: state.config.transport,
+            token_configured: state.config.token_configured(),
+            state: status.state,
+            connected: status.state == ConnectionState::Connected,
+            last_error: status.last_error.clone(),
+            events_received: status.events_received,
+            messages_ingested: status.messages_ingested,
+            messages_rejected: status.messages_rejected,
+            messages_delivered: status.messages_delivered,
+            last_event_at_unix_ms: status.last_event_at_unix_ms,
+            login: status.login.clone(),
+            implementation: status.implementation.clone(),
+        }
+    }
+
+    /// Installs a new configuration and makes it effective immediately.
+    ///
+    /// The old stream is stopped *before* the new configuration is stored, so an in-flight event
+    /// from the previous connection can never be attributed to the new one. Identity fields are
+    /// rejected rather than ignored: the registry routes by platform and reports the display name
+    /// through `&str` accessors, so changing either would leave the catalog describing an adapter
+    /// that no longer exists until the next restart.
+    pub async fn apply(&self, config: MilkyConfig) -> Result<MilkyStatus, AdapterError> {
+        let config = config
+            .prepare()
+            .map_err(|err| configuration_error(&self.platform, err))?;
+
+        if config.platform != self.platform {
+            return Err(AdapterError::Configuration {
+                platform: self.platform.clone(),
+                reason: format!(
+                    "the platform identifier is fixed once the adapter is registered ('{}'); restart the node to change it",
+                    self.platform
+                ),
+            });
+        }
+        if config.effective_display_name() != self.display_name {
+            return Err(AdapterError::Configuration {
+                platform: self.platform.clone(),
+                reason: format!(
+                    "the display name is fixed once the adapter is registered ('{}'); restart the node to change it",
+                    self.display_name
+                ),
+            });
+        }
+
+        let previous = {
+            let mut state = self.state.write().expect("adapter state poisoned");
+            state.source.take()
+        };
+        if let Some(previous) = previous {
+            previous.shutdown().await;
+        }
+
+        {
+            let mut state = self.state.write().expect("adapter state poisoned");
+            state.config = config;
+            // Connection-scoped state is discarded; the counters are lifetime metrics of the
+            // adapter and survive a reconfiguration on purpose.
+            state.client = None;
+            state.status.login = None;
+            state.status.implementation = None;
+            state.status.last_error = None;
+            state.status.state = if state.config.enabled {
+                ConnectionState::Connecting
+            } else {
+                ConnectionState::Disabled
+            };
+        }
+
+        self.install_runtime();
+
+        Ok(self.status())
+    }
+
+    /// Disables the adapter, releasing its connection.
+    pub async fn disable(&self) -> Result<MilkyStatus, AdapterError> {
+        let mut config = self.config();
+        config.enabled = false;
+        self.apply(config).await
+    }
+
+    /// Probes an endpoint and reports what answered.
+    ///
+    /// A configuration may be supplied so the console can test values *before* saving them; when it
+    /// is absent the stored configuration is probed. The probe never installs anything, so a failed
+    /// test cannot disturb a working adapter.
+    pub async fn test_connection(
+        &self,
+        candidate: Option<MilkyConfig>,
+    ) -> Result<MilkyTestReport, AdapterError> {
+        let config = match candidate {
+            Some(candidate) => candidate
+                .prepare()
+                .map_err(|err| configuration_error(&self.platform, err))?,
+            None => self.config(),
+        };
+
+        let client = MilkyClient::new(config).map_err(|err| AdapterError::Configuration {
+            platform: self.platform.clone(),
+            reason: err.to_string(),
+        })?;
+
+        let started = Instant::now();
+        let (login, implementation) = probe_identity(&client)
+            .await
+            .map_err(|err| err.into_adapter_error(&self.platform))?;
+
+        Ok(MilkyTestReport {
+            latency_ms: started.elapsed().as_millis() as u64,
+            login,
+            implementation,
+        })
+    }
+
+    /// Creates the client and stream for the stored configuration when one is missing.
+    ///
+    /// Called by both [`PlatformAdapter::start`] and [`MilkyAdapter::apply`], so a configuration
+    /// saved before the core handed over its ingest handle still comes up as soon as it does.
+    fn install_runtime(&self) {
+        let mut state = self.state.write().expect("adapter state poisoned");
+
+        if !state.config.enabled || state.source.is_some() {
+            return;
+        }
+        let Some(ingress) = state.ingress.clone() else {
+            // Without an ingest queue the core cannot receive what the stream would deliver; the
+            // adapter stays in `Connecting` until `start` supplies the handle.
+            return;
+        };
+
+        let config = state.config.clone();
+
+        let client = match MilkyClient::new(config.clone()) {
+            Ok(client) => Arc::new(client),
+            Err(err) => {
+                state.status.state = ConnectionState::Error;
+                state.status.last_error = Some(err.to_string());
+                return;
+            }
+        };
+        let source = match EventSource::new(config) {
+            Ok(source) => source,
+            Err(err) => {
+                state.status.state = ConnectionState::Error;
+                state.status.last_error = Some(err.to_string());
+                return;
+            }
+        };
+
+        let (handle, receiver) = source.spawn();
+        state.client = Some(client);
+        state.source = Some(handle);
+        state.status.state = ConnectionState::Connecting;
+        state.status.last_error = None;
+        drop(state);
+
+        tokio::spawn(pump(
+            self.state.clone(),
+            self.platform.clone(),
+            ingress,
+            receiver,
+        ));
+    }
+}
+
+#[async_trait]
+impl PlatformAdapter for MilkyAdapter {
+    /// Platform identifier owned by this adapter.
+    fn platform(&self) -> &str {
+        &self.platform
+    }
+
+    /// Console-facing name.
+    fn display_name(&self) -> &str {
+        &self.display_name
+    }
+
+    /// Whether the event stream is currently up.
+    fn is_connected(&self) -> bool {
+        self.state
+            .read()
+            .expect("adapter state poisoned")
+            .status
+            .state
+            == ConnectionState::Connected
+    }
+
+    /// Delivers one outbound message through the Milky API.
+    async fn deliver(
+        &self,
+        request: DeliverMessageRequest,
+    ) -> Result<DeliverMessageResponse, AdapterError> {
+        let target = mapping::delivery_target(&request.channel_id).map_err(|err| {
+            AdapterError::Delivery {
+                platform: self.platform.clone(),
+                reason: err.to_string(),
+            }
+        })?;
+
+        let client = {
+            self.state
+                .read()
+                .expect("adapter state poisoned")
+                .client
+                .clone()
+        };
+        let Some(client) = client else {
+            return Err(AdapterError::Configuration {
+                platform: self.platform.clone(),
+                reason: "the Milky adapter is disabled or not configured yet; enable it in the management console"
+                    .to_string(),
+            });
+        };
+
+        let segments = mapping::outbound_segments(&request.segments).map_err(|err| {
+            AdapterError::Delivery {
+                platform: self.platform.clone(),
+                reason: err.to_string(),
+            }
+        })?;
+
+        // Naming the segment kinds makes a delivery observable in the trace log without dumping
+        // user content, which is what an operator needs when a platform rejects a payload.
+        let segment_types: Vec<&str> = segments
+            .iter()
+            .map(mapping::outbound_segment_type)
+            .collect();
+
+        let sent = match target.scene {
+            ChannelScene::Group => {
+                let input = SendGroupMessageInput {
+                    group_id: target.peer_id,
+                    message: segments,
+                };
+                client
+                    .send_group_message(&input)
+                    .await
+                    .map(|out| out.message_seq)
+            }
+            ChannelScene::Friend => {
+                let input = SendPrivateMessageInput {
+                    user_id: target.peer_id,
+                    message: segments,
+                };
+                client
+                    .send_private_message(&input)
+                    .await
+                    .map(|out| out.message_seq)
+            }
+            // Rejected by `delivery_target` above; handled explicitly so a future scene cannot
+            // silently fall through to a private message.
+            ChannelScene::Temp => unreachable!("temporary conversations are rejected before send"),
+        };
+
+        match sent {
+            Ok(message_seq) => {
+                self.state
+                    .write()
+                    .expect("adapter state poisoned")
+                    .status
+                    .messages_delivered += 1;
+
+                tracing::debug!(
+                    channel = %request.channel_id,
+                    segments = ?segment_types,
+                    message_seq,
+                    "Milky message delivered"
+                );
+
+                Ok(DeliverMessageResponse {
+                    success: true,
+                    message_id: message_seq.to_string(),
+                    error_message: String::new(),
+                })
+            }
+            Err(err) => Err(record_failure(
+                &self.state,
+                err.into_adapter_error(&self.platform),
+            )),
+        }
+    }
+
+    /// Captures the ingest handle and brings up the event stream.
+    async fn start(&self, ingress: EventIngress) -> Result<(), AdapterError> {
+        {
+            let mut state = self.state.write().expect("adapter state poisoned");
+            state.ingress = Some(ingress);
+        }
+
+        self.install_runtime();
+        Ok(())
+    }
+
+    /// Releases the event stream.
+    async fn stop(&self) -> Result<(), AdapterError> {
+        let source = {
+            let mut state = self.state.write().expect("adapter state poisoned");
+            state.client = None;
+            state.status.state = ConnectionState::Disabled;
+            state.source.take()
+        };
+
+        if let Some(source) = source {
+            source.shutdown().await;
+        }
+        Ok(())
+    }
+}
+
+/// Forwards decoded stream events into the core pipeline until the stream goes away.
+///
+/// Runs as its own task so that the ingest path stays non-blocking: the adapter's `deliver` and
+/// management calls never wait for event decoding, and a saturated core applies backpressure to
+/// this task alone.
+async fn pump(
+    state: Arc<RwLock<State>>,
+    platform: String,
+    ingress: EventIngress,
+    mut receiver: tokio::sync::mpsc::Receiver<StreamEvent>,
+) {
+    while let Some(item) = receiver.recv().await {
+        match item {
+            StreamEvent::Connected => {
+                let client = {
+                    let mut state = state.write().expect("adapter state poisoned");
+                    state.status.state = ConnectionState::Connected;
+                    state.status.last_error = None;
+                    state.client.clone()
+                };
+
+                // Identity is refreshed on every (re)connection because a protocol implementation
+                // may have been restarted with a different account in the meantime.
+                if let Some(client) = client {
+                    tokio::spawn(refresh_identity(state.clone(), client));
+                }
+            }
+            StreamEvent::Disconnected(reason) => {
+                let mut state = state.write().expect("adapter state poisoned");
+                state.status.state = ConnectionState::Error;
+                state.status.last_error = Some(reason);
+            }
+            StreamEvent::Event(event) => handle_event(&state, &platform, &ingress, &event),
+        }
+    }
+}
+
+/// Records one protocol event and ingests it when it is a conversational message.
+fn handle_event(state: &Arc<RwLock<State>>, platform: &str, ingress: &EventIngress, event: &Event) {
+    let event_type = event.event_type();
+    let self_id = event.self_id();
+
+    {
+        let mut guard = state.write().expect("adapter state poisoned");
+        guard.status.events_received += 1;
+        guard.status.last_event_at_unix_ms = Some(now_unix_millis());
+    }
+
+    let request = match mapping::inbound_message(platform, self_id, event) {
+        Ok(Some(request)) => request,
+        Ok(None) => {
+            // A non-message event: counted, deliberately not ingested.
+            tracing::trace!(event_type, "Milky event observed but not ingested");
+            return;
+        }
+        Err(err) => {
+            let mut guard = state.write().expect("adapter state poisoned");
+            guard.status.last_error = Some(err.to_string());
+            tracing::warn!(event_type, error = %err, "Failed to translate Milky message");
+            return;
+        }
+    };
+
+    let event_id = request.event_id.clone();
+    let ingest = IngestEventRequest {
+        platform: platform.to_string(),
+        event: Some(request),
+    };
+
+    let mut guard = state.write().expect("adapter state poisoned");
+    match ingress.try_ingest(ingest) {
+        Ok(()) => {
+            guard.status.messages_ingested += 1;
+            tracing::debug!(event_id, "Milky message ingested");
+        }
+        Err(err) => {
+            guard.status.messages_rejected += 1;
+            // Backpressure is not a connection failure: the stream stays up and the platform's own
+            // retry-free semantics mean the message is simply lost, so it is logged loudly.
+            tracing::warn!(event_id, error = %err, "Core refused a Milky message");
+        }
+    }
+}
+
+/// Refreshes the cached login and implementation description after a connection.
+async fn refresh_identity(state: Arc<RwLock<State>>, client: Arc<MilkyClient>) {
+    match probe_identity(&client).await {
+        Ok((login, implementation)) => {
+            let mut guard = state.write().expect("adapter state poisoned");
+            guard.status.login = Some(login);
+            guard.status.implementation = Some(implementation);
+        }
+        Err(err) => {
+            // The stream is up, so the endpoint is reachable; failing to describe it is a
+            // diagnostic gap, not a connection failure, and must not flip the reported state.
+            tracing::debug!(error = %err, "Failed to read Milky identity");
+        }
+    }
+}
+
+/// Reads the login information and implementation description from an endpoint.
+async fn probe_identity(
+    client: &MilkyClient,
+) -> Result<(MilkyLogin, MilkyImplementation), MilkyError> {
+    let login = client.get_login_info().await?;
+    let implementation = client.get_impl_info().await?;
+
+    Ok((
+        MilkyLogin {
+            uin: login.uin,
+            nickname: login.nickname,
+        },
+        MilkyImplementation {
+            impl_name: implementation.impl_name,
+            impl_version: implementation.impl_version,
+            qq_protocol_version: implementation.qq_protocol_version,
+            qq_protocol_type: implementation.qq_protocol_type,
+            milky_version: implementation.milky_version,
+        },
+    ))
+}
+
+/// Records a delivery failure in the status and returns the error unchanged.
+///
+/// Outbound failures are the one failure mode an operator cannot observe from the connection
+/// state, so they are surfaced here as well as returned to the dispatcher.
+fn record_failure(state: &Arc<RwLock<State>>, error: AdapterError) -> AdapterError {
+    state
+        .write()
+        .expect("adapter state poisoned")
+        .status
+        .last_error = Some(error.to_string());
+    error
+}
+
+/// Renders a configuration error in the adapter's error vocabulary.
+fn configuration_error(platform: &str, error: ConfigError) -> AdapterError {
+    AdapterError::Configuration {
+        platform: platform.to_string(),
+        reason: error.to_string(),
+    }
+}
+
+/// Current Unix time in milliseconds, saturating at the epoch for a clock before 1970.
+fn now_unix_millis() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_millis() as u64)
+        .unwrap_or_default()
+}

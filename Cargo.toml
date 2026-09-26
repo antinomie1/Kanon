@@ -6,6 +6,7 @@ members = [
     "crates/kanon-storage",
     "crates/kanon-llm",
     "crates/kanon-core",
+    "crates/kanon-adapter-milky",
     "crates/kanon-api",
     "crates/kanon-dev",
     "sdks/rust/kanon-sdk",

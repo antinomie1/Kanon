@@ -14,9 +14,14 @@ import type {
   McpCatalog,
   McpServerView,
   McpStateResponse,
+  MilkyConfigRequest,
+  MilkyConfigView,
+  MilkyTestReport,
+  MilkyTestRequest,
   NodeHealth,
   PersonasResponse,
   PluginConfigResponse,
+  PluginConfigUpdateResponse,
   PluginStateResponse,
   PluginsResponse,
   ProvidersCatalog,
@@ -173,19 +178,19 @@ export const api = {
     request<PluginConfigResponse>(
       `/api/v1/plugins/${encodeURIComponent(pluginId)}/config`,
     ),
+  // The gateway names the payload `values` and the concurrency token `version`; sending the
+  // version it handed us is what makes a stale editor fail with 409 instead of overwriting a
+  // change made elsewhere.
   updatePluginConfig: (
     pluginId: string,
-    config: Record<string, unknown>,
-    expectedCasVersion: number,
+    values: Record<string, unknown>,
+    expectedVersion?: number,
   ) =>
-    request<{ success: boolean; cas_version: number }>(
+    request<PluginConfigUpdateResponse>(
       `/api/v1/plugins/${encodeURIComponent(pluginId)}/config`,
       {
         method: 'PUT',
-        body: JSON.stringify({
-          config,
-          expected_cas_version: expectedCasVersion,
-        }),
+        body: JSON.stringify({ values, version: expectedVersion }),
       },
     ),
   // Tool catalog: every tool the model can call, grouped by provider.
@@ -260,6 +265,20 @@ export const api = {
     ),
 
   getAdapters: () => request<AdaptersResponse>('/api/v1/adapters'),
+
+  // Milky platform adapter: an account-level configuration that is validated, persisted to
+  // data/system.json and hot-applied to the running adapter in one call.
+  getMilkyConfig: () => request<MilkyConfigView>('/api/v1/adapters/milky/config'),
+  updateMilkyConfig: (req: MilkyConfigRequest) =>
+    request<MilkyConfigView>('/api/v1/adapters/milky/config', {
+      method: 'PUT',
+      body: JSON.stringify(req),
+    }),
+  testMilkyConfig: (req: MilkyTestRequest) =>
+    request<MilkyTestReport>('/api/v1/adapters/milky/config/test', {
+      method: 'POST',
+      body: JSON.stringify(req),
+    }),
   ingestEvent: (platform: string, payload: Record<string, unknown>) =>
     request<{ accepted: boolean; event_id: string }>(
       `/api/v1/adapters/${encodeURIComponent(platform)}/ingest`,

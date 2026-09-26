@@ -10,6 +10,7 @@ path = "src/main.rs"
 
 [dependencies]
 kanon-core = { path = "../kanon-core" }
+kanon-adapter-milky = { path = "../kanon-adapter-milky" }
 kanon-llm = { path = "../kanon-llm" }
 kanon-proto = { path = "../kanon-proto" }
 kanon-storage = { path = "../kanon-storage" }

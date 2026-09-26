@@ -115,6 +115,7 @@ export const dictionaries = {
     'plugins.disabled': 'Disabled',
     'plugins.crashed': 'Crashed',
     'plugins.restarts': 'restarts',
+    'plugins.restart_unavailable': 'This host runs no plugin, so it cannot be addressed for a restart',
     'plugins.restart': 'Restart Process',
     'plugins.config': 'Configure',
     'plugins.commands': 'Commands',
@@ -142,6 +143,7 @@ export const dictionaries = {
     'tools.empty_hint':
       'Register native tools, start a plugin host or enable an MCP server to expose tools to the model.',
     'tools.no_match': 'No tool matches the current filter.',
+    'plugins.tab_adapters': 'Adapters',
     'plugins.tab_skills': 'Skills',
 
     // MCP servers
@@ -224,6 +226,46 @@ export const dictionaries = {
     'adapters.qq_use_markdown': 'Native Markdown Support',
     'adapters.qq_md_template': 'Markdown Template ID',
     'adapters.qq_md_param': 'Template Parameter Key',
+
+    // Milky platform adapter
+    'adapters.milky_title': 'Milky Protocol Adapter',
+    'adapters.empty': 'No platform adapter is registered on this node.',
+    'adapters.milky_unsaved': 'Unsaved change (press Save & apply)',
+    'adapters.milky_enabled': 'Enable Milky adapter',
+    'adapters.milky_enabled_hint':
+      'While disabled the adapter holds no connection and every delivery fails explicitly.',
+    'adapters.milky_base_url': 'Protocol implementation base URL',
+    'adapters.milky_transport': 'Inbound transport',
+    'adapters.milky_transport_sse': 'Server-Sent Events',
+    'adapters.milky_transport_ws': 'WebSocket',
+    'adapters.milky_token': 'Access Token',
+    'adapters.milky_token_keep': 'Leave empty to keep the stored token',
+    'adapters.milky_token_none': 'No token configured',
+    'adapters.milky_token_show': 'Show token',
+    'adapters.milky_token_hide': 'Hide token',
+    'adapters.milky_clear_token': 'Remove the stored token',
+    'adapters.milky_platform': 'Platform identifier',
+    'adapters.milky_display_name': 'Display name',
+    'adapters.milky_readonly_hint':
+      'The platform identifier and display name identify the adapter inside the node registry; changing either requires a restart.',
+    'adapters.milky_save': 'Save & apply',
+    'adapters.milky_saving': 'Saving...',
+    'adapters.milky_saved': 'Saved, persisted and applied',
+    'adapters.milky_test': 'Test connection',
+    'adapters.milky_testing': 'Testing...',
+    'adapters.milky_test_ok': 'Endpoint reachable',
+    'adapters.milky_login': 'Signed-in account',
+    'adapters.milky_impl': 'Protocol implementation',
+    'adapters.milky_counters': 'Ingested / delivered',
+    'adapters.milky_events': 'events',
+    'adapters.milky_rejected': 'rejected',
+    'adapters.milky_last_event': 'Last event',
+    'adapters.milky_state_disabled': 'Disabled',
+    'adapters.milky_state_connecting': 'Connecting',
+    'adapters.milky_state_connected': 'Connected',
+    'adapters.milky_state_error': 'Connection error',
+    'adapters.milky_not_hosted':
+      'This node does not host the Milky adapter; it was not registered at startup.',
 
     // Sessions & Personas
     'sessions.active_sessions': 'Tracked Sessions',
@@ -493,6 +535,7 @@ export const dictionaries = {
     'plugins.disabled': '已停用',
     'plugins.crashed': '已崩溃',
     'plugins.restarts': '次重启',
+    'plugins.restart_unavailable': '该宿主未运行任何插件，无法定位重启目标',
     'plugins.restart': '重启宿主进程',
     'plugins.config': '配置参数',
     'plugins.commands': '指令声明',
@@ -519,6 +562,7 @@ export const dictionaries = {
     'tools.empty_hint':
       '注册内置工具、启动插件宿主或启用 MCP 服务器后，模型即可调用这些工具。',
     'tools.no_match': '没有符合当前筛选条件的工具。',
+    'plugins.tab_adapters': '适配器',
     'plugins.tab_skills': '技能',
 
     // MCP servers
@@ -596,6 +640,44 @@ export const dictionaries = {
     'adapters.qq_use_markdown': '启用原生 Markdown',
     'adapters.qq_md_template': 'Markdown 模板 ID (可选)',
     'adapters.qq_md_param': '模板变量 Key (默认: text)',
+
+    // Milky 协议适配器
+    'adapters.milky_title': 'Milky 协议适配器',
+    'adapters.empty': '本节点尚未注册任何平台适配器。',
+    'adapters.milky_unsaved': '有未保存的改动（请点“保存并生效”）',
+    'adapters.milky_enabled': '启用 Milky 适配器',
+    'adapters.milky_enabled_hint': '关闭时不建立任何连接，所有出站投递都会明确报错。',
+    'adapters.milky_base_url': '协议端基础地址',
+    'adapters.milky_transport': '事件接收方式',
+    'adapters.milky_transport_sse': 'Server-Sent Events',
+    'adapters.milky_transport_ws': 'WebSocket',
+    'adapters.milky_token': 'Access Token',
+    'adapters.milky_token_keep': '留空表示保留已保存的 Token',
+    'adapters.milky_token_none': '尚未配置 Token',
+    'adapters.milky_token_show': '显示 Token',
+    'adapters.milky_token_hide': '隐藏 Token',
+    'adapters.milky_clear_token': '清除已保存的 Token',
+    'adapters.milky_platform': '平台标识',
+    'adapters.milky_display_name': '显示名称',
+    'adapters.milky_readonly_hint':
+      '平台标识与显示名称是适配器在节点注册表中的身份，修改需要重启节点。',
+    'adapters.milky_save': '保存并生效',
+    'adapters.milky_saving': '保存中...',
+    'adapters.milky_saved': '已保存、已持久化、已生效',
+    'adapters.milky_test': '测试连接',
+    'adapters.milky_testing': '测试中...',
+    'adapters.milky_test_ok': '协议端可达',
+    'adapters.milky_login': '登录账号',
+    'adapters.milky_impl': '协议端实现',
+    'adapters.milky_counters': '入站 / 出站',
+    'adapters.milky_events': '事件',
+    'adapters.milky_rejected': '被拒',
+    'adapters.milky_last_event': '最近事件',
+    'adapters.milky_state_disabled': '未启用',
+    'adapters.milky_state_connecting': '连接中',
+    'adapters.milky_state_connected': '已连接',
+    'adapters.milky_state_error': '连接异常',
+    'adapters.milky_not_hosted': '本节点未注册 Milky 适配器，启动时未启用该扩展。',
 
     // 会话与人设
     'sessions.active_sessions': '追踪中的会话列表',

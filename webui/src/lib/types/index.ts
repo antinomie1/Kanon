@@ -355,11 +355,29 @@ export interface InstallPluginResponse {
   message?: string;
 }
 
+/**
+ * Response of `GET /api/v1/plugins/:id/config`.
+ *
+ * Field names follow the gateway's wire contract exactly: `values` are the effective settings
+ * (schema defaults merged with what is persisted) and `version` is the token used for optimistic
+ * concurrency control on the next save.
+ */
 export interface PluginConfigResponse {
   plugin_id: string;
-  cas_version: number;
+  values: Record<string, unknown>;
   schema: Record<string, unknown>;
-  config: Record<string, unknown>;
+  /** Whether the values came from a persisted file instead of schema defaults alone. */
+  persisted: boolean;
+  version: number;
+}
+
+/** Response of `PUT /api/v1/plugins/:id/config`. */
+export interface PluginConfigUpdateResponse {
+  plugin_id: string;
+  host_id: string;
+  values: Record<string, unknown>;
+  reloaded: boolean;
+  version: number;
 }
 
 // Adapter types
@@ -375,6 +393,85 @@ export interface AdapterItem {
 export interface AdaptersResponse {
   total: number;
   adapters: AdapterItem[];
+}
+
+/**
+ * Milky adapter types.
+ *
+ * The configuration is a node property persisted to data/system.json, so every mutation goes
+ * through the backend and is applied to the running adapter without a restart.
+ */
+export type MilkyTransport = 'sse' | 'websocket';
+
+export type MilkyConnectionState = 'disabled' | 'connecting' | 'connected' | 'error';
+
+export interface MilkyConfig {
+  enabled: boolean;
+  platform: string;
+  display_name: string | null;
+  base_url: string;
+  transport: MilkyTransport;
+}
+
+export interface MilkyLogin {
+  uin: number;
+  nickname: string;
+}
+
+export interface MilkyImplementation {
+  impl_name: string;
+  impl_version: string;
+  qq_protocol_version: string;
+  qq_protocol_type: string;
+  milky_version: string;
+}
+
+export interface MilkyStatus {
+  platform: string;
+  display_name: string;
+  enabled: boolean;
+  base_url: string;
+  transport: MilkyTransport;
+  /** Whether a credential is stored; the value itself is never reported. */
+  token_configured: boolean;
+  state: MilkyConnectionState;
+  connected: boolean;
+  last_error: string | null;
+  events_received: number;
+  messages_ingested: number;
+  messages_rejected: number;
+  messages_delivered: number;
+  last_event_at_unix_ms: number | null;
+  login: MilkyLogin | null;
+  implementation: MilkyImplementation | null;
+}
+
+export interface MilkyConfigView {
+  config: MilkyConfig;
+  status: MilkyStatus;
+}
+
+export interface MilkyConfigRequest {
+  enabled: boolean;
+  platform: string;
+  display_name: string | null;
+  base_url: string;
+  transport: MilkyTransport;
+  /** Omitted or empty keeps the stored credential. */
+  access_token?: string;
+  /** Explicitly removes the stored credential. */
+  clear_access_token?: boolean;
+}
+
+export interface MilkyTestRequest {
+  base_url: string;
+  access_token?: string;
+}
+
+export interface MilkyTestReport {
+  latency_ms: number;
+  login: MilkyLogin;
+  implementation: MilkyImplementation;
 }
 
 // Sessions & Personas

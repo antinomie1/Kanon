@@ -11,6 +11,11 @@
 //!   `webhook`); inbound messages POST to `/api/v1/adapters/<platform>/ingest`.
 //! - `KANON_WEBHOOK_CALLBACK_URL` — outbound callback URL; when unset the adapter stays
 //!   inbound-only and reports `connected: false` instead of pretending to deliver.
+//! - `KANON_MILKY_BASE_URL` — Milky protocol implementation base URL; when set, the Milky adapter
+//!   is enabled at startup. A configuration saved through the console wins over this bootstrap.
+//! - `KANON_MILKY_TOKEN` — shared `access_token` for the Milky implementation.
+//! - `KANON_MILKY_PLATFORM` — platform identifier owned by the Milky adapter (default `milky`).
+//! - `KANON_MILKY_TRANSPORT` — inbound event transport, `sse` (default) or `websocket`.
 //! - `KANON_LLM_BASE_URL` — model provider base URL; when unset, chat debugging is disabled and
 //!   `/api/v1/chat/completions` answers `503` instead of inventing a fake provider.
 //! - `KANON_LLM_API_KEY` — provider credential.
@@ -21,6 +26,7 @@
 use std::net::SocketAddr;
 use std::sync::Arc;
 
+use kanon_adapter_milky::{MilkyAdapter, MilkyConfig};
 use kanon_api::llm_config::resolve_bootstrap;
 use kanon_api::{
     ApiServer, ApiState, LlmProviderConfig, Observability, SystemConfigStore, WebhookAdapter,
@@ -132,11 +138,20 @@ async fn main() -> StartupResult<()> {
         Err(err) => tracing::warn!(error = %err, "Failed to enumerate the skills directory"),
     }
 
+    // --- Milky platform adapter -------------------------------------------------------
+    // Built before the gateway state because the console manages this very instance: it holds the
+    // concrete adapter so configuration changes reach the object the registry routes to. The
+    // adapter is registered here and *started* later, when `start_all` hands every adapter the
+    // core's ingest queue; until then a configured adapter reports `connecting` and opens no
+    // connection it could not feed.
+    let milky_adapter = register_milky_adapter(&supervisor).await?;
+
     // --- Management gateway state & agent engine --------------------------------------
     // The state owns one agent factory (and the provider slot inside it), shared with the
     // pipeline worker and the IPC service, so a provider configured later through the console is
     // observed by all three without a restart.
     let state = ApiState::builder(supervisor.clone())
+        .with_milky_adapter(milky_adapter)
         .with_observability(observability.clone())
         .with_ingress(ingress.clone())
         .with_instances(instances.clone())
@@ -317,6 +332,65 @@ fn bootstrap_provider() -> StartupResult<Option<(LlmProviderConfig, &'static str
     })?;
 
     Ok(resolve_bootstrap(persisted, LlmProviderConfig::from_env()))
+}
+
+/// Builds and registers the Milky platform adapter.
+///
+/// # Precedence
+/// A configuration saved through the console is the node's own and wins over the
+/// `KANON_MILKY_*` environment bootstrap, mirroring how the model provider is resolved: the
+/// environment seeds a fresh deployment, the console is how it is changed afterwards. Unlike the
+/// provider, a malformed *environment* value does not prevent the node from starting — the Milky
+/// adapter is one optional platform among many, and refusing to boot the whole node over it would
+/// be a worse failure than reporting it and staying disabled. A malformed *stored* document is
+/// still a hard error, because that file is the node's own state and silently ignoring it would
+/// start a node that does not do what its configuration says.
+async fn register_milky_adapter(
+    supervisor: &Arc<Supervisor>,
+) -> StartupResult<Arc<MilkyAdapter>> {
+    let store = SystemConfigStore::default();
+    let persisted = store.load_milky().map_err(|err| {
+        format!(
+            "Failed to load the Milky adapter configuration from {}: {err}",
+            store.path().display()
+        )
+    })?;
+
+    let (config, source) = match persisted {
+        Some(config) => (config, "data/system.json"),
+        None => match MilkyConfig::from_env() {
+            Ok(Some(config)) => (config, "environment"),
+            Ok(None) => (MilkyConfig::default(), "defaults"),
+            Err(err) => {
+                tracing::error!(
+                    error = %err,
+                    "Ignoring an invalid KANON_MILKY_* bootstrap; the Milky adapter stays disabled"
+                );
+                (MilkyConfig::default(), "defaults")
+            }
+        },
+    };
+
+    let adapter = Arc::new(MilkyAdapter::new(config)?);
+    supervisor.adapters().register(adapter.clone()).await?;
+
+    let status = adapter.status();
+    if status.enabled {
+        tracing::info!(
+            source = %source,
+            platform = %status.platform,
+            base_url = %status.base_url,
+            transport = %status.transport,
+            "Milky adapter registered"
+        );
+    } else {
+        tracing::info!(
+            platform = %status.platform,
+            "Milky adapter registered but disabled; configure it in the console under Plugins & Adapters"
+        );
+    }
+
+    Ok(adapter)
 }
 
 /// Registers the bundled webhook adapter from environment configuration.

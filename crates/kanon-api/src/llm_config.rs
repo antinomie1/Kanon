@@ -7,14 +7,23 @@
 //! and re-applied at startup. The file holds a credential, so it is written with mode `0600`
 //! and never leaves the node.
 //!
+//! # One document, several sections
+//! `data/system.json` is the node's own configuration document, not an LLM-specific file: the
+//! Milky platform adapter stores its section here too. Every section is read-modify-written by
+//! this one store, which is what guarantees that saving the model provider cannot erase the
+//! adapter's settings, and vice versa. Unknown keys are carried through untouched so a newer
+//! component's settings survive a downgrade.
+//!
 //! # Precedence
 //! A provider saved here is the node's own configuration and wins over the `KANON_LLM_*`
 //! environment bootstrap. Environment variables remain the way to deploy a node with a provider
 //! out of the box (containers, CI); the console is the way to change it afterwards. Every
-//! response reports which of the two is in effect, so the source is never ambiguous.
+//! response reports which of the two is in effect, so the source is never ambiguous. The Milky
+//! adapter's configuration follows the same precedence.
 
 use std::path::{Path, PathBuf};
 
+use kanon_adapter_milky::MilkyConfig;
 use kanon_llm::AgentConfig;
 use serde::{Deserialize, Serialize};
 
@@ -50,6 +59,9 @@ struct SystemConfigDocument {
     /// Model provider selected through the management console, when any.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     llm: Option<LlmProviderConfig>,
+    /// Milky platform adapter configuration, when one was saved.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    milky: Option<MilkyConfig>,
     /// Every unrecognized key is carried through verbatim.
     ///
     /// The document is shared, forward-compatible node state: writing the provider must never
@@ -199,6 +211,18 @@ impl SystemConfigStore {
             None => return Ok(()),
         };
         document.llm = None;
+        self.write_document(&document)
+    }
+
+    /// Loads the persisted Milky adapter configuration, if the document carries one.
+    pub fn load_milky(&self) -> Result<Option<MilkyConfig>, String> {
+        Ok(self.read_document()?.and_then(|document| document.milky))
+    }
+
+    /// Persists the Milky adapter configuration, preserving every other section.
+    pub fn save_milky(&self, config: &MilkyConfig) -> Result<(), String> {
+        let mut document = self.read_document()?.unwrap_or_default();
+        document.milky = Some(config.clone());
         self.write_document(&document)
     }
 
