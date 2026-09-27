@@ -47,6 +47,10 @@ service BotApiService {
   rpc RegisterHost (RegisterHostRequest) returns (RegisterHostResponse);
   rpc IngestEvent (IngestEventRequest) returns (IngestEventResponse);
   rpc SendMessage (SendMessageRequest) returns (SendMessageResponse);
+  // Reply to an original platform event through the same outbound FIFO. Success
+  // means the platform adapter accepted delivery, not merely queue admission.
+  // A deadline/disconnect is an unknown outcome and must not trigger an automatic retry.
+  rpc ReplyMessage (DeliverMessageRequest) returns (DeliverMessageResponse);
   rpc RequestLLM (LLMRequest) returns (stream LLMChunk);
   rpc SetStorage (SetStorageRequest) returns (SetStorageResponse);
   rpc GetStorage (GetStorageRequest) returns (GetStorageResponse);

@@ -5,8 +5,8 @@ description = "Official Python Host and SDK skeleton for Kanon"
 readme = "README.md"
 requires-python = ">=3.10"
 dependencies = [
-    "grpcio>=1.60.0",
-    "protobuf>=4.25.0",
+    "grpcio>=1.84.0",
+    "protobuf>=7.35.1",
     "pydantic>=2.0.0",
 ]
 

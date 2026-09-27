@@ -322,6 +322,20 @@ async fn test_send_message_dispatches_to_platform_adapter() {
     assert_eq!(recorded[0].channel_id, "channel_abc");
     assert_eq!(recorded[0].recipient_id, "user_xyz");
     assert_eq!(recorded[0].segments.len(), 1);
+    drop(recorded);
+
+    // ReplyMessage uses the same dispatcher but returns the platform receipt and
+    // preserves the original message ID required for QQ passive replies.
+    let result = client.reply_message(DeliverMessageRequest {
+        platform: "mock_platform".into(), channel_id: "channel_abc".into(),
+        recipient_id: "user_xyz".into(), event_id: "original-qq-message".into(), segments: vec![],
+    }).await.expect("ReplyMessage RPC succeeded").into_inner();
+    assert!(result.success);
+    let recorded = deliveries.lock().await;
+    assert_eq!(recorded.len(), 2);
+    assert_eq!(recorded[1].event_id, "original-qq-message");
+    drop(recorded);
+
 
     // Clean up
     let _ = core_shutdown_tx.send(());

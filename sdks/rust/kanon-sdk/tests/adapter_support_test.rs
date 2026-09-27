@@ -122,6 +122,13 @@ impl BotApiService for CoreStub {
         }))
     }
 
+    async fn reply_message(
+        &self,
+        _request: Request<DeliverMessageRequest>,
+    ) -> Result<Response<DeliverMessageResponse>, Status> {
+        Err(Status::unimplemented("not part of this fixture"))
+    }
+
     async fn send_message(
         &self,
         _request: Request<SendMessageRequest>,
@@ -197,6 +204,13 @@ impl BotApiService for CoreStubServer {
         request: Request<IngestEventRequest>,
     ) -> Result<Response<IngestEventResponse>, Status> {
         self.inner.ingest_event(request).await
+    }
+
+    async fn reply_message(
+        &self,
+        _request: Request<DeliverMessageRequest>,
+    ) -> Result<Response<DeliverMessageResponse>, Status> {
+        Err(Status::unimplemented("not part of this fixture"))
     }
 
     async fn send_message(
