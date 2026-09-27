@@ -88,6 +88,54 @@ The management API exposes `GET` and `PUT /api/v1/adapters/onebot/config`. The r
 `token_configured` and `last_error`. Reverse mode reports `listening` until a client connects.
 Refresh the console to obtain the current status.
 
+## Common API client
+
+`OneBotAdapter::client()` returns a cloneable `OneBotClient` for in-process Rust callers, following
+the Milky client's typed-call model. It shares the existing forward or reverse connection, and a
+retained handle resolves the current session on each new call. The pipeline's outbound delivery
+also uses this client, so there is only one API request/response path.
+
+The client wraps these 29 standard actions with typed arguments and response structs from
+`kanon_adapter_onebot::protocol`:
+
+| Category | Methods |
+| :--- | :--- |
+| Messages | `send_private_msg`, `send_group_msg`, `delete_msg`, `get_msg`, `get_forward_msg` |
+| Account and friends | `get_login_info`, `get_stranger_info`, `get_friend_list`, `send_like` |
+| Groups and members | `get_group_info`, `get_group_list`, `get_group_member_info`, `get_group_member_list` |
+| Group management | `set_group_kick`, `set_group_ban`, `set_group_whole_ban`, `set_group_admin`, `set_group_card`, `set_group_name`, `set_group_leave`, `set_group_special_title` |
+| Requests | `set_friend_add_request`, `set_group_add_request` |
+| Media | `get_record`, `get_image`, `can_send_image`, `can_send_record` |
+| Implementation | `get_status`, `get_version_info` |
+
+```rust,no_run
+use kanon_adapter_onebot::{OneBotAdapter, OneBotError};
+
+async fn inspect_account(adapter: &OneBotAdapter) -> Result<(), OneBotError> {
+    let client = adapter.client();
+    let login = client.get_login_info().await?;
+    let groups = client.get_group_list().await?;
+    println!("{} belongs to {} groups", login.nickname, groups.len());
+    Ok(())
+}
+```
+
+Methods take explicit flags, such as `no_cache`, `approve` and `enable`. Message arguments support
+CQ strings or arrays through `protocol::Message`; `auto_escape` controls CQ parsing for strings.
+The generic `call::<_, Response>(action, &params)` and `call_void(action, &params)` methods support
+additional implementation APIs over the same transport. Typed calls require valid response data;
+void calls accept null or omitted `data` when the envelope reports `status: ok`, `retcode: 0`.
+An `async` acknowledgement is not treated as completed success. Errors preserve the API action
+and numeric return code without relaying arbitrary peer wording. Calls still time out after
+15 seconds and are never replayed after disconnection.
+
+These wrappers perform an operation only when explicitly called. They do not add automatic request
+approval, notification dispatch, a group-management UI or cross-process plugin RPCs. Request
+handling requires the original event's flag and subtype supplied by the caller. `get_msg` and
+`get_forward_msg` are explicit queries, not automatic enrichment of every incoming message.
+`get_image` and `get_record` return paths on the OneBot host; Kanon does not read those paths locally.
+Implementation support and account permissions determine whether a particular API succeeds.
+
 ## Protocol references and verification
 
 The adapter follows the official OneBot v11 specifications for
@@ -95,8 +143,9 @@ The adapter follows the official OneBot v11 specifications for
 [reverse WebSockets](https://github.com/botuniverse/onebot-11/blob/master/communication/ws-reverse.md),
 [authentication](https://github.com/botuniverse/onebot-11/blob/master/communication/authorization.md)
 and [message segments](https://github.com/botuniverse/onebot-11/blob/master/message/segment.md).
+The typed client follows the [public API contracts](https://github.com/botuniverse/onebot-11/blob/master/api/public.md).
 
 Run `cargo test -p kanon-adapter-onebot` and
 `cargo test -p kanon-api --test onebot_routes_test` to verify mapping, real loopback WebSocket
-exchanges and management persistence. These tests use simulated protocol peers; an actual
+exchanges, all 29 client action contracts and management persistence. These tests use simulated protocol peers; an actual
 NapCat/Lagrange account still needs deployment-specific end-to-end testing.

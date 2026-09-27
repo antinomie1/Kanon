@@ -3,10 +3,13 @@
 //! A single socket task owns API correlation and event reception. Ingest never waits on the
 //! pipeline; API calls have deadlines and are failed on disconnect rather than replayed.
 
+pub mod client;
 pub mod config;
 pub mod mapping;
+pub mod protocol;
 mod transport;
 
+pub use client::{OneBotClient, OneBotError};
 pub use config::{DEFAULT_PLATFORM, OneBotConfig, TransportKind};
 
 use async_trait::async_trait;
@@ -19,7 +22,7 @@ use serde::Serialize;
 use std::sync::{Arc, RwLock};
 use tokio::{
     net::TcpListener,
-    sync::{Mutex, mpsc, oneshot},
+    sync::{Mutex, mpsc},
     task::JoinHandle,
 };
 
@@ -92,6 +95,11 @@ pub struct OneBotAdapter {
 }
 
 impl OneBotAdapter {
+    /// Returns a typed API handle sharing this adapter's current and future connections.
+    pub fn client(&self) -> OneBotClient {
+        OneBotClient::new(self.state.clone())
+    }
+
     /// Validates settings without opening network resources.
     pub fn new(config: OneBotConfig) -> Result<Self, AdapterError> {
         let config = config
@@ -305,13 +313,12 @@ impl PlatformAdapter for OneBotAdapter {
         if request.platform != self.platform {
             return Err(self.delivery_error("delivery platform does not match this adapter"));
         }
+        // Pin the current session before file I/O: a reconnect or account switch during
+        // attachment loading must fail this delivery rather than send it from another account.
         let sender = self
-            .state
-            .read()
-            .expect("OneBot state poisoned")
-            .sender
-            .clone()
-            .ok_or_else(|| self.configuration_error("OneBot is disabled or not connected"))?;
+            .client()
+            .session()
+            .map_err(|error| self.configuration_error(error.to_string()))?;
         // FilePath belongs to the Kanon host, which may differ from the OneBot host. Read
         // it here and use the protocol's base64 media form instead of forwarding a local path.
         for segment in &mut request.segments {
@@ -340,31 +347,10 @@ impl PlatformAdapter for OneBotAdapter {
             }
         }
         let (action, params) = mapping::delivery(&request).map_err(|e| self.delivery_error(e))?;
-        let (reply, receive) = oneshot::channel();
-        let deadline = tokio::time::Instant::now() + transport::REQUEST_TIMEOUT;
-        sender
-            .try_send(transport::Command {
-                action,
-                params,
-                reply,
-                deadline,
-            })
-            .map_err(|_| {
-                self.delivery_error("OneBot connection closed or outbound queue is full")
-            })?;
-        let value = tokio::time::timeout_at(deadline, receive)
+        let result: protocol::SendMessageOutput = OneBotClient::call_on(sender, &action, &params)
             .await
-            .map_err(|_| {
-                self.delivery_error("OneBot API response timed out; delivery outcome is unknown")
-            })?
-            .map_err(|_| {
-                self.delivery_error(
-                    "OneBot disconnected before replying; delivery outcome is unknown",
-                )
-            })?
-            .map_err(|e| self.delivery_error(e))?;
-        let message_id =
-            mapping::message_id(&value["message_id"]).map_err(|e| self.delivery_error(e))?;
+            .map_err(|error| self.delivery_error(error.to_string()))?;
+        let message_id = result.message_id.to_string();
         Ok(DeliverMessageResponse {
             success: true,
             message_id,

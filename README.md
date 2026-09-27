@@ -58,7 +58,7 @@ IPC sockets under the platform runtime directory (`$XDG_RUNTIME_DIR/kanon/run/` 
 
 OneBot v11 can also be configured under **Plugins & Adapters → OneBot v11** in the console.
 Both forward and reverse universal WebSockets are supported. See [the OneBot setup guide](docs/ONEBOT.md)
-for connection examples, account binding and message support.
+for connection examples, account binding, message support and the typed client covering 29 common APIs.
 
 ## Build outputs
 

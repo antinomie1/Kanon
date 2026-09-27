@@ -250,3 +250,50 @@ async fn local_attachments_are_sent_as_bytes_and_read_failures_do_not_send() {
     );
     adapter.stop().await.unwrap();
 }
+
+/// A FIFO holds file preparation at a real I/O boundary while the adapter changes sessions.
+#[cfg(unix)]
+#[tokio::test]
+async fn connection_switch_during_attachment_read_does_not_retarget_delivery() {
+    let (adapter, url) = adapter().await;
+    let (sender, _receiver) = mpsc::channel(1);
+    adapter.start(EventIngress::new(sender)).await.unwrap();
+    let _original = connect(&url, "before").await;
+    wait_state(&adapter, ConnectionState::Connected).await;
+    let file = Attachment::new();
+    std::fs::remove_file(&file.0).unwrap();
+    assert!(
+        std::process::Command::new("mkfifo")
+            .arg(&file.0)
+            .status()
+            .unwrap()
+            .success()
+    );
+    let mut request = media_request(file.0.to_str().unwrap());
+    request.segments.truncate(1);
+    let mut delivery = Box::pin(adapter.deliver(request));
+    assert!(matches!(futures_util::poll!(&mut delivery), Poll::Pending));
+
+    adapter
+        .apply(OneBotConfig {
+            access_token: Some("after".into()),
+            ..adapter.config()
+        })
+        .await
+        .unwrap();
+    let mut replacement = connect(&url, "after").await;
+    wait_state(&adapter, ConnectionState::Connected).await;
+    // Release the blocked file read only after the replacement session is available.
+    tokio::fs::write(&file.0, [1, 2, 3]).await.unwrap();
+    let error = timeout(Duration::from_secs(2), delivery)
+        .await
+        .unwrap()
+        .unwrap_err();
+    assert!(error.to_string().contains("connection closed"));
+    assert!(
+        timeout(Duration::from_millis(100), replacement.next())
+            .await
+            .is_err()
+    );
+    adapter.stop().await.unwrap();
+}

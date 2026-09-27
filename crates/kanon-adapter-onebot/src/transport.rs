@@ -1,6 +1,6 @@
 //! Universal WebSocket transport. Each session exclusively owns its echo correlation map.
 
-use crate::{ConnectionState, OneBotConfig, State, mapping};
+use crate::{ConnectionState, OneBotConfig, OneBotError, State, mapping};
 use futures_util::{SinkExt, StreamExt};
 use kanon_core::EventIngress;
 use kanon_proto::v1::IngestEventRequest;
@@ -33,7 +33,7 @@ pub(crate) const REQUEST_TIMEOUT: Duration = Duration::from_secs(15);
 pub(crate) struct Command {
     pub action: String,
     pub params: Value,
-    pub reply: oneshot::Sender<Result<Value, String>>,
+    pub reply: oneshot::Sender<Result<Value, OneBotError>>,
     pub deadline: Instant,
 }
 
@@ -226,21 +226,20 @@ where
                     }
                 } else if let Some(echo) = value.get("echo").and_then(Value::as_str) {
                     if let Some(command) = pending.remove(echo) {
-                        let result = if value["status"] == "ok" && value["retcode"].as_i64() == Some(0) {
-                            value.get("data").cloned().ok_or_else(|| "OneBot API response has no data".into())
-                        } else {
-                            // Do not relay peer-provided text: it can echo credentials or full messages.
-                            Err(format!("OneBot API failed (retcode: {})", value["retcode"].as_i64().map(|n| n.to_string()).unwrap_or_else(|| "missing".into())))
-                        };
-                        let _ = command.reply.send(result);
+                        // The client interprets success/error envelopes and typed or void data.
+                        let _ = command.reply.send(Ok(value));
                     }
                 }
             }
             command = commands.recv() => {
                 let Some(command) = command else { return Ok(()); };
-                if command.reply.is_closed() || Instant::now() >= command.deadline { continue; }
+                if command.reply.is_closed() { continue; }
+                if Instant::now() >= command.deadline {
+                    let _ = command.reply.send(Err(OneBotError::Timeout { action: command.action }));
+                    continue;
+                }
                 if pending.len() >= 64 {
-                    let _ = command.reply.send(Err("too many pending OneBot API calls".into()));
+                    let _ = command.reply.send(Err(OneBotError::Transport("too many pending OneBot API calls".into())));
                     continue;
                 }
                 sequence += 1;
@@ -258,7 +257,7 @@ where
                     .map(|(echo, _)| echo.clone()).collect();
                 for echo in expired {
                     if let Some(command) = pending.remove(&echo) {
-                        let _ = command.reply.send(Err("OneBot API response timed out; delivery outcome is unknown".into()));
+                        let _ = command.reply.send(Err(OneBotError::Timeout { action: command.action }));
                     }
                 }
                 if pong_deadline.is_some_and(|deadline| now >= deadline) { return Err("WebSocket pong timed out".into()); }
