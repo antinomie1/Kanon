@@ -114,6 +114,9 @@ class ProvidersStore {
     try {
       this.catalog = await api.upsertProvider(req);
       this.selectedProviderName = req.name;
+      // The node fills the model catalog from the endpoint's own listing while saving, so the
+      // catalog is re-read here rather than left showing the pre-save snapshot.
+      await modelsStore.load();
       return true;
     } catch (e) {
       this.nodeError = e instanceof Error ? e.message : String(e);
@@ -132,6 +135,8 @@ class ProvidersStore {
       if (this.selectedProviderName === name) {
         this.selectedProviderName = this.providers[0]?.name ?? '';
       }
+      // Removing an endpoint removes its catalog entries too.
+      await modelsStore.load();
       return true;
     } catch (e) {
       this.nodeError = e instanceof Error ? e.message : String(e);
@@ -178,8 +183,10 @@ class ProvidersStore {
     try {
       const res = await api.activateProvider(req);
       this.nodeProvider = res.active;
-      // Activation registers or replaces a directory entry, so the catalog must be re-read.
+      // Activation registers or replaces a directory entry, so the catalog must be re-read; the
+      // node also fills the model catalog from the endpoint's listing while activating.
       await this.load();
+      await modelsStore.load();
       this.nodeMessage = res.message;
       return res;
     } catch (e) {
@@ -199,6 +206,8 @@ class ProvidersStore {
       const res = await api.clearActiveProvider();
       this.nodeProvider = res.active;
       await this.load();
+      // Clearing every endpoint also clears the model catalog that described them.
+      await modelsStore.load();
       this.nodeMessage = res.message;
       return res;
     } catch (e) {

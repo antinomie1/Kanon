@@ -358,9 +358,41 @@ fn translate_incoming_message(message: &IncomingMessage, self_id: i64) -> Incomi
         sender_id: sender_id.to_string(),
         message_seq,
         raw_text: render_text(segments),
-        segments: segments.iter().map(incoming_segment).collect(),
+        segments: segments.iter().flat_map(incoming_segments).collect(),
         metadata: json_to_struct(&Value::Object(metadata_fields)),
     }
+}
+
+/// Translates one inbound Milky segment into one or more Kanon segments.
+///
+/// A reply normally maps to a single `reply` segment, but its quoted payload may itself contain
+/// media. Those are surfaced as additional image/audio segments so a picture the user quoted
+/// reaches the model, instead of only being named inside the snippet.
+pub fn incoming_segments(segment: &IncomingSegment) -> Vec<MessageSegment> {
+    let IncomingSegment::Reply(data) = segment else {
+        return vec![incoming_segment(segment)];
+    };
+
+    let mut rendered = vec![incoming_segment(segment)];
+    for quoted in &data.segments {
+        match quoted {
+            IncomingSegment::Image(image) => rendered.push(MessageSegment {
+                segment: Some(Segment::Image(ImageSegment {
+                    source: Some(image_segment::Source::Url(image.temp_url.clone())),
+                    mime_type: None,
+                    filename: None,
+                })),
+            }),
+            IncomingSegment::Record(record) => rendered.push(MessageSegment {
+                segment: Some(Segment::Audio(AudioSegment {
+                    source: Some(audio_segment::Source::Url(record.temp_url.clone())),
+                    duration_seconds: Some(record.duration),
+                })),
+            }),
+            _ => {}
+        }
+    }
+    rendered
 }
 
 /// Whether a Milky message addresses the bot itself.

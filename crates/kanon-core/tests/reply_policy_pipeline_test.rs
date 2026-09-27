@@ -378,6 +378,44 @@ async fn model_command_with_an_out_of_range_index_lists_instead_of_switching() {
     assert!(registry.get(&id).await.expect("instance").model.is_none());
 }
 
+#[tokio::test]
+async fn a_mention_prefixed_command_is_recognised() {
+    // Group platforms render a mention as leading text, so `/model` arrives as `@bot /model`. The
+    // core must strip that prefix before parsing, or commands typed in a group never work.
+    let registry = Arc::new(InstanceRegistry::in_memory());
+    let id = instance(&registry, None).await;
+    let engine = factory_harness(registry.clone());
+
+    let result = engine
+        .process_event(event("m5", "@黑猪AI /model 1", "group", true))
+        .await;
+
+    assert!(
+        matches!(result, PipelineResult::ModelSelected { .. }),
+        "unexpected result: {result:?}"
+    );
+    assert_eq!(
+        registry.get(&id).await.expect("instance").model.as_deref(),
+        Some("local/alt-model")
+    );
+}
+
+#[tokio::test]
+async fn a_mention_prefixed_new_command_rotates_the_session() {
+    let registry = Arc::new(InstanceRegistry::in_memory());
+    instance(&registry, None).await;
+    let engine = factory_harness(registry);
+
+    let result = engine
+        .process_event(event("m6", "@黑猪AI /new", "group", true))
+        .await;
+
+    assert!(
+        matches!(result, PipelineResult::SessionRotated { .. }),
+        "unexpected result: {result:?}"
+    );
+}
+
 /// Renders the text of the first reply segment.
 fn reply_text(replies: &[kanon_proto::v1::MessageSegment]) -> String {
     replies

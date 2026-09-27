@@ -184,27 +184,7 @@ async fn discover(
     }
 
     let mut settings = state.node_settings();
-    let mut persisted = 0usize;
-    for spec in &discovered {
-        let reference = spec.full_name();
-        match settings
-            .models
-            .iter_mut()
-            .find(|existing| existing.full_name() == reference)
-        {
-            // An operator's manual value is authoritative; discovery only refreshes entries that
-            // were themselves discovered (or never configured).
-            Some(existing) if existing.source == ModelSettingsSource::Manual => {}
-            Some(existing) => {
-                *existing = spec.clone();
-                persisted += 1;
-            }
-            None => {
-                settings.models.push(spec.clone());
-                persisted += 1;
-            }
-        }
-    }
+    let persisted = model_discovery::merge_discovered(&mut settings.models, &discovered);
 
     state
         .apply_node_settings(settings)

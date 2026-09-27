@@ -70,6 +70,33 @@ pub async fn discover_models(entry: &ProviderEntry) -> Result<Vec<ModelSpec>, St
     Ok(parse_model_listing(&entry.name, &payload))
 }
 
+/// Merges discovered entries into a catalog, returning how many entries were written.
+///
+/// An operator-edited (`manual`) entry is authoritative and never overwritten; a missing entry is
+/// inserted, and an entry that was itself discovered is refreshed. That is what makes an automatic
+/// refresh safe to run at startup and after configuring an endpoint.
+pub fn merge_discovered(models: &mut Vec<ModelSpec>, discovered: &[ModelSpec]) -> usize {
+    let mut written = 0usize;
+    for spec in discovered {
+        let full_name = spec.full_name();
+        match models
+            .iter_mut()
+            .find(|existing| existing.full_name() == full_name)
+        {
+            Some(existing) if existing.source == ModelSettingsSource::Manual => {}
+            Some(existing) => {
+                *existing = spec.clone();
+                written += 1;
+            }
+            None => {
+                models.push(spec.clone());
+                written += 1;
+            }
+        }
+    }
+    written
+}
+
 /// Parses either the OpenAI-compatible or the Ollama listing shape into catalog entries.
 pub fn parse_model_listing(provider: &str, payload: &Value) -> Vec<ModelSpec> {
     let items = payload
@@ -127,13 +154,34 @@ fn parse_model_entry(provider: &str, item: &Value) -> Option<ModelSpec> {
     )
     .or_else(|| nested_u32(item, "top_provider", "max_completion_tokens"));
 
+    let mut capabilities = spec.capabilities;
+
     if let Some(modalities) = item
         .get("architecture")
         .and_then(|architecture| architecture.get("input_modalities"))
         .and_then(Value::as_array)
     {
-        spec.capabilities = capabilities_from_modalities(modalities);
+        capabilities = capabilities_from_modalities(modalities);
     }
+
+    // OpenRouter-style listings advertise the request parameters a model accepts; tool calling and
+    // a reasoning channel are exactly the two the node routes on.
+    if let Some(parameters) = item.get("supported_parameters").and_then(Value::as_array) {
+        let supports = |needle: &str| {
+            parameters.iter().any(|p| {
+                p.as_str()
+                    .is_some_and(|value| value.eq_ignore_ascii_case(needle))
+            })
+        };
+        if supports("tools") || supports("tool_choice") {
+            capabilities.tool_calling = true;
+        }
+        if supports("reasoning") || supports("include_reasoning") {
+            capabilities.reasoning = true;
+        }
+    }
+
+    spec.capabilities = capabilities;
 
     Some(spec)
 }
@@ -169,10 +217,18 @@ fn capabilities_from_modalities(modalities: &[Value]) -> ModelCapabilities {
         })
     };
 
+    let vision = has("image");
+    let audio = has("audio");
+    let video = has("video");
+    // A listing that names only media modalities describes an image-only endpoint, so text is
+    // turned off for it; a listing that names nothing recognizable must not disable the default.
+    let text = has("text") || !(vision || audio || video);
+
     ModelCapabilities {
-        vision: has("image"),
-        audio: has("audio"),
-        video: has("video"),
+        text,
+        vision,
+        audio,
+        video,
         ..ModelCapabilities::default()
     }
 }

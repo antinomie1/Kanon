@@ -205,6 +205,22 @@ async fn main() -> StartupResult<()> {
         ),
     }
 
+    // Fill the model catalog from each endpoint that has none yet. Spawned rather than awaited so a
+    // slow or unreachable endpoint can never delay the node coming up; the catalog only holds
+    // metadata, so arriving a few seconds late is harmless.
+    {
+        let state = state.clone();
+        tokio::spawn(async move {
+            let written = state.autofill_model_catalog().await;
+            if written > 0 {
+                tracing::info!(
+                    count = written,
+                    "Model catalog populated from the configured endpoints"
+                );
+            }
+        });
+    }
+
     // The pipeline never awaits platform I/O: replies are queued and an independent dispatcher
     // resolves the destination platform to a built-in adapter or a plugin host.
     let engine = Arc::new(

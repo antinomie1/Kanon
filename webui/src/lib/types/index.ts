@@ -166,6 +166,7 @@ export interface InstanceMutationResponse {
 // Provider & Models types
 /** Input modalities and behaviours a model advertises. */
 export interface ModelCapabilities {
+  text: boolean;
   vision: boolean;
   audio: boolean;
   video: boolean;

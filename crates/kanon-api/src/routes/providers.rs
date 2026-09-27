@@ -451,6 +451,11 @@ async fn activate_provider(
         .apply_node_settings(settings)
         .map_err(ApiError::BadRequest)?;
 
+    // Fill the model catalog from the endpoint's own listing so the operator gets the provider's
+    // models (and their context windows and modalities) without a second manual step. Failures are
+    // logged by the helper and never fail the activation.
+    state.autofill_provider_models(&name).await;
+
     let active = active_provider_info(&state)?;
     tracing::info!(
         provider = %name,
@@ -534,7 +539,7 @@ async fn upsert_provider(
     let becomes_default =
         payload.make_default || (settings.default_provider.is_none() && model.is_some());
     if becomes_default {
-        settings.default_provider = Some(name);
+        settings.default_provider = Some(name.clone());
         if let Some(model) = model {
             settings.default_model = Some(model);
         }
@@ -543,6 +548,7 @@ async fn upsert_provider(
     state
         .apply_node_settings(settings)
         .map_err(ApiError::BadRequest)?;
+    state.autofill_provider_models(&name).await;
     list_providers(State(state)).await
 }
 

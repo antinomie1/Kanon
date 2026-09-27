@@ -17,7 +17,9 @@ use tokio::sync::{Mutex, RwLock, mpsc};
 use tokio::task::JoinHandle;
 
 use kanon_llm::tool_router::ToolRouter;
-use kanon_llm::{AgentFactory, AgentSlot, ModelRef, ModelSpec, strip_reasoning_tags};
+use kanon_llm::{
+    AgentFactory, AgentSlot, ModelCapabilities, ModelRef, ModelSpec, strip_reasoning_tags,
+};
 use kanon_proto::v1::message_segment::Segment;
 use kanon_proto::v1::{
     DeliverMessageRequest, IngestEventRequest, MessageSegment, PipelineEventRequest,
@@ -163,6 +165,23 @@ pub struct DeliveryOutcome {
     pub platform: String,
     /// Platform-assigned message identifier, when reported.
     pub message_id: String,
+}
+
+/// Removes leading `@mention` tokens from a message before slash-command parsing.
+///
+/// A group platform renders a mention as leading text, so a command typed at the bot arrives as
+/// `@bot /model`. The core only uses this for *command* parsing: the model still receives the
+/// mention, because knowing it was addressed is real context.
+fn strip_leading_mentions(text: &str) -> &str {
+    let mut rest = text.trim_start();
+    while let Some(after_at) = rest.strip_prefix('@') {
+        match after_at.find(char::is_whitespace) {
+            Some(index) => rest = after_at[index..].trim_start(),
+            // A mention with no following text leaves nothing that could be a command.
+            None => return "",
+        }
+    }
+    rest
 }
 
 /// Builds an outbound text reply segment.
@@ -833,8 +852,12 @@ impl PipelineEngine {
         // switches the instance's model. Both are matched before plugin commands (so a plugin can
         // never shadow them) and long before the LLM, which must never receive them as
         // conversation text.
+        //
+        // Group platforms render a mention as leading text (`@bot /model`), so mentions are
+        // stripped before parsing; otherwise a command typed in a group would never be recognised.
+        let command_text = strip_leading_mentions(&text_candidate);
         if let Some(instance) = instance.as_ref()
-            && let Some((cmd_name, args)) = CommandRouter::parse_command(&text_candidate)
+            && let Some((cmd_name, args)) = CommandRouter::parse_command(command_text)
         {
             if cmd_name.eq_ignore_ascii_case(NEW_SESSION_COMMAND) {
                 return self.handle_new_session(&filtered_event, instance).await;
@@ -844,7 +867,7 @@ impl PipelineEngine {
             }
         }
 
-        if let Some((cmd_name, args)) = CommandRouter::parse_command(&text_candidate) {
+        if let Some((cmd_name, args)) = CommandRouter::parse_command(command_text) {
             if let Some(target) = CommandRouter::resolve(&cmd_name, &hosts) {
                 tracing::debug!(
                     command = %cmd_name,
@@ -949,17 +972,24 @@ impl PipelineEngine {
             None => self.agent.current(),
         };
 
-        // An image may only be attached when the model that will serve the turn accepts one;
-        // otherwise the placeholder text stays, which is what a text-only endpoint expects.
-        let vision = match (self.agent_factory.as_ref(), resolved_agent.as_ref()) {
-            (Some(factory), Some(agent)) => factory
-                .models()
-                .supports_vision(&ModelRef::parse(&agent.config().model_ref())),
-            _ => false,
+        // The target model's catalog entry decides which modalities may be attached: an image only
+        // when it accepts images, text only when it accepts text.
+        let capabilities = match (self.agent_factory.as_ref(), resolved_agent.as_ref()) {
+            (Some(factory), Some(agent)) => {
+                factory
+                    .models()
+                    .settings_for(&ModelRef::parse(&agent.config().model_ref()))
+                    .capabilities
+            }
+            _ => ModelCapabilities::default(),
         };
-        let user_message = build_user_message(&filtered_event, vision);
+        let user_message = build_user_message(&filtered_event, &capabilities);
 
-        if (user_message.content.is_some() || user_message.has_parts())
+        if (user_message
+            .content
+            .as_deref()
+            .is_some_and(|content| !content.is_empty())
+            || user_message.has_parts())
             && let Some(agent) = resolved_agent
         {
             let router = ToolRouter::from_arc(agent.clone());
@@ -1010,8 +1040,20 @@ impl PipelineEngine {
                 active_hosts.extend(mcp.hosts_for_instance(toggles, instance.as_ref()).await);
             }
 
+            // A model the catalog marks as not tool-capable is offered no external tools. Native
+            // in-process tools stay available: they never leave the node and cost nothing to offer.
+            let tool_hosts = if capabilities.tool_calling {
+                active_hosts
+            } else {
+                tracing::debug!(
+                    session_id = %session_id,
+                    "Model catalog disables tool calling; offering no plugin tools"
+                );
+                Vec::new()
+            };
+
             match router
-                .execute_message(&session_id, user_message, &active_hosts)
+                .execute_message(&session_id, user_message, &tool_hosts)
                 .await
             {
                 Ok(output) => {

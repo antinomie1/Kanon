@@ -13,10 +13,8 @@
 //! must not silently lose the fact that a picture was sent, and conversation history stays readable
 //! after an image URL expires.
 
-use kanon_llm::ChatMessage;
-use kanon_llm::ContentPart;
 use kanon_llm::tool_router::prost_struct_to_json;
-use kanon_proto::prost_types;
+use kanon_llm::{ChatMessage, ContentPart, ModelCapabilities};
 use kanon_proto::v1::PipelineEventRequest;
 use kanon_proto::v1::audio_segment;
 use kanon_proto::v1::image_segment;
@@ -25,9 +23,13 @@ use serde_json::Value;
 
 /// Builds the user message for a conversation turn.
 ///
-/// `vision` is taken from the target model's capabilities: when it is `false`, images stay textual
-/// placeholders, because attaching an image part an endpoint rejects would fail the whole turn.
-pub fn build_user_message(event: &PipelineEventRequest, vision: bool) -> ChatMessage {
+/// `capabilities` come from the target model's catalog entry: text is included only when the model
+/// accepts it, and images are attached only when it accepts images, because sending a modality an
+/// endpoint rejects fails the whole turn.
+pub fn build_user_message(
+    event: &PipelineEventRequest,
+    capabilities: &ModelCapabilities,
+) -> ChatMessage {
     let mut text = TextBuffer::default();
     let mut images: Vec<ContentPart> = Vec::new();
 
@@ -50,7 +52,7 @@ pub fn build_user_message(event: &PipelineEventRequest, vision: bool) -> ChatMes
             }
             Some(Segment::Image(image)) => {
                 text.push("[图片]");
-                if vision {
+                if capabilities.vision {
                     match image_part(image.source.as_ref(), image.mime_type.as_deref()) {
                         Some(part) => images.push(part),
                         None => tracing::debug!(
@@ -70,13 +72,28 @@ pub fn build_user_message(event: &PipelineEventRequest, vision: bool) -> ChatMes
                 ));
             }
             Some(Segment::Custom(custom)) => {
-                render_custom(&custom.type_name, custom.payload.as_ref(), &mut text);
+                let json = custom
+                    .payload
+                    .as_ref()
+                    .map(|payload| prost_struct_to_json(payload.clone()))
+                    .unwrap_or(Value::Null);
+                render_custom(&custom.type_name, &json, &mut text);
+                // A sticker is an image. Its URL is attached too, so the model can actually see it
+                // instead of only being told that an emoji was used.
+                if capabilities.vision
+                    && let Some(part) = custom_media_part(&custom.type_name, &json)
+                {
+                    images.push(part);
+                }
             }
             None => {}
         }
     }
 
-    let text = if text.is_empty() {
+    let text = if !capabilities.text {
+        // An image-only endpoint must not receive a textual projection it would reject.
+        String::new()
+    } else if text.is_empty() {
         // No segment produced anything readable. Falling back to the adapter's rendering keeps an
         // event shape this release does not understand from turning into an empty prompt.
         event.raw_text.clone()
@@ -91,23 +108,37 @@ pub fn build_user_message(event: &PipelineEventRequest, vision: bool) -> ChatMes
     }
 }
 
-/// Renders one custom (platform-preserved) segment into the model text.
-fn render_custom(type_name: &str, payload: Option<&prost_types::Struct>, text: &mut TextBuffer) {
-    let json = payload
-        .map(|payload| prost_struct_to_json(payload.clone()))
-        .unwrap_or(Value::Null);
-    // Adapters namespace their preserved segments (`milky.forward`); the kind is what matters here.
-    let kind = type_name
+/// Returns the image a custom (platform-preserved) segment carries, if any.
+///
+/// Only kinds whose payload is documented to hold an image URL are read: guessing from a generic
+/// `url` field would attach a web page as if it were a picture.
+fn custom_media_part(type_name: &str, json: &Value) -> Option<ContentPart> {
+    match custom_kind(type_name) {
+        // A Milky market-face sticker carries the rendered image URL; a QQ built-in face does not.
+        "market_face" => field_str(json, "url").map(|url| ContentPart::image_url(url, None)),
+        _ => None,
+    }
+}
+
+/// Strips the adapter namespace from a custom segment type name.
+fn custom_kind(type_name: &str) -> &str {
+    type_name
         .split_once('.')
         .map(|(_, kind)| kind)
-        .unwrap_or(type_name);
+        .unwrap_or(type_name)
+}
+
+/// Renders one custom (platform-preserved) segment into the model text.
+fn render_custom(type_name: &str, json: &Value, text: &mut TextBuffer) {
+    // Adapters namespace their preserved segments (`milky.forward`); the kind is what matters here.
+    let kind = custom_kind(type_name);
 
     let rendered = match kind {
         "forward" => {
-            let title = field_str(&json, "title").unwrap_or("合并转发");
+            let title = field_str(json, "title").unwrap_or("合并转发");
             let mut detail = format!("[合并转发: {title}]");
             for key in ["summary", "preview"] {
-                if let Some(value) = field_str(&json, key) {
+                if let Some(value) = field_str(json, key) {
                     detail.push(' ');
                     detail.push_str(value);
                 }
@@ -115,24 +146,24 @@ fn render_custom(type_name: &str, payload: Option<&prost_types::Struct>, text: &
             detail
         }
         "file" => {
-            let name = field_str(&json, "file_name").unwrap_or("file");
-            match field_number(&json, "file_size") {
+            let name = field_str(json, "file_name").unwrap_or("file");
+            match field_number(json, "file_size") {
                 Some(size) => format!("[文件: {name} ({size} bytes)]"),
                 None => format!("[文件: {name}]"),
             }
         }
         "video" => {
-            let duration = field_number(&json, "duration")
+            let duration = field_number(json, "duration")
                 .map(|seconds| format!(" {seconds}s"))
                 .unwrap_or_default();
-            let url = field_str(&json, "temp_url").unwrap_or_default();
+            let url = field_str(json, "temp_url").unwrap_or_default();
             format!("[视频{duration}]{url}")
         }
         "face" | "market_face" => "[表情]".to_string(),
         // Markdown is text as far as a model is concerned.
-        "markdown" => field_str(&json, "content").unwrap_or_default().to_string(),
+        "markdown" => field_str(json, "content").unwrap_or_default().to_string(),
         "light_app" => {
-            let name = field_str(&json, "app_name").unwrap_or("app");
+            let name = field_str(json, "app_name").unwrap_or("app");
             format!("[应用卡片: {name}]")
         }
         "xml" => "[xml 卡片]".to_string(),
@@ -141,7 +172,7 @@ fn render_custom(type_name: &str, payload: Option<&prost_types::Struct>, text: &
             // newer adapter's segment is not reduced to an opaque tag.
             let mut detail = format!("[{other}]");
             for key in ["text", "content", "summary", "url"] {
-                if let Some(value) = field_str(&json, key) {
+                if let Some(value) = field_str(json, key) {
                     detail.push(' ');
                     detail.push_str(value);
                     break;

@@ -9,11 +9,12 @@ import type {
 /**
  * Capabilities assumed for a model the operator adds by hand.
  *
- * Tools default to enabled because that is what the node assumes for an unknown model, and every
- * other modality defaults to off: claiming vision an endpoint does not support surfaces as an
+ * Text and tools default to enabled because that is what the node assumes for an unknown model, and
+ * every other modality defaults to off: claiming vision an endpoint does not support surfaces as an
  * opaque upstream 400, while omitting a capability merely hides a feature that can be enabled.
  */
 export const DEFAULT_CAPABILITIES: ModelCapabilities = {
+  text: true,
   vision: false,
   audio: false,
   video: false,
@@ -23,6 +24,7 @@ export const DEFAULT_CAPABILITIES: ModelCapabilities = {
 
 /** Capability flags in the order the console renders them. */
 export const CAPABILITY_FLAGS: (keyof ModelCapabilities)[] = [
+  'text',
   'vision',
   'audio',
   'video',

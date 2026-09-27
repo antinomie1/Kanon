@@ -270,6 +270,112 @@ impl ApiState {
         self.apply_node_settings(settings)
     }
 
+    /// Populates the model catalog for every endpoint that has no entries yet.
+    ///
+    /// Best-effort by design: an endpoint may be unreachable when the node starts, and a missing
+    /// catalog entry only means the operator runs discovery from the console. Returns how many
+    /// entries were written, which is what the caller logs.
+    pub async fn autofill_model_catalog(&self) -> usize {
+        let missing: Vec<String> = {
+            let settings = self.node_settings();
+            settings
+                .providers
+                .iter()
+                .filter(|entry| {
+                    !settings
+                        .models
+                        .iter()
+                        .any(|model| model.provider == entry.name)
+                })
+                .map(|entry| entry.name.clone())
+                .collect()
+        };
+
+        let mut written = 0usize;
+        for provider in missing {
+            written += self.autofill_provider_models(&provider).await;
+        }
+        written
+    }
+
+    /// Populates the catalog for one endpoint, returning how many entries were written.
+    ///
+    /// Existing entries for the endpoint are left untouched: this is a first fill, not a refresh.
+    /// An operator re-runs discovery explicitly when they want the listing re-read.
+    pub async fn autofill_provider_models(&self, provider: &str) -> usize {
+        if self
+            .node_settings()
+            .models
+            .iter()
+            .any(|model| model.provider == provider)
+        {
+            return 0;
+        }
+
+        let Some(entry) = self
+            .node_settings()
+            .providers
+            .into_iter()
+            .find(|entry| entry.name == provider)
+        else {
+            return 0;
+        };
+
+        // A hung endpoint must not hold a management request (or startup) open forever.
+        let discovered = match tokio::time::timeout(
+            std::time::Duration::from_secs(10),
+            crate::model_discovery::discover_models(&entry),
+        )
+        .await
+        {
+            Ok(Ok(models)) => models,
+            Ok(Err(err)) => {
+                tracing::warn!(
+                    provider = %provider,
+                    error = %err,
+                    "Model discovery failed; the catalog stays as configured"
+                );
+                return 0;
+            }
+            Err(_) => {
+                tracing::warn!(
+                    provider = %provider,
+                    "Model discovery timed out; the catalog stays as configured"
+                );
+                return 0;
+            }
+        };
+
+        if discovered.is_empty() {
+            return 0;
+        }
+
+        let mut settings = self.node_settings();
+        let written = crate::model_discovery::merge_discovered(&mut settings.models, &discovered);
+        if written == 0 {
+            return 0;
+        }
+
+        match self.apply_node_settings(settings) {
+            Ok(()) => {
+                tracing::info!(
+                    provider = %provider,
+                    count = written,
+                    "Model catalog auto-filled from the endpoint"
+                );
+                written
+            }
+            Err(err) => {
+                tracing::warn!(
+                    provider = %provider,
+                    error = %err,
+                    "Failed to store auto-discovered models"
+                );
+                0
+            }
+        }
+    }
+
     /// Milky platform adapter handle, when this node hosts one.
     pub fn milky(&self) -> Option<&Arc<MilkyAdapter>> {
         self.inner.milky.as_ref()

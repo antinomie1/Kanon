@@ -114,6 +114,13 @@ impl fmt::Display for ModelRef {
 /// Input modalities and behaviours a model exposes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ModelCapabilities {
+    /// Whether the model accepts text input.
+    ///
+    /// Enabled by default and only turned off for a model that is genuinely not a chat model; the
+    /// pipeline omits the textual projection when it is disabled, which is what an image-only
+    /// endpoint expects.
+    #[serde(default = "default_true")]
+    pub text: bool,
     /// Whether the model accepts image input.
     #[serde(default)]
     pub vision: bool,
@@ -137,13 +144,14 @@ fn default_true() -> bool {
 }
 
 impl Default for ModelCapabilities {
-    /// The conservative default: tools yes, media no.
+    /// The conservative default: text and tools yes, media no.
     ///
     /// Assuming vision on an unknown model would make the node attach an image part an upstream
     /// endpoint may reject with an opaque 400; assuming no tools merely loses a capability the
     /// operator can enable explicitly.
     fn default() -> Self {
         Self {
+            text: true,
             vision: false,
             audio: false,
             video: false,

@@ -591,6 +591,15 @@ impl Agent {
                             success: is_success,
                         });
 
+                        // Attachment paths are delivery metadata, not conversation content: they are
+                        // collected here so the textual result can be redacted below. A filesystem
+                        // path must never reach the model (or the transcript) through the tool result.
+                        let redactions: Vec<String> = resp
+                            .attachments
+                            .iter()
+                            .filter_map(|attachment| attachment.file_path.clone())
+                            .collect();
+
                         // Attachments of a failed call are discarded with it: a partial image from
                         // an errored tool would be sent to the user as if it were a result.
                         if is_success {
@@ -615,6 +624,7 @@ impl Agent {
                                 None => "{}".to_string(),
                             }
                         };
+                        let result_str = redact_tool_paths(result_str, &redactions);
 
                         for hook in &self.hooks {
                             hook.on_after_tool_call(session_id, &call, &result_str, is_success)
@@ -832,6 +842,11 @@ impl Agent {
                 match target_host.call_tool(tool_req).await {
                     Ok(resp) => {
                         let is_success = resp.success;
+                        let redactions: Vec<String> = resp
+                            .attachments
+                            .iter()
+                            .filter_map(|attachment| attachment.file_path.clone())
+                            .collect();
                         let result_str = if !is_success {
                             format!("Error: {}", resp.error_message)
                         } else {
@@ -845,6 +860,7 @@ impl Agent {
                                 None => "{}".to_string(),
                             }
                         };
+                        let result_str = redact_tool_paths(result_str, &redactions);
                         for hook in &self.hooks {
                             hook.on_after_tool_call(session_id, &call, &result_str, is_success)
                                 .await?;
@@ -966,6 +982,22 @@ impl Agent {
 
         Ok(Box::pin(tokio_stream::wrappers::ReceiverStream::new(rx)))
     }
+}
+
+/// Removes tool-produced filesystem paths from a tool result before it enters memory.
+///
+/// A tool that generated a file reports the attachment (which the pipeline delivers to the platform)
+/// and, very often, the path in its textual result. The path is node-internal: leaving it in the
+/// transcript leaks an absolute location to the model and to anyone reading the console, so it is
+/// replaced by a marker — the file itself is still sent.
+fn redact_tool_paths(mut text: String, paths: &[String]) -> String {
+    for path in paths {
+        let trimmed = path.trim();
+        if !trimmed.is_empty() && text.contains(trimmed) {
+            text = text.replace(trimmed, "[attachment]");
+        }
+    }
+    text
 }
 
 /// Recovers tool calls from a completion whose model emitted markup instead of a structured array.
