@@ -24,7 +24,7 @@
 use std::path::{Path, PathBuf};
 
 use kanon_adapter_milky::MilkyConfig;
-use kanon_core::ReplyPolicy;
+use kanon_core::{ContextPolicy, ReplyPolicy};
 use kanon_llm::{AgentConfig, ModelRef, ModelSpec, ProviderEntry};
 use serde::{Deserialize, Serialize};
 
@@ -133,6 +133,8 @@ pub struct NodeSettings {
     pub models: Vec<ModelSpec>,
     /// Node-wide reply policy inherited by instances without an override.
     pub reply_policy: ReplyPolicy,
+    /// Node-wide context-extras policy inherited by instances without an override.
+    pub context_policy: ContextPolicy,
     /// Where these settings came from.
     pub source: SettingsSource,
 }
@@ -188,6 +190,9 @@ struct SystemConfigDocument {
     /// Node-wide reply policy.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     reply_policy: Option<ReplyPolicy>,
+    /// Node-wide context-extras policy.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    context_policy: Option<ContextPolicy>,
     /// Milky platform adapter configuration, when one was saved.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     milky: Option<MilkyConfig>,
@@ -301,6 +306,7 @@ impl LlmProviderConfig {
             default_model: Some(default_model),
             models: Vec::new(),
             reply_policy: ReplyPolicy::default(),
+            context_policy: ContextPolicy::default(),
             source: SettingsSource::Environment,
         }
     }
@@ -460,6 +466,7 @@ impl SystemConfigStore {
 
         let mut settings = NodeSettings {
             reply_policy: document.reply_policy.unwrap_or_default(),
+            context_policy: document.context_policy.unwrap_or_default(),
             models: document.models.unwrap_or_default(),
             ..NodeSettings::default()
         };
@@ -503,6 +510,7 @@ impl SystemConfigStore {
         document.default_model = settings.default_model.clone();
         document.models = Some(settings.models.clone());
         document.reply_policy = Some(settings.reply_policy);
+        document.context_policy = Some(settings.context_policy);
 
         let active_provider = settings
             .default_model

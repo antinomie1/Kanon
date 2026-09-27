@@ -445,6 +445,16 @@ export const dictionaries = {
     'models.optional': 'optional',
 
     // Reply policy (shared by the instance form and the node settings)
+    'context.title': 'Context extras',
+    'context.hint':
+      'Choose what the node adds to every prompt besides the message itself. Both are off by default: a sender id is personal data and a wall-clock time is not part of what the user said.',
+    'context.sender_id': 'Sender id',
+    'context.sender_id_hint':
+      'Prepend the platform sender id (QQ number / openid) to the prompt.',
+    'context.timestamp': 'Message time',
+    'context.timestamp_hint': 'Prepend the message timestamp to the prompt.',
+    'context.updated': 'Context policy updated',
+    'context.none': 'No extras',
     'reply.title': 'Reply policy',
     'reply.mode_always': 'Always',
     'reply.mode_mention': 'Only when mentioned',
@@ -1024,6 +1034,15 @@ export const dictionaries = {
     'models.optional': '可选',
 
     // 回复策略（实例表单与节点设置共用）
+    'context.title': '上下文附加信息',
+    'context.hint':
+      '选择节点在消息本身之外额外加入提示词的内容。两项默认关闭：发送者 ID 属于个人数据，时间也不是用户说的话。',
+    'context.sender_id': '发送者 ID',
+    'context.sender_id_hint': '在提示词中加入平台发送者 ID（QQ 号 / openid）。',
+    'context.timestamp': '消息时间',
+    'context.timestamp_hint': '在提示词中加入消息时间戳。',
+    'context.updated': '上下文策略已更新',
+    'context.none': '不附加',
     'reply.title': '回复策略',
     'reply.mode_always': '总是回复',
     'reply.mode_mention': '仅被 @ 时回复',

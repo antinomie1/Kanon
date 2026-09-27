@@ -26,7 +26,8 @@ pub use adapter::{
     PlatformAdapter,
 };
 pub use conversation::{
-    ConversationKind, META_BOT_MENTIONED, META_CONVERSATION_KIND, ReplyMode, ReplyPolicy,
+    ContextPolicy, ContextPolicyStore, ConversationKind, META_BOT_MENTIONED,
+    META_CONVERSATION_KIND, META_TIMESTAMP, META_TIMESTAMP_TEXT, ReplyMode, ReplyPolicy,
     ReplyPolicyStore, bot_mentioned,
 };
 pub use instance::{

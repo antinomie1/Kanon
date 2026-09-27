@@ -161,6 +161,94 @@ impl Default for ModelCapabilities {
     }
 }
 
+impl ModelCapabilities {
+    /// Infers capabilities from a model id.
+    ///
+    /// Used when an endpoint's own listing reports no modality metadata — many
+    /// OpenAI-compatible endpoints return bare ids, which used to make a vision model show up as
+    /// text-only. The pattern list is short and explicit: a wrong guess costs an upstream 400, so
+    /// it leans on well-known family markers and an operator can always correct it in the console.
+    pub fn infer_from_model_id(model_id: &str) -> Self {
+        let id = model_id.to_ascii_lowercase();
+        let has = |needle: &str| id.contains(needle);
+
+        let vision = [
+            "vision",
+            "vl",
+            "multimodal",
+            "omni",
+            "gpt-4o",
+            "gpt-4.1",
+            "gpt-4.5",
+            "gpt-5",
+            "o1",
+            "o3",
+            "o4",
+            "claude-3",
+            "claude-4",
+            "claude-sonnet",
+            "claude-opus",
+            "claude-haiku",
+            "gemini",
+            "llava",
+            "pixtral",
+            "internvl",
+            "minicpm-v",
+            "glm-4v",
+            "glm-4.5v",
+            "qwen-vl",
+            "qwen2-vl",
+            "qwen2.5-vl",
+            "phi-3-vision",
+            "phi-4-multimodal",
+            "moondream",
+            "idefics",
+            "smolvlm",
+            "gemma-3",
+        ]
+        .iter()
+        .any(|needle| has(needle));
+
+        let audio = [
+            "audio",
+            "realtime",
+            "omni",
+            "whisper",
+            "voxtral",
+            "qwen-audio",
+            "qwen2-audio",
+        ]
+        .iter()
+        .any(|needle| has(needle));
+
+        let video = has("video");
+
+        let reasoning = [
+            "reasoner",
+            "-r1",
+            "r1-",
+            "thinking",
+            "qwq",
+            "magistral",
+            "deepseek-r",
+            "o1",
+            "o3",
+            "o4",
+        ]
+        .iter()
+        .any(|needle| has(needle));
+
+        Self {
+            text: true,
+            vision,
+            audio,
+            video,
+            tool_calling: true,
+            reasoning,
+        }
+    }
+}
+
 /// Provenance of a model's settings, so the console can explain where a value came from.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]

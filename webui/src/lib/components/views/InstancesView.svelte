@@ -11,6 +11,7 @@ import {
   Trash2,
   X,
 } from 'lucide-svelte';
+import { describeContextPolicy } from '../../stores/contextPolicy.svelte';
 import { t } from '../../stores/i18n.svelte';
 import type { PolicyKind } from '../../stores/instances.svelte';
 import { instancesStore } from '../../stores/instances.svelte';
@@ -440,6 +441,50 @@ $effect(() => {
               </p>
             {:else}
               <p class="text-xs text-zinc-400">{t('instances.reply_override_hint')}</p>
+            {/if}
+          </div>
+
+          <!-- Context extras: whether the sender id and the message time reach the model. -->
+          <div class="space-y-3 border-t border-zinc-200 dark:border-zinc-800 pt-4">
+            <div>
+              <span class="text-xs font-medium text-zinc-500">{t('context.title')}</span>
+              <p class="text-xs text-zinc-400 mt-0.5">{t('context.hint')}</p>
+            </div>
+
+            <label class="flex items-center gap-2 text-sm text-zinc-700 dark:text-zinc-300 cursor-pointer select-none">
+              <input
+                type="checkbox"
+                bind:checked={instancesStore.formContextInherit}
+                class="rounded text-indigo-600 focus:ring-0 w-4 h-4"
+              />
+              <span>{t('reply.inherit')}</span>
+            </label>
+
+            <div class="space-y-2 {instancesStore.formContextInherit ? 'opacity-50 pointer-events-none' : ''}">
+              <label class="flex items-center justify-between gap-4 text-sm text-zinc-700 dark:text-zinc-300 cursor-pointer select-none">
+                <span>{t('context.sender_id')}</span>
+                <input
+                  type="checkbox"
+                  bind:checked={instancesStore.formIncludeSenderId}
+                  class="rounded text-indigo-600 focus:ring-0 w-4 h-4"
+                />
+              </label>
+              <label class="flex items-center justify-between gap-4 text-sm text-zinc-700 dark:text-zinc-300 cursor-pointer select-none">
+                <span>{t('context.timestamp')}</span>
+                <input
+                  type="checkbox"
+                  bind:checked={instancesStore.formIncludeTimestamp}
+                  class="rounded text-indigo-600 focus:ring-0 w-4 h-4"
+                />
+              </label>
+            </div>
+
+            {#if instancesStore.formContextInherit && instancesStore.nodeContextPolicy}
+              <p class="text-xs text-zinc-400">
+                {t('reply.node_current', {
+                  policy: describeContextPolicy(instancesStore.nodeContextPolicy),
+                })}
+              </p>
             {/if}
           </div>
 

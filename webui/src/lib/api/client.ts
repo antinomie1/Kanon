@@ -5,6 +5,8 @@ import type {
   CallPluginToolResponse,
   ChatCompletionRequest,
   ChatCompletionResponse,
+  ContextPolicy,
+  ContextPolicyResponse,
   DeleteModelRequest,
   DeleteProviderRequest,
   DiscoverModelsRequest,
@@ -122,6 +124,15 @@ export const api = {
     request<ReplyPolicyResponse>('/api/v1/system/reply-policy'),
   setReplyPolicy: (policy: ReplyPolicy) =>
     request<ReplyPolicyResponse>('/api/v1/system/reply-policy', {
+      method: 'PUT',
+      body: JSON.stringify(policy),
+    }),
+
+  // Whether the sender id and the message time are prepended to the model prompt.
+  getContextPolicy: () =>
+    request<ContextPolicyResponse>('/api/v1/system/context-policy'),
+  setContextPolicy: (policy: ContextPolicy) =>
+    request<ContextPolicyResponse>('/api/v1/system/context-policy', {
       method: 'PUT',
       body: JSON.stringify(policy),
     }),

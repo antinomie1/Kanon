@@ -2,6 +2,7 @@ import { api } from '../api/client';
 import type {
   AdapterItem,
   BotInstanceView,
+  ContextPolicy,
   InstanceRequest,
   InstancesResponse,
   ItemPolicy,
@@ -66,6 +67,10 @@ class InstancesStore {
   formReplyPolicyMode = $state<ReplyPolicyChoice>('inherit');
   /** Only consulted by the `probability` mode. */
   formReplyProbability = $state(0.5);
+  /** `true` sends `context_policy: null`, inheriting the node-wide context policy. */
+  formContextInherit = $state(true);
+  formIncludeSenderId = $state(false);
+  formIncludeTimestamp = $state(false);
   formPlugins = $state<Record<string, ItemPolicy>>({});
   formSkills = $state<Record<string, ItemPolicy>>({});
   formMcp = $state<Record<string, ItemPolicy>>({});
@@ -86,6 +91,11 @@ class InstancesStore {
   /** Canonical model references the operator may assign, seeded from the node's catalog. */
   get modelReferences(): string[] {
     return modelsStore.models.map((spec) => modelsStore.referenceOf(spec));
+  }
+
+  /** Node-wide context policy an instance without an override inherits, for the form hint. */
+  get nodeContextPolicy(): ContextPolicy | null {
+    return this.catalog?.node_context_policy ?? null;
   }
 
   /** Node default model shown by the "inherit" option, when one is configured. */
@@ -211,6 +221,9 @@ class InstancesStore {
     this.formModel = '';
     this.formReplyPolicyMode = 'inherit';
     this.formReplyProbability = 0.5;
+    this.formContextInherit = true;
+    this.formIncludeSenderId = false;
+    this.formIncludeTimestamp = false;
     this.formPlugins = {};
     this.formSkills = {};
     this.formMcp = {};
@@ -230,6 +243,12 @@ class InstancesStore {
     // A null override is the `inherit` choice; any stored policy is shown verbatim.
     this.formReplyPolicyMode = instance.reply_policy?.mode ?? 'inherit';
     this.formReplyProbability = instance.reply_policy?.probability ?? 0.5;
+    // A null override is the `inherit` choice; a stored policy is shown verbatim.
+    this.formContextInherit = instance.context_policy === null;
+    this.formIncludeSenderId =
+      instance.context_policy?.include_sender_id ?? false;
+    this.formIncludeTimestamp =
+      instance.context_policy?.include_timestamp ?? false;
     this.formPlugins = { ...instance.plugins };
     this.formSkills = { ...instance.skills };
     this.formMcp = { ...instance.mcp };
@@ -263,6 +282,12 @@ class InstancesStore {
               mode: this.formReplyPolicyMode,
               probability: this.formReplyProbability,
             },
+      context_policy: this.formContextInherit
+        ? null
+        : {
+            include_sender_id: this.formIncludeSenderId,
+            include_timestamp: this.formIncludeTimestamp,
+          },
       plugins: this.formPlugins,
       skills: this.formSkills,
       mcp: this.formMcp,

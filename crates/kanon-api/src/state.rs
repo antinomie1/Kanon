@@ -14,8 +14,8 @@ use std::time::Instant;
 
 use kanon_adapter_milky::MilkyAdapter;
 use kanon_core::{
-    EventIngress, InstanceRegistry, McpConfigStore, McpPool, ReplyPolicyStore, SkillStore,
-    Supervisor, ToggleStore,
+    ContextPolicyStore, EventIngress, InstanceRegistry, McpConfigStore, McpPool, ReplyPolicyStore,
+    SkillStore, Supervisor, ToggleStore,
 };
 use kanon_llm::{
     Agent, AgentConfig, AgentFactory, AgentSlot, LlmProvider, Memory, PersonaRegistry,
@@ -71,6 +71,8 @@ struct ApiStateInner {
     system_config: Arc<SystemConfigStore>,
     /// Node-wide reply policy shared with the pipeline worker.
     reply_policy: Arc<ReplyPolicyStore>,
+    /// Node-wide context-extras policy shared with the pipeline worker.
+    context_policy: Arc<ContextPolicyStore>,
     /// In-memory view of the persisted model-routing settings.
     ///
     /// Kept alongside the store so a read (listing providers, resolving a model) never touches the
@@ -216,6 +218,11 @@ impl ApiState {
         &self.inner.reply_policy
     }
 
+    /// Node-wide context-extras policy shared with the pipeline worker.
+    pub fn context_policy(&self) -> &Arc<ContextPolicyStore> {
+        &self.inner.context_policy
+    }
+
     /// Snapshot of the persisted model-routing settings.
     pub fn node_settings(&self) -> NodeSettings {
         self.inner
@@ -248,6 +255,7 @@ impl ApiState {
             },
         )?;
         self.inner.reply_policy.set(settings.reply_policy);
+        self.inner.context_policy.set(settings.context_policy);
         *self
             .inner
             .node_settings
@@ -298,17 +306,16 @@ impl ApiState {
         written
     }
 
-    /// Populates the catalog for one endpoint, returning how many entries were written.
+    /// Populates (or refreshes) the catalog for one endpoint.
     ///
-    /// Existing entries for the endpoint are left untouched: this is a first fill, not a refresh.
-    /// An operator re-runs discovery explicitly when they want the listing re-read.
+    /// An entry the operator edited by hand marks the endpoint as curated, and nothing is
+    /// overwritten. Otherwise the listing is re-read, which is what keeps an upstream correction —
+    /// a newly reported context window or modality — flowing into the node on every restart.
     pub async fn autofill_provider_models(&self, provider: &str) -> usize {
-        if self
-            .node_settings()
-            .models
-            .iter()
-            .any(|model| model.provider == provider)
-        {
+        let curated = self.node_settings().models.iter().any(|model| {
+            model.provider == provider && model.source == kanon_llm::ModelSettingsSource::Manual
+        });
+        if curated {
             return 0;
         }
 
@@ -693,6 +700,7 @@ impl ApiStateBuilder {
             }
         }
         let reply_policy = Arc::new(ReplyPolicyStore::new(node_settings.reply_policy));
+        let context_policy = Arc::new(ContextPolicyStore::new(node_settings.context_policy));
 
         let instances = self.instances.unwrap_or_default();
         let plugin_state = self.plugin_state.unwrap_or_default();
@@ -731,6 +739,7 @@ impl ApiStateBuilder {
                 config_store,
                 system_config,
                 reply_policy,
+                context_policy,
                 node_settings: Arc::new(RwLock::new(node_settings)),
                 milky: self.milky,
                 observability,

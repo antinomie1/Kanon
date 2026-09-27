@@ -226,6 +226,8 @@ pub fn inbound_message(
     let mut metadata = inbound.metadata;
     insert_number(&mut metadata, META_SELF_ID, self_id as f64);
     insert_number(&mut metadata, META_TIME, *time as f64);
+    // Platform-neutral timestamp the core's context policy renders when it is enabled.
+    insert_number(&mut metadata, kanon_core::META_TIMESTAMP, *time as f64);
 
     Ok(Some(PipelineEventRequest {
         event_id,

@@ -167,6 +167,7 @@ async fn instance(registry: &InstanceRegistry, policy: Option<ReplyPolicy>) -> S
             system_prompt: None,
             model: None,
             reply_policy: policy,
+            context_policy: None,
             plugins: Default::default(),
             skills: Default::default(),
             mcp: Default::default(),

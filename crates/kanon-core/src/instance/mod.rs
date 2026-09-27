@@ -26,7 +26,7 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use tokio::sync::RwLock;
 
-use crate::conversation::ReplyPolicy;
+use crate::conversation::{ContextPolicy, ReplyPolicy};
 
 /// Default location of the instance catalog, relative to the node working directory.
 pub const DEFAULT_INSTANCE_CATALOG: &str = "./data/instances.json";
@@ -122,6 +122,11 @@ pub struct BotInstance {
     /// platform: the same group may host a chatty bot and a quiet one.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reply_policy: Option<ReplyPolicy>,
+    /// Context-extras override; `None` inherits the node-wide policy.
+    ///
+    /// Controls whether the sender id and the message time are prepended to the prompt.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub context_policy: Option<ContextPolicy>,
     /// Per-plugin overrides; absent identifiers inherit the node-wide switch.
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     pub plugins: HashMap<String, ItemPolicy>,
@@ -162,6 +167,9 @@ pub struct InstanceDraft {
     /// Optional reply-policy override; absent inherits the node-wide policy.
     #[serde(default)]
     pub reply_policy: Option<ReplyPolicy>,
+    /// Optional context-extras override; absent inherits the node-wide policy.
+    #[serde(default)]
+    pub context_policy: Option<ContextPolicy>,
     /// Per-plugin overrides.
     #[serde(default)]
     pub plugins: HashMap<String, ItemPolicy>,
@@ -248,6 +256,11 @@ impl BotInstance {
     /// Reply policy that governs this instance, given the node-wide default.
     pub fn effective_reply_policy(&self, node_policy: ReplyPolicy) -> ReplyPolicy {
         self.reply_policy.unwrap_or(node_policy)
+    }
+
+    /// Context-extras policy that governs this instance, given the node-wide default.
+    pub fn effective_context_policy(&self, node_policy: ContextPolicy) -> ContextPolicy {
+        self.context_policy.unwrap_or(node_policy)
     }
 }
 
@@ -684,6 +697,7 @@ fn build_instance(
         system_prompt,
         model,
         reply_policy: draft.reply_policy,
+        context_policy: draft.context_policy,
         plugins: draft.plugins,
         skills: draft.skills,
         mcp: draft.mcp,

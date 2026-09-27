@@ -3,7 +3,6 @@ import {
   Activity,
   Blocks,
   Bot,
-  Boxes,
   Cpu,
   Languages,
   Laptop,
@@ -37,7 +36,6 @@ const navItems = [
   { id: 'plugins', key: 'nav.plugins', icon: Blocks },
   { id: 'sessions', key: 'nav.sessions', icon: Users },
   { id: 'providers', key: 'nav.providers', icon: Cpu },
-  { id: 'models', key: 'nav.models', icon: Boxes },
   { id: 'system', key: 'nav.system', icon: Settings },
 ];
 </script>

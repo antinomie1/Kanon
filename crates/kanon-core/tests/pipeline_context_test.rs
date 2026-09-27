@@ -5,6 +5,7 @@
 //! forwarded messages, audio and files — plus the conservative fallback when a segment produces no
 //! readable text.
 
+use kanon_core::ContextPolicy;
 use kanon_core::pipeline::build_user_message;
 use kanon_llm::ModelCapabilities;
 use kanon_proto::prost_types;
@@ -20,6 +21,14 @@ fn caps(vision: bool) -> ModelCapabilities {
         vision,
         ..ModelCapabilities::default()
     }
+}
+
+/// Calls the builder with the node default context policy (no sender id, no timestamp).
+fn build_with_defaults(
+    event: &PipelineEventRequest,
+    capabilities: &ModelCapabilities,
+) -> kanon_llm::ChatMessage {
+    build_user_message(event, capabilities, &ContextPolicy::default())
 }
 
 /// Builds a pipeline event wrapping the given segments.
@@ -59,7 +68,7 @@ fn string_struct(pairs: &[(&str, &str)]) -> prost_types::Struct {
 
 #[test]
 fn text_and_mentions_render_into_the_prompt() {
-    let message = build_user_message(
+    let message = build_with_defaults(
         &event(
             vec![
                 Segment::Mention(MentionSegment {
@@ -82,7 +91,7 @@ fn text_and_mentions_render_into_the_prompt() {
 
 #[test]
 fn a_quoted_message_contributes_its_snippet() {
-    let message = build_user_message(
+    let message = build_with_defaults(
         &event(
             vec![Segment::Reply(ReplySegment {
                 target_message_id: "7".to_string(),
@@ -108,14 +117,14 @@ fn images_become_native_parts_only_when_the_model_accepts_them() {
         })
     };
 
-    let without_vision = build_user_message(&event(vec![image()], "[image]"), &caps(false));
+    let without_vision = build_with_defaults(&event(vec![image()], "[image]"), &caps(false));
     assert!(
         !without_vision.has_parts(),
         "a text-only model must not receive an image part"
     );
     assert_eq!(without_vision.content.as_deref(), Some("[图片]"));
 
-    let with_vision = build_user_message(&event(vec![image()], "[image]"), &caps(true));
+    let with_vision = build_with_defaults(&event(vec![image()], "[image]"), &caps(true));
     assert!(with_vision.has_parts());
     assert_eq!(with_vision.content.as_deref(), Some("[图片]"));
     let parts = with_vision.parts.expect("image parts");
@@ -138,7 +147,7 @@ fn a_sticker_carries_its_image_when_vision_is_enabled() {
         })
     };
 
-    let with_vision = build_user_message(&event(vec![sticker()], "[emoji]"), &caps(true));
+    let with_vision = build_with_defaults(&event(vec![sticker()], "[emoji]"), &caps(true));
     assert!(
         with_vision.has_parts(),
         "the sticker image must be attached"
@@ -151,14 +160,14 @@ fn a_sticker_carries_its_image_when_vision_is_enabled() {
         Some("https://example.invalid/sticker.png")
     );
 
-    let without_vision = build_user_message(&event(vec![sticker()], "[emoji]"), &caps(false));
+    let without_vision = build_with_defaults(&event(vec![sticker()], "[emoji]"), &caps(false));
     assert!(!without_vision.has_parts());
     assert_eq!(without_vision.content.as_deref(), Some("[表情]"));
 }
 
 #[test]
 fn forwarded_messages_expand_their_title_and_summary() {
-    let message = build_user_message(
+    let message = build_with_defaults(
         &event(
             vec![Segment::Custom(RawCustomSegment {
                 type_name: "milky.forward".to_string(),
@@ -183,7 +192,7 @@ fn forwarded_messages_expand_their_title_and_summary() {
 
 #[test]
 fn audio_and_files_are_described_in_text() {
-    let message = build_user_message(
+    let message = build_with_defaults(
         &event(
             vec![
                 Segment::Audio(AudioSegment {
@@ -218,7 +227,7 @@ fn text_can_be_disabled_for_an_image_only_model() {
         vision: true,
         ..ModelCapabilities::default()
     };
-    let message = build_user_message(
+    let message = build_with_defaults(
         &event(
             vec![Segment::Image(ImageSegment {
                 source: Some(image_segment::Source::Url(
@@ -241,7 +250,7 @@ fn text_can_be_disabled_for_an_image_only_model() {
 
 #[test]
 fn an_unreadable_event_falls_back_to_the_adapter_rendering() {
-    let message = build_user_message(
+    let message = build_with_defaults(
         &event(
             vec![Segment::Mention(MentionSegment {
                 target_user_id: String::new(),
@@ -257,6 +266,46 @@ fn an_unreadable_event_falls_back_to_the_adapter_rendering() {
     // applies when every segment produced nothing at all.
     assert!(message.content.is_some());
 
-    let empty = build_user_message(&event(Vec::new(), "fallback text"), &caps(false));
+    let empty = build_with_defaults(&event(Vec::new(), "fallback text"), &caps(false));
     assert_eq!(empty.content.as_deref(), Some("fallback text"));
+}
+
+#[test]
+fn the_sender_id_and_time_are_included_only_when_the_policy_asks() {
+    let mut event = event(
+        vec![Segment::Text(TextSegment {
+            content: "hi".to_string(),
+        })],
+        "hi",
+    );
+    event.sender_id = "1705702687".to_string();
+    event.metadata = Some(prost_types::Struct {
+        fields: [(
+            kanon_core::META_TIMESTAMP.to_string(),
+            prost_types::Value {
+                kind: Some(prost_types::value::Kind::NumberValue(0.0)),
+            },
+        )]
+        .into_iter()
+        .collect(),
+    });
+
+    // Default: neither extra is added, so a private id never reaches the model by accident.
+    let off = build_user_message(&event, &caps(false), &ContextPolicy::default());
+    assert_eq!(off.content.as_deref(), Some("hi"));
+
+    let on = build_user_message(
+        &event,
+        &caps(false),
+        &ContextPolicy {
+            include_sender_id: true,
+            include_timestamp: true,
+        },
+    );
+    let content = on.content.unwrap_or_default();
+    assert!(content.contains("[发送者: 1705702687]"), "{content}");
+    assert!(
+        content.contains("[时间: 1970-01-01 00:00:00 UTC]"),
+        "{content}"
+    );
 }

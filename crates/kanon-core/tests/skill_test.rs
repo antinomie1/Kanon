@@ -44,6 +44,7 @@ async fn instance_with_policy(
             system_prompt: None,
             model: None,
             reply_policy: None,
+            context_policy: None,
             plugins: Default::default(),
             skills: HashMap::from([(skill_id.to_string(), policy)]),
             mcp: Default::default(),

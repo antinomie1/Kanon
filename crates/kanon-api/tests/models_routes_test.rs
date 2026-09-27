@@ -269,3 +269,54 @@ async fn deleting_a_provider_removes_its_models() {
         "a deleted endpoint must not leave catalog entries pointing at it"
     );
 }
+
+#[tokio::test]
+async fn the_context_policy_round_trips_and_instances_override_it() {
+    let dir = tempfile::tempdir().expect("config dir");
+    let state = isolated_state(dir.path().to_path_buf());
+    let app = kanon_api::app(state.clone());
+
+    let (status, body) = common::send_json(
+        &app,
+        Method::PUT,
+        "/api/v1/system/context-policy",
+        Some(json!({ "include_sender_id": true, "include_timestamp": false })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "unexpected body: {body}");
+    assert_eq!(body["policy"]["include_sender_id"], json!(true));
+    assert!(state.context_policy().get().include_sender_id);
+
+    // The node value is visible on the system config payload as well.
+    let (_, config) = common::send_json(&app, Method::GET, "/api/v1/system/config", None).await;
+    assert_eq!(config["context_policy"]["include_sender_id"], json!(true));
+
+    let (status, body) = common::send_json(
+        &app,
+        Method::POST,
+        "/api/v1/instances",
+        Some(json!({
+            "name": "Context Bot",
+            "enabled": true,
+            "adapters": ["context"],
+            "context_policy": { "include_sender_id": false, "include_timestamp": true }
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "unexpected body: {body}");
+    assert_eq!(
+        body["instance"]["context_policy"]["include_timestamp"],
+        json!(true)
+    );
+
+    let (_, listed) = common::send_json(&app, Method::GET, "/api/v1/instances", None).await;
+    assert_eq!(
+        listed["node_context_policy"]["include_sender_id"],
+        json!(true),
+        "the node-wide policy is reported so the console can show what an instance inherits"
+    );
+    assert_eq!(
+        listed["instances"][0]["context_policy"]["include_sender_id"],
+        json!(false)
+    );
+}

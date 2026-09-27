@@ -15,23 +15,39 @@
 
 use kanon_llm::tool_router::prost_struct_to_json;
 use kanon_llm::{ChatMessage, ContentPart, ModelCapabilities};
+use kanon_proto::prost_types;
 use kanon_proto::v1::PipelineEventRequest;
 use kanon_proto::v1::audio_segment;
 use kanon_proto::v1::image_segment;
 use kanon_proto::v1::message_segment::Segment;
 use serde_json::Value;
 
+use crate::conversation::{ContextPolicy, META_TIMESTAMP, META_TIMESTAMP_TEXT};
+
 /// Builds the user message for a conversation turn.
 ///
 /// `capabilities` come from the target model's catalog entry: text is included only when the model
 /// accepts it, and images are attached only when it accepts images, because sending a modality an
-/// endpoint rejects fails the whole turn.
+/// endpoint rejects fails the whole turn. `context_policy` decides whether the sender id and the
+/// message time are prepended; both are off by default.
 pub fn build_user_message(
     event: &PipelineEventRequest,
     capabilities: &ModelCapabilities,
+    context_policy: &ContextPolicy,
 ) -> ChatMessage {
     let mut text = TextBuffer::default();
     let mut images: Vec<ContentPart> = Vec::new();
+
+    if capabilities.text {
+        if context_policy.include_timestamp
+            && let Some(timestamp) = event_timestamp(event.metadata.as_ref())
+        {
+            text.push(&format!("[时间: {timestamp}]"));
+        }
+        if context_policy.include_sender_id && !event.sender_id.trim().is_empty() {
+            text.push(&format!("[发送者: {}]", event.sender_id.trim()));
+        }
+    }
 
     for segment in &event.segments {
         match segment.segment.as_ref() {
@@ -220,6 +236,62 @@ fn media_suffix(url: &Option<String>) -> String {
         Some(url) if !url.trim().is_empty() => format!(" {url}"),
         _ => String::new(),
     }
+}
+
+/// Reads the event timestamp, preferring an adapter-formatted string over raw Unix seconds.
+fn event_timestamp(metadata: Option<&prost_types::Struct>) -> Option<String> {
+    let metadata = metadata?;
+    let field = |key: &str| {
+        metadata
+            .fields
+            .get(key)
+            .and_then(|value| value.kind.as_ref())
+    };
+
+    if let Some(prost_types::value::Kind::StringValue(text)) = field(META_TIMESTAMP_TEXT)
+        && !text.trim().is_empty()
+    {
+        return Some(text.trim().to_string());
+    }
+
+    match field(META_TIMESTAMP) {
+        Some(prost_types::value::Kind::NumberValue(seconds)) => {
+            Some(format_unix_utc(*seconds as i64))
+        }
+        _ => None,
+    }
+}
+
+/// Renders Unix seconds as a readable UTC timestamp.
+///
+/// Implemented locally (a dozen lines) instead of pulling in a date-time crate: the model only
+/// needs a human-readable anchor, and this keeps the node free of another dependency.
+fn format_unix_utc(seconds: i64) -> String {
+    let days = seconds.div_euclid(86_400);
+    let seconds_of_day = seconds.rem_euclid(86_400);
+    let (year, month, day) = civil_from_days(days);
+    format!(
+        "{year:04}-{month:02}-{day:02} {:02}:{:02}:{:02} UTC",
+        seconds_of_day / 3600,
+        (seconds_of_day % 3600) / 60,
+        seconds_of_day % 60
+    )
+}
+
+/// Converts days since the Unix epoch into a civil `(year, month, day)`.
+///
+/// Hinnant's `civil_from_days`; private because nothing else needs calendar arithmetic.
+fn civil_from_days(days: i64) -> (i64, i64, i64) {
+    let z = days + 719_468;
+    let era = z.div_euclid(146_097);
+    let doe = z.rem_euclid(146_097);
+    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
+    let y = yoe + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let day = doy - (153 * mp + 2) / 5 + 1;
+    let month = if mp < 10 { mp + 3 } else { mp - 9 };
+    (if month <= 2 { y + 1 } else { y }, month, day)
 }
 
 /// Reads a string field out of a decoded custom payload.

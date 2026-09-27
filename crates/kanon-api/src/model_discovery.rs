@@ -84,6 +84,9 @@ pub fn merge_discovered(models: &mut Vec<ModelSpec>, discovered: &[ModelSpec]) -
             .find(|existing| existing.full_name() == full_name)
         {
             Some(existing) if existing.source == ModelSettingsSource::Manual => {}
+            // Identical data is not a change: skipping it keeps a restart from rewriting the
+            // node's configuration document for nothing.
+            Some(existing) if *existing == *spec => {}
             Some(existing) => {
                 *existing = spec.clone();
                 written += 1;
@@ -154,15 +157,17 @@ fn parse_model_entry(provider: &str, item: &Value) -> Option<ModelSpec> {
     )
     .or_else(|| nested_u32(item, "top_provider", "max_completion_tokens"));
 
-    let mut capabilities = spec.capabilities;
-
-    if let Some(modalities) = item
+    // The endpoint's own modality metadata is authoritative; when it says nothing (the common case
+    // for OpenAI-compatible endpoints that return bare ids) the capabilities are inferred from the
+    // model id, so a vision or audio model is not stored as text-only.
+    let mut capabilities = match item
         .get("architecture")
         .and_then(|architecture| architecture.get("input_modalities"))
         .and_then(Value::as_array)
     {
-        capabilities = capabilities_from_modalities(modalities);
-    }
+        Some(modalities) => capabilities_from_modalities(modalities),
+        None => ModelCapabilities::infer_from_model_id(id),
+    };
 
     // OpenRouter-style listings advertise the request parameters a model accepts; tool calling and
     // a reasoning channel are exactly the two the node routes on.

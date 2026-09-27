@@ -76,6 +76,8 @@ export interface SystemConfig {
   llm: LlmConfig;
   /** Node-wide reply policy inherited by instances without an override. */
   reply_policy: ReplyPolicy;
+  /** Node-wide context-extras policy inherited by instances without an override. */
+  context_policy: ContextPolicy;
   environment: EnvironmentConfig;
 }
 
@@ -92,6 +94,24 @@ export type ReplyMode = 'always' | 'mention' | 'probability' | 'never';
 export interface ReplyPolicy {
   mode: ReplyMode;
   probability: number;
+}
+
+/**
+ * Whether identifying or contextual extras are prepended to the model prompt.
+ *
+ * Both default to off: a sender id is personal data and a wall-clock time is not part of what the
+ * user said, so including either is an explicit operator decision.
+ */
+export interface ContextPolicy {
+  /** Include the platform sender id (QQ number, openid, …) in the prompt. */
+  include_sender_id: boolean;
+  /** Include the message timestamp in the prompt. */
+  include_timestamp: boolean;
+}
+
+/** Response of `GET`/`PUT /api/v1/system/context-policy`. */
+export interface ContextPolicyResponse {
+  policy: ContextPolicy;
 }
 
 /** Response of `GET`/`PUT /api/v1/system/reply-policy`. */
@@ -129,6 +149,8 @@ export interface BotInstanceView {
   model: string | null;
   /** Reply-policy override; `null` inherits the node-wide policy. */
   reply_policy: ReplyPolicy | null;
+  /** Context-extras override; `null` inherits the node-wide policy. */
+  context_policy: ContextPolicy | null;
   plugins: Record<string, ItemPolicy>;
   skills: Record<string, ItemPolicy>;
   mcp: Record<string, ItemPolicy>;
@@ -140,6 +162,8 @@ export interface InstancesResponse {
   enabled: number;
   /** Node-wide reply policy inherited by instances without an override. */
   node_reply_policy: ReplyPolicy;
+  /** Node-wide context-extras policy inherited by instances without an override. */
+  node_context_policy: ContextPolicy;
   instances: BotInstanceView[];
 }
 
@@ -152,6 +176,8 @@ export interface InstanceRequest {
   model?: string | null;
   /** `null` (or omitted) inherits the node-wide reply policy. */
   reply_policy?: ReplyPolicy | null;
+  /** `null` (or omitted) inherits the node-wide context policy. */
+  context_policy?: ContextPolicy | null;
   plugins?: Record<string, ItemPolicy>;
   skills?: Record<string, ItemPolicy>;
   mcp?: Record<string, ItemPolicy>;

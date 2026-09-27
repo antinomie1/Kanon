@@ -1,5 +1,5 @@
-//! Node system configuration inspection (`GET /api/v1/system/config`) and the node-wide reply
-//! policy (`/api/v1/system/reply-policy`).
+//! Node system configuration inspection (`GET /api/v1/system/config`) and the node-wide reply and
+//! context policies (`/api/v1/system/reply-policy`, `/api/v1/system/context-policy`).
 
 use axum::Json;
 use axum::Router;
@@ -7,7 +7,7 @@ use axum::extract::State;
 use axum::routing::get;
 use serde::Serialize;
 
-use kanon_core::ReplyPolicy;
+use kanon_core::{ContextPolicy, ReplyPolicy};
 
 use crate::error::ApiError;
 use crate::state::ApiState;
@@ -19,6 +19,10 @@ pub fn routes() -> Router<ApiState> {
         .route(
             "/api/v1/system/reply-policy",
             get(get_reply_policy).put(put_reply_policy),
+        )
+        .route(
+            "/api/v1/system/context-policy",
+            get(get_context_policy).put(put_context_policy),
         )
 }
 
@@ -43,6 +47,8 @@ pub struct SystemConfigResponse {
     pub llm: LlmConfigSection,
     /// Node-wide reply policy inherited by instances without an override.
     pub reply_policy: ReplyPolicy,
+    /// Node-wide context-extras policy inherited by instances without an override.
+    pub context_policy: ContextPolicy,
     /// Host operating system and architecture.
     pub environment: EnvironmentSection,
 }
@@ -160,6 +166,7 @@ async fn system_config(
         webhook,
         llm,
         reply_policy: state.reply_policy().get(),
+        context_policy: state.context_policy().get(),
         environment: EnvironmentSection {
             os: std::env::consts::OS,
             arch: std::env::consts::ARCH,
@@ -202,4 +209,37 @@ async fn put_reply_policy(
 
     tracing::info!(policy = %policy.describe(), "Node-wide reply policy updated");
     Ok(get_reply_policy(State(state)).await)
+}
+
+/// Response describing the node-wide context-extras policy.
+#[derive(Debug, Serialize)]
+pub struct ContextPolicyResponse {
+    /// The effective policy.
+    pub policy: ContextPolicy,
+}
+
+/// Handler for `GET /api/v1/system/context-policy`.
+async fn get_context_policy(State(state): State<ApiState>) -> Json<ContextPolicyResponse> {
+    Json(ContextPolicyResponse {
+        policy: state.context_policy().get(),
+    })
+}
+
+/// Handler for `PUT /api/v1/system/context-policy`.
+async fn put_context_policy(
+    State(state): State<ApiState>,
+    Json(policy): Json<ContextPolicy>,
+) -> Result<Json<ContextPolicyResponse>, ApiError> {
+    let mut settings = state.node_settings();
+    settings.context_policy = policy;
+    state
+        .apply_node_settings(settings)
+        .map_err(ApiError::BadRequest)?;
+
+    tracing::info!(
+        include_sender_id = policy.include_sender_id,
+        include_timestamp = policy.include_timestamp,
+        "Node-wide context policy updated"
+    );
+    Ok(get_context_policy(State(state)).await)
 }

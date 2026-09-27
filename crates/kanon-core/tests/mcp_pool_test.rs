@@ -179,6 +179,7 @@ async fn instance_with_policy(
             system_prompt: None,
             model: None,
             reply_policy: None,
+            context_policy: None,
             plugins: Default::default(),
             skills: Default::default(),
             mcp: HashMap::from([(server_id.to_string(), policy)]),

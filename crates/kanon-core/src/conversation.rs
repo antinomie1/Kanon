@@ -231,3 +231,62 @@ impl ReplyPolicyStore {
             .unwrap_or_else(|poisoned| poisoned.into_inner()) = policy;
     }
 }
+
+/// Metadata key carrying the event timestamp in Unix seconds.
+pub const META_TIMESTAMP: &str = "kanon.timestamp";
+
+/// Metadata key carrying an adapter-formatted timestamp string, preferred over [`META_TIMESTAMP`].
+pub const META_TIMESTAMP_TEXT: &str = "kanon.timestamp_text";
+
+/// Whether identifying or contextual extras are prepended to the model prompt.
+///
+/// Both default to `false`: a sender id is personal data and a wall-clock time is not part of what
+/// the user said, so including them is an explicit operator decision — which is why the switch
+/// exists at all.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub struct ContextPolicy {
+    /// Whether the platform sender id (QQ number, openid, …) is included in the prompt.
+    #[serde(default)]
+    pub include_sender_id: bool,
+    /// Whether the message timestamp is included in the prompt.
+    #[serde(default)]
+    pub include_timestamp: bool,
+}
+
+/// Hot-swappable node-wide context policy, mirroring [`ReplyPolicyStore`].
+#[derive(Debug)]
+pub struct ContextPolicyStore {
+    /// Current node-wide policy.
+    current: std::sync::RwLock<ContextPolicy>,
+}
+
+impl Default for ContextPolicyStore {
+    fn default() -> Self {
+        Self::new(ContextPolicy::default())
+    }
+}
+
+impl ContextPolicyStore {
+    /// Creates a store holding an initial policy.
+    pub fn new(policy: ContextPolicy) -> Self {
+        Self {
+            current: std::sync::RwLock::new(policy),
+        }
+    }
+
+    /// Returns the current node-wide policy.
+    pub fn get(&self) -> ContextPolicy {
+        *self
+            .current
+            .read()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
+    /// Replaces the node-wide policy.
+    pub fn set(&self, policy: ContextPolicy) {
+        *self
+            .current
+            .write()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = policy;
+    }
+}

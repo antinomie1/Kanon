@@ -8,6 +8,7 @@ import {
   RefreshCw,
   Server,
 } from 'lucide-svelte';
+import { contextPolicyStore } from '../../stores/contextPolicy.svelte';
 import { i18n, t } from '../../stores/i18n.svelte';
 import { nodeStore } from '../../stores/node.svelte';
 import { providersStore } from '../../stores/providers.svelte';
@@ -15,7 +16,7 @@ import {
   describeReplyPolicy,
   replyPolicyStore,
 } from '../../stores/replyPolicy.svelte';
-import type { ReplyMode, ReplyPolicy } from '../../types';
+import type { ContextPolicy, ReplyMode, ReplyPolicy } from '../../types';
 
 let copiedSnippet = $state(false);
 
@@ -47,6 +48,32 @@ $effect(() => {
     policySeeded = true;
   }
 });
+
+let contextDraft = $state<ContextPolicy>({
+  include_sender_id: false,
+  include_timestamp: false,
+});
+let contextRequested = false;
+let contextSeeded = false;
+
+// The context policy is read once and seeded into the draft, mirroring the reply policy above.
+$effect(() => {
+  if (!contextRequested) {
+    contextRequested = true;
+    void contextPolicyStore.load();
+  }
+  const policy = contextPolicyStore.policy;
+  if (policy && !contextSeeded) {
+    contextDraft = { ...policy };
+    contextSeeded = true;
+  }
+});
+
+/** Flips one context switch and persists the result immediately. */
+async function saveContextPolicy(next: ContextPolicy) {
+  contextDraft = next;
+  await contextPolicyStore.save(next);
+}
 
 /** Applies the draft to the running node. */
 async function saveReplyPolicy() {
@@ -236,5 +263,55 @@ function copySocketPath(path: string) {
         {replyPolicyStore.saving ? t('models.saving') : t('common.save')}
       </button>
     </div>
+  </div>
+  <!-- Context extras: what besides the message itself reaches the model. -->
+  <div class="bg-white dark:bg-zinc-900 border border-zinc-200 dark:border-zinc-800 rounded-xl p-6 shadow-xs">
+    <div class="pb-4 border-b border-zinc-100 dark:border-zinc-800">
+      <h3 class="text-base font-semibold text-zinc-900 dark:text-zinc-100">{t('context.title')}</h3>
+      <p class="text-xs text-zinc-500 mt-0.5">{t('context.hint')}</p>
+    </div>
+
+    <div class="mt-5 space-y-4">
+      <label class="flex items-start justify-between gap-4 cursor-pointer select-none">
+        <span>
+          <span class="block text-sm font-medium text-zinc-800 dark:text-zinc-200">{t('context.sender_id')}</span>
+          <span class="block text-xs text-zinc-500 mt-0.5">{t('context.sender_id_hint')}</span>
+        </span>
+        <input
+          type="checkbox"
+          checked={contextDraft.include_sender_id}
+          onchange={(e) =>
+            saveContextPolicy({
+              ...contextDraft,
+              include_sender_id: e.currentTarget.checked,
+            })}
+          class="mt-1 rounded text-indigo-600 focus:ring-0 w-4 h-4 shrink-0"
+        />
+      </label>
+
+      <label class="flex items-start justify-between gap-4 cursor-pointer select-none">
+        <span>
+          <span class="block text-sm font-medium text-zinc-800 dark:text-zinc-200">{t('context.timestamp')}</span>
+          <span class="block text-xs text-zinc-500 mt-0.5">{t('context.timestamp_hint')}</span>
+        </span>
+        <input
+          type="checkbox"
+          checked={contextDraft.include_timestamp}
+          onchange={(e) =>
+            saveContextPolicy({
+              ...contextDraft,
+              include_timestamp: e.currentTarget.checked,
+            })}
+          class="mt-1 rounded text-indigo-600 focus:ring-0 w-4 h-4 shrink-0"
+        />
+      </label>
+    </div>
+
+    {#if contextPolicyStore.error}
+      <p class="text-xs text-rose-500 mt-4 font-mono">{contextPolicyStore.error}</p>
+    {/if}
+    {#if contextPolicyStore.notice}
+      <p class="text-xs text-emerald-500 mt-4 font-mono">{t('context.updated')}</p>
+    {/if}
   </div>
 </div>

@@ -137,6 +137,7 @@ async fn instance(registry: &InstanceRegistry, enabled: bool, adapters: &[&str])
             system_prompt: None,
             model: None,
             reply_policy: None,
+            context_policy: None,
             plugins: Default::default(),
             skills: Default::default(),
             mcp: Default::default(),
@@ -287,6 +288,7 @@ async fn a_plugin_disabled_for_an_instance_is_removed_before_pre_filter() {
             system_prompt: None,
             model: None,
             reply_policy: None,
+            context_policy: None,
             plugins: std::collections::HashMap::from([(
                 PLUGIN_ID.to_string(),
                 ItemPolicy::Disable,

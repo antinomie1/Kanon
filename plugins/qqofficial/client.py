@@ -118,6 +118,19 @@ def _build_inbound_segments(message: Any, content: str) -> List[Dict[str, Any]]:
     return segments
 
 
+def _timestamp_extra(message: Any) -> Dict[str, Any]:
+    """Platform-neutral timestamp the core adds to context when the operator enables it.
+
+    botpy exposes an ISO-8601 string on every message type; passing it through as text keeps date
+    formatting out of the core, which does not ship a date library. Only a real scalar is
+    forwarded, so an unexpected object attribute is ignored rather than stringified into the
+    prompt.
+    """
+    timestamp = getattr(message, "timestamp", None)
+    if isinstance(timestamp, (str, int, float)) and str(timestamp).strip():
+        return {"kanon.timestamp_text": str(timestamp)}
+    return {}
+
 class KanonBotClient(botpy.Client):
     """QQ Official bot client bridging WebSocket gateway events to Kanon Core."""
 
@@ -155,6 +168,7 @@ class KanonBotClient(botpy.Client):
             msg_id=message.id,
             scene="group",
             extra={
+                **_timestamp_extra(message),
                 "mentions": mentions,
                 # Core owns the reply policy and reads these two platform-neutral
                 # keys: a group @-callback is inherently addressed to the bot.
@@ -179,6 +193,7 @@ class KanonBotClient(botpy.Client):
             msg_id=message.id,
             scene="group",
             extra={
+                **_timestamp_extra(message),
                 "unmentioned": True,
                 # Unmentioned means the bot was not addressed; Core's "mention"
                 # policy must therefore be free to drop this event.
@@ -203,6 +218,7 @@ class KanonBotClient(botpy.Client):
             msg_id=message.id,
             scene="c2c",
             extra={
+                **_timestamp_extra(message),
                 # A C2C conversation is one-to-one, so Core always answers it.
                 "kanon.conversation_kind": "private",
                 "kanon.bot_mentioned": False,
@@ -225,6 +241,7 @@ class KanonBotClient(botpy.Client):
             msg_id=message.id,
             scene="guild",
             extra={
+                **_timestamp_extra(message),
                 "guild_id": getattr(message, "guild_id", ""),
                 # A guild channel is a broadcast-style conversation; the policy
                 # applies, and this @-callback means the bot was addressed.
@@ -249,6 +266,7 @@ class KanonBotClient(botpy.Client):
             msg_id=message.id,
             scene="guild",
             extra={
+                **_timestamp_extra(message),
                 "guild_id": getattr(message, "guild_id", ""),
                 "unmentioned": True,
                 # Unmentioned in a guild channel: Core may legitimately stay quiet.
@@ -275,6 +293,7 @@ class KanonBotClient(botpy.Client):
             msg_id=message.id,
             scene="guild_dm",
             extra={
+                **_timestamp_extra(message),
                 # A guild direct message is a one-to-one conversation, so Core
                 # always answers it regardless of the group policy.
                 "kanon.conversation_kind": "private",

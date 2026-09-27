@@ -25,6 +25,7 @@ import type {
   TestProviderRequest,
   UpsertProviderRequest,
 } from '../../types';
+import ModelsView from './ModelsView.svelte';
 
 /** Protocols offered for a new endpoint, with the base URL used when the field is left empty. */
 const protocolDefaults: Record<string, string> = {
@@ -739,6 +740,9 @@ async function handleClearAll() {
               </div>
             </div>
           </div>
+
+          <!-- This endpoint's own model catalog: capabilities, context window and modalities. -->
+          <ModelsView provider={prov.name} />
         {/if}
       </div>
     </div>

@@ -26,7 +26,7 @@ use kanon_proto::v1::{
 };
 
 use crate::adapter::{AdapterDescriptor, AdapterError, AdapterKind};
-use crate::conversation::{ConversationKind, ReplyPolicyStore, bot_mentioned};
+use crate::conversation::{ContextPolicyStore, ConversationKind, ReplyPolicyStore, bot_mentioned};
 use crate::instance::InstanceRegistry;
 use crate::mcp::McpPool;
 use crate::pipeline::command::CommandRouter;
@@ -253,6 +253,8 @@ pub struct PipelineEngine {
     /// Optional for the same reason as the instance catalog: an embedded pipeline without a policy
     /// store keeps answering everything, which is the pre-policy behaviour.
     reply_policy: Option<Arc<ReplyPolicyStore>>,
+    /// Node-wide context-extras policy, when the control plane provides one.
+    context_policy: Option<Arc<ContextPolicyStore>>,
     /// MCP servers contributing tools alongside plugin hosts.
     mcp: Option<Arc<McpPool>>,
     /// Optional lifecycle observer used by the management control plane for tracing.
@@ -281,6 +283,7 @@ impl PipelineEngine {
             instances: None,
             toggles: None,
             reply_policy: None,
+            context_policy: None,
             mcp: None,
             observer: None,
             dead_letter: Arc::new(DeadLetterWriter::default()),
@@ -342,6 +345,12 @@ impl PipelineEngine {
     /// Shares the node-wide reply policy used when an instance does not override it.
     pub fn with_reply_policy(mut self, policy: Arc<ReplyPolicyStore>) -> Self {
         self.reply_policy = Some(policy);
+        self
+    }
+
+    /// Shares the node-wide context-extras policy used when an instance does not override it.
+    pub fn with_context_policy(mut self, policy: Arc<ContextPolicyStore>) -> Self {
+        self.context_policy = Some(policy);
         self
     }
 
@@ -983,7 +992,24 @@ impl PipelineEngine {
             }
             _ => ModelCapabilities::default(),
         };
-        let user_message = build_user_message(&filtered_event, &capabilities);
+        // The instance may override whether the sender id and the message time are prepended.
+        let context_policy = instance.as_ref().map_or_else(
+            || {
+                self.context_policy
+                    .as_ref()
+                    .map(|store| store.get())
+                    .unwrap_or_default()
+            },
+            |instance| {
+                instance.effective_context_policy(
+                    self.context_policy
+                        .as_ref()
+                        .map(|store| store.get())
+                        .unwrap_or_default(),
+                )
+            },
+        );
+        let user_message = build_user_message(&filtered_event, &capabilities, &context_policy);
 
         if (user_message
             .content

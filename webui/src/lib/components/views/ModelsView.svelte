@@ -64,15 +64,22 @@ function optionalNumber(raw: string): number | undefined {
   return raw.trim() !== '' && Number.isFinite(value) ? value : undefined;
 }
 
+let { provider = '' }: { provider?: string } = $props();
+
 let draft = $state<ModelDraft>(blankDraft());
 /** Canonical reference of the row being edited, or `null` when no inline editor is open. */
 let editingRef = $state<string | null>(null);
 let isAdding = $state(false);
 let filterProvider = $state('');
 
-// Seed the provider filter from the node's providers once the catalog arrives.
+// Load once; the providers view keeps the catalog fresh after every endpoint edit.
 $effect(() => {
-  void modelsStore.load();
+  if (!modelsStore.catalog) void modelsStore.load();
+});
+
+// Embedded in a provider panel, the list is scoped to that provider.
+$effect(() => {
+  filterProvider = provider;
 });
 
 let visibleModels = $derived(
@@ -82,7 +89,7 @@ let visibleModels = $derived(
 );
 
 function startAdd() {
-  draft = blankDraft(filterProvider || undefined);
+  draft = blankDraft(provider || filterProvider || undefined);
   editingRef = null;
   isAdding = true;
 }
@@ -137,9 +144,10 @@ function sourceLabel(source: ModelSpec['source']): string {
 }
 </script>
 
-<div class="p-6 space-y-6 max-w-7xl mx-auto font-sans">
-  <!-- Node default: the reference every instance without an override resolves to. -->
+<div class="{provider ? 'space-y-4' : 'p-6 space-y-6 max-w-7xl mx-auto'} font-sans">
   <div class="bg-white dark:bg-zinc-900 border border-zinc-200 dark:border-zinc-800 rounded-xl p-4 sm:p-5 shadow-xs flex flex-wrap items-center justify-between gap-4">
+    {#if !provider}
+    <!-- Node default: the reference every instance without an override resolves to. -->
     <div class="flex items-center gap-3.5">
       <div class="p-2.5 rounded-xl bg-amber-500/10 text-amber-600 dark:text-amber-400">
         <Star class="w-6 h-6" />
@@ -158,21 +166,31 @@ function sourceLabel(source: ModelSpec['source']): string {
         </p>
       </div>
     </div>
+    {:else}
+    <div class="min-w-0">
+      <h4 class="text-sm font-semibold text-zinc-900 dark:text-zinc-100">{t('models.title')}</h4>
+      <p class="text-xs text-zinc-500 font-mono mt-1">
+        {provider}/&lt;model-id&gt; · {visibleModels.length}
+      </p>
+    </div>
+    {/if}
 
     <div class="flex flex-wrap items-center gap-3">
-      <div class="flex items-center gap-2">
-        <label for="models-provider-filter" class="text-xs text-zinc-500">{t('models.filter_provider')}:</label>
-        <select
-          id="models-provider-filter"
-          bind:value={filterProvider}
-          class="px-3 py-1.5 text-xs sm:text-sm font-mono bg-zinc-50 dark:bg-zinc-800 border border-zinc-200 dark:border-zinc-700 rounded-lg text-zinc-900 dark:text-zinc-100 focus:outline-hidden cursor-pointer"
-        >
-          <option value="">{t('models.all_providers')}</option>
-          {#each modelsStore.providers as provider (provider)}
-            <option value={provider}>{provider}</option>
-          {/each}
-        </select>
-      </div>
+      {#if !provider}
+        <div class="flex items-center gap-2">
+          <label for="models-provider-filter" class="text-xs text-zinc-500">{t('models.filter_provider')}:</label>
+          <select
+            id="models-provider-filter"
+            bind:value={filterProvider}
+            class="px-3 py-1.5 text-xs sm:text-sm font-mono bg-zinc-50 dark:bg-zinc-800 border border-zinc-200 dark:border-zinc-700 rounded-lg text-zinc-900 dark:text-zinc-100 focus:outline-hidden cursor-pointer"
+          >
+            <option value="">{t('models.all_providers')}</option>
+            {#each modelsStore.providers as providerName (providerName)}
+              <option value={providerName}>{providerName}</option>
+            {/each}
+          </select>
+        </div>
+      {/if}
 
       <button
         onclick={startAdd}
