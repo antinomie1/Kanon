@@ -52,6 +52,13 @@ impl BotApiService for StubCore {
         }))
     }
 
+    async fn reply_message(
+        &self,
+        _request: Request<kanon_proto::v1::DeliverMessageRequest>,
+    ) -> Result<Response<kanon_proto::v1::DeliverMessageResponse>, Status> {
+        Err(Status::unimplemented("not part of this fixture"))
+    }
+
     async fn send_message(
         &self,
         _request: Request<SendMessageRequest>,

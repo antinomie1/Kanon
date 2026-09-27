@@ -105,6 +105,29 @@ class CoreHandle:
         # outside a loop (e.g. at import time) stays safe.
         self._lock = asyncio.Lock()
 
+    async def reply_to(
+        self,
+        event: pb.PipelineEventRequest,
+        segments: List[pb.MessageSegment],
+    ) -> pb.DeliverMessageResponse:
+        """Reply with the original platform context and await actual delivery.
+
+        The existing shared Core channel owns authentication and reconnects.
+        Unlike SendMessage admission, success here is the platform adapter's
+        delivery result. RPC failures/timeouts are ambiguous: never retry a
+        reply automatically, or mark an upload review delivered on that basis.
+        """
+        return await self._stub.ReplyMessage(
+            pb.DeliverMessageRequest(
+                platform=event.platform,
+                channel_id=event.channel_id,
+                recipient_id=event.sender_id,
+                event_id=event.event_id,
+                segments=segments,
+            ),
+            timeout=35.0,
+        )
+
     async def ingest_event(
         self,
         platform: str,

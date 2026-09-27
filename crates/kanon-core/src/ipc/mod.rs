@@ -3,19 +3,21 @@
 //! Provides the central gRPC endpoint (`core.sock`) through which plugin hosts
 //! communicate with the Core microkernel via [`BotApiService`].
 
+use crate::pipeline::engine::OutboundMessage;
 use std::future::Future;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, oneshot};
 use tonic::{Request, Response, Status};
 
 use kanon_proto::v1::bot_api_service_server::{BotApiService, BotApiServiceServer};
 use kanon_proto::v1::{
-    DeliverMessageRequest, GetStorageRequest, GetStorageResponse, IngestEventRequest,
-    IngestEventResponse, LlmChunk, LlmRequest, RegisterHostRequest, RegisterHostResponse,
-    SendMessageRequest, SendMessageResponse, SetStorageRequest, SetStorageResponse,
+    DeliverMessageRequest, DeliverMessageResponse, GetStorageRequest, GetStorageResponse,
+    IngestEventRequest, IngestEventResponse, LlmChunk, LlmRequest, RegisterHostRequest,
+    RegisterHostResponse, SendMessageRequest, SendMessageResponse, SetStorageRequest,
+    SetStorageResponse,
 };
 use kanon_transport::{IpcListener, core_socket_path};
 
@@ -38,7 +40,7 @@ pub struct CoreApiService {
     /// Reference to the central Supervisor managing host lifecycles and registration.
     supervisor: Option<Arc<Supervisor>>,
     /// Producer channel connected to the central pipeline outbound dispatcher.
-    outbound_sender: Option<mpsc::Sender<DeliverMessageRequest>>,
+    outbound_sender: Option<mpsc::Sender<OutboundMessage>>,
     /// Shared agent slot resolving the node's live model provider for `RequestLLM`.
     ///
     /// A slot (not a captured gateway) so that a provider configured, replaced or cleared
@@ -72,7 +74,7 @@ impl CoreApiService {
     }
 
     /// Configures the outbound message queue sender for dispatching external messages.
-    pub fn with_outbound_sender(mut self, sender: mpsc::Sender<DeliverMessageRequest>) -> Self {
+    pub fn with_outbound_sender(mut self, sender: mpsc::Sender<OutboundMessage>) -> Self {
         self.outbound_sender = Some(sender);
         self
     }
@@ -207,6 +209,52 @@ impl BotApiService for CoreApiService {
     }
 
     /// Dispatches an outbound message to the target platform adapter via the pipeline queue.
+    /// Preserves the original event ID and waits for the platform delivery result.
+    async fn reply_message(
+        &self,
+        request: Request<DeliverMessageRequest>,
+    ) -> Result<Response<DeliverMessageResponse>, Status> {
+        let request = request.into_inner();
+        if request.event_id.is_empty()
+            || request.platform.is_empty()
+            || request.channel_id.is_empty()
+        {
+            return Err(Status::invalid_argument(
+                "reply requires original event_id, platform and channel_id",
+            ));
+        }
+        let sender = self
+            .outbound_sender
+            .as_ref()
+            .ok_or_else(|| Status::unavailable("Outbound delivery dispatcher is not configured"))?;
+        let (receipt, result) = oneshot::channel();
+        sender
+            .try_send(OutboundMessage {
+                request,
+                receipt: Some(receipt),
+            })
+            .map_err(|error| match error {
+                mpsc::error::TrySendError::Full(_) => {
+                    Status::resource_exhausted("Outbound queue full; reply not queued")
+                }
+                mpsc::error::TrySendError::Closed(_) => {
+                    Status::unavailable("Outbound dispatcher stopped; reply not queued")
+                }
+            })?;
+        let response = tokio::time::timeout(std::time::Duration::from_secs(30), result)
+            .await
+            .map_err(|_| {
+                Status::deadline_exceeded(
+                    "Reply delivery outcome unknown; do not automatically retry",
+                )
+            })?
+            .map_err(|_| {
+                Status::unavailable("Outbound dispatcher stopped before delivery was confirmed")
+            })?;
+        Ok(Response::new(response))
+    }
+
+    /// Admits a proactive message to the queue without waiting for platform delivery.
     async fn send_message(
         &self,
         request: Request<SendMessageRequest>,
@@ -246,7 +294,7 @@ impl BotApiService for CoreApiService {
             event_id: event_id.clone(),
         };
 
-        match sender.try_send(deliver_req) {
+        match sender.try_send(deliver_req.into()) {
             Ok(()) => Ok(Response::new(SendMessageResponse {
                 accepted: true,
                 success: true,

@@ -13,7 +13,7 @@
 
 use std::collections::HashMap;
 use std::sync::Arc;
-use tokio::sync::{Mutex, RwLock, mpsc};
+use tokio::sync::{Mutex, RwLock, mpsc, oneshot};
 use tokio::task::JoinHandle;
 
 use kanon_llm::tool_router::ToolRouter;
@@ -22,7 +22,8 @@ use kanon_llm::{
 };
 use kanon_proto::v1::message_segment::Segment;
 use kanon_proto::v1::{
-    DeliverMessageRequest, IngestEventRequest, MessageSegment, PipelineEventRequest,
+    DeliverMessageRequest, DeliverMessageResponse, IngestEventRequest, MessageSegment,
+    PipelineEventRequest,
 };
 
 use crate::adapter::{AdapterDescriptor, AdapterError, AdapterKind};
@@ -49,6 +50,27 @@ pub const DEFAULT_OUTBOUND_QUEUE_CAPACITY: usize = 1024;
 /// Preserves sequential FIFO delivery per platform while providing strict cross-platform
 /// concurrency isolation so one slow platform never starves others.
 pub const DEFAULT_PLATFORM_QUEUE_CAPACITY: usize = 64;
+
+/// One queued delivery, optionally carrying a single-use completion receipt.
+///
+/// Keeping the receipt with the request preserves FIFO ordering and makes queue
+/// drops explicit without a second registry of messages to reconcile.
+#[derive(Debug)]
+pub struct OutboundMessage {
+    /// Original platform event and reply segments, unchanged by queueing.
+    pub request: DeliverMessageRequest,
+    /// Resolved only after platform delivery or an explicit dispatch failure.
+    pub receipt: Option<oneshot::Sender<DeliverMessageResponse>>,
+}
+
+impl From<DeliverMessageRequest> for OutboundMessage {
+    fn from(request: DeliverMessageRequest) -> Self {
+        Self {
+            request,
+            receipt: None,
+        }
+    }
+}
 
 /// Result produced after processing an event through the pipeline engine.
 #[derive(Debug, Clone)]
@@ -283,9 +305,9 @@ pub struct PipelineEngine {
     /// Persistent dead-letter queue writer for failed or dropped outbound messages.
     dead_letter: Arc<DeadLetterWriter>,
     /// Producer side of the bounded outbound delivery queue.
-    outbound_sender: mpsc::Sender<DeliverMessageRequest>,
+    outbound_sender: mpsc::Sender<OutboundMessage>,
     /// Consumer side, taken exactly once by [`PipelineEngine::start_outbound_dispatcher`].
-    outbound_receiver: Mutex<Option<mpsc::Receiver<DeliverMessageRequest>>>,
+    outbound_receiver: Mutex<Option<mpsc::Receiver<OutboundMessage>>>,
     /// Adaptive circuit breakers maintaining health status per platform outbound queue.
     platform_circuit_breakers: Arc<RwLock<HashMap<String, Arc<CircuitBreaker>>>>,
 }
@@ -396,7 +418,7 @@ impl PipelineEngine {
     }
 
     /// Returns a handle for enqueuing outbound messages from outside the worker loop.
-    pub fn outbound_sender(&self) -> mpsc::Sender<DeliverMessageRequest> {
+    pub fn outbound_sender(&self) -> mpsc::Sender<OutboundMessage> {
         self.outbound_sender.clone()
     }
 
@@ -550,7 +572,7 @@ impl PipelineEngine {
         &self,
         request: DeliverMessageRequest,
         breaker: &CircuitBreaker,
-    ) {
+    ) -> DeliverMessageResponse {
         let platform = request.platform.clone();
         let channel_id = request.channel_id.clone();
         let segment_count = request.segments.len();
@@ -574,12 +596,21 @@ impl PipelineEngine {
                 channel_id,
                 reason: "circuit breaker open, persisted to dead letter".to_string(),
             });
-            return;
+            return DeliverMessageResponse {
+                success: false,
+                message_id: String::new(),
+                error_message: reason,
+            };
         }
 
         let start = std::time::Instant::now();
         match self.deliver_outbound(request.clone()).await {
             Ok(outcome) => {
+                let response = DeliverMessageResponse {
+                    success: true,
+                    message_id: outcome.message_id.clone(),
+                    error_message: String::new(),
+                };
                 breaker.record_success(start.elapsed());
                 tracing::info!(
                     platform = %outcome.platform,
@@ -594,6 +625,7 @@ impl PipelineEngine {
                     target: outcome.kind,
                     message_id: outcome.message_id,
                 });
+                response
             }
             Err(err) => {
                 let reason = err.to_string();
@@ -614,8 +646,13 @@ impl PipelineEngine {
                 self.observe(PipelineStage::OutboundFailed {
                     platform,
                     channel_id,
-                    reason,
+                    reason: reason.clone(),
                 });
+                DeliverMessageResponse {
+                    success: false,
+                    message_id: String::new(),
+                    error_message: reason,
+                }
             }
         }
     }
@@ -624,7 +661,7 @@ impl PipelineEngine {
     fn spawn_platform_worker(
         self: &Arc<Self>,
         platform: String,
-        mut rx: mpsc::Receiver<DeliverMessageRequest>,
+        mut rx: mpsc::Receiver<OutboundMessage>,
     ) {
         let engine = Arc::clone(self);
         tokio::spawn(async move {
@@ -633,10 +670,22 @@ impl PipelineEngine {
             loop {
                 // Workers retire after 30 seconds of inactivity to reclaim resources.
                 match tokio::time::timeout(std::time::Duration::from_secs(30), rx.recv()).await {
-                    Ok(Some(req)) => {
-                        engine
-                            .dispatch_outbound_request_with_breaker(req, &breaker)
+                    Ok(Some(message)) => {
+                        // Do not start a queued reply after its caller has gone away.
+                        // Already-started platform I/O is never retried on cancellation.
+                        if message
+                            .receipt
+                            .as_ref()
+                            .is_some_and(|receipt| receipt.is_closed())
+                        {
+                            continue;
+                        }
+                        let response = engine
+                            .dispatch_outbound_request_with_breaker(message.request, &breaker)
                             .await;
+                        if let Some(receipt) = message.receipt {
+                            let _ = receipt.send(response);
+                        }
                     }
                     Ok(None) => {
                         // All channel senders dropped (shutting down).
@@ -654,7 +703,15 @@ impl PipelineEngine {
 
     /// Reports an outbound drop when a specific platform's worker queue is saturated,
     /// and durably flushes the dropped message to the dead-letter queue log before returning.
-    async fn report_outbound_queue_full(&self, dropped: DeliverMessageRequest) {
+    async fn report_outbound_queue_full(&self, message: OutboundMessage) {
+        let dropped = message.request;
+        if let Some(receipt) = message.receipt {
+            let _ = receipt.send(DeliverMessageResponse {
+                success: false,
+                message_id: String::new(),
+                error_message: "platform outbound queue full".to_string(),
+            });
+        }
         let platform = dropped.platform.clone();
         let channel_id = dropped.channel_id.clone();
         tracing::warn!(
@@ -690,16 +747,13 @@ impl PipelineEngine {
     ///   outbound deliveries to platform `B`.
     /// - **Bounded queue protection**: If platform `A`'s queue reaches capacity, overflow messages
     ///   are dropped and emit [`PipelineStage::OutboundFailed`], without stalling the global dispatcher.
-    pub async fn run_outbound_loop(
-        self: Arc<Self>,
-        mut receiver: mpsc::Receiver<DeliverMessageRequest>,
-    ) {
+    pub async fn run_outbound_loop(self: Arc<Self>, mut receiver: mpsc::Receiver<OutboundMessage>) {
         tracing::info!("Partitioned outbound adapter dispatcher started");
-        let mut workers: std::collections::HashMap<String, mpsc::Sender<DeliverMessageRequest>> =
+        let mut workers: std::collections::HashMap<String, mpsc::Sender<OutboundMessage>> =
             std::collections::HashMap::new();
 
         while let Some(request) = receiver.recv().await {
-            let platform = request.platform.clone();
+            let platform = request.request.platform.clone();
 
             // Periodic cleanup of dead channels to avoid memory buildup when platforms are dynamic
             if workers.len() > 128 {
@@ -1610,7 +1664,7 @@ impl PipelineEngine {
                 let segment_count = deliver_req.segments.len();
 
                 // Non-blocking hand-off: the pipeline worker must never await platform I/O.
-                match self.outbound_sender.try_send(deliver_req) {
+                match self.outbound_sender.try_send(deliver_req.into()) {
                     Ok(()) => {
                         self.observe(PipelineStage::OutboundQueued {
                             event_id,
@@ -1628,7 +1682,7 @@ impl PipelineEngine {
                         let dead_letter = Arc::clone(&self.dead_letter);
                         tokio::spawn(async move {
                             let _ = dead_letter
-                                .write_record(&dropped, "outbound queue is full")
+                                .write_record(&dropped.request, "outbound queue is full")
                                 .await;
                         });
                         self.observe(PipelineStage::OutboundFailed {

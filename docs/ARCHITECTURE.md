@@ -841,3 +841,20 @@ sequenceDiagram
 ### 12.5 单机拓扑与容灾边界 (Single-Node Topology & HA Scope)
 - **单节点进程模型**：微内核当前设计为单机单节点运行形态，Supervisor 仅负责管理本机子进程，不包含跨主机心跳、主备选举或分布式协同功能。
 - **高可用建议**：生产部署时建议通过外部进程管理工具（如 `systemd`、Docker Compose 或 Kubernetes）提供进程级与容器级的高可用拉起守护。
+
+### Asynchronous plugin replies and delivery receipts
+
+`BotApiService.ReplyMessage(DeliverMessageRequest)` preserves the original inbound
+`event_id`, platform, channel and recipient. It enters the same bounded outbound
+FIFO and platform circuit breaker as ordinary command replies. Its response is
+the platform adapter delivery result; `success=true` is never queue admission.
+The RPC waits at most 30 seconds. Timeout or disconnection is an unknown outcome;
+callers must not automatically retry or authorize a write based on that failure.
+Canceled requests still waiting in the queue are skipped. In-flight platform I/O
+may already have committed and cannot be assumed undone.
+
+Python plugins use `ctx.core.reply_to(event, segments)` on the existing shared
+Core channel. Return long-running commands promptly, then use this method for
+progress and final replies. `SendMessage` retains its existing proactive-message
+Fast-ACK contract. PreFilter must return within its 30ms chain budget; image
+downloads, local audit writes and business operations belong outside that callback.

@@ -3,7 +3,7 @@
 import grpc
 import warnings
 
-import plugin_pb2 as plugin__pb2
+from . import plugin_pb2 as plugin__pb2
 
 GRPC_GENERATED_VERSION = '1.84.0'
 GRPC_VERSION = grpc.__version__
@@ -507,6 +507,11 @@ class BotApiServiceStub:
                 request_serializer=plugin__pb2.SendMessageRequest.SerializeToString,
                 response_deserializer=plugin__pb2.SendMessageResponse.FromString,
                 _registered_method=True)
+        self.ReplyMessage = channel.unary_unary(
+                '/kanon.plugin.v1.BotApiService/ReplyMessage',
+                request_serializer=plugin__pb2.DeliverMessageRequest.SerializeToString,
+                response_deserializer=plugin__pb2.DeliverMessageResponse.FromString,
+                _registered_method=True)
         self.RequestLLM = channel.unary_stream(
                 '/kanon.plugin.v1.BotApiService/RequestLLM',
                 request_serializer=plugin__pb2.LLMRequest.SerializeToString,
@@ -547,6 +552,15 @@ class BotApiServiceServicer:
 
     def SendMessage(self, request, context):
         """Missing associated documentation comment in .proto file."""
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
+    def ReplyMessage(self, request, context):
+        """Reply to an original platform event through the same outbound FIFO. Success
+        means the platform adapter accepted delivery, not merely queue admission.
+        A deadline/disconnect is an unknown outcome and must not trigger an automatic retry.
+        """
         context.set_code(grpc.StatusCode.UNIMPLEMENTED)
         context.set_details('Method not implemented!')
         raise NotImplementedError('Method not implemented!')
@@ -598,6 +612,11 @@ def add_BotApiServiceServicer_to_server(servicer, server):
                     servicer.SendMessage,
                     request_deserializer=plugin__pb2.SendMessageRequest.FromString,
                     response_serializer=plugin__pb2.SendMessageResponse.SerializeToString,
+            ),
+            'ReplyMessage': grpc.unary_unary_rpc_method_handler(
+                    servicer.ReplyMessage,
+                    request_deserializer=plugin__pb2.DeliverMessageRequest.FromString,
+                    response_serializer=plugin__pb2.DeliverMessageResponse.SerializeToString,
             ),
             'RequestLLM': grpc.unary_stream_rpc_method_handler(
                     servicer.RequestLLM,
@@ -702,6 +721,33 @@ class BotApiService:
             '/kanon.plugin.v1.BotApiService/SendMessage',
             plugin__pb2.SendMessageRequest.SerializeToString,
             plugin__pb2.SendMessageResponse.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
+    @staticmethod
+    def ReplyMessage(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(
+            request,
+            target,
+            '/kanon.plugin.v1.BotApiService/ReplyMessage',
+            plugin__pb2.DeliverMessageRequest.SerializeToString,
+            plugin__pb2.DeliverMessageResponse.FromString,
             options,
             channel_credentials,
             insecure,

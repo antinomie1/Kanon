@@ -513,15 +513,15 @@ async fn test_partitioned_outbound_dispatch_cross_platform_isolation_and_fifo_or
 
     // Send 1 to slow, then 2 and 3 to fast
     sender
-        .send(make_req("slow_plat", "c1"))
+        .send(make_req("slow_plat", "c1").into())
         .await
         .expect("send slow 1");
     sender
-        .send(make_req("fast_plat", "f1"))
+        .send(make_req("fast_plat", "f1").into())
         .await
         .expect("send fast 1");
     sender
-        .send(make_req("fast_plat", "f2"))
+        .send(make_req("fast_plat", "f2").into())
         .await
         .expect("send fast 2");
 
@@ -609,7 +609,7 @@ async fn test_partitioned_outbound_dispatch_queue_saturation_drop() {
                 recipient_id: "u1".to_string(),
                 segments: vec![],
                 event_id: format!("evt-drop-{i}"),
-            })
+            }.into())
             .await
             .expect("send to global outbound queue");
     }
@@ -709,7 +709,7 @@ async fn platform_circuit_breaker_trips_and_persists_to_dead_letter() {
                     })),
                 }],
                 event_id: format!("evt-fail-{i}"),
-            })
+            }.into())
             .await
             .expect("enqueue message");
     }
@@ -758,7 +758,7 @@ async fn platform_circuit_breaker_trips_and_persists_to_dead_letter() {
                 })),
             }],
             event_id: "evt-short-circuit-6".to_string(),
-        })
+        }.into())
         .await
         .expect("enqueue message");
 

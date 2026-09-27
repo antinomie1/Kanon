@@ -139,5 +139,30 @@ class TestIngestEventSegments(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(stub.requests, [], "the malformed event must not reach Core")
 
 
+class TestReplyContext(unittest.IsolatedAsyncioTestCase):
+    """Replies retain the original native event and propagate delivery failures."""
+
+    async def test_reply_preserves_context_and_waits_for_platform(self):
+        import asyncio
+        entered, release = asyncio.Event(), asyncio.Event()
+        captured = []
+        class Stub:
+            async def ReplyMessage(self, request, *, timeout):
+                captured.append((request, timeout))
+                entered.set()
+                await release.wait()
+                return pb.DeliverMessageResponse(success=False, error_message="platform rejected")
+        event = pb.PipelineEventRequest(platform="qqofficial", channel_id="group:test",
+            sender_id="sender", event_id="native-message")
+        call = asyncio.create_task(CoreHandle(Stub()).reply_to(event, []))
+        await entered.wait()
+        self.assertFalse(call.done())
+        self.assertEqual(captured[0][0].event_id, "native-message")
+        self.assertEqual(captured[0][0].recipient_id, "sender")
+        self.assertEqual(captured[0][1], 35.0)
+        release.set()
+        self.assertFalse((await call).success)
+
+
 if __name__ == "__main__":
     unittest.main()
