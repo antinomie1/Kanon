@@ -24,6 +24,7 @@
 use std::path::{Path, PathBuf};
 
 use kanon_adapter_milky::MilkyConfig;
+use kanon_adapter_onebot::OneBotConfig;
 use kanon_core::{ContextPolicy, ReplyPolicy};
 use kanon_llm::{AgentConfig, ModelRef, ModelSpec, ProviderEntry};
 use serde::{Deserialize, Serialize};
@@ -196,6 +197,9 @@ struct SystemConfigDocument {
     /// Milky platform adapter configuration, when one was saved.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     milky: Option<MilkyConfig>,
+    /// OneBot v11 adapter configuration, when saved.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    onebot: Option<OneBotConfig>,
     /// Every unrecognized key is carried through verbatim.
     ///
     /// The document is shared, forward-compatible node state: writing the provider must never
@@ -438,6 +442,18 @@ impl SystemConfigStore {
             None => return Ok(()),
         };
         document.llm = None;
+        self.write_document(&document)
+    }
+
+    /// Loads the persisted OneBot v11 configuration.
+    pub fn load_onebot(&self) -> Result<Option<OneBotConfig>, String> {
+        Ok(self.read_document()?.and_then(|document| document.onebot))
+    }
+
+    /// Saves OneBot settings without changing other system configuration sections.
+    pub fn save_onebot(&self, config: &OneBotConfig) -> Result<(), String> {
+        let mut document = self.read_document()?.unwrap_or_default();
+        document.onebot = Some(config.clone());
         self.write_document(&document)
     }
 

@@ -8,6 +8,7 @@ description = "Decoupled RESTful API and WebSocket gateway for Kanon"
 [dependencies]
 kanon-core = { path = "../kanon-core" }
 kanon-adapter-milky = { path = "../kanon-adapter-milky" }
+kanon-adapter-onebot = { path = "../kanon-adapter-onebot" }
 kanon-llm = { path = "../kanon-llm" }
 kanon-proto = { path = "../kanon-proto" }
 kanon-storage = { path = "../kanon-storage" }

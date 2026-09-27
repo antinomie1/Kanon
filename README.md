@@ -47,11 +47,18 @@ variables (the complete list is in [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) 
 | `KANON_LLM_MODEL` | `gpt-4o-mini` | default model identifier |
 | `KANON_LLM_PROTOCOL` | `openai` | `openai`, `openai_responses` or `anthropic` |
 | `KANON_WEBHOOK_CALLBACK_URL` | unset | outbound callback for the bundled webhook adapter |
+| `KANON_ONEBOT_WS_URL` | unset | OneBot v11 forward WebSocket endpoint or reverse listener URL; setting it enables the adapter |
+| `KANON_ONEBOT_TRANSPORT` | `forward_websocket` | `forward_websocket` or `reverse_websocket` |
+| `KANON_ONEBOT_TOKEN` | unset | OneBot bearer access token |
 | `KANON_RUN_DIR` | platform runtime dir | overrides where IPC sockets (`core.sock`, `host_<id>.sock`) are created |
 | `RUST_LOG` | `info` | standard `tracing` filter directives |
 
 At runtime the node reads plugins from `./plugins`, keeps operator state in `./data/`, and creates its
 IPC sockets under the platform runtime directory (`$XDG_RUNTIME_DIR/kanon/run/` on Linux).
+
+OneBot v11 can also be configured under **Plugins & Adapters → OneBot v11** in the console.
+Both forward and reverse universal WebSockets are supported. See [the OneBot setup guide](docs/ONEBOT.md)
+for connection examples, account binding and message support.
 
 ## Build outputs
 
@@ -82,6 +89,7 @@ cargo build --workspace                           # everything, including the fi
 | `crates/kanon-storage` | embedded KV storage and data directory isolation |
 | `crates/kanon-proto` | Protobuf/gRPC contract and generated stubs |
 | `crates/kanon-adapter-milky` | Milky protocol platform adapter |
+| `crates/kanon-adapter-onebot` | OneBot v11 forward/reverse WebSocket platform adapter |
 | `crates/kanon-dev` | developer CLI |
 | `sdks/{rust,python,typescript}` | plugin SDKs and language hosts |
 | `webui` | independent web console |

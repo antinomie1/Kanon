@@ -27,6 +27,8 @@ import type {
   ModelSpec,
   ModelsResponse,
   NodeHealth,
+  OneBotConfigRequest,
+  OneBotConfigView,
   PersonasResponse,
   PluginConfigResponse,
   PluginConfigUpdateResponse,
@@ -332,6 +334,15 @@ export const api = {
     ),
 
   getAdapters: () => request<AdaptersResponse>('/api/v1/adapters'),
+
+  // OneBot v11 uses the running connection status for both connection modes.
+  getOneBotConfig: () =>
+    request<OneBotConfigView>('/api/v1/adapters/onebot/config'),
+  updateOneBotConfig: (req: OneBotConfigRequest) =>
+    request<OneBotConfigView>('/api/v1/adapters/onebot/config', {
+      method: 'PUT',
+      body: JSON.stringify(req),
+    }),
 
   // Milky platform adapter: an account-level configuration that is validated, persisted to
   // data/system.json and hot-applied to the running adapter in one call.

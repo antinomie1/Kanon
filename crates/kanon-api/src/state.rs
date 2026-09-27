@@ -13,6 +13,7 @@ use std::sync::{Arc, RwLock};
 use std::time::Instant;
 
 use kanon_adapter_milky::MilkyAdapter;
+use kanon_adapter_onebot::OneBotAdapter;
 use kanon_core::{
     ContextPolicyStore, EventIngress, InstanceRegistry, McpConfigStore, McpPool, ReplyPolicyStore,
     SkillStore, Supervisor, ToggleStore,
@@ -84,6 +85,8 @@ struct ApiStateInner {
     /// the console reconfigures it and reads its connection status — neither of which the generic
     /// adapter contract exposes.
     milky: Option<Arc<MilkyAdapter>>,
+    /// OneBot v11 adapter hosted by this node.
+    onebot: Option<Arc<OneBotAdapter>>,
     /// Real-time log and trace channels plus the metrics registry.
     observability: Arc<Observability>,
     /// Fast-ACK ingest handle driving the inbound data plane, absent when no pipeline is attached.
@@ -383,6 +386,11 @@ impl ApiState {
         }
     }
 
+    /// OneBot v11 adapter handle, when this node hosts one.
+    pub fn onebot(&self) -> Option<&Arc<OneBotAdapter>> {
+        self.inner.onebot.as_ref()
+    }
+
     /// Milky platform adapter handle, when this node hosts one.
     pub fn milky(&self) -> Option<&Arc<MilkyAdapter>> {
         self.inner.milky.as_ref()
@@ -424,6 +432,8 @@ pub struct ApiStateBuilder {
     system_config: Option<Arc<SystemConfigStore>>,
     node_settings: Option<NodeSettings>,
     milky: Option<Arc<MilkyAdapter>>,
+    /// OneBot v11 adapter hosted by this node.
+    onebot: Option<Arc<OneBotAdapter>>,
     config_base_dir: Option<PathBuf>,
     observability: Option<Arc<Observability>>,
     ingress: Option<EventIngress>,
@@ -459,6 +469,7 @@ impl ApiStateBuilder {
             system_config: None,
             node_settings: None,
             milky: None,
+            onebot: None,
             config_base_dir: None,
             observability: None,
             ingress: None,
@@ -596,6 +607,12 @@ impl ApiStateBuilder {
     /// an embedded gateway or a test cannot accidentally adopt a real node's configuration.
     pub fn with_node_settings(mut self, settings: NodeSettings) -> Self {
         self.node_settings = Some(settings);
+        self
+    }
+
+    /// Shares the OneBot v11 adapter registered by the composition root.
+    pub fn with_onebot_adapter(mut self, adapter: Arc<OneBotAdapter>) -> Self {
+        self.onebot = Some(adapter);
         self
     }
 
@@ -742,6 +759,7 @@ impl ApiStateBuilder {
                 context_policy,
                 node_settings: Arc::new(RwLock::new(node_settings)),
                 milky: self.milky,
+                onebot: self.onebot,
                 observability,
                 ingress: self.ingress,
                 plugins_dir,
