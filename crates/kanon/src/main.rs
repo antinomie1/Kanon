@@ -20,6 +20,10 @@
 //! - `KANON_MILKY_TOKEN` — shared `access_token` for the Milky implementation.
 //! - `KANON_MILKY_PLATFORM` — platform identifier owned by the Milky adapter (default `milky`).
 //! - `KANON_MILKY_TRANSPORT` — inbound event transport, `sse` (default) or `websocket`.
+//! - `KANON_ONEBOT_WS_URL` — OneBot v11 forward endpoint or reverse listener URL.
+//! - `KANON_ONEBOT_TRANSPORT` — `forward_websocket` (default) or `reverse_websocket`.
+//! - `KANON_ONEBOT_TOKEN` — shared OneBot access token.
+//! - `KANON_ONEBOT_PLATFORM` — platform identifier (default `onebot`).
 //! - `KANON_LLM_BASE_URL` — model provider base URL; when unset, chat debugging is disabled and
 //!   `/api/v1/chat/completions` answers `503` instead of inventing a fake provider.
 //! - `KANON_LLM_API_KEY` — provider credential.
@@ -37,6 +41,7 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 
 use kanon_adapter_milky::{MilkyAdapter, MilkyConfig};
+use kanon_adapter_onebot::{OneBotAdapter, OneBotConfig};
 use kanon_api::{
     ApiServer, ApiState, LlmProviderConfig, NodeSettings, Observability, SystemConfigStore,
     WebhookAdapter,
@@ -148,13 +153,14 @@ async fn main() -> StartupResult<()> {
         Err(err) => tracing::warn!(error = %err, "Failed to enumerate the skills directory"),
     }
 
-    // --- Milky platform adapter -------------------------------------------------------
+    // --- Built-in platform adapters --------------------------------------------------
     // Built before the gateway state because the console manages this very instance: it holds the
     // concrete adapter so configuration changes reach the object the registry routes to. The
     // adapter is registered here and *started* later, when `start_all` hands every adapter the
     // core's ingest queue; until then a configured adapter reports `connecting` and opens no
     // connection it could not feed.
     let milky_adapter = register_milky_adapter(&supervisor).await?;
+    let onebot_adapter = register_onebot_adapter(&supervisor).await?;
 
     // --- Management gateway state & agent engine --------------------------------------
     // The state owns one agent factory (and the named provider directory inside it), shared with
@@ -168,6 +174,7 @@ async fn main() -> StartupResult<()> {
     let node_settings = bootstrap_node_settings()?;
     let state = ApiState::builder(supervisor.clone())
         .with_milky_adapter(milky_adapter)
+        .with_onebot_adapter(onebot_adapter)
         .with_observability(observability.clone())
         .with_ingress(ingress.clone())
         .with_instances(instances.clone())
@@ -430,6 +437,30 @@ async fn register_milky_adapter(supervisor: &Arc<Supervisor>) -> StartupResult<A
         );
     }
 
+    Ok(adapter)
+}
+
+/// Registers OneBot v11, preferring saved settings over the environment bootstrap.
+async fn register_onebot_adapter(
+    supervisor: &Arc<Supervisor>,
+) -> StartupResult<Arc<OneBotAdapter>> {
+    let store = SystemConfigStore::default();
+    let config = match store.load_onebot().map_err(|err| {
+        format!(
+            "Failed to load OneBot configuration from {}: {err}",
+            store.path().display()
+        )
+    })? {
+        Some(config) => config,
+        None => OneBotConfig::from_env()?.unwrap_or_default(),
+    };
+    let adapter = Arc::new(OneBotAdapter::new(config)?);
+    supervisor.adapters().register(adapter.clone()).await?;
+    tracing::info!(
+        platform = %adapter.identity(),
+        enabled = adapter.config().enabled,
+        "OneBot v11 adapter registered"
+    );
     Ok(adapter)
 }
 

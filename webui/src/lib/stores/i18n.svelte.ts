@@ -232,6 +232,45 @@ export const dictionaries = {
     'adapters.qq_md_template': 'Markdown Template ID',
     'adapters.qq_md_param': 'Template Parameter Key',
 
+    // OneBot v11 adapter
+    'adapters.onebot_title': 'OneBot v11 Adapter',
+    'adapters.onebot_unsaved': 'Unsaved change (press Save & apply)',
+    'adapters.onebot_enabled': 'Enable OneBot v11 adapter',
+    'adapters.onebot_enabled_hint':
+      'Saving starts or stops the configured WebSocket connection.',
+    'adapters.onebot_ws_url': 'WebSocket URL',
+    'adapters.onebot_transport': 'Connection mode',
+    'adapters.onebot_transport_forward': 'Forward WebSocket',
+    'adapters.onebot_transport_reverse': 'Reverse WebSocket',
+    'adapters.onebot_forward_hint':
+      'Kanon connects to the combined API and event WebSocket endpoint of NapCat, Lagrange, or another OneBot v11 implementation.',
+    'adapters.onebot_reverse_hint':
+      'Kanon listens on this ws:// IP address and port. Configure the protocol implementation to connect to the reachable address, path and matching token. One account per listener.',
+    'adapters.onebot_token': 'Access Token',
+    'adapters.onebot_token_keep': 'Leave empty to keep the stored token',
+    'adapters.onebot_token_none': 'No token configured',
+    'adapters.onebot_token_show': 'Show token',
+    'adapters.onebot_token_hide': 'Hide token',
+    'adapters.onebot_clear_token': 'Remove the stored token',
+    'adapters.onebot_platform': 'Platform identifier',
+    'adapters.onebot_display_name': 'Display name',
+    'adapters.onebot_readonly_hint':
+      'Identity fields are fixed while the node runs. Change them in the saved configuration and restart.',
+    'adapters.onebot_save': 'Save & apply',
+    'adapters.onebot_saving': 'Saving...',
+    'adapters.onebot_saved':
+      'Settings saved and applied; see connection status below',
+    'adapters.onebot_login': 'Account ID',
+    'adapters.onebot_state_disabled': 'Disabled',
+    'adapters.onebot_state_connecting': 'Connecting',
+    'adapters.onebot_state_listening':
+      'Listening — waiting for protocol client',
+    'adapters.onebot_state_connected': 'Connected',
+    'adapters.onebot_state_disconnected': 'Disconnected',
+    'adapters.onebot_state_stopped': 'Stopped',
+    'adapters.onebot_not_hosted':
+      'This node does not host the OneBot v11 adapter.',
+
     // Milky platform adapter
     'adapters.milky_title': 'Milky Protocol Adapter',
     'adapters.empty': 'No platform adapter is registered on this node.',
@@ -828,6 +867,41 @@ export const dictionaries = {
     'adapters.qq_use_markdown': '启用原生 Markdown',
     'adapters.qq_md_template': 'Markdown 模板 ID (可选)',
     'adapters.qq_md_param': '模板变量 Key (默认: text)',
+
+    // OneBot v11 adapter
+    'adapters.onebot_title': 'OneBot v11 适配器',
+    'adapters.onebot_unsaved': '有未保存的改动（请点“保存并生效”）',
+    'adapters.onebot_enabled': '启用 OneBot v11 适配器',
+    'adapters.onebot_enabled_hint': '保存后启动或停止所配置的 WebSocket 连接。',
+    'adapters.onebot_ws_url': 'WebSocket 地址',
+    'adapters.onebot_transport': '连接方式',
+    'adapters.onebot_transport_forward': '正向 WebSocket',
+    'adapters.onebot_transport_reverse': '反向 WebSocket',
+    'adapters.onebot_forward_hint':
+      '由 Kanon 连接 NapCat、Lagrange 等 OneBot v11 协议端的 API 与事件共用 WebSocket 地址。',
+    'adapters.onebot_reverse_hint':
+      '由 Kanon 在此 ws:// IP 地址和端口监听。请让协议端连接可达的监听地址与路径，并配置相同 Token；每个监听器连接一个账号。',
+    'adapters.onebot_token': 'Access Token',
+    'adapters.onebot_token_keep': '留空表示保留已保存的 Token',
+    'adapters.onebot_token_none': '尚未配置 Token',
+    'adapters.onebot_token_show': '显示 Token',
+    'adapters.onebot_token_hide': '隐藏 Token',
+    'adapters.onebot_clear_token': '清除已保存的 Token',
+    'adapters.onebot_platform': '平台标识',
+    'adapters.onebot_display_name': '显示名称',
+    'adapters.onebot_readonly_hint':
+      '运行期间不能修改身份字段；需在已保存的配置中修改并重启节点。',
+    'adapters.onebot_save': '保存并生效',
+    'adapters.onebot_saving': '保存中...',
+    'adapters.onebot_saved': '设置已保存并应用，连接结果请查看下方状态',
+    'adapters.onebot_login': '账号 ID',
+    'adapters.onebot_state_disabled': '未启用',
+    'adapters.onebot_state_connecting': '连接中',
+    'adapters.onebot_state_listening': '监听中，等待协议端连接',
+    'adapters.onebot_state_connected': '已连接',
+    'adapters.onebot_state_disconnected': '已断开',
+    'adapters.onebot_state_stopped': '已停止',
+    'adapters.onebot_not_hosted': '本节点未注册 OneBot v11 适配器。',
 
     // Milky 协议适配器
     'adapters.milky_title': 'Milky 协议适配器',

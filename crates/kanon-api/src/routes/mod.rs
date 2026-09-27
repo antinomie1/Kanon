@@ -12,6 +12,8 @@
 //! | `GET` | `/api/v1/metrics` | Prometheus text exposition |
 //! | `GET` | `/api/v1/adapters` | Platform adapter catalog (built-in and plugin) |
 //! | `POST` | `/api/v1/adapters/:platform/ingest` | Fast-ACK inbound message ingress |
+//! | `GET` | `/api/v1/adapters/onebot/config` | OneBot v11 configuration and live status |
+//! | `PUT` | `/api/v1/adapters/onebot/config` | Validate, persist and hot-apply OneBot v11 |
 //! | `GET` | `/api/v1/adapters/milky/config` | Milky adapter configuration and live status |
 //! | `PUT` | `/api/v1/adapters/milky/config` | Validate, persist and hot-apply the Milky adapter |
 //! | `POST` | `/api/v1/adapters/milky/config/test` | Probe a Milky endpoint without saving |
@@ -58,6 +60,7 @@ pub mod mcp;
 pub mod metrics;
 pub mod milky;
 pub mod models;
+pub mod onebot;
 pub mod personas;
 pub mod plugins;
 pub mod providers;
@@ -78,6 +81,7 @@ pub fn api_router() -> Router<ApiState> {
         .merge(metrics::routes())
         .merge(adapters::routes())
         .merge(milky::routes())
+        .merge(onebot::routes())
         .merge(instances::routes())
         .merge(plugins::routes())
         .merge(sessions::routes())

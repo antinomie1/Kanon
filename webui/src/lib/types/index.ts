@@ -804,3 +804,47 @@ export interface CallPluginToolResponse {
   result: unknown;
   error?: string;
 }
+
+/** OneBot v11 supports a combined forward socket or a reverse listener. */
+export type OneBotTransport = 'forward_websocket' | 'reverse_websocket';
+
+/** The socket's live lifecycle, independent from the saved enabled setting. */
+export type OneBotConnectionState =
+  | 'disabled'
+  | 'connecting'
+  | 'listening'
+  | 'connected'
+  | 'disconnected'
+  | 'stopped';
+
+/** Stored configuration with the write-only access token removed. */
+export interface OneBotConfig {
+  enabled: boolean;
+  platform: string;
+  display_name: string | null;
+  transport: OneBotTransport;
+  ws_url: string;
+}
+
+/** Live connection status returned by the node. */
+export interface OneBotStatus {
+  platform: string;
+  enabled: boolean;
+  connected: boolean;
+  connection_state: OneBotConnectionState;
+  token_configured: boolean;
+  self_id: string | null;
+  last_error: string | null;
+}
+
+/** Configuration and status shown by the console. */
+export interface OneBotConfigView {
+  config: OneBotConfig;
+  status: OneBotStatus;
+}
+
+/** An empty credential preserves the saved token; clearing is explicit. */
+export interface OneBotConfigRequest extends OneBotConfig {
+  access_token?: string;
+  clear_access_token?: boolean;
+}

@@ -3,11 +3,13 @@ import { QrCode, Radio, RefreshCw, Send, Settings } from 'lucide-svelte';
 import { api } from '../../api/client';
 import { t } from '../../stores/i18n.svelte';
 import { milkyStore } from '../../stores/milky.svelte';
+import { onebotStore } from '../../stores/onebot.svelte';
 import type { AdapterItem } from '../../types';
 import QqOfficialQrModal from '../adapters/QqOfficialQrModal.svelte';
 import PluginConfigDrawer from '../plugins/PluginConfigDrawer.svelte';
 import Switch from '../ui/Switch.svelte';
 import MilkyAdapterPanel from './MilkyAdapterPanel.svelte';
+import OneBotAdapterPanel from './OneBotAdapterPanel.svelte';
 
 /**
  * Platform adapters tab.
@@ -25,6 +27,8 @@ let error = $state<string | null>(null);
 
 /** Milky has an account-level configuration surface of its own. */
 let milkyConfigOpen = $state(false);
+/** OneBot v11 connection settings drawer. */
+let onebotConfigOpen = $state(false);
 /** Plugin configuration drawer, used by adapters that are implemented as plugins. */
 let configPluginId = $state<string | null>(null);
 /** QQ Official QR binding dialog. */
@@ -52,7 +56,7 @@ async function load() {
       // Keep the simulator pointed at a platform the node actually serves.
       testPlatform = adapters[0].platform;
     }
-    await milkyStore.ensureLoaded();
+    await Promise.all([milkyStore.ensureLoaded(), onebotStore.ensureLoaded()]);
   } catch (e) {
     error = e instanceof Error ? e.message : String(e);
   } finally {
@@ -64,6 +68,12 @@ async function load() {
 function openMilkyConfig() {
   milkyConfigOpen = true;
   void milkyStore.load();
+}
+
+/** Opens OneBot settings with the current saved values. */
+function openOneBotConfig() {
+  onebotConfigOpen = true;
+  void onebotStore.load();
 }
 
 /** Pushes one synthetic event into a platform's Fast-ACK ingest endpoint. */
@@ -144,6 +154,20 @@ $effect(() => {
               >
                 {t(milkyStore.stateLabelKey)}
               </span>
+            {:else if adapter.platform === onebotStore.platformId && onebotStore.status}
+              <!-- The OneBot adapter's own state is more precise than "connected or not": it
+                   distinguishes disabled, connecting and failed, which need different reactions. -->
+              <span
+                class="px-2 py-0.5 rounded text-xs font-mono border {onebotStore.stateTone === 'ok'
+                  ? 'bg-emerald-500/10 text-emerald-600 border-emerald-500/20'
+                  : onebotStore.stateTone === 'warn'
+                    ? 'bg-amber-500/10 text-amber-600 border-amber-500/20'
+                    : onebotStore.stateTone === 'bad'
+                      ? 'bg-rose-500/10 text-rose-600 border-rose-500/20'
+                      : 'bg-zinc-500/10 text-zinc-500 border-zinc-500/20'}"
+              >
+                {t(onebotStore.stateLabelKey)}
+              </span>
             {:else}
               <span
                 class="px-2 py-0.5 rounded text-xs font-mono {adapter.connected
@@ -188,6 +212,22 @@ $effect(() => {
                 <Settings class="w-3.5 h-3.5" />
                 <span>{t('plugins.config')}</span>
               </button>
+            {:else if adapter.platform === onebotStore.platformId}
+              <!-- Outside switch for the same node setting the panel edits: it applies
+                   immediately, and the two stay in step because both go through the store. -->
+              <Switch
+                checked={onebotStore.status?.enabled ?? false}
+                disabled={onebotStore.loading || onebotStore.applyingEnabled}
+                onchange={(next) => void onebotStore.setEnabled(next)}
+                label={t('adapters.onebot_enabled')}
+              />
+              <button
+                onclick={openOneBotConfig}
+                class="px-2.5 py-1 text-xs font-medium text-zinc-600 dark:text-zinc-400 hover:text-zinc-900 dark:hover:text-zinc-100 hover:bg-zinc-100 dark:hover:bg-zinc-800 border border-zinc-200 dark:border-zinc-700 rounded-md transition cursor-pointer flex items-center gap-1"
+              >
+                <Settings class="w-3.5 h-3.5" />
+                <span>{t('plugins.config')}</span>
+              </button>
             {/if}
           </div>
         </div>
@@ -199,6 +239,13 @@ $effect(() => {
         class="p-3 rounded-lg bg-rose-500/10 border border-rose-500/20 text-xs text-rose-700 dark:text-rose-300 font-mono break-all"
       >
         {milkyStore.error}
+      </div>
+    {/if}
+    {#if onebotStore.error && !onebotConfigOpen}
+      <div
+        class="p-3 rounded-lg bg-rose-500/10 border border-rose-500/20 text-xs text-rose-700 dark:text-rose-300 font-mono break-all"
+      >
+        {onebotStore.error}
       </div>
     {/if}
   </div>
@@ -303,6 +350,42 @@ $effect(() => {
       </div>
 
       <MilkyAdapterPanel />
+    </div>
+  </div>
+{/if}
+
+<!-- OneBot adapter configuration drawer: the built-in adapter's second-level view, mirroring how
+     the QQ Official plugin exposes its own settings from the adapter list. -->
+{#if onebotConfigOpen}
+  <!-- svelte-ignore a11y_click_events_have_key_events -->
+  <div
+    class="fixed inset-0 bg-black/40 backdrop-blur-xs z-50 flex items-center justify-center p-4"
+    onclick={() => (onebotConfigOpen = false)}
+    role="button"
+    tabindex="-1"
+  >
+    <!-- svelte-ignore a11y_click_events_have_key_events -->
+    <div
+      class="w-full max-w-3xl max-h-[85vh] overflow-y-auto bg-white dark:bg-zinc-900 border border-zinc-200 dark:border-zinc-800 rounded-xl shadow-2xl p-6 space-y-4"
+      onclick={(e) => e.stopPropagation()}
+      role="dialog"
+      tabindex="-1"
+    >
+      <div
+        class="flex items-center justify-between border-b border-zinc-200 dark:border-zinc-800 pb-3"
+      >
+        <h3 class="text-base font-semibold text-zinc-900 dark:text-zinc-100">
+          {t('adapters.onebot_title')}
+        </h3>
+        <button
+          onclick={() => (onebotConfigOpen = false)}
+          class="text-zinc-400 hover:text-zinc-600 dark:hover:text-zinc-200 text-xs sm:text-sm font-mono cursor-pointer"
+        >
+          {t('common.close')}
+        </button>
+      </div>
+
+      <OneBotAdapterPanel />
     </div>
   </div>
 {/if}
