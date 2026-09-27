@@ -47,32 +47,10 @@ async function sendMessage() {
   if (!text || isStreaming) return;
 
   const activeModelKey = providersStore.activeModel;
-  let targetModel: string | undefined = activeModelKey || undefined;
-  let targetProtocol: string | undefined;
-  let targetBaseUrl: string | undefined;
-  let targetApiKey: string | undefined;
-
-  if (activeModelKey) {
-    const slashIdx = activeModelKey.indexOf('/');
-    if (slashIdx !== -1) {
-      const provName = activeModelKey.slice(0, slashIdx);
-      const modelId = activeModelKey.slice(slashIdx + 1);
-      const prov = providersStore.providers.find((p) => p.name === provName);
-      if (prov) {
-        targetModel = modelId;
-        targetProtocol = prov.protocol;
-        targetBaseUrl = prov.base_url;
-        targetApiKey = prov.api_key;
-      }
-    } else {
-      const prov = providersStore.selectedProvider;
-      if (prov) {
-        targetProtocol = prov.protocol;
-        targetBaseUrl = prov.base_url;
-        targetApiKey = prov.api_key;
-      }
-    }
-  }
+  // The sandbox sends the canonical `<provider>/<model-id>` reference and lets the node resolve it
+  // against its provider directory. The browser never receives a credential, so it cannot build a
+  // provider of its own — and it no longer needs to.
+  const targetModel: string | undefined = activeModelKey || undefined;
 
   inputMessage = '';
   const userMsg: ChatMessage = {
@@ -95,7 +73,7 @@ async function sendMessage() {
   messages = [...messages, assistantMsg];
 
   // If no model or provider is configured and core has no active provider
-  if (!targetProtocol && !providersStore.catalog?.active?.configured) {
+  if (!targetModel && !providersStore.catalog?.active?.configured) {
     messages = messages.map((m) =>
       m.id === assistantId
         ? {
@@ -117,9 +95,6 @@ async function sendMessage() {
         session_id: sessionId,
         message: text,
         model: targetModel,
-        protocol: targetProtocol,
-        base_url: targetBaseUrl,
-        api_key: targetApiKey || undefined,
         tools: enableTools,
       },
       {

@@ -12,8 +12,8 @@ use std::sync::Arc;
 
 use axum::Router;
 use axum::http::Method;
-use axum::response::{IntoResponse, Response};
 use axum::response::sse::{Event as SseEvent, Sse};
+use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, extract::Path as AxumPath};
 use kanon_adapter_milky::{MilkyAdapter, MilkyConfig};
@@ -21,9 +21,9 @@ use kanon_api::{ApiState, SystemConfigStore, app};
 use kanon_core::supervisor::Supervisor;
 use kanon_core::{EventIngress, PlatformAdapter};
 use kanon_proto::v1::IngestEventRequest;
-use tokio::sync::mpsc;
 use serde_json::{Value, json};
 use tempfile::TempDir;
+use tokio::sync::mpsc;
 
 use common::send_json;
 
@@ -151,13 +151,8 @@ async fn read_reports_defaults_when_nothing_is_configured() {
     let (state, _adapter, _ingest) = milky_state(dir.path(), MilkyConfig::default()).await;
     let router: Router = app(state);
 
-    let (status, body) = send_json(
-        &router,
-        Method::GET,
-        "/api/v1/adapters/milky/config",
-        None,
-    )
-    .await;
+    let (status, body) =
+        send_json(&router, Method::GET, "/api/v1/adapters/milky/config", None).await;
 
     assert_eq!(status, 200);
     assert_eq!(body["config"]["enabled"], false);
@@ -439,13 +434,8 @@ async fn routes_report_a_missing_adapter() {
     let dir = temp_dir();
     let router: Router = app(common::empty_state(PathBuf::from(dir.path())).await);
 
-    let (status, body) = send_json(
-        &router,
-        Method::GET,
-        "/api/v1/adapters/milky/config",
-        None,
-    )
-    .await;
+    let (status, body) =
+        send_json(&router, Method::GET, "/api/v1/adapters/milky/config", None).await;
 
     assert_eq!(status, 404);
     assert_eq!(body["error"]["code"], "not_found");

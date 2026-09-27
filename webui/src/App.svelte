@@ -4,6 +4,7 @@ import Header from './lib/components/layout/Header.svelte';
 import Sidebar from './lib/components/layout/Sidebar.svelte';
 
 import InstancesView from './lib/components/views/InstancesView.svelte';
+import ModelsView from './lib/components/views/ModelsView.svelte';
 import OverviewView from './lib/components/views/OverviewView.svelte';
 import PipelineLogsView from './lib/components/views/PipelineLogsView.svelte';
 import PlaygroundView from './lib/components/views/PlaygroundView.svelte';
@@ -73,6 +74,8 @@ function handleKeydown(e: KeyboardEvent) {
         <SessionsPersonasView />
       {:else if currentTab === 'providers'}
         <ProvidersView />
+      {:else if currentTab === 'models'}
+        <ModelsView />
       {:else if currentTab === 'system'}
         <SystemConfigView />
       {/if}

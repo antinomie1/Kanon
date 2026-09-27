@@ -17,7 +17,8 @@ pub use providers::{
     OpenAiResponsesProvider, SseDecoder, SseEvent,
 };
 pub use types::{
-    ChatChunk, ChatMessage, ChatRequest, ChatResponse, Role, TokenUsage, ToolCall, ToolDefinition,
+    ChatChunk, ChatMessage, ChatRequest, ChatResponse, ContentPart, Role, TokenUsage, ToolCall,
+    ToolDefinition,
 };
 
 /// Pinned, boxed stream of asynchronous chat completion chunks.

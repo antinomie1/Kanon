@@ -24,11 +24,125 @@
 use std::path::{Path, PathBuf};
 
 use kanon_adapter_milky::MilkyConfig;
-use kanon_llm::AgentConfig;
+use kanon_core::ReplyPolicy;
+use kanon_llm::{AgentConfig, ModelRef, ModelSpec, ProviderEntry};
 use serde::{Deserialize, Serialize};
 
 /// Default location of the node's system configuration, relative to the node working directory.
 pub const DEFAULT_SYSTEM_CONFIG: &str = "./data/system.json";
+
+/// One pre-configured provider template offered by the console.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ProviderPresetDef {
+    /// Stable preset identifier, also used as the derived provider name.
+    pub id: &'static str,
+    /// Display name.
+    pub name: &'static str,
+    /// Wire protocol.
+    pub protocol: &'static str,
+    /// Endpoint base URL.
+    pub base_url: &'static str,
+}
+
+/// Provider templates offered when configuring an endpoint.
+///
+/// Exposed as one function (rather than a literal in the route handler) because the provider-name
+/// migration matches a persisted base URL against exactly this list: a legacy single-provider
+/// document must come back under the same name the console would offer.
+pub fn provider_presets() -> Vec<ProviderPresetDef> {
+    vec![
+        ProviderPresetDef {
+            id: "openai",
+            name: "OpenAI Official",
+            protocol: "openai",
+            base_url: "https://api.openai.com/v1",
+        },
+        ProviderPresetDef {
+            id: "anthropic",
+            name: "Anthropic Claude",
+            protocol: "anthropic",
+            base_url: "https://api.anthropic.com/v1",
+        },
+        ProviderPresetDef {
+            id: "deepseek",
+            name: "DeepSeek",
+            protocol: "openai",
+            base_url: "https://api.deepseek.com/v1",
+        },
+        ProviderPresetDef {
+            id: "xiaomi",
+            name: "Xiaomi MiMo",
+            protocol: "openai",
+            base_url: "https://api.xiaomimimo.com/v1",
+        },
+        ProviderPresetDef {
+            id: "ollama",
+            name: "Ollama (Local)",
+            protocol: "openai",
+            base_url: "http://127.0.0.1:11434/v1",
+        },
+        ProviderPresetDef {
+            id: "vllm",
+            name: "vLLM (Local / Server)",
+            protocol: "openai",
+            base_url: "http://127.0.0.1:8000/v1",
+        },
+        ProviderPresetDef {
+            id: "openrouter",
+            name: "OpenRouter",
+            protocol: "openai",
+            base_url: "https://openrouter.ai/api/v1",
+        },
+        ProviderPresetDef {
+            id: "siliconflow",
+            name: "SiliconFlow (硅基流动)",
+            protocol: "openai",
+            base_url: "https://api.siliconflow.cn/v1",
+        },
+    ]
+}
+
+/// Where the effective model-routing settings came from.
+///
+/// Reported to the console so an operator can tell a provider saved through the console apart from
+/// one supplied by the `KANON_LLM_*` environment bootstrap. Purely descriptive: it is never
+/// persisted, only derived at load time.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum SettingsSource {
+    /// Loaded from the node's own configuration document.
+    #[default]
+    Console,
+    /// Synthesized from the `KANON_LLM_*` environment bootstrap.
+    Environment,
+}
+
+/// Everything `data/system.json` says about model routing.
+///
+/// One value is passed around instead of five loose fields because these settings are always read,
+/// written and applied together: a provider without its default model, or a model catalog without
+/// the endpoints it belongs to, would be an inconsistent node.
+#[derive(Debug, Clone, Default)]
+pub struct NodeSettings {
+    /// Configured provider endpoints.
+    pub providers: Vec<ProviderEntry>,
+    /// Endpoint used when a model reference carries no provider.
+    pub default_provider: Option<String>,
+    /// Canonical `<provider>/<model-id>` the node answers with by default.
+    pub default_model: Option<String>,
+    /// Per-model settings.
+    pub models: Vec<ModelSpec>,
+    /// Node-wide reply policy inherited by instances without an override.
+    pub reply_policy: ReplyPolicy,
+    /// Where these settings came from.
+    pub source: SettingsSource,
+}
+
+impl NodeSettings {
+    /// Whether any provider is configured.
+    pub fn has_providers(&self) -> bool {
+        !self.providers.is_empty()
+    }
+}
 
 /// Serializable description of one model provider.
 ///
@@ -59,6 +173,21 @@ struct SystemConfigDocument {
     /// Model provider selected through the management console, when any.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     llm: Option<LlmProviderConfig>,
+    /// Named provider endpoints, keyed by model-reference prefix.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    providers: Option<Vec<ProviderEntry>>,
+    /// Name of the endpoint used when a model reference carries no provider.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    default_provider: Option<String>,
+    /// Canonical `<provider>/<model-id>` the node answers with by default.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    default_model: Option<String>,
+    /// Per-model settings catalog.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    models: Option<Vec<ModelSpec>>,
+    /// Node-wide reply policy.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    reply_policy: Option<ReplyPolicy>,
     /// Milky platform adapter configuration, when one was saved.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     milky: Option<MilkyConfig>,
@@ -142,6 +271,98 @@ impl LlmProviderConfig {
             .as_ref()
             .is_some_and(|key| !key.trim().is_empty())
     }
+
+    /// Converts this single-endpoint description into the named directory form.
+    ///
+    /// Used for the `KANON_LLM_*` environment bootstrap, which predates named providers: the
+    /// endpoint is registered under a name derived from its base URL so the resulting model
+    /// reference is exactly what the console would have produced.
+    pub fn into_node_settings(&self) -> NodeSettings {
+        let name = derive_provider_name(&self.base_url);
+        let provider = ProviderEntry {
+            name: name.clone(),
+            protocol: self.protocol.clone(),
+            base_url: self.base_url.clone(),
+            api_key: self.api_key.clone(),
+            temperature: self.temperature,
+            max_tokens: self.max_tokens,
+        };
+        let model = self.model.trim();
+        let default_model = match ModelRef::parse(model).provider() {
+            // A model id that already carries a prefix (an aggregator's `vendor/model`) is kept
+            // verbatim; prefixing it again would produce an id no endpoint recognises.
+            Some(_) => model.to_string(),
+            None => format!("{name}/{model}"),
+        };
+
+        NodeSettings {
+            providers: vec![provider],
+            default_provider: Some(name),
+            default_model: Some(default_model),
+            models: Vec::new(),
+            reply_policy: ReplyPolicy::default(),
+            source: SettingsSource::Environment,
+        }
+    }
+}
+
+/// Derives a provider name from an endpoint URL.
+///
+/// A known preset wins, so a URL configured before named providers existed comes back under the
+/// name the console offers for the same endpoint (`api.xiaomimimo.com` becomes `xiaomi`). Any other
+/// URL yields a sanitized host label, and an address without a hostname yields `local`.
+pub fn derive_provider_name(base_url: &str) -> String {
+    let trimmed = base_url.trim().trim_end_matches('/');
+    if let Some(preset) = provider_presets()
+        .into_iter()
+        .find(|preset| same_endpoint(preset.base_url, trimmed))
+    {
+        return preset.id.to_string();
+    }
+
+    let host = trimmed
+        .split("://")
+        .nth(1)
+        .unwrap_or(trimmed)
+        .split('/')
+        .next()
+        .unwrap_or_default();
+    let host = host.rsplit('@').next().unwrap_or(host);
+    let host = host.split(':').next().unwrap_or(host);
+    let host = host
+        .strip_prefix("api.")
+        .or_else(|| host.strip_prefix("www."))
+        .unwrap_or(host);
+
+    let label = if host.is_empty() || host.chars().all(|c| c.is_ascii_digit() || c == '.') {
+        "local".to_string()
+    } else {
+        host.split('.').next().unwrap_or(host).to_string()
+    };
+
+    let sanitized: String = label
+        .chars()
+        .map(|ch| {
+            if ch.is_ascii_alphanumeric() || ch == '-' {
+                ch.to_ascii_lowercase()
+            } else {
+                '-'
+            }
+        })
+        .collect();
+    let sanitized = sanitized.trim_matches('-').to_string();
+    if sanitized.is_empty() {
+        "local".to_string()
+    } else {
+        sanitized
+    }
+}
+
+/// Compares two endpoint URLs for identity, ignoring a trailing slash and casing.
+fn same_endpoint(left: &str, right: &str) -> bool {
+    left.trim()
+        .trim_end_matches('/')
+        .eq_ignore_ascii_case(right.trim().trim_end_matches('/'))
 }
 
 /// Resolves the provider a node should start with.
@@ -223,6 +444,100 @@ impl SystemConfigStore {
     pub fn save_milky(&self, config: &MilkyConfig) -> Result<(), String> {
         let mut document = self.read_document()?.unwrap_or_default();
         document.milky = Some(config.clone());
+        self.write_document(&document)
+    }
+
+    /// Loads the node's model-routing settings, migrating a legacy single-provider document.
+    ///
+    /// A document written before named providers existed carries only `llm`. It is migrated in
+    /// memory (and rewritten on the next save) so an operator's working endpoint survives the
+    /// upgrade instead of showing up as "no provider configured".
+    pub fn load_node_settings(&self) -> Result<NodeSettings, String> {
+        let document = match self.read_document()? {
+            Some(document) => document,
+            None => return Ok(NodeSettings::default()),
+        };
+
+        let mut settings = NodeSettings {
+            reply_policy: document.reply_policy.unwrap_or_default(),
+            models: document.models.unwrap_or_default(),
+            ..NodeSettings::default()
+        };
+
+        match document.providers {
+            Some(providers) if !providers.is_empty() => {
+                settings.providers = providers;
+                // A default that names no configured endpoint would make every unprefixed model
+                // reference fail at call time; dropping it here reports the honest state instead.
+                settings.default_provider = document
+                    .default_provider
+                    .filter(|name| settings.providers.iter().any(|entry| &entry.name == name));
+                settings.default_model = document.default_model;
+            }
+            _ => {
+                if let Some(legacy) = document.llm.as_ref() {
+                    let migrated = legacy.into_node_settings();
+                    settings.providers = migrated.providers;
+                    settings.default_provider = migrated.default_provider;
+                    settings.default_model = migrated.default_model;
+                }
+            }
+        }
+
+        if settings.default_provider.is_none() {
+            settings.default_provider = settings.providers.first().map(|entry| entry.name.clone());
+        }
+
+        Ok(settings)
+    }
+
+    /// Persists the node's model-routing settings.
+    ///
+    /// The default provider is mirrored into the legacy `llm` section so an older binary — and the
+    /// existing `load()` callers — still see the endpoint that is actually in effect.
+    pub fn save_node_settings(&self, settings: &NodeSettings) -> Result<(), String> {
+        let mut document = self.read_document()?.unwrap_or_default();
+
+        document.providers = Some(settings.providers.clone());
+        document.default_provider = settings.default_provider.clone();
+        document.default_model = settings.default_model.clone();
+        document.models = Some(settings.models.clone());
+        document.reply_policy = Some(settings.reply_policy);
+
+        let active_provider = settings
+            .default_model
+            .as_deref()
+            .map(|model| ModelRef::parse(model))
+            .and_then(|reference| reference.provider().map(str::to_string))
+            .or_else(|| settings.default_provider.clone());
+
+        document.llm = active_provider
+            .as_deref()
+            .and_then(|name| settings.providers.iter().find(|entry| entry.name == name))
+            .map(|entry| LlmProviderConfig {
+                protocol: entry.protocol.clone(),
+                base_url: entry.base_url.clone(),
+                model: settings
+                    .default_model
+                    .as_deref()
+                    .map(|model| ModelRef::parse(model).model().to_string())
+                    .unwrap_or_default(),
+                api_key: entry.api_key.clone(),
+                temperature: entry.temperature,
+                max_tokens: entry.max_tokens,
+            })
+            // No resolvable default provider: the legacy section must not claim an endpoint that
+            // is not in effect.
+            .filter(|legacy| !legacy.model.is_empty());
+
+        self.write_document(&document)
+    }
+
+    /// Persists only the node-wide reply policy, preserving every other section.
+    pub fn save_reply_policy(&self, policy: ReplyPolicy) -> Result<(), String> {
+        policy.validate()?;
+        let mut document = self.read_document()?.unwrap_or_default();
+        document.reply_policy = Some(policy);
         self.write_document(&document)
     }
 

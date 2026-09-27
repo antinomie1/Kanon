@@ -63,6 +63,7 @@ interface PipelineEventPayload {
   sender_id: string;
   raw_text: string;
   metadata?: { fields: Record<string, any> };
+  segments?: Array<Record<string, any>>;
 }
 
 /** Wire shape of `kanon.plugin.v1.IngestEventRequest`. */
@@ -188,7 +189,12 @@ export class CoreHandle {
    * @param eventId Optional caller-supplied event id. When omitted, a `randomUUID()`
    *   is generated locally so the Core can echo it for tracing and de-duplication.
    * @param metadata Optional adapter-specific extras; converted to a
-   *   `google.protobuf.Struct` for transport.
+   *   `google.protobuf.Struct` for transport. The platform-neutral reply-policy keys
+   *   (`kanon.conversation_kind`, `kanon.bot_mentioned`) belong here.
+   * @param segments Optional rich-media segments in proto-JSON shape (for example
+   *   `{ text: { content: "hi" } }` or `{ image: { url: "https://…" } }`). The Core
+   *   builds the model-visible message from them, so an adapter that omits them can
+   *   only deliver plain text — and a picture-only message would look empty.
    * @returns The mapped response. `accepted: false` means the Core's ingest queue was
    *   at its high watermark and the event was dropped, so callers MUST check it and
    *   apply their own backpressure.
@@ -202,6 +208,7 @@ export class CoreHandle {
     text: string,
     eventId?: string,
     metadata?: Record<string, any>,
+    segments?: Array<Record<string, any>>,
   ): Promise<IngestEventResponse> {
     const resolvedEventId = eventId ?? randomUUID();
 
@@ -214,6 +221,11 @@ export class CoreHandle {
     };
     if (metadata !== undefined) {
       event.metadata = toProtoStruct(metadata);
+    }
+    if (segments !== undefined && segments.length > 0) {
+      // `keepCase` makes the dynamic client accept the proto-JSON field names verbatim, so the
+      // repeated `MessageSegment` is transmitted as-is.
+      event.segments = segments;
     }
 
     const response = await new Promise<RawIngestEventResponse>(

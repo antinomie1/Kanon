@@ -14,6 +14,8 @@ import {
 import { t } from '../../stores/i18n.svelte';
 import type { PolicyKind } from '../../stores/instances.svelte';
 import { instancesStore } from '../../stores/instances.svelte';
+import { modelsStore } from '../../stores/models.svelte';
+import { describeReplyPolicy } from '../../stores/replyPolicy.svelte';
 import type { ItemPolicy } from '../../types';
 
 /** Policy kinds in the order the form renders them. */
@@ -24,6 +26,15 @@ const policyChoices: { value: ItemPolicy; labelKey: string }[] = [
   { value: 'inherit', labelKey: 'instances.policy_inherit' },
   { value: 'enable', labelKey: 'instances.policy_enable' },
   { value: 'disable', labelKey: 'instances.policy_disable' },
+];
+
+/** Reply-policy choices, in the order the form renders them. */
+const replyChoices: { value: string; labelKey: string }[] = [
+  { value: 'inherit', labelKey: 'reply.inherit' },
+  { value: 'always', labelKey: 'reply.mode_always' },
+  { value: 'mention', labelKey: 'reply.mode_mention' },
+  { value: 'probability', labelKey: 'reply.mode_probability' },
+  { value: 'never', labelKey: 'reply.mode_never' },
 ];
 
 /** Section heading key for one policy kind. */
@@ -38,9 +49,11 @@ function policyTitleKey(kind: PolicyKind): string {
   }
 }
 
-// Load once when the view mounts; the catalog is small and changes only through this view.
+// Load once when the view mounts; the catalog is small and changes only through this view. The
+// model catalog is loaded alongside it so the model picker can offer canonical references.
 $effect(() => {
   void instancesStore.load();
+  void modelsStore.load();
 });
 </script>
 
@@ -185,6 +198,15 @@ $effect(() => {
                     <Cpu class="w-3.5 h-3.5" />
                     {instance.model ?? t('instances.model_default')}
                   </span>
+                  {#if instance.reply_policy}
+                    <span>
+                      · {t('instances.reply_policy_badge', {
+                        policy: describeReplyPolicy(instance.reply_policy),
+                      })}
+                    </span>
+                  {:else}
+                    <span>· {t('instances.reply_policy')}: {t('reply.inherit')}</span>
+                  {/if}
                   {#if instance.persona_id}
                     <span>· {t('instances.persona_label')}: {instance.persona_id}</span>
                   {/if}
@@ -347,31 +369,77 @@ $effect(() => {
             <span class="text-xs text-zinc-400">{t('instances.prompt_hint')}</span>
           </label>
 
-          <div class="space-y-2">
-            <button
-              type="button"
-              onclick={() => (instancesStore.formUseCustomModel = !instancesStore.formUseCustomModel)}
-              class="flex items-center gap-2 text-xs font-medium text-zinc-600 dark:text-zinc-300 cursor-pointer"
+          <label class="space-y-1.5 block">
+            <span class="text-xs font-medium text-zinc-500">{t('instances.field_model')}</span>
+            <select
+              bind:value={instancesStore.formModel}
+              class="w-full px-3 py-2 text-sm font-mono bg-zinc-50 dark:bg-zinc-800 border border-zinc-200 dark:border-zinc-700 rounded-lg focus:outline-hidden cursor-pointer"
             >
-              <span
-                class="w-4 h-4 rounded border flex items-center justify-center
-                  {instancesStore.formUseCustomModel
-                  ? 'bg-indigo-600 border-indigo-600 text-white'
-                  : 'border-zinc-300 dark:border-zinc-600'}"
-              >
-                {#if instancesStore.formUseCustomModel}
-                  <CheckCircle2 class="w-3 h-3" />
-                {/if}
+              <option value="">
+                {instancesStore.nodeDefaultModel
+                  ? t('instances.model_inherit_named', {
+                      model: instancesStore.nodeDefaultModel,
+                    })
+                  : t('instances.model_inherit')}
+              </option>
+              {#each instancesStore.modelReferences as reference (reference)}
+                <option value={reference}>{reference}</option>
+              {/each}
+            </select>
+            <span class="text-xs text-zinc-400">{t('instances.model_hint')}</span>
+            {#if instancesStore.modelReferences.length === 0}
+              <span class="text-xs text-amber-600 dark:text-amber-400">
+                {t('instances.model_catalog_empty')}
               </span>
-              {t('instances.model_override')}
-            </button>
-            {#if instancesStore.formUseCustomModel}
-              <input
-                bind:value={instancesStore.formModel}
-                placeholder="deepseek-flash"
-                class="w-full px-3 py-2 text-xs font-mono bg-zinc-50 dark:bg-zinc-800 border border-zinc-200 dark:border-zinc-700 rounded-lg focus:outline-hidden focus:border-indigo-400"
-              />
-              <span class="text-xs text-zinc-400">{t('instances.model_hint')}</span>
+            {/if}
+          </label>
+
+          <!-- Reply policy: deciding whether group messages are answered at all. -->
+          <div class="space-y-2 border-t border-zinc-200 dark:border-zinc-800 pt-4">
+            <div>
+              <span class="text-xs font-medium text-zinc-500">{t('instances.reply_policy')}</span>
+              <p class="text-xs text-zinc-400 mt-0.5">{t('instances.reply_policy_hint')}</p>
+            </div>
+
+            <select
+              bind:value={instancesStore.formReplyPolicyMode}
+              class="w-full px-3 py-2 text-sm bg-zinc-50 dark:bg-zinc-800 border border-zinc-200 dark:border-zinc-700 rounded-lg focus:outline-hidden cursor-pointer"
+            >
+              {#each replyChoices as choice (choice.value)}
+                <option value={choice.value}>{t(choice.labelKey)}</option>
+              {/each}
+            </select>
+
+            {#if instancesStore.formReplyPolicyMode === 'probability'}
+              <div class="flex items-center gap-3">
+                <input
+                  type="range"
+                  min="0"
+                  max="1"
+                  step="0.05"
+                  bind:value={instancesStore.formReplyProbability}
+                  class="flex-1 accent-indigo-600 cursor-pointer"
+                  aria-label={t('reply.probability')}
+                />
+                <span class="w-12 text-right text-xs font-mono text-zinc-600 dark:text-zinc-300">
+                  {Math.round(instancesStore.formReplyProbability * 100)}%
+                </span>
+              </div>
+            {/if}
+
+            {#if instancesStore.formReplyPolicyMode === 'inherit'}
+              <p class="text-xs text-zinc-400">
+                {t('instances.reply_inherit_hint')}
+                {#if instancesStore.nodeReplyPolicy}
+                  <span class="font-mono text-zinc-500">
+                    {t('reply.node_current', {
+                      policy: describeReplyPolicy(instancesStore.nodeReplyPolicy),
+                    })}
+                  </span>
+                {/if}
+              </p>
+            {:else}
+              <p class="text-xs text-zinc-400">{t('instances.reply_override_hint')}</p>
             {/if}
           </div>
 

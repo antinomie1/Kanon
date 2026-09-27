@@ -112,7 +112,11 @@ async function saveConfig() {
   configStatusMsg = null;
   try {
     const parsed = JSON.parse(configEditRaw);
-    const res = await api.updatePluginConfig(pluginId, parsed, currentConfig.version);
+    const res = await api.updatePluginConfig(
+      pluginId,
+      parsed,
+      currentConfig.version,
+    );
     currentConfig.version = res.version;
     currentConfig.values = res.values;
     configStatusMsg = 'Configuration saved successfully (CAS enforced).';
@@ -124,7 +128,10 @@ async function saveConfig() {
 }
 
 /** Adopts credentials obtained through the QR flow and mirrors them into the visual form. */
-function handleBound(credentials: { appid: string | null; secret: string | null }) {
+function handleBound(credentials: {
+  appid: string | null;
+  secret: string | null;
+}) {
   if (credentials.appid) qqAppId = credentials.appid;
   if (credentials.secret) qqSecret = credentials.secret;
   syncVisualToRaw();

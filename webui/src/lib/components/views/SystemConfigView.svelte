@@ -11,8 +11,51 @@ import {
 import { i18n, t } from '../../stores/i18n.svelte';
 import { nodeStore } from '../../stores/node.svelte';
 import { providersStore } from '../../stores/providers.svelte';
+import {
+  describeReplyPolicy,
+  replyPolicyStore,
+} from '../../stores/replyPolicy.svelte';
+import type { ReplyMode, ReplyPolicy } from '../../types';
 
 let copiedSnippet = $state(false);
+
+/** Reply-policy draft, seeded from the node once its policy has been read. */
+let policyMode = $state<ReplyMode>('always');
+let policyProbability = $state(0.5);
+let policyRequested = false;
+let policySeeded = false;
+
+/** Modes the node accepts, in the order the editor renders them. */
+const replyModeKeys: { value: ReplyMode; labelKey: string }[] = [
+  { value: 'always', labelKey: 'reply.mode_always' },
+  { value: 'mention', labelKey: 'reply.mode_mention' },
+  { value: 'probability', labelKey: 'reply.mode_probability' },
+  { value: 'never', labelKey: 'reply.mode_never' },
+];
+
+// The policy lives on the node, so it is read once when the view opens; the draft is seeded from
+// that answer rather than from a guessed default, otherwise saving would silently overwrite it.
+$effect(() => {
+  if (!policyRequested) {
+    policyRequested = true;
+    void replyPolicyStore.load();
+  }
+  const policy = replyPolicyStore.policy;
+  if (policy && !policySeeded) {
+    policyMode = policy.mode;
+    policyProbability = policy.probability;
+    policySeeded = true;
+  }
+});
+
+/** Applies the draft to the running node. */
+async function saveReplyPolicy() {
+  const policy: ReplyPolicy = {
+    mode: policyMode,
+    probability: policyProbability,
+  };
+  await replyPolicyStore.save(policy);
+}
 
 function copySocketPath(path: string) {
   navigator.clipboard.writeText(path);
@@ -125,6 +168,73 @@ function copySocketPath(path: string) {
           {providersStore.systemConfig?.environment.os ?? 'linux'} ({providersStore.systemConfig?.environment.arch ?? 'x86_64'})
         </span>
       </div>
+    </div>
+  </div>
+
+  <!-- Node-wide reply policy: inherited by every instance without an override. -->
+  <div class="bg-white dark:bg-zinc-900 border border-zinc-200 dark:border-zinc-800 rounded-xl p-6 shadow-xs">
+    <div class="flex items-start justify-between pb-4 border-b border-zinc-100 dark:border-zinc-800 gap-4">
+      <div>
+        <h3 class="text-base font-semibold text-zinc-900 dark:text-zinc-100">{t('reply.title')}</h3>
+        <p class="text-xs text-zinc-500 mt-0.5">{t('instances.reply_policy_hint')}</p>
+      </div>
+      <span class="text-xs font-mono text-zinc-400 text-right shrink-0">
+        {t('reply.node_current', {
+          policy:
+            replyPolicyStore.description ||
+            describeReplyPolicy(replyPolicyStore.policy),
+        })}
+      </span>
+    </div>
+
+    <div class="mt-5 grid grid-cols-1 md:grid-cols-3 gap-5">
+      <div class="md:col-span-2">
+        <div class="flex flex-wrap gap-2">
+          {#each replyModeKeys as choice (choice.value)}
+            <button
+              onclick={() => (policyMode = choice.value)}
+              class="px-3 py-1.5 rounded-lg text-xs font-medium border transition cursor-pointer
+                {policyMode === choice.value
+                  ? 'bg-zinc-900 text-white dark:bg-zinc-100 dark:text-zinc-950 border-transparent'
+                  : 'bg-zinc-50 dark:bg-zinc-950/50 text-zinc-600 dark:text-zinc-400 border-zinc-200 dark:border-zinc-800 hover:border-zinc-300 dark:hover:border-zinc-700'}"
+            >
+              {t(choice.labelKey)}
+            </button>
+          {/each}
+        </div>
+      </div>
+
+      {#if policyMode === 'probability'}
+        <div>
+          <span class="text-xs text-zinc-400 block mb-2 font-mono">{t('reply.probability')}</span>
+          <input
+            type="range"
+            min="0"
+            max="1"
+            step="0.05"
+            bind:value={policyProbability}
+            class="w-full accent-indigo-600 cursor-pointer"
+          />
+          <span class="text-xs font-mono text-zinc-500">{Math.round(policyProbability * 100)}%</span>
+        </div>
+      {/if}
+    </div>
+
+    {#if replyPolicyStore.error}
+      <p class="text-xs text-rose-500 mt-4 font-mono">{replyPolicyStore.error}</p>
+    {/if}
+    {#if replyPolicyStore.notice}
+      <p class="text-xs text-emerald-500 mt-4 font-mono">{replyPolicyStore.notice}</p>
+    {/if}
+
+    <div class="mt-5 flex justify-end">
+      <button
+        onclick={saveReplyPolicy}
+        disabled={replyPolicyStore.saving}
+        class="px-4 py-1.5 bg-zinc-900 dark:bg-zinc-100 hover:bg-zinc-700 dark:hover:bg-zinc-200 disabled:opacity-50 text-white dark:text-zinc-950 rounded-md text-xs font-medium transition cursor-pointer"
+      >
+        {replyPolicyStore.saving ? t('models.saving') : t('common.save')}
+      </button>
     </div>
   </div>
 </div>

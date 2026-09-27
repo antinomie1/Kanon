@@ -18,6 +18,106 @@ if TYPE_CHECKING:
     from main import QQOfficialAdapter
 
 
+def _attachment_segment(attachment: Any) -> Optional[Dict[str, Any]]:
+    """Maps one botpy attachment to a proto-JSON ``MessageSegment`` dict.
+
+    Returns ``None`` for an attachment without a URL: every segment variant that
+    can carry it is source-based, so an URL-less entry would be valueless for the
+    model. Skipping one unreadable attachment keeps the rest of the message
+    (text and mentions) intact instead of failing the whole ingest.
+
+    ``getattr`` is used throughout because botpy's attachment classes differ
+    between versions and some payloads omit ``content_type``/``filename``.
+    """
+    url = getattr(attachment, "url", None) or ""
+    if not url:
+        return None
+
+    content_type = getattr(attachment, "content_type", None) or ""
+    filename = getattr(attachment, "filename", None) or ""
+    kind = content_type.lower()
+
+    if kind.startswith("image"):
+        # QQ reports the media type of an image attachment, so carry it through
+        # as the segment MIME type instead of making Core guess from the URL.
+        image: Dict[str, Any] = {"url": url}
+        if content_type:
+            image["mime_type"] = content_type
+        if filename:
+            image["filename"] = filename
+        return {"image": image}
+
+    if kind.startswith("audio") or kind.startswith("voice"):
+        return {"audio": {"url": url}}
+
+    if kind.startswith("video"):
+        # The proto has no video variant: a video is a platform-specific payload
+        # the model cannot consume as a first-class segment yet, so preserve it
+        # verbatim as a named custom segment.
+        return {
+            "custom": {
+                "type_name": "qqofficial.video",
+                "payload": {"url": url, "content_type": content_type},
+            }
+        }
+
+    payload: Dict[str, Any] = {"url": url, "content_type": content_type}
+    if filename:
+        payload["filename"] = filename
+    return {"custom": {"type_name": "qqofficial.file", "payload": payload}}
+
+
+def _mention_segment(member: Any) -> Optional[Dict[str, Any]]:
+    """Maps one botpy mentioned member to a proto-JSON ``mention`` segment.
+
+    Group mentions expose ``member_openid`` while guild mentions expose ``id``;
+    accept either so one helper serves every callback. A mention without any id
+    cannot be resolved by the model and is skipped.
+    """
+    target_user_id = getattr(member, "member_openid", None) or getattr(member, "id", None) or ""
+    if not target_user_id:
+        return None
+    # Display names are optional in botpy and field names vary by version.
+    display_name = (
+        getattr(member, "username", None)
+        or getattr(member, "nickname", None)
+        or getattr(member, "nick", None)
+        or getattr(member, "name", None)
+        or ""
+    )
+    return {
+        "mention": {
+            "target_user_id": target_user_id,
+            "display_name": display_name,
+        }
+    }
+
+
+def _build_inbound_segments(message: Any, content: str) -> List[Dict[str, Any]]:
+    """Builds the proto-JSON segment list describing one inbound botpy message.
+
+    Order matters for the model-visible rendering: text first, then mentions,
+    then attachments, mirroring how the parts appear in the original message.
+    ``content`` is the already-normalized text the callback forwards as
+    ``text``, so the text segment and the raw text stay identical.
+    """
+    segments: List[Dict[str, Any]] = []
+    if content:
+        segments.append({"text": {"content": content}})
+
+    for member in getattr(message, "mentions", None) or []:
+        mention = _mention_segment(member)
+        if mention is not None:
+            segments.append(mention)
+
+    for attachment in getattr(message, "attachments", None) or []:
+        segment = _attachment_segment(attachment)
+        if segment is not None:
+            segments.append(segment)
+
+    return segments
+
+
 class KanonBotClient(botpy.Client):
     """QQ Official bot client bridging WebSocket gateway events to Kanon Core."""
 
@@ -54,7 +154,14 @@ class KanonBotClient(botpy.Client):
             content=content,
             msg_id=message.id,
             scene="group",
-            extra={"mentions": mentions},
+            extra={
+                "mentions": mentions,
+                # Core owns the reply policy and reads these two platform-neutral
+                # keys: a group @-callback is inherently addressed to the bot.
+                "kanon.conversation_kind": "group",
+                "kanon.bot_mentioned": True,
+            },
+            segments=_build_inbound_segments(message, content),
         )
 
     async def on_group_message_create(self, message: GroupMessage) -> None:
@@ -71,7 +178,14 @@ class KanonBotClient(botpy.Client):
             content=content,
             msg_id=message.id,
             scene="group",
-            extra={"unmentioned": True},
+            extra={
+                "unmentioned": True,
+                # Unmentioned means the bot was not addressed; Core's "mention"
+                # policy must therefore be free to drop this event.
+                "kanon.conversation_kind": "group",
+                "kanon.bot_mentioned": False,
+            },
+            segments=_build_inbound_segments(message, content),
         )
 
     async def on_c2c_message_create(self, message: C2CMessage) -> None:
@@ -88,6 +202,12 @@ class KanonBotClient(botpy.Client):
             content=content,
             msg_id=message.id,
             scene="c2c",
+            extra={
+                # A C2C conversation is one-to-one, so Core always answers it.
+                "kanon.conversation_kind": "private",
+                "kanon.bot_mentioned": False,
+            },
+            segments=_build_inbound_segments(message, content),
         )
 
     async def on_at_message_create(self, message: Message) -> None:
@@ -104,7 +224,14 @@ class KanonBotClient(botpy.Client):
             content=content,
             msg_id=message.id,
             scene="guild",
-            extra={"guild_id": getattr(message, "guild_id", "")},
+            extra={
+                "guild_id": getattr(message, "guild_id", ""),
+                # A guild channel is a broadcast-style conversation; the policy
+                # applies, and this @-callback means the bot was addressed.
+                "kanon.conversation_kind": "channel",
+                "kanon.bot_mentioned": True,
+            },
+            segments=_build_inbound_segments(message, content),
         )
 
     async def on_message_create(self, message: Message) -> None:
@@ -121,7 +248,14 @@ class KanonBotClient(botpy.Client):
             content=content,
             msg_id=message.id,
             scene="guild",
-            extra={"guild_id": getattr(message, "guild_id", ""), "unmentioned": True},
+            extra={
+                "guild_id": getattr(message, "guild_id", ""),
+                "unmentioned": True,
+                # Unmentioned in a guild channel: Core may legitimately stay quiet.
+                "kanon.conversation_kind": "channel",
+                "kanon.bot_mentioned": False,
+            },
+            segments=_build_inbound_segments(message, content),
         )
 
     async def on_direct_message_create(self, message: DirectMessage) -> None:
@@ -140,6 +274,13 @@ class KanonBotClient(botpy.Client):
             content=content,
             msg_id=message.id,
             scene="guild_dm",
+            extra={
+                # A guild direct message is a one-to-one conversation, so Core
+                # always answers it regardless of the group policy.
+                "kanon.conversation_kind": "private",
+                "kanon.bot_mentioned": False,
+            },
+            segments=_build_inbound_segments(message, content),
         )
 
     async def on_group_add_robot(self, event: Any) -> None:

@@ -165,7 +165,15 @@ class QQOfficialAdapter(Plugin):
         msg_id: str,
         scene: str = "",
         extra: Optional[Dict[str, Any]] = None,
+        segments: Optional[List[Dict[str, Any]]] = None,
     ) -> None:
+        """Forwards one inbound QQ message to Core, including its typed segments.
+
+        ``segments`` is the proto-JSON form of the message content (text,
+        mentions, attachments). It is appended last so existing positional and
+        keyword callers keep working unchanged; adapters that pass no segments
+        keep the previous text-only behaviour.
+        """
         if not self.context:
             print(f"[QQOfficial] Dropped message {msg_id}: no plugin context initialized", flush=True)
             return
@@ -208,6 +216,7 @@ class QQOfficialAdapter(Plugin):
                 text=content,
                 event_id=msg_id,
                 metadata=metadata,
+                segments=segments,
             )
             if not resp.accepted:
                 print(f"[QQOfficial] Core queue backpressure: dropped message {msg_id}", flush=True)

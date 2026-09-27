@@ -6,7 +6,10 @@ import type {
   InstancesResponse,
   ItemPolicy,
   PersonaItem,
+  ReplyMode,
+  ReplyPolicy,
 } from '../types';
+import { modelsStore } from './models.svelte';
 
 /** One toggleable item an instance may opt in or out of. */
 export interface PolicyItem {
@@ -16,6 +19,14 @@ export interface PolicyItem {
 
 /** Which policy map an override belongs to. */
 export type PolicyKind = 'plugins' | 'skills' | 'mcp';
+
+/**
+ * Reply-policy selection offered by the instance form.
+ *
+ * `inherit` is not a server mode: it maps to `reply_policy: null`, which is how an instance says
+ * "follow the node-wide policy".
+ */
+export type ReplyPolicyChoice = 'inherit' | ReplyMode;
 
 /**
  * Console state for bot instances.
@@ -49,8 +60,12 @@ class InstancesStore {
   formAdapters = $state<string[]>([]);
   formPersonaId = $state('');
   formSystemPrompt = $state('');
-  formUseCustomModel = $state(false);
+  /** Canonical catalog reference; empty means the instance inherits the node default model. */
   formModel = $state('');
+  /** `inherit` sends `reply_policy: null`. */
+  formReplyPolicyMode = $state<ReplyPolicyChoice>('inherit');
+  /** Only consulted by the `probability` mode. */
+  formReplyProbability = $state(0.5);
   formPlugins = $state<Record<string, ItemPolicy>>({});
   formSkills = $state<Record<string, ItemPolicy>>({});
   formMcp = $state<Record<string, ItemPolicy>>({});
@@ -61,6 +76,21 @@ class InstancesStore {
 
   get enabledCount(): number {
     return this.catalog?.enabled ?? 0;
+  }
+
+  /** Node-wide policy an instance without an override inherits, for the form hint. */
+  get nodeReplyPolicy(): ReplyPolicy | null {
+    return this.catalog?.node_reply_policy ?? null;
+  }
+
+  /** Canonical model references the operator may assign, seeded from the node's catalog. */
+  get modelReferences(): string[] {
+    return modelsStore.models.map((spec) => modelsStore.referenceOf(spec));
+  }
+
+  /** Node default model shown by the "inherit" option, when one is configured. */
+  get nodeDefaultModel(): string | null {
+    return modelsStore.defaultModel;
   }
 
   /** Items of one policy kind, in the order the console renders them. */
@@ -178,8 +208,9 @@ class InstancesStore {
     this.formAdapters = [];
     this.formPersonaId = '';
     this.formSystemPrompt = '';
-    this.formUseCustomModel = false;
     this.formModel = '';
+    this.formReplyPolicyMode = 'inherit';
+    this.formReplyProbability = 0.5;
     this.formPlugins = {};
     this.formSkills = {};
     this.formMcp = {};
@@ -195,8 +226,10 @@ class InstancesStore {
     this.formAdapters = [...instance.adapters];
     this.formPersonaId = instance.persona_id ?? '';
     this.formSystemPrompt = instance.system_prompt ?? '';
-    this.formUseCustomModel = Boolean(instance.model);
     this.formModel = instance.model ?? '';
+    // A null override is the `inherit` choice; any stored policy is shown verbatim.
+    this.formReplyPolicyMode = instance.reply_policy?.mode ?? 'inherit';
+    this.formReplyProbability = instance.reply_policy?.probability ?? 0.5;
     this.formPlugins = { ...instance.plugins };
     this.formSkills = { ...instance.skills };
     this.formMcp = { ...instance.mcp };
@@ -222,10 +255,14 @@ class InstancesStore {
       adapters: this.formAdapters,
       persona_id: this.formPersonaId || null,
       system_prompt: this.formSystemPrompt.trim() || null,
-      model:
-        this.formUseCustomModel && this.formModel.trim()
-          ? this.formModel.trim()
-          : null,
+      model: this.formModel.trim() || null,
+      reply_policy:
+        this.formReplyPolicyMode === 'inherit'
+          ? null
+          : {
+              mode: this.formReplyPolicyMode,
+              probability: this.formReplyProbability,
+            },
       plugins: this.formPlugins,
       skills: this.formSkills,
       mcp: this.formMcp,
@@ -265,6 +302,7 @@ class InstancesStore {
         system_prompt: instance.system_prompt,
         model: instance.model,
         // Preserved verbatim: a start/stop toggle must not silently drop the instance's overrides.
+        reply_policy: instance.reply_policy,
         plugins: instance.plugins,
         skills: instance.skills,
         mcp: instance.mcp,

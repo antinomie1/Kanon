@@ -37,6 +37,17 @@ pub struct AgentConfig {
     pub max_iterations: usize,
     /// Default model identifier.
     pub default_model: String,
+    /// Name of the provider endpoint that serves `default_model`, when the node routes by name.
+    ///
+    /// Kept separately from `default_model` because the wire request must carry the bare upstream
+    /// id while the console and the built-in `/model` command address the model as
+    /// `<provider>/<model-id>`.
+    pub provider: Option<String>,
+    /// Maximum context window of the model in tokens, when known.
+    ///
+    /// Descriptive metadata: it lets the console explain why history is compacted and lets the
+    /// pipeline reason about how much media fits, rather than being enforced here.
+    pub context_length: Option<u32>,
     /// Optional sampling temperature.
     pub temperature: Option<f32>,
     /// Optional max tokens limit for completions.
@@ -45,11 +56,23 @@ pub struct AgentConfig {
     pub stop_on_tool_failure: bool,
 }
 
+impl AgentConfig {
+    /// Canonical `<provider>/<model-id>` reference addressed by this configuration.
+    pub fn model_ref(&self) -> String {
+        match self.provider.as_deref().filter(|name| !name.is_empty()) {
+            Some(provider) => format!("{provider}/{}", self.default_model),
+            None => self.default_model.clone(),
+        }
+    }
+}
+
 impl Default for AgentConfig {
     fn default() -> Self {
         Self {
             max_iterations: 5,
             default_model: "gpt-4o-mini".to_string(),
+            provider: None,
+            context_length: None,
             temperature: None,
             max_tokens: None,
             stop_on_tool_failure: false,
@@ -296,6 +319,23 @@ impl Agent {
         user_input: &str,
         hosts: &[Arc<dyn ToolHost>],
     ) -> Result<AgentOutput, AgentError> {
+        self.run_message(session_id, ChatMessage::user(user_input), hosts)
+            .await
+    }
+
+    /// Executes the agent reasoning loop for a fully built user message.
+    ///
+    /// Identical to [`Agent::run`] except that the caller supplies the message itself, which is how
+    /// a multimodal turn carrying images reaches the provider. The textual projection in
+    /// [`ChatMessage::content`] is what token accounting and summaries use.
+    pub async fn run_message(
+        &self,
+        session_id: &str,
+        message: ChatMessage,
+        hosts: &[Arc<dyn ToolHost>],
+    ) -> Result<AgentOutput, AgentError> {
+        let user_input = message.content.clone().unwrap_or_default();
+
         // 1. Ensure system prompt is established for this session if configured
         if let Some(ref prompt) = self.system_prompt
             && self.memory.get_system_prompt(session_id).await?.is_none()
@@ -306,9 +346,7 @@ impl Agent {
         }
 
         // 2. Push user message to memory
-        self.memory
-            .push_message(session_id, ChatMessage::user(user_input))
-            .await?;
+        self.memory.push_message(session_id, message).await?;
 
         // 3. Dynamically aggregate tools from both native tools and active plugin hosts
         let mut tools = Vec::with_capacity(self.tools.len());
@@ -340,6 +378,10 @@ impl Agent {
 
             let mut response = self.provider.chat(&request).await?;
 
+            // Recover tool calls a model emitted as text markup instead of structured calls, so the
+            // loop executes them instead of sending the markup to the chat platform as an answer.
+            normalize_textual_tool_calls(&mut response);
+
             // Lifecycle Hook: after LLM response (e.g. for auditing / token counting)
             for hook in &self.hooks {
                 hook.on_llm_response(session_id, &mut response).await?;
@@ -360,7 +402,7 @@ impl Agent {
                         .as_ref()
                         .map(|u| u.total_tokens as usize)
                         .unwrap_or_else(|| {
-                            crate::token::estimate_text_tokens(user_input)
+                            crate::token::estimate_text_tokens(&user_input)
                                 + crate::token::estimate_text_tokens(&final_content)
                         });
                     sm.record_turn(session_id, tokens_used);
@@ -391,7 +433,7 @@ impl Agent {
                     .await?;
 
                 if let Some(ref sm) = self.session_manager {
-                    let tokens_used = crate::token::estimate_text_tokens(user_input)
+                    let tokens_used = crate::token::estimate_text_tokens(&user_input)
                         + crate::token::estimate_text_tokens(&fallback);
                     sm.record_turn(session_id, tokens_used);
                 }
@@ -414,6 +456,7 @@ impl Agent {
                     ChatMessage {
                         role: Role::Assistant,
                         content: response.content.clone(),
+                        parts: None,
                         tool_calls: Some(response.tool_calls.clone()),
                         tool_call_id: None,
                         name: None,
@@ -706,6 +749,7 @@ impl Agent {
                     ChatMessage {
                         role: Role::Assistant,
                         content: response.content.clone(),
+                        parts: None,
                         tool_calls: Some(response.tool_calls.clone()),
                         tool_call_id: None,
                         name: None,
@@ -924,6 +968,38 @@ impl Agent {
     }
 }
 
+/// Recovers tool calls from a completion whose model emitted markup instead of a structured array.
+///
+/// Some endpoints ignore the `tools` request field and answer with `<tool_call>...` text. Turning
+/// that text back into real calls is what makes the reasoning loop execute the tool and continue;
+/// without it the markup is returned to the user as the assistant's answer.
+fn normalize_textual_tool_calls(response: &mut ChatResponse) {
+    if !response.tool_calls.is_empty() {
+        return;
+    }
+    let Some(content) = response.content.as_deref() else {
+        return;
+    };
+
+    let (recovered, cleaned) = crate::tool_call_text::extract_textual_tool_calls(content);
+    if recovered.is_empty() {
+        return;
+    }
+
+    tracing::info!(
+        tool_calls = recovered.len(),
+        tools = ?recovered.iter().map(|call| call.name.as_str()).collect::<Vec<_>>(),
+        "Recovered tool calls a model emitted as text markup"
+    );
+
+    response.tool_calls = recovered;
+    response.content = if cleaned.trim().is_empty() {
+        None
+    } else {
+        Some(cleaned)
+    };
+}
+
 /// Helper locating the owning host, plugin ID, and canonical tool name for an invoked tool name.
 ///
 /// Resolves both:
@@ -1066,6 +1142,18 @@ impl AgentBuilder {
     /// Sets default model tag.
     pub fn model(mut self, model: impl Into<String>) -> Self {
         self.config.default_model = model.into();
+        self
+    }
+
+    /// Names the provider endpoint that serves the default model.
+    pub fn provider(mut self, provider: Option<String>) -> Self {
+        self.config.provider = provider;
+        self
+    }
+
+    /// Records the default model's context window, when known.
+    pub fn context_length(mut self, context_length: Option<u32>) -> Self {
+        self.config.context_length = context_length;
         self
     }
 

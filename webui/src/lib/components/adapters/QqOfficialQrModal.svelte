@@ -29,13 +29,18 @@ let {
   open?: boolean;
   onclose: () => void;
   /** Called after a successful authorization so the caller can adopt the credentials. */
-  onbound?: (credentials: { appid: string | null; secret: string | null }) => void;
+  onbound?: (credentials: {
+    appid: string | null;
+    secret: string | null;
+  }) => void;
 } = $props();
 
 let qrTaskId = $state<string | null>(null);
 let qrBindKey = $state<string | null>(null);
 let qrCodeUrl = $state<string | null>(null);
-let qrStatus = $state<'idle' | 'generating' | 'waiting' | 'success' | 'expired' | 'error'>('idle');
+let qrStatus = $state<
+  'idle' | 'generating' | 'waiting' | 'success' | 'expired' | 'error'
+>('idle');
 let qrStatusMsg = $state<string | null>(null);
 let qrBoundAppId = $state<string | null>(null);
 let qrCopied = $state(false);
@@ -75,7 +80,10 @@ async function startLogin() {
           stopQrPolling();
           qrStatus = 'success';
           qrBoundAppId = pollRes.appid ?? '';
-          onbound?.({ appid: pollRes.appid ?? null, secret: pollRes.secret ?? null });
+          onbound?.({
+            appid: pollRes.appid ?? null,
+            secret: pollRes.secret ?? null,
+          });
         } else if (pollRes.status === 'expired') {
           stopQrPolling();
           qrStatus = 'expired';

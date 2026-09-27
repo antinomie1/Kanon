@@ -13,7 +13,9 @@ use tokio_stream::StreamExt;
 
 use crate::error::GatewayError;
 use crate::gateway::providers::sse::SseDecoder;
-use crate::gateway::types::{ChatRequest, ChatResponse, Role, TokenUsage, ToolCall};
+use crate::gateway::types::{
+    ChatMessage, ChatRequest, ChatResponse, ContentPart, Role, TokenUsage, ToolCall,
+};
 use crate::gateway::{ChatChunk, ChatChunkStream, LlmProvider};
 
 /// Private wire structures representing the Anthropic Messages API format.
@@ -48,6 +50,9 @@ mod wire {
         #[serde(rename = "text")]
         Text { text: String },
 
+        #[serde(rename = "image")]
+        Image { source: AnthropicImageSource },
+
         #[serde(rename = "tool_use")]
         ToolUse {
             id: String,
@@ -62,6 +67,15 @@ mod wire {
             #[serde(skip_serializing_if = "Option::is_none")]
             is_error: Option<bool>,
         },
+    }
+
+    #[derive(Debug, Clone, Serialize, Deserialize)]
+    #[serde(tag = "type", rename_all = "snake_case")]
+    pub enum AnthropicImageSource {
+        /// Inline base64 payload, which is how a local file is transmitted.
+        Base64 { media_type: String, data: String },
+        /// Remote URL the endpoint fetches itself.
+        Url { url: String },
     }
 
     #[derive(Debug, Serialize, Deserialize)]
@@ -157,6 +171,52 @@ impl AnthropicMessagesProvider {
         self.custom_headers.push((key.into(), value.into()));
         self
     }
+
+    /// Builds the content blocks of a user turn, including any multimodal parts.
+    ///
+    /// The textual projection is emitted first so a model that ignores images still receives the
+    /// caption and the surrounding conversation.
+    fn user_blocks(msg: &ChatMessage) -> Vec<wire::AnthropicContentBlock> {
+        let mut blocks = Vec::new();
+        if let Some(text) = msg.content.as_ref().filter(|text| !text.is_empty()) {
+            blocks.push(wire::AnthropicContentBlock::Text { text: text.clone() });
+        }
+        for part in msg.parts.as_deref().unwrap_or_default() {
+            match part {
+                ContentPart::Text { text } => {
+                    blocks.push(wire::AnthropicContentBlock::Text { text: text.clone() });
+                }
+                ContentPart::Image { .. } => {
+                    let Some(block) = anthropic_image_block(part) else {
+                        tracing::warn!("Dropping an image part that resolved to no URL");
+                        continue;
+                    };
+                    blocks.push(block);
+                }
+            }
+        }
+        blocks
+    }
+}
+
+/// Renders one multimodal image part as an Anthropic image block.
+///
+/// Anthropic accepts a remote URL or an inline base64 payload. The shared resolver returns a
+/// `data:` URI for local files, which is split back into its media type and payload here.
+fn anthropic_image_block(part: &ContentPart) -> Option<wire::AnthropicContentBlock> {
+    let url = part.resolved_image_url()?;
+    let source = match url.strip_prefix("data:") {
+        Some(rest) => {
+            let (meta, data) = rest.split_once(',')?;
+            let media_type = meta.strip_suffix(";base64").unwrap_or(meta).to_string();
+            wire::AnthropicImageSource::Base64 {
+                media_type,
+                data: data.to_string(),
+            }
+        }
+        None => wire::AnthropicImageSource::Url { url },
+    };
+    Some(wire::AnthropicContentBlock::Image { source })
 }
 
 #[async_trait]
@@ -188,10 +248,7 @@ impl LlmProvider for AnthropicMessagesProvider {
                     }
                 }
                 Role::User => {
-                    let mut blocks = Vec::new();
-                    if let Some(ref text) = msg.content {
-                        blocks.push(wire::AnthropicContentBlock::Text { text: text.clone() });
-                    }
+                    let blocks = Self::user_blocks(msg);
                     if !blocks.is_empty() {
                         messages.push(wire::AnthropicMessageWire {
                             role: "user".to_string(),
@@ -306,6 +363,9 @@ impl LlmProvider for AnthropicMessagesProvider {
                     });
                 }
                 wire::AnthropicContentBlock::ToolResult { .. } => {}
+                // A response never carries an image block; ignoring one keeps the parser total
+                // instead of failing on a proxy that echoes content back.
+                wire::AnthropicContentBlock::Image { .. } => {}
             }
         }
 
@@ -360,10 +420,7 @@ impl LlmProvider for AnthropicMessagesProvider {
                     }
                 }
                 Role::User => {
-                    let mut blocks = Vec::new();
-                    if let Some(ref text) = msg.content {
-                        blocks.push(wire::AnthropicContentBlock::Text { text: text.clone() });
-                    }
+                    let blocks = Self::user_blocks(msg);
                     if !blocks.is_empty() {
                         messages.push(wire::AnthropicMessageWire {
                             role: "user".to_string(),

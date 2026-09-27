@@ -26,6 +26,8 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use tokio::sync::RwLock;
 
+use crate::conversation::ReplyPolicy;
+
 /// Default location of the instance catalog, relative to the node working directory.
 pub const DEFAULT_INSTANCE_CATALOG: &str = "./data/instances.json";
 
@@ -114,6 +116,12 @@ pub struct BotInstance {
     /// Model override; `None` means "use the node's default model".
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model: Option<String>,
+    /// Reply policy override; `None` inherits the node-wide policy.
+    ///
+    /// Kept per instance because "answer only when mentioned" is a property of a bot, not of the
+    /// platform: the same group may host a chatty bot and a quiet one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reply_policy: Option<ReplyPolicy>,
     /// Per-plugin overrides; absent identifiers inherit the node-wide switch.
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     pub plugins: HashMap<String, ItemPolicy>,
@@ -151,6 +159,9 @@ pub struct InstanceDraft {
     /// Optional model override.
     #[serde(default)]
     pub model: Option<String>,
+    /// Optional reply-policy override; absent inherits the node-wide policy.
+    #[serde(default)]
+    pub reply_policy: Option<ReplyPolicy>,
     /// Per-plugin overrides.
     #[serde(default)]
     pub plugins: HashMap<String, ItemPolicy>,
@@ -232,6 +243,11 @@ impl BotInstance {
             return Some(instance_persona_id(&self.id));
         }
         self.persona_id.clone()
+    }
+
+    /// Reply policy that governs this instance, given the node-wide default.
+    pub fn effective_reply_policy(&self, node_policy: ReplyPolicy) -> ReplyPolicy {
+        self.reply_policy.unwrap_or(node_policy)
     }
 }
 
@@ -491,6 +507,29 @@ impl InstanceRegistry {
         Ok(session_id)
     }
 
+    /// Replaces the model override of one instance and persists the catalog.
+    ///
+    /// Used by the built-in `/model` command: switching a model must survive a restart, otherwise
+    /// a conversation would silently drift back to the previous model after a reboot.
+    pub async fn set_model(
+        &self,
+        id: &str,
+        model: Option<String>,
+    ) -> Result<BotInstance, InstanceError> {
+        let mut instances = self.instances.write().await;
+        let instance = instances
+            .get_mut(id)
+            .ok_or_else(|| InstanceError::NotFound(id.to_string()))?;
+
+        instance.model = model
+            .map(|model| model.trim().to_string())
+            .filter(|model| !model.is_empty());
+        let updated = instance.clone();
+        Self::persist(self.path.as_deref(), &instances)?;
+
+        Ok(updated)
+    }
+
     /// Validates that no two enabled instances claim the same platform.
     async fn validate_all(&self) -> Result<(), InstanceError> {
         let instances = self.instances.read().await;
@@ -632,6 +671,10 @@ fn build_instance(
         .map(|persona| persona.trim().to_string())
         .filter(|persona| !persona.is_empty());
 
+    if let Some(policy) = draft.reply_policy.as_ref() {
+        policy.validate().map_err(InstanceError::Invalid)?;
+    }
+
     Ok(BotInstance {
         id,
         name,
@@ -640,6 +683,7 @@ fn build_instance(
         persona_id,
         system_prompt,
         model,
+        reply_policy: draft.reply_policy,
         plugins: draft.plugins,
         skills: draft.skills,
         mcp: draft.mcp,

@@ -2,6 +2,7 @@
 
 import asyncio
 from pathlib import Path
+from types import SimpleNamespace
 from unittest import IsolatedAsyncioTestCase
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -78,7 +79,14 @@ class TestQQOfficialAdapter(IsolatedAsyncioTestCase):
             sender_id="test_member_openid_456",
             text="/help command",
             event_id="qq_msg_group_999",
-            metadata={"msg_id": "qq_msg_group_999", "scene": "group", "mentions": []},
+            metadata={
+                "msg_id": "qq_msg_group_999",
+                "scene": "group",
+                "mentions": [],
+                "kanon.conversation_kind": "group",
+                "kanon.bot_mentioned": True,
+            },
+            segments=[{"text": {"content": "/help command"}}],
         )
 
     async def test_inbound_c2c_message_create(self) -> None:
@@ -103,7 +111,13 @@ class TestQQOfficialAdapter(IsolatedAsyncioTestCase):
             sender_id="test_user_openid_789",
             text="ping",
             event_id="qq_msg_c2c_888",
-            metadata={"msg_id": "qq_msg_c2c_888", "scene": "c2c"},
+            metadata={
+                "msg_id": "qq_msg_c2c_888",
+                "scene": "c2c",
+                "kanon.conversation_kind": "private",
+                "kanon.bot_mentioned": False,
+            },
+            segments=[{"text": {"content": "ping"}}],
         )
 
     async def test_inbound_at_message_create_guild(self) -> None:
@@ -130,8 +144,200 @@ class TestQQOfficialAdapter(IsolatedAsyncioTestCase):
             sender_id="test_guild_author_222",
             text="hello guild",
             event_id="qq_msg_guild_777",
-            metadata={"msg_id": "qq_msg_guild_777", "scene": "guild", "guild_id": "test_guild_999"},
+            metadata={
+                "msg_id": "qq_msg_guild_777",
+                "scene": "guild",
+                "guild_id": "test_guild_999",
+                "kanon.conversation_kind": "channel",
+                "kanon.bot_mentioned": True,
+            },
+            segments=[{"text": {"content": "hello guild"}}],
         )
+
+    async def test_group_at_message_reports_policy_and_rich_segments(self) -> None:
+        """Verifies rich inbound content reaches Core as typed segments.
+
+        The core renders the model-visible message from ``segments``, so an
+        attachment type the proto cannot express (video, arbitrary file) must
+        still arrive as a named ``custom`` segment instead of being dropped.
+        """
+        mock_core = MagicMock()
+        mock_core.ingest_event = AsyncMock(return_value=pb.IngestEventResponse(accepted=True))
+        self.adapter.context = PluginContext(data_dir=Path("/tmp"), core=mock_core)
+
+        client = KanonBotClient(adapter=self.adapter)
+        mock_msg = MagicMock()
+        mock_msg.group_openid = "grp_rich"
+        mock_msg.author.member_openid = "member_rich"
+        mock_msg.content = "look !"
+        mock_msg.id = "qq_msg_rich"
+        mock_msg.mentions = [SimpleNamespace(member_openid="mention_1", username="Alice")]
+        mock_msg.attachments = [
+            SimpleNamespace(
+                url="https://cdn.example/img.png",
+                content_type="image/png",
+                filename="img.png",
+            ),
+            SimpleNamespace(url="https://cdn.example/a.mp3", content_type="audio/mpeg", filename="a.mp3"),
+            SimpleNamespace(url="https://cdn.example/v.mp4", content_type="video/mp4", filename="v.mp4"),
+            SimpleNamespace(
+                url="https://cdn.example/doc.pdf",
+                content_type="application/pdf",
+                filename="doc.pdf",
+            ),
+        ]
+
+        await client.on_group_at_message_create(mock_msg)
+
+        kwargs = mock_core.ingest_event.await_args.kwargs
+        # The two platform-neutral keys are what make "only reply when @'d" work.
+        self.assertEqual(kwargs["metadata"]["kanon.conversation_kind"], "group")
+        self.assertTrue(kwargs["metadata"]["kanon.bot_mentioned"])
+        self.assertEqual(kwargs["metadata"]["mentions"], ["mention_1"])
+        self.assertEqual(
+            kwargs["segments"],
+            [
+                {"text": {"content": "look !"}},
+                {"mention": {"target_user_id": "mention_1", "display_name": "Alice"}},
+                {
+                    "image": {
+                        "url": "https://cdn.example/img.png",
+                        "mime_type": "image/png",
+                        "filename": "img.png",
+                    }
+                },
+                {"audio": {"url": "https://cdn.example/a.mp3"}},
+                {
+                    "custom": {
+                        "type_name": "qqofficial.video",
+                        "payload": {
+                            "url": "https://cdn.example/v.mp4",
+                            "content_type": "video/mp4",
+                        },
+                    }
+                },
+                {
+                    "custom": {
+                        "type_name": "qqofficial.file",
+                        "payload": {
+                            "url": "https://cdn.example/doc.pdf",
+                            "content_type": "application/pdf",
+                            "filename": "doc.pdf",
+                        },
+                    }
+                },
+            ],
+        )
+
+    async def test_guild_mentions_use_the_member_id_attribute(self) -> None:
+        """Guild mention entries expose ``id`` where group entries expose ``member_openid``."""
+        mock_core = MagicMock()
+        mock_core.ingest_event = AsyncMock(return_value=pb.IngestEventResponse(accepted=True))
+        self.adapter.context = PluginContext(data_dir=Path("/tmp"), core=mock_core)
+
+        client = KanonBotClient(adapter=self.adapter)
+        mock_msg = MagicMock()
+        mock_msg.channel_id = "chan_mentions"
+        mock_msg.guild_id = "guild_mentions"
+        mock_msg.author.id = "author_mentions"
+        mock_msg.content = "hi"
+        mock_msg.id = "qq_msg_mentions"
+        mock_msg.mentions = [SimpleNamespace(id="guild_user_1", username="Bob")]
+        mock_msg.attachments = []
+
+        await client.on_at_message_create(mock_msg)
+
+        kwargs = mock_core.ingest_event.await_args.kwargs
+        self.assertEqual(kwargs["metadata"]["kanon.conversation_kind"], "channel")
+        self.assertTrue(kwargs["metadata"]["kanon.bot_mentioned"])
+        self.assertIn(
+            {"mention": {"target_user_id": "guild_user_1", "display_name": "Bob"}},
+            kwargs["segments"],
+        )
+
+    async def test_attachment_without_url_is_skipped_not_fatal(self) -> None:
+        """One unreadable attachment must not cost the model the rest of the message."""
+        mock_core = MagicMock()
+        mock_core.ingest_event = AsyncMock(return_value=pb.IngestEventResponse(accepted=True))
+        self.adapter.context = PluginContext(data_dir=Path("/tmp"), core=mock_core)
+
+        client = KanonBotClient(adapter=self.adapter)
+        mock_msg = MagicMock()
+        mock_msg.group_openid = "grp_empty_att"
+        mock_msg.author.member_openid = "member_empty_att"
+        mock_msg.content = "text survives"
+        mock_msg.id = "qq_msg_empty_att"
+        mock_msg.mentions = []
+        mock_msg.attachments = [SimpleNamespace(url="", content_type="image/png", filename="")]
+
+        await client.on_group_at_message_create(mock_msg)
+
+        kwargs = mock_core.ingest_event.await_args.kwargs
+        self.assertEqual(kwargs["segments"], [{"text": {"content": "text survives"}}])
+
+    async def test_unmentioned_group_message_is_not_marked_as_mentioned(self) -> None:
+        """Unmentioned callbacks must report the mention policy fact as false."""
+        mock_core = MagicMock()
+        mock_core.ingest_event = AsyncMock(return_value=pb.IngestEventResponse(accepted=True))
+        self.adapter.context = PluginContext(data_dir=Path("/tmp"), core=mock_core)
+
+        client = KanonBotClient(adapter=self.adapter)
+        mock_msg = MagicMock()
+        mock_msg.group_openid = "grp_unmentioned"
+        mock_msg.author.member_openid = "member_unmentioned"
+        mock_msg.content = "chatter"
+        mock_msg.id = "qq_msg_unmentioned"
+        mock_msg.mentions = []
+        mock_msg.attachments = []
+
+        await client.on_group_message_create(mock_msg)
+
+        metadata = mock_core.ingest_event.await_args.kwargs["metadata"]
+        self.assertEqual(metadata["kanon.conversation_kind"], "group")
+        self.assertFalse(metadata["kanon.bot_mentioned"])
+
+    async def test_unmentioned_guild_message_is_channel_kind(self) -> None:
+        """Unmentioned guild callbacks are channel conversations the policy governs."""
+        mock_core = MagicMock()
+        mock_core.ingest_event = AsyncMock(return_value=pb.IngestEventResponse(accepted=True))
+        self.adapter.context = PluginContext(data_dir=Path("/tmp"), core=mock_core)
+
+        client = KanonBotClient(adapter=self.adapter)
+        mock_msg = MagicMock()
+        mock_msg.channel_id = "chan_unmentioned"
+        mock_msg.guild_id = "guild_unmentioned"
+        mock_msg.author.id = "author_unmentioned"
+        mock_msg.content = "chatter"
+        mock_msg.id = "qq_msg_guild_unmentioned"
+        mock_msg.mentions = []
+        mock_msg.attachments = []
+
+        await client.on_message_create(mock_msg)
+
+        metadata = mock_core.ingest_event.await_args.kwargs["metadata"]
+        self.assertEqual(metadata["kanon.conversation_kind"], "channel")
+        self.assertFalse(metadata["kanon.bot_mentioned"])
+
+    async def test_guild_direct_message_is_private_kind(self) -> None:
+        """A guild DM is one-to-one, so Core must always answer it."""
+        mock_core = MagicMock()
+        mock_core.ingest_event = AsyncMock(return_value=pb.IngestEventResponse(accepted=True))
+        self.adapter.context = PluginContext(data_dir=Path("/tmp"), core=mock_core)
+
+        client = KanonBotClient(adapter=self.adapter)
+        mock_msg = MagicMock()
+        mock_msg.channel_id = "dm_chan"
+        mock_msg.author.id = "dm_author"
+        mock_msg.content = "dm text"
+        mock_msg.id = "qq_msg_dm"
+        mock_msg.mentions = []
+        mock_msg.attachments = []
+
+        await client.on_direct_message_create(mock_msg)
+
+        metadata = mock_core.ingest_event.await_args.kwargs["metadata"]
+        self.assertEqual(metadata["kanon.conversation_kind"], "private")
+        self.assertFalse(metadata["kanon.bot_mentioned"])
 
     async def test_deliver_group_message(self) -> None:
         """Verifies outbound delivery to group channel."""

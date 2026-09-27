@@ -18,7 +18,7 @@ use axum::routing::{get, put};
 use serde::{Deserialize, Serialize};
 
 use kanon_core::instance::{InstanceDraft, InstanceError, sync_instance_personas};
-use kanon_core::{AdapterDescriptor, BotInstance};
+use kanon_core::{AdapterDescriptor, BotInstance, ReplyPolicy};
 
 use crate::error::ApiError;
 use crate::state::ApiState;
@@ -68,6 +68,8 @@ pub struct InstanceView {
     pub system_prompt: Option<String>,
     /// Model override; `null` means the node's default model.
     pub model: Option<String>,
+    /// Reply-policy override; `null` inherits the node-wide policy.
+    pub reply_policy: Option<ReplyPolicy>,
     /// Per-plugin overrides.
     pub plugins: std::collections::HashMap<String, kanon_core::instance::ItemPolicy>,
     /// Per-skill overrides.
@@ -85,6 +87,8 @@ pub struct InstancesResponse {
     pub total: usize,
     /// Instances that currently accept messages.
     pub enabled: usize,
+    /// Node-wide reply policy inherited by instances without an override.
+    pub node_reply_policy: ReplyPolicy,
     /// The instances themselves.
     pub instances: Vec<InstanceView>,
 }
@@ -120,6 +124,9 @@ pub struct InstanceRequest {
     /// Optional model override; omit or `null` to use the node's default.
     #[serde(default)]
     pub model: Option<String>,
+    /// Optional reply-policy override; omit or `null` to inherit the node-wide policy.
+    #[serde(default)]
+    pub reply_policy: Option<ReplyPolicy>,
     /// Per-plugin overrides (`inherit` | `enable` | `disable`).
     #[serde(default)]
     pub plugins: std::collections::HashMap<String, kanon_core::instance::ItemPolicy>,
@@ -140,6 +147,7 @@ impl From<InstanceRequest> for InstanceDraft {
             persona_id: request.persona_id,
             system_prompt: request.system_prompt,
             model: request.model,
+            reply_policy: request.reply_policy,
             plugins: request.plugins,
             skills: request.skills,
             mcp: request.mcp,
@@ -184,6 +192,7 @@ async fn view(state: &ApiState, instance: &BotInstance) -> InstanceView {
         persona_id: instance.persona_id.clone(),
         system_prompt: instance.system_prompt.clone(),
         model: instance.model.clone(),
+        reply_policy: instance.reply_policy,
         plugins: instance.plugins.clone(),
         skills: instance.skills.clone(),
         mcp: instance.mcp.clone(),
@@ -243,6 +252,7 @@ async fn list_instances(State(state): State<ApiState>) -> Json<InstancesResponse
     Json(InstancesResponse {
         total: instances.len(),
         enabled,
+        node_reply_policy: state.reply_policy().get(),
         instances: views,
     })
 }

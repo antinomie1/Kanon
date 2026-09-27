@@ -11,6 +11,7 @@ export const dictionaries = {
     'nav.sessions': 'Sessions & Personas',
     'nav.playground': 'Chat',
     'nav.providers': 'Model Providers',
+    'nav.models': 'Model Catalog',
     'nav.system': 'System Settings',
 
     // Titles & Subtitles
@@ -35,6 +36,9 @@ export const dictionaries = {
     'title.providers': 'Model Providers',
     'subtitle.providers':
       'LLM gateway backends, connectivity testing, and provider presets',
+    'title.models': 'Model Catalog',
+    'subtitle.models':
+      'Per-model context window, modalities and sampling overrides, keyed by provider reference',
     'title.system': 'System Configuration',
     'subtitle.system':
       'Microkernel IPC socket, runtime & data paths, memory window, and platform webhook parameters',
@@ -115,7 +119,8 @@ export const dictionaries = {
     'plugins.disabled': 'Disabled',
     'plugins.crashed': 'Crashed',
     'plugins.restarts': 'restarts',
-    'plugins.restart_unavailable': 'This host runs no plugin, so it cannot be addressed for a restart',
+    'plugins.restart_unavailable':
+      'This host runs no plugin, so it cannot be addressed for a restart',
     'plugins.restart': 'Restart Process',
     'plugins.config': 'Configure',
     'plugins.commands': 'Commands',
@@ -318,6 +323,140 @@ export const dictionaries = {
     'providers.os_arch': 'OS & Architecture',
     'providers.rust_edition': 'Rust Edition',
 
+    // Named provider directory
+    'providers.node_effective': 'Effective provider on this node:',
+    'providers.node_none':
+      'Not configured — the bot will not answer plain messages',
+    'providers.source_console': 'Saved from console',
+    'providers.source_env': 'Environment bootstrap',
+    'providers.source_runtime': 'Injected at runtime',
+    'providers.source_none': 'Not configured',
+    'providers.node_hint':
+      "Applying writes to the node's data/system.json and takes effect immediately for the pipeline, RequestLLM and the chat API — no restart required.",
+    'providers.upstream_model': 'Upstream model',
+    'providers.context_length': 'Context window',
+    'providers.capabilities': 'Capabilities',
+    'providers.default_provider': 'Default provider',
+    'providers.default_model': 'Node default model',
+    'providers.default_model_none': 'No default model configured',
+    'providers.create_default': 'Create default provider',
+    'providers.apply_to_node': 'Apply to this node',
+    'providers.applying': 'Applying...',
+    'providers.clear_all': 'Clear all providers',
+    'providers.clear_confirm':
+      'Remove every configured provider? Chat is disabled until one is applied again.',
+    'providers.directory_title': 'Provider directory',
+    'providers.add_provider': 'Add provider',
+    'providers.select_hint': 'Select a provider to edit it.',
+    'providers.empty_title': 'No model provider configured yet',
+    'providers.empty_hint':
+      'Configure an endpoint first (API base URL and credential), then discover the models it serves. A model is always addressed as provider/model-id.',
+    'providers.name': 'Provider name (identifier)',
+    'providers.name_hint':
+      'Used as the prefix of every model reference this endpoint serves, e.g. deepseek/deepseek-chat.',
+    'providers.base_url_default': 'Provider default endpoint',
+    'providers.api_key_keep': 'Leave empty to keep the stored credential',
+    'providers.api_key_clear': 'Remove the stored credential',
+    'providers.api_key_hint':
+      'Online providers need a valid API key before models can be listed or tested.',
+    'providers.api_key_configured': 'Credential stored',
+    'providers.temperature_hint':
+      'Sampling temperature applied to models on this endpoint.',
+    'providers.max_tokens_hint':
+      'Generation ceiling applied to models on this endpoint.',
+    'providers.save': 'Save changes',
+    'providers.saved': 'Saved',
+    'providers.delete': 'Delete provider',
+    'providers.delete_confirm':
+      'Delete this provider? Its models are removed from the catalog with it.',
+    'providers.default_badge': 'default',
+    'providers.set_default': 'Set as default',
+    'providers.make_default': 'Make this the node default',
+    'providers.default_model_label': 'Default model reference',
+    'providers.default_model_placeholder': 'provider/model-id',
+    'providers.default_model_hint':
+      'Suggestions come from the model catalog. Discover the endpoint first if the list is empty.',
+    'providers.models_in_catalog': '{count} models in catalog',
+    'providers.test': 'Test connectivity',
+    'providers.test_key_hint':
+      'The stored credential is never returned to the browser: type one here to test an endpoint that is not the node default.',
+    'providers.test_model_label': 'Model to probe',
+    'providers.discover': 'Discover models',
+    'providers.discovering': 'Discovering...',
+    'providers.discover_done': 'Discovered {count} models, stored {persisted}',
+    'providers.discover_hint':
+      'Reads the endpoint model listing and stores it. Entries you edited by hand are never overwritten.',
+    'providers.quick_config': 'Quick setup',
+    'providers.quick_config_title': 'Provider templates',
+    'providers.quick_config_hint':
+      'Pick a common service template to prefill the protocol and base URL, then add the API key.',
+    'providers.manual_add_title': 'Add model provider',
+    'providers.create_provider': 'Create provider',
+    'providers.create_default_title': 'Create default provider',
+    'providers.create_default_hint':
+      'Registers one endpoint from these values and makes it the node default in a single step.',
+    'providers.preset_applied':
+      'Template applied: fill in the credential to finish.',
+    'providers.no_providers': 'No provider endpoint configured.',
+
+    // Model catalog
+    'models.title': 'Model Catalog',
+    'models.subtitle':
+      'Context window, modalities and sampling overrides for every model the node may route to',
+    'models.total': 'Catalog entries',
+    'models.default_model': 'Node default model',
+    'models.default_none': 'Not set',
+    'models.default_badge': 'default',
+    'models.filter_provider': 'Provider',
+    'models.all_providers': 'All providers',
+    'models.add': 'Add model',
+    'models.edit': 'Edit',
+    'models.delete': 'Remove from catalog',
+    'models.delete_confirm': 'Remove this model from the catalog?',
+    'models.empty': 'The model catalog is empty.',
+    'models.empty_hint':
+      'Add an endpoint on the Model Providers page and discover its models, or add one entry manually here.',
+    'models.no_match': 'No model matches the current filter.',
+    'models.reference': 'Reference',
+    'models.provider': 'Provider',
+    'models.model_id': 'Model ID',
+    'models.display_name': 'Display name',
+    'models.display_name_placeholder': 'Optional label',
+    'models.context_length': 'Context length',
+    'models.max_output': 'Max output tokens',
+    'models.temperature': 'Temperature',
+    'models.temperature_hint': 'Between 0.0 and 2.0.',
+    'models.source': 'Source',
+    'models.source_unknown': 'Unknown',
+    'models.source_upstream': 'Discovered',
+    'models.source_manual': 'Manual',
+    'models.capabilities': 'Capabilities',
+    'models.cap_vision': 'Vision',
+    'models.cap_audio': 'Audio',
+    'models.cap_video': 'Video',
+    'models.cap_tool_calling': 'Tools',
+    'models.cap_reasoning': 'Reasoning',
+    'models.save': 'Save',
+    'models.cancel': 'Cancel',
+    'models.saving': 'Saving...',
+    'models.discover_all': 'Discover all providers',
+    'models.discover_done': 'Discovered {count} models, stored {persisted}',
+    'models.optional': 'optional',
+
+    // Reply policy (shared by the instance form and the node settings)
+    'reply.title': 'Reply policy',
+    'reply.mode_always': 'Always',
+    'reply.mode_mention': 'Only when mentioned',
+    'reply.mode_probability': 'By probability',
+    'reply.mode_never': 'Never (groups)',
+    'reply.inherit': 'Inherit node policy',
+    'reply.probability': 'Reply probability',
+    'reply.node_current': 'Node policy: {policy}',
+    'reply.describe_always': 'Always reply',
+    'reply.describe_mention': 'Reply only when mentioned',
+    'reply.describe_never': 'Never reply in groups',
+    'reply.describe_probability': 'Reply with probability {percent}%',
+
     // Bot instances
     'instances.gate_label': 'Running bot instances:',
     'instances.gate_none': 'No instance is running — messages are dropped',
@@ -372,6 +511,27 @@ export const dictionaries = {
     'instances.cancel': 'Cancel',
     'instances.save': 'Save Instance',
     'instances.saving': 'Saving...',
+    'instances.field_model': 'Model',
+    'instances.model_inherit': 'Inherit node default',
+    'instances.model_inherit_named': 'Inherit node default ({model})',
+    'instances.model_catalog_empty': 'The model catalog is empty.',
+    'instances.reply_policy': 'Reply policy',
+    'instances.reply_policy_hint':
+      'Decides whether group and channel messages are answered. Private conversations are always answered.',
+    'instances.reply_override_hint':
+      'This instance overrides the node policy; other instances are unaffected.',
+    'instances.reply_inherit_hint':
+      'This instance follows the node-wide policy shown above.',
+    'instances.reply_policy_badge': 'Reply: {policy}',
+
+    // Node-wide reply policy
+    'system.reply_policy_title': 'Node-wide reply policy',
+    'system.reply_policy_hint':
+      'Every instance without its own override answers group and channel messages according to this policy. Private conversations are always answered.',
+    'system.reply_policy_current': 'Effective policy',
+    'system.reply_policy_save': 'Apply policy',
+    'system.reply_policy_saving': 'Applying...',
+    'system.reply_policy_saved': 'Policy applied to the running node',
   },
   zh: {
     // 导航项
@@ -435,7 +595,18 @@ export const dictionaries = {
     'instances.save': '保存',
     'instances.saving': '保存中...',
     'instances.cancel': '取消',
+    'instances.field_model': '模型',
+    'instances.model_inherit': '继承节点默认模型',
+    'instances.model_inherit_named': '继承节点默认模型（{model}）',
+    'instances.model_catalog_empty': '模型目录为空。',
+    'instances.reply_policy': '回复策略',
+    'instances.reply_policy_hint':
+      '决定群聊与频道消息是否被回复；私聊始终回复。',
+    'instances.reply_override_hint': '该实例覆盖了节点策略，不影响其他实例。',
+    'instances.reply_inherit_hint': '该实例跟随上方的节点级策略。',
+    'instances.reply_policy_badge': '回复策略：{policy}',
     'nav.providers': '模型提供商',
+    'nav.models': '模型目录',
     'nav.system': '系统配置',
 
     // 标题与副标题
@@ -456,6 +627,9 @@ export const dictionaries = {
     'subtitle.playground': '与大模型进行交互对话，支持多轮推理与插件工具调用',
     'title.providers': '模型提供商',
     'subtitle.providers': '大语言模型提供商配置、连通性测速与主流服务商预设',
+    'title.models': '模型目录',
+    'subtitle.models':
+      '按「提供商/模型」引用记录每个模型的上下文窗口、模态能力与采样参数',
     'title.system': '系统配置',
     'subtitle.system':
       '微内核 IPC 通信套接字、运行与存储路径、记忆窗口及平台适配器',
@@ -646,7 +820,8 @@ export const dictionaries = {
     'adapters.empty': '本节点尚未注册任何平台适配器。',
     'adapters.milky_unsaved': '有未保存的改动（请点“保存并生效”）',
     'adapters.milky_enabled': '启用 Milky 适配器',
-    'adapters.milky_enabled_hint': '关闭时不建立任何连接，所有出站投递都会明确报错。',
+    'adapters.milky_enabled_hint':
+      '关闭时不建立任何连接，所有出站投递都会明确报错。',
     'adapters.milky_base_url': '协议端基础地址',
     'adapters.milky_transport': '事件接收方式',
     'adapters.milky_transport_sse': 'Server-Sent Events',
@@ -677,7 +852,8 @@ export const dictionaries = {
     'adapters.milky_state_connecting': '连接中',
     'adapters.milky_state_connected': '已连接',
     'adapters.milky_state_error': '连接异常',
-    'adapters.milky_not_hosted': '本节点未注册 Milky 适配器，启动时未启用该扩展。',
+    'adapters.milky_not_hosted':
+      '本节点未注册 Milky 适配器，启动时未启用该扩展。',
 
     // 会话与人设
     'sessions.active_sessions': '追踪中的会话列表',
@@ -728,6 +904,145 @@ export const dictionaries = {
     'providers.env_title': '系统环境参数',
     'providers.os_arch': '操作系统与架构',
     'providers.rust_edition': 'Rust 版本规范',
+
+    // 命名提供商目录
+    'providers.node_effective': '节点当前生效的提供商:',
+    'providers.node_none': '未配置 —— 机器人不会回复普通消息',
+    'providers.source_console': '控制台已保存',
+    'providers.source_env': '环境变量引导',
+    'providers.source_runtime': '运行时注入',
+    'providers.source_none': '未配置',
+    'providers.node_hint':
+      '应用后会写入节点的 data/system.json，并立即对流水线、RequestLLM 与聊天接口生效，无需重启。',
+    'providers.upstream_model': '上游模型',
+    'providers.context_length': '上下文窗口',
+    'providers.capabilities': '能力',
+    'providers.default_provider': '默认提供商',
+    'providers.default_model': '节点默认模型',
+    'providers.default_model_none': '尚未设置默认模型',
+    'providers.create_default': '创建默认提供商',
+    'providers.apply_to_node': '应用到此节点',
+    'providers.applying': '应用中...',
+    'providers.clear_all': '清除全部提供商',
+    'providers.clear_confirm':
+      '确定要移除全部提供商吗？在重新应用之前聊天将被停用。',
+    'providers.directory_title': '提供商列表',
+    'providers.add_provider': '添加提供商',
+    'providers.select_hint': '请选择一个提供商进行编辑。',
+    'providers.empty_title': '暂未配置模型提供商',
+    'providers.empty_hint':
+      '先配置提供商端点（API Base URL 与密钥），再发现它所提供的模型。模型统一表示为「提供商名称/模型ID」。',
+    'providers.name': '提供商名称 (标识符)',
+    'providers.name_hint':
+      '作为该端点旗下所有模型引用的前缀，例如 deepseek/deepseek-chat。',
+    'providers.base_url_default': '使用协议默认地址',
+    'providers.api_key_keep': '留空表示保留已保存的密钥',
+    'providers.api_key_clear': '清除已保存的密钥',
+    'providers.api_key_hint':
+      '在线服务商必须填入有效 API Key，才能获取模型列表或进行对话测试。',
+    'providers.api_key_configured': '密钥已保存',
+    'providers.temperature_hint': '该端点下模型使用的默认采样温度。',
+    'providers.max_tokens_hint': '该端点下模型使用的默认最大生成 Token 数。',
+    'providers.save': '保存修改',
+    'providers.saved': '已保存',
+    'providers.delete': '删除提供商',
+    'providers.delete_confirm':
+      '确定要删除该提供商吗？其目录中的模型也会一并移除。',
+    'providers.default_badge': '默认',
+    'providers.set_default': '设为默认',
+    'providers.make_default': '设为节点默认提供商',
+    'providers.default_model_label': '默认模型引用',
+    'providers.default_model_placeholder': '提供商/模型ID',
+    'providers.default_model_hint':
+      '候选来自模型目录；列表为空时请先点击「发现模型」。',
+    'providers.models_in_catalog': '目录中 {count} 个模型',
+    'providers.test': '测试连通性',
+    'providers.test_key_hint':
+      '已保存的密钥不会回传到浏览器：测试非默认提供商时请在此临时输入密钥。',
+    'providers.test_model_label': '用于测试的模型',
+    'providers.discover': '发现模型',
+    'providers.discovering': '正在发现...',
+    'providers.discover_done': '发现 {count} 个模型，已存储 {persisted} 个',
+    'providers.discover_hint':
+      '读取端点自身的模型列表并写入目录；手动编辑过的条目不会被覆盖。',
+    'providers.quick_config': '一键配置',
+    'providers.quick_config_title': '一键配置提供商模板',
+    'providers.quick_config_hint':
+      '选择常见服务商模板以自动填入协议与 Base URL，创建后填入 API 密钥即可使用。',
+    'providers.manual_add_title': '手动添加模型提供商',
+    'providers.create_provider': '创建提供商',
+    'providers.create_default_title': '创建默认提供商',
+    'providers.create_default_hint':
+      '用这里填写的值注册一个端点，并一步将其设为节点默认提供商。',
+    'providers.preset_applied': '模板已填入，补充密钥后即可创建。',
+    'providers.no_providers': '尚未配置任何提供商端点。',
+
+    // 模型目录
+    'models.title': '模型目录',
+    'models.subtitle':
+      '记录节点可路由的每个模型的上下文窗口、模态能力与采样参数',
+    'models.total': '目录条目数',
+    'models.default_model': '节点默认模型',
+    'models.default_none': '未设置',
+    'models.default_badge': '默认',
+    'models.filter_provider': '提供商',
+    'models.all_providers': '全部提供商',
+    'models.add': '添加模型',
+    'models.edit': '编辑',
+    'models.delete': '从目录移除',
+    'models.delete_confirm': '确定要从此目录移除该模型吗？',
+    'models.empty': '模型目录为空。',
+    'models.empty_hint':
+      '先在「模型提供商」页添加端点并点击「发现模型」，或在此手动添加一条记录。',
+    'models.no_match': '没有符合当前筛选条件的模型。',
+    'models.reference': '模型引用',
+    'models.provider': '提供商',
+    'models.model_id': '模型 ID',
+    'models.display_name': '展示名称',
+    'models.display_name_placeholder': '可选别名',
+    'models.context_length': '上下文长度',
+    'models.max_output': '最大输出 Token',
+    'models.temperature': '采样温度',
+    'models.temperature_hint': '取值范围 0.0 至 2.0。',
+    'models.source': '来源',
+    'models.source_unknown': '未知',
+    'models.source_upstream': '自动发现',
+    'models.source_manual': '手动',
+    'models.capabilities': '能力',
+    'models.cap_vision': '视觉',
+    'models.cap_audio': '音频',
+    'models.cap_video': '视频',
+    'models.cap_tool_calling': '工具调用',
+    'models.cap_reasoning': '推理',
+    'models.save': '保存',
+    'models.cancel': '取消',
+    'models.saving': '保存中...',
+    'models.discover_all': '发现全部提供商的模型',
+    'models.discover_done': '发现 {count} 个模型，已存储 {persisted} 个',
+    'models.optional': '可选',
+
+    // 回复策略（实例表单与节点设置共用）
+    'reply.title': '回复策略',
+    'reply.mode_always': '总是回复',
+    'reply.mode_mention': '仅被 @ 时回复',
+    'reply.mode_probability': '按概率回复',
+    'reply.mode_never': '从不回复（群聊）',
+    'reply.inherit': '继承节点策略',
+    'reply.probability': '回复概率',
+    'reply.node_current': '节点当前策略：{policy}',
+    'reply.describe_always': '总是回复',
+    'reply.describe_mention': '仅在被 @ 时回复',
+    'reply.describe_never': '群聊中从不回复',
+    'reply.describe_probability': '以 {percent}% 的概率回复',
+
+    // 节点级回复策略
+    'system.reply_policy_title': '节点级回复策略',
+    'system.reply_policy_hint':
+      '所有未单独设置策略的实例都按此策略回复群聊与频道消息；私聊始终回复。',
+    'system.reply_policy_current': '当前生效策略',
+    'system.reply_policy_save': '应用策略',
+    'system.reply_policy_saving': '应用中...',
+    'system.reply_policy_saved': '策略已应用到运行中的节点',
   },
 };
 

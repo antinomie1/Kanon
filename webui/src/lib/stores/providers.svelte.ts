@@ -1,18 +1,29 @@
 import { api } from '../api/client';
 import type {
   ActivateProviderRequest,
+  ActivateProviderResponse,
   ActiveProviderInfo,
-  CustomProvider,
-  ProviderPreset,
+  DiscoverModelsResponse,
+  ProviderInfo,
   ProvidersCatalog,
+  SetDefaultProviderRequest,
   SystemConfig,
   TestProviderRequest,
   TestProviderResponse,
+  UpsertProviderRequest,
 } from '../types';
+import { modelsStore } from './models.svelte';
 
-const STORAGE_KEY_PROVIDERS = 'kanon_custom_providers_v3';
-const STORAGE_KEY_ACTIVE_MODEL = 'kanon_active_model_v3';
-
+/**
+ * Console state for the node's LLM directory.
+ *
+ * # One source of truth
+ * The named endpoints live in the node's `data/system.json`; the browser keeps no copy. Every
+ * mutation posts to the gateway and replaces the whole catalog with the response, so the console
+ * can never describe a directory the running node does not have. The stored credential is never
+ * returned — only whether one exists — which is why editing a provider leaves the key field blank
+ * and omitting it keeps whatever the node already holds.
+ */
 class ProvidersStore {
   catalog = $state<ProvidersCatalog | null>(null);
   systemConfig = $state<SystemConfig | null>(null);
@@ -22,419 +33,153 @@ class ProvidersStore {
   /**
    * The provider the *node* is actually using, as reported by the backend.
    *
-   * Distinct from `activeModel`, which is a browser-local playlist entry for the Playground:
-   * only this value decides whether the bot answers messages.
+   * This is the only value that decides whether the bot answers messages; the catalog's default
+   * provider is the persisted intention, which the runtime snapshot confirms.
    */
   nodeProvider = $state<ActiveProviderInfo | null>(null);
   nodeActionPending = $state(false);
   nodeMessage = $state<string | null>(null);
   nodeError = $state<string | null>(null);
 
-  // Two-tier providers & models: Empty by default per user rule
-  providers = $state<CustomProvider[]>([]);
-  selectedProviderId = $state<string>('');
-  activeModel = $state<string>('');
+  /** Name of the endpoint currently open in the editor. */
+  selectedProviderName = $state<string>('');
 
-  // Per-model test results and state
-  testingModelKey = $state<string | null>(null);
-  modelTestResults = $state<Record<string, TestProviderResponse>>({});
-
-  // Remote models fetching state
-  isFetchingModels = $state(false);
-  fetchModelsError = $state<string | null>(null);
-  fetchedModelCandidates = $state<string[]>([]);
+  /** Connectivity test result per provider name. */
+  providerTestResults = $state<Record<string, TestProviderResponse>>({});
+  testingProvider = $state<string | null>(null);
 
   constructor() {
-    this.loadStorage();
     this.load();
   }
 
-  private loadStorage() {
-    if (typeof window === 'undefined') return;
-    try {
-      const savedProviders = localStorage.getItem(STORAGE_KEY_PROVIDERS);
-      if (savedProviders) {
-        const parsed = JSON.parse(savedProviders);
-        if (Array.isArray(parsed)) {
-          this.providers = parsed;
-        }
-      }
-
-      if (this.providers.length > 0) {
-        this.selectedProviderId = this.providers[0].id;
-      }
-
-      const savedActive = localStorage.getItem(STORAGE_KEY_ACTIVE_MODEL);
-      if (savedActive) {
-        this.activeModel = savedActive;
-      } else if (this.providers[0]?.name && this.providers[0]?.models[0]?.id) {
-        this.activeModel = `${this.providers[0].name}/${this.providers[0].models[0].id}`;
-      }
-    } catch (e) {
-      console.warn('Failed to load saved providers from localStorage', e);
-      this.providers = [];
-      this.selectedProviderId = '';
-      this.activeModel = '';
-    }
+  get providers(): ProviderInfo[] {
+    return this.catalog?.providers ?? [];
   }
 
-  private persistStorage() {
-    if (typeof window === 'undefined') return;
-    try {
-      localStorage.setItem(
-        STORAGE_KEY_PROVIDERS,
-        JSON.stringify(this.providers),
-      );
-      localStorage.setItem(STORAGE_KEY_ACTIVE_MODEL, this.activeModel);
-    } catch (e) {
-      console.warn('Failed to save providers to localStorage', e);
-    }
+  /** Endpoint used for unprefixed model references, when one is configured. */
+  get defaultProvider(): string | null {
+    return this.catalog?.default_provider ?? null;
   }
 
-  get selectedProvider(): CustomProvider | undefined {
+  /** Canonical model reference the node answers with by default. */
+  get defaultModel(): string | null {
+    return this.catalog?.default_model ?? null;
+  }
+
+  get selectedProvider(): ProviderInfo | undefined {
     return (
-      this.providers.find((p) => p.id === this.selectedProviderId) ??
+      this.providers.find((p) => p.name === this.selectedProviderName) ??
       this.providers[0]
     );
   }
 
+  /** Catalog model references served by one endpoint, used as input suggestions. */
+  referencesFor(name: string): string[] {
+    return modelsStore.referencesFor(name);
+  }
+
+  /**
+   * Canonical model references the sandbox may pick from, node default first.
+   *
+   * The catalog is the source of truth; the node's effective model is still listed when the catalog
+   * is empty so a freshly configured endpoint stays usable from the playground.
+   */
   get allModelKeys(): string[] {
-    const keys: string[] = [];
-    for (const p of this.providers) {
-      for (const m of p.models) {
-        keys.push(`${p.name}/${m.id}`);
-      }
+    const keys = modelsStore.models.map((spec) =>
+      modelsStore.referenceOf(spec),
+    );
+    const fallback = this.defaultModel ?? this.nodeProvider?.model;
+    if (fallback && !keys.includes(fallback)) {
+      keys.unshift(fallback);
     }
     return keys;
   }
 
-  selectProvider(id: string) {
-    this.selectedProviderId = id;
-    this.fetchedModelCandidates = [];
-    this.fetchModelsError = null;
+  /** Sandbox model choice; empty means "let the node decide". */
+  activeModel = $state<string>('');
+
+  setActiveModel(model: string) {
+    this.activeModel = model;
   }
 
-  addProvider(data: {
-    name: string;
-    protocol: 'openai' | 'openai_responses' | 'anthropic';
-    base_url: string;
-    api_key: string;
-  }) {
-    const cleanName = data.name
-      .trim()
-      .toLowerCase()
-      .replace(/[^a-z0-9_-]/g, '_');
-    const newProv: CustomProvider = {
-      id: `prov_${Date.now()}`,
-      name: cleanName || `provider_${Date.now().toString().slice(-4)}`,
-      protocol: data.protocol,
-      base_url: data.base_url.trim(),
-      api_key: data.api_key.trim(),
-      models: [],
-    };
-    this.providers = [...this.providers, newProv];
-    this.selectedProviderId = newProv.id;
-
-    this.persistStorage();
-    return newProv;
+  selectProvider(name: string) {
+    this.selectedProviderName = name;
   }
 
-  // One-click quick configuration from backend presets
-  applyPreset(preset: ProviderPreset) {
-    // Generate a unique name if already exists
-    let candidateName = preset.id;
-    let counter = 1;
-    while (this.providers.some((p) => p.name === candidateName)) {
-      counter++;
-      candidateName = `${preset.id}_${counter}`;
-    }
-
-    return this.addProvider({
-      name: candidateName,
-      protocol: (preset.protocol === 'anthropic' ? 'anthropic' : 'openai') as
-        | 'openai'
-        | 'anthropic',
-      base_url: preset.base_url,
-      api_key: '',
-    });
-  }
-
-  updateProvider(
-    id: string,
-    updates: Partial<Omit<CustomProvider, 'id' | 'models'>>,
-  ) {
-    const oldProv = this.providers.find((p) => p.id === id);
-    const oldName = oldProv?.name;
-
-    this.providers = this.providers.map((p) => {
-      if (p.id !== id) return p;
-      const updatedName = updates.name
-        ? updates.name
-            .trim()
-            .toLowerCase()
-            .replace(/[^a-z0-9_-]/g, '_')
-        : p.name;
-      return {
-        ...p,
-        ...updates,
-        name: updatedName || p.name,
-      };
-    });
-
-    if (oldName && updates.name && oldName !== updates.name) {
-      if (this.activeModel.startsWith(`${oldName}/`)) {
-        this.activeModel = this.activeModel.replace(
-          `${oldName}/`,
-          `${updates.name}/`,
-        );
-      }
-    }
-
-    this.persistStorage();
-  }
-
-  deleteProvider(id: string) {
-    const prov = this.providers.find((p) => p.id === id);
-    if (!prov) return;
-
-    this.providers = this.providers.filter((p) => p.id !== id);
-    if (this.selectedProviderId === id) {
-      this.selectedProviderId = this.providers[0]?.id ?? '';
-    }
-
-    if (this.activeModel.startsWith(`${prov.name}/`)) {
-      if (this.providers[0]?.models[0]) {
-        this.activeModel = `${this.providers[0].name}/${this.providers[0].models[0].id}`;
-      } else {
-        this.activeModel = '';
-      }
-    }
-
-    this.persistStorage();
-  }
-
-  addModel(providerId: string, modelId: string, name?: string) {
-    const cleanId = modelId.trim();
-    if (!cleanId) return;
-
-    this.providers = this.providers.map((p) => {
-      if (p.id !== providerId) return p;
-      if (p.models.some((m) => m.id === cleanId)) return p;
-      return {
-        ...p,
-        models: [...p.models, { id: cleanId, name: name?.trim() || cleanId }],
-      };
-    });
-
-    const prov = this.providers.find((p) => p.id === providerId);
-    if (prov && !this.activeModel) {
-      this.activeModel = `${prov.name}/${cleanId}`;
-    }
-
-    this.persistStorage();
-  }
-
-  addMultipleModels(providerId: string, modelIds: string[]) {
-    this.providers = this.providers.map((p) => {
-      if (p.id !== providerId) return p;
-      const existing = new Set(p.models.map((m) => m.id));
-      const additions = modelIds
-        .map((m) => m.trim())
-        .filter((m) => m && !existing.has(m))
-        .map((m) => ({ id: m, name: m }));
-      return {
-        ...p,
-        models: [...p.models, ...additions],
-      };
-    });
-
-    const prov = this.providers.find((p) => p.id === providerId);
-    if (prov && !this.activeModel && prov.models[0]) {
-      this.activeModel = `${prov.name}/${prov.models[0].id}`;
-    }
-
-    this.persistStorage();
-  }
-
-  deleteModel(providerId: string, modelId: string) {
-    const prov = this.providers.find((p) => p.id === providerId);
-    this.providers = this.providers.map((p) => {
-      if (p.id !== providerId) return p;
-      return {
-        ...p,
-        models: p.models.filter((m) => m.id !== modelId),
-      };
-    });
-
-    if (prov && this.activeModel === `${prov.name}/${modelId}`) {
-      const remaining = prov.models.filter((m) => m.id !== modelId);
-      if (remaining[0]) {
-        this.activeModel = `${prov.name}/${remaining[0].id}`;
-      } else {
-        const nextProv = this.providers.find((p) => p.models.length > 0);
-        this.activeModel = nextProv
-          ? `${nextProv.name}/${nextProv.models[0].id}`
-          : '';
-      }
-    }
-
-    this.persistStorage();
-  }
-
-  setActiveModel(fullModelKey: string) {
-    this.activeModel = fullModelKey;
-    this.persistStorage();
-  }
-
-  // Fetch remote models list using backend endpoint (Zero browser CORS issues)
-  async fetchRemoteModels(
-    providerId: string,
-    overrideApiKey?: string,
-    overrideBaseUrl?: string,
-    overrideProtocol?: 'openai' | 'openai_responses' | 'anthropic',
-  ) {
-    const prov = this.providers.find((p) => p.id === providerId);
-    if (!prov) return [];
-
-    this.isFetchingModels = true;
-    this.fetchModelsError = null;
-    this.fetchedModelCandidates = [];
-
-    const apiKey = (
-      overrideApiKey !== undefined ? overrideApiKey : prov.api_key
-    ).trim();
-    const baseUrl = (
-      overrideBaseUrl !== undefined ? overrideBaseUrl : prov.base_url
-    ).trim();
-    const protocol =
-      overrideProtocol !== undefined ? overrideProtocol : prov.protocol;
-
-    const isLocal =
-      baseUrl.includes('127.0.0.1') || baseUrl.includes('localhost');
-    if (!apiKey && !isLocal) {
-      this.isFetchingModels = false;
-      this.fetchModelsError =
-        '该在线服务商需要 API Key 才能获取模型列表，请先在上方输入 API 密钥并保存修改。';
-      return [];
-    }
-
+  /** Creates or replaces one endpoint; `make_default` also repoints the node's default model. */
+  async upsertProvider(req: UpsertProviderRequest): Promise<boolean> {
+    this.nodeMessage = null;
+    this.nodeError = null;
+    this.nodeActionPending = true;
     try {
-      const res = await api.fetchModels({
-        protocol,
-        base_url: baseUrl,
-        api_key: apiKey || undefined,
-      });
-      this.fetchedModelCandidates = res.models;
-      return res.models;
+      this.catalog = await api.upsertProvider(req);
+      this.selectedProviderName = req.name;
+      return true;
     } catch (e) {
-      let msg = e instanceof Error ? e.message : String(e);
-      if (
-        msg.includes('401') ||
-        msg.includes('Unauthorized') ||
-        msg.includes('Authentication Fails') ||
-        msg.includes('governor')
-      ) {
-        msg = `鉴权失败 (HTTP 401)：API 密钥无效、未配置或配额不足。请确认 API Key 并重新保存。详细信息: ${msg}`;
-      }
-      this.fetchModelsError = msg;
-      return [];
+      this.nodeError = e instanceof Error ? e.message : String(e);
+      return false;
     } finally {
-      this.isFetchingModels = false;
+      this.nodeActionPending = false;
     }
   }
 
-  async testModel(
-    providerId: string,
-    modelId: string,
-    prompt: string = 'ping',
-    overrideApiKey?: string,
-  ) {
-    const prov = this.providers.find((p) => p.id === providerId);
-    if (!prov) return;
-
-    const fullKey = `${prov.name}/${modelId}`;
-    this.testingModelKey = fullKey;
-    const apiKey = (
-      overrideApiKey !== undefined ? overrideApiKey : prov.api_key
-    ).trim();
-
+  async deleteProvider(name: string): Promise<boolean> {
+    this.nodeMessage = null;
+    this.nodeError = null;
+    this.nodeActionPending = true;
     try {
-      const res = await api.testProvider({
-        protocol: prov.protocol,
-        base_url: prov.base_url || undefined,
-        api_key: apiKey || undefined,
-        model: modelId,
-        prompt,
-      });
-      this.modelTestResults = {
-        ...this.modelTestResults,
-        [fullKey]: res,
-      };
-      return res;
+      this.catalog = await api.deleteProvider({ name });
+      if (this.selectedProviderName === name) {
+        this.selectedProviderName = this.providers[0]?.name ?? '';
+      }
+      return true;
     } catch (e) {
-      const errRes: TestProviderResponse = {
-        status: 'error',
-        latency_ms: 0,
-        model: modelId,
-        reply: null,
-        error: e instanceof Error ? e.message : String(e),
-      };
-      this.modelTestResults = {
-        ...this.modelTestResults,
-        [fullKey]: errRes,
-      };
-      return errRes;
+      this.nodeError = e instanceof Error ? e.message : String(e);
+      return false;
     } finally {
-      this.testingModelKey = null;
+      this.nodeActionPending = false;
     }
-  }
-
-  /** Model id of the browser-local selection, without the `provider/` display prefix. */
-  get activeModelId(): string {
-    const key = this.activeModel;
-    if (!key) return '';
-    const separator = key.indexOf('/');
-    return separator === -1 ? key : key.slice(separator + 1);
   }
 
   /**
-   * Persists the selected provider to the node and applies it immediately.
+   * Makes one endpoint the default.
    *
-   * The credential comes from the browser-local provider entry only because that is where the
-   * operator typed it; once accepted it lives in `data/system.json` on the node.
+   * A model reference is mandatory when the current default model belongs to another endpoint:
+   * the node refuses rather than sending one provider's model id to a different service.
    */
-  async activateOnNode(options?: { providerId?: string; modelId?: string }) {
-    const provider = options?.providerId
-      ? this.providers.find((p) => p.id === options.providerId)
-      : this.selectedProvider;
-    const modelId = (options?.modelId ?? this.activeModelId).trim();
-
+  async setDefaultProvider(req: SetDefaultProviderRequest): Promise<boolean> {
     this.nodeMessage = null;
     this.nodeError = null;
-
-    if (!provider) {
-      this.nodeError = '请先配置提供商（API Base URL 与密钥），再应用到节点。';
-      return null;
-    }
-    if (!modelId) {
-      this.nodeError = '请先为该提供商添加并选择一个模型，再应用到节点。';
-      return null;
-    }
-
-    const payload: ActivateProviderRequest = {
-      protocol: provider.protocol,
-      base_url: provider.base_url,
-      model: modelId,
-      api_key: provider.api_key || undefined,
-    };
-
     this.nodeActionPending = true;
     try {
-      const res = await api.activateProvider(payload);
+      this.catalog = await api.setDefaultProvider(req);
+      return true;
+    } catch (e) {
+      this.nodeError = e instanceof Error ? e.message : String(e);
+      return false;
+    } finally {
+      this.nodeActionPending = false;
+    }
+  }
+
+  /**
+   * Legacy single-endpoint activation, surfaced as "create default provider".
+   *
+   * It registers one endpoint from the values the operator just typed and makes it the default —
+   * the path that works when no endpoint exists yet and the console therefore has no credential to
+   * reuse.
+   */
+  async activateOnNode(
+    req: ActivateProviderRequest,
+  ): Promise<ActivateProviderResponse | null> {
+    this.nodeMessage = null;
+    this.nodeError = null;
+    this.nodeActionPending = true;
+    try {
+      const res = await api.activateProvider(req);
       this.nodeProvider = res.active;
-      if (this.catalog) {
-        this.catalog = { ...this.catalog, active: res.active };
-      }
+      // Activation registers or replaces a directory entry, so the catalog must be re-read.
+      await this.load();
       this.nodeMessage = res.message;
       return res;
     } catch (e) {
@@ -445,17 +190,15 @@ class ProvidersStore {
     }
   }
 
-  /** Clears the node's provider, disabling chat until one is applied again. */
-  async clearOnNode() {
+  /** Clears every endpoint, disabling chat until one is applied again. */
+  async clearOnNode(): Promise<ActivateProviderResponse | null> {
     this.nodeMessage = null;
     this.nodeError = null;
     this.nodeActionPending = true;
     try {
       const res = await api.clearActiveProvider();
       this.nodeProvider = res.active;
-      if (this.catalog) {
-        this.catalog = { ...this.catalog, active: res.active };
-      }
+      await this.load();
       this.nodeMessage = res.message;
       return res;
     } catch (e) {
@@ -464,6 +207,47 @@ class ProvidersStore {
     } finally {
       this.nodeActionPending = false;
     }
+  }
+
+  /**
+   * Probes one endpoint and records the result.
+   *
+   * The stored credential is never sent to the browser, so a probe of the endpoint the node is
+   * already using omits the coordinates entirely and lets the server reuse its own stored entry;
+   * any other endpoint is probed with what the form holds, because there is nothing else to use.
+   */
+  async testProvider(
+    name: string,
+    req: TestProviderRequest,
+  ): Promise<TestProviderResponse | null> {
+    this.testingProvider = name;
+    try {
+      const res = await api.testProvider(req);
+      this.providerTestResults = { ...this.providerTestResults, [name]: res };
+      return res;
+    } catch (e) {
+      const failure: TestProviderResponse = {
+        status: 'error',
+        latency_ms: 0,
+        model: req.model ?? '',
+        reply: null,
+        error: e instanceof Error ? e.message : String(e),
+      };
+      this.providerTestResults = {
+        ...this.providerTestResults,
+        [name]: failure,
+      };
+      return failure;
+    } finally {
+      this.testingProvider = null;
+    }
+  }
+
+  /** Reads the endpoint's model listing and stores it, reporting how many entries were written. */
+  async discoverModels(
+    provider: string,
+  ): Promise<DiscoverModelsResponse | null> {
+    return modelsStore.discover(provider, true);
   }
 
   async load() {
@@ -477,6 +261,15 @@ class ProvidersStore {
       this.catalog = cat;
       this.nodeProvider = cat.active;
       this.systemConfig = sys;
+      if (
+        !this.selectedProviderName ||
+        !cat.providers.some((p) => p.name === this.selectedProviderName)
+      ) {
+        this.selectedProviderName = cat.providers[0]?.name ?? '';
+      }
+      if (!this.activeModel) {
+        this.activeModel = cat.default_model ?? cat.active.model ?? '';
+      }
     } catch (e) {
       this.error = e instanceof Error ? e.message : String(e);
     } finally {
@@ -485,7 +278,8 @@ class ProvidersStore {
   }
 
   async refresh() {
-    return this.load();
+    await this.load();
+    await modelsStore.load();
   }
 
   async runTest(req?: TestProviderRequest) {

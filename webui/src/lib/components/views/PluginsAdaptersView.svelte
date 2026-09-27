@@ -26,7 +26,9 @@ import ToolsView from './ToolsView.svelte';
  * adapters the node can offer — so they live behind one page with three tabs instead of three
  * navigation entries.
  */
-let activeTab = $state<'plugins' | 'adapters' | 'tools' | 'mcp' | 'skills'>('plugins');
+let activeTab = $state<'plugins' | 'adapters' | 'tools' | 'mcp' | 'skills'>(
+  'plugins',
+);
 
 let hosts = $state<PluginHost[]>([]);
 // Plugins without a host process. They would otherwise be invisible, and a disabled plugin is

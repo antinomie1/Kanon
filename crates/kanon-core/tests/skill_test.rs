@@ -43,6 +43,7 @@ async fn instance_with_policy(
             persona_id: None,
             system_prompt: None,
             model: None,
+            reply_policy: None,
             plugins: Default::default(),
             skills: HashMap::from([(skill_id.to_string(), policy)]),
             mcp: Default::default(),

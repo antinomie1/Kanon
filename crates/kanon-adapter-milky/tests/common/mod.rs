@@ -224,18 +224,14 @@ async fn api_handler(
         serde_json::from_str(&body).unwrap_or(Value::Null)
     };
 
-    state
-        .calls
-        .lock()
-        .expect("calls lock")
-        .push(RecordedCall {
-            endpoint: endpoint.clone(),
-            body: parsed,
-            authorization: headers
-                .get("authorization")
-                .and_then(|value| value.to_str().ok())
-                .map(str::to_string),
-        });
+    state.calls.lock().expect("calls lock").push(RecordedCall {
+        endpoint: endpoint.clone(),
+        body: parsed,
+        authorization: headers
+            .get("authorization")
+            .and_then(|value| value.to_str().ok())
+            .map(str::to_string),
+    });
 
     let failure = state.failure.lock().expect("failure lock").clone();
     match failure {

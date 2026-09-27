@@ -1,11 +1,16 @@
 //! Model provider catalog, activation and connectivity testing (`/api/v1/providers`).
 //!
-//! # Why activation lives here
-//! The console owns provider selection, but a provider is a *node* property: it drives the
-//! conversational pipeline, `RequestLLM` from plugin hosts and the sandbox chat endpoint. Writing
-//! it into browser storage would configure nothing but the browser, so `PUT /active` validates
-//! the description, persists it to `data/system.json` and installs it on the running node
-//! through the shared agent slot — no restart, and the very next message uses it.
+//! # Why providers are named
+//! A model is addressed as `<provider>/<model-id>`, so the node needs a directory that maps the
+//! provider part to an endpoint, its protocol and its credential. That directory lives in
+//! `data/system.json`, is edited here, and is applied to the running node through the shared agent
+//! factory — the very next message uses it, with no restart.
+//!
+//! # One authoritative store, one apply path
+//! Every mutation loads the current [`NodeSettings`], changes it, and hands the result to
+//! `ApiState::apply_node_settings`, which validates, persists and publishes in that order. Keeping
+//! a single apply path is what guarantees the console can never describe a directory the running
+//! node does not have.
 
 use std::sync::Arc;
 use std::time::Instant;
@@ -18,19 +23,25 @@ use serde::{Deserialize, Serialize};
 
 use kanon_llm::gateway::LlmProvider;
 use kanon_llm::gateway::types::{ChatMessage, ChatRequest};
+use kanon_llm::{ModelCapabilities, ModelRef, ModelSpec, ProviderEntry};
 
 use crate::error::ApiError;
-use crate::llm_config::LlmProviderConfig;
+use crate::llm_config::{NodeSettings, derive_provider_name, provider_presets};
 use crate::state::ApiState;
 
 /// Registers the providers endpoints.
 pub fn routes() -> Router<ApiState> {
     Router::new()
-        .route("/api/v1/providers", get(list_providers))
+        .route(
+            "/api/v1/providers",
+            get(list_providers).post(upsert_provider),
+        )
         .route(
             "/api/v1/providers/active",
             put(activate_provider).delete(clear_active_provider),
         )
+        .route("/api/v1/providers/default", put(set_default_provider))
+        .route("/api/v1/providers/delete", post(delete_provider))
         .route("/api/v1/providers/test", post(test_provider))
         .route("/api/v1/providers/models", post(fetch_models))
 }
@@ -38,28 +49,72 @@ pub fn routes() -> Router<ApiState> {
 /// Catalog response listing active and available providers and presets.
 #[derive(Debug, Serialize)]
 pub struct ProvidersCatalogResponse {
-    /// Active provider configuration on this node.
+    /// Effective provider on this node.
     pub active: ActiveProviderInfo,
     /// Available wire protocols.
     pub available_protocols: Vec<ProtocolDescriptor>,
     /// Popular pre-configured provider templates.
     pub presets: Vec<ProviderPreset>,
+    /// Every configured provider endpoint.
+    pub providers: Vec<ProviderInfo>,
+    /// Name of the endpoint used for unprefixed model references.
+    pub default_provider: Option<String>,
+    /// Canonical model reference the node answers with by default.
+    pub default_model: Option<String>,
+}
+
+/// One configured provider endpoint, credential excluded.
+#[derive(Debug, Serialize)]
+pub struct ProviderInfo {
+    /// Operator-chosen name used as the model-reference prefix.
+    pub name: String,
+    /// Wire protocol.
+    pub protocol: String,
+    /// Endpoint base URL.
+    pub base_url: String,
+    /// Whether a credential is stored.
+    pub api_key_configured: bool,
+    /// Default sampling temperature for this endpoint.
+    pub temperature: Option<f32>,
+    /// Default generation ceiling for this endpoint.
+    pub max_tokens: Option<u32>,
+    /// Whether this is the default endpoint.
+    pub is_default: bool,
+}
+
+impl ProviderInfo {
+    /// Renders one entry for the console.
+    fn from_entry(entry: &ProviderEntry, default: Option<&str>) -> Self {
+        Self {
+            name: entry.name.clone(),
+            protocol: entry.protocol.clone(),
+            base_url: entry.base_url.clone(),
+            api_key_configured: entry.has_api_key(),
+            temperature: entry.temperature,
+            max_tokens: entry.max_tokens,
+            is_default: default == Some(entry.name.as_str()),
+        }
+    }
 }
 
 /// Summary of the currently effective model provider.
 #[derive(Debug, Serialize)]
 pub struct ActiveProviderInfo {
-    /// Whether an LLM provider is loaded and available.
+    /// Whether a model runtime is loaded and available.
     pub configured: bool,
-    /// Where the effective provider comes from: `console`, `env` or `none`.
+    /// Where the effective provider comes from: `console`, `env`, `runtime` or `none`.
     ///
     /// Reported explicitly so an operator can tell a provider saved through the console apart
-    /// from one supplied by the environment bootstrap.
+    /// from one supplied by the environment bootstrap or injected in-process.
     pub source: &'static str,
-    /// Wire protocol (e.g. `openai`, `anthropic`).
+    /// Wire protocol of the endpoint serving the default model.
     pub protocol: String,
-    /// Default model identifier.
+    /// Canonical `<provider>/<model-id>` reference in effect.
     pub model: String,
+    /// Model id actually sent upstream (the provider prefix stripped).
+    pub upstream_model: String,
+    /// Provider endpoint serving the default model.
+    pub provider: Option<String>,
     /// Provider base URL if set.
     pub base_url: Option<String>,
     /// Whether an API credential is configured.
@@ -68,6 +123,39 @@ pub struct ActiveProviderInfo {
     pub temperature: Option<f32>,
     /// Configured maximum generation tokens.
     pub max_tokens: Option<u32>,
+    /// Context window of the effective model, when known.
+    pub context_length: Option<u32>,
+    /// Capabilities of the effective model.
+    pub capabilities: ModelCapabilities,
+}
+
+/// Request payload for `POST /api/v1/providers` (create or replace one named endpoint).
+#[derive(Debug, Deserialize)]
+pub struct UpsertProviderRequest {
+    /// Provider name; also the prefix of every model reference it serves.
+    pub name: String,
+    /// Wire protocol: `openai` (alias `openai_chat`), `openai_responses` or `anthropic`.
+    pub protocol: String,
+    /// Endpoint base URL.
+    pub base_url: String,
+    /// Credential. Omitted means "keep the stored one"; `clear_api_key` removes it explicitly.
+    #[serde(default)]
+    pub api_key: Option<String>,
+    /// Whether to remove the stored credential.
+    #[serde(default)]
+    pub clear_api_key: bool,
+    /// Default sampling temperature for models on this endpoint.
+    #[serde(default)]
+    pub temperature: Option<f32>,
+    /// Default generation ceiling for models on this endpoint.
+    #[serde(default)]
+    pub max_tokens: Option<u32>,
+    /// Whether this endpoint should become the default one.
+    #[serde(default)]
+    pub make_default: bool,
+    /// Default model reference to use when `make_default` is set.
+    #[serde(default)]
+    pub model: Option<String>,
 }
 
 /// Request payload for `PUT /api/v1/providers/active`.
@@ -78,9 +166,9 @@ pub struct ActiveProviderInfo {
 pub struct ActivateProviderRequest {
     /// Wire protocol: `openai` (alias `openai_chat`), `openai_responses` or `anthropic`.
     pub protocol: String,
-    /// Provider base URL, e.g. `https://api.deepseek.com/v1`.
+    /// Provider base URL, e.g. `https://api.xiaomimimo.com/v1`.
     pub base_url: String,
-    /// Default model identifier, e.g. `deepseek-chat`.
+    /// Default model identifier, e.g. `deepseek-chat` or `xiaomi/mimo-v2.6-flash`.
     pub model: String,
     /// Provider credential. Optional for local runtimes that need none.
     #[serde(default)]
@@ -91,9 +179,30 @@ pub struct ActivateProviderRequest {
     /// Maximum generation tokens applied to the node's agent.
     #[serde(default)]
     pub max_tokens: Option<u32>,
+    /// Optional endpoint name; defaults to the existing default endpoint's name, or one derived
+    /// from the base URL (so `api.xiaomimimo.com` becomes `xiaomi`).
+    #[serde(default)]
+    pub provider_name: Option<String>,
 }
 
-/// Response payload after a provider is activated or cleared.
+/// Request payload for `PUT /api/v1/providers/default`.
+#[derive(Debug, Deserialize)]
+pub struct SetDefaultProviderRequest {
+    /// Endpoint to make default.
+    pub provider: String,
+    /// Model reference to answer with; prefixed with the provider when it carries none.
+    #[serde(default)]
+    pub model: Option<String>,
+}
+
+/// Request payload for `POST /api/v1/providers/delete`.
+#[derive(Debug, Deserialize)]
+pub struct DeleteProviderRequest {
+    /// Endpoint to remove.
+    pub name: String,
+}
+
+/// Response payload after a provider mutation.
 #[derive(Debug, Serialize)]
 pub struct ActivateProviderResponse {
     /// Whether the change was applied to the running node.
@@ -118,7 +227,7 @@ pub struct ProtocolDescriptor {
 /// Pre-configured provider preset for quick configuration.
 #[derive(Debug, Serialize)]
 pub struct ProviderPreset {
-    /// Preset identifier.
+    /// Preset identifier; also the provider name it creates.
     pub id: &'static str,
     /// Display name.
     pub name: &'static str,
@@ -158,92 +267,74 @@ pub struct TestProviderResponse {
     pub error: Option<String>,
 }
 
-/// Resolves the provider that is effective on this node right now.
-///
-/// Precedence: a provider persisted by the console wins over the `KANON_LLM_*` environment
-/// bootstrap, because the console is how an operator changes the node after it started. When
-/// neither exists the node reports `none` rather than inventing a default.
-pub(crate) fn effective_provider(
-    state: &ApiState,
-) -> Result<(LlmProviderConfig, &'static str), ApiError> {
-    let persisted = state.system_config().load().map_err(ApiError::Internal)?;
-
-    if let Some(config) = persisted {
-        return Ok((config, "console"));
-    }
-
-    match LlmProviderConfig::from_env() {
-        Some(config) => Ok((config, "env")),
-        None => Err(ApiError::Unavailable(
-            "No LLM provider is configured on this node".to_string(),
-        )),
-    }
-}
-
-/// Renders what the node is actually using, plus where that provider came from.
+/// Renders the effective model routing state.
 ///
 /// The agent slot is the ground truth for *whether* the node can answer and with which tuning
-/// values; the persisted/environment description supplies the provenance (protocol, base URL,
-/// credential presence). The two can legitimately disagree — an agent can be injected
-/// programmatically with no description at all (`source: "runtime"`), which is why neither source
-/// alone is sufficient.
+/// values; the persisted directory supplies the provenance (protocol, base URL, credential). The
+/// two can legitimately disagree — an agent can be injected programmatically with no directory at
+/// all (`source: "runtime"`) — which is why neither source alone is sufficient.
 pub(crate) fn active_provider_info(state: &ApiState) -> Result<ActiveProviderInfo, ApiError> {
+    let settings = state.node_settings();
     let agent = state.agent();
     let configured = agent.is_some();
 
-    let described = match effective_provider(state) {
-        Ok(resolved) => Some(resolved),
-        // "No description" is the expected state of a fresh node, not a request failure.
-        Err(ApiError::Unavailable(_)) => None,
-        Err(other) => return Err(other),
+    if !configured {
+        return Ok(ActiveProviderInfo {
+            configured: false,
+            source: "none",
+            protocol: "openai".to_string(),
+            model: String::new(),
+            upstream_model: String::new(),
+            provider: None,
+            base_url: None,
+            api_key_configured: false,
+            temperature: None,
+            max_tokens: None,
+            context_length: None,
+            capabilities: ModelCapabilities::default(),
+        });
+    }
+
+    let agent = agent.expect("agent presence checked above");
+    let config = agent.config();
+    let model_ref = config.model_ref();
+    let reference = ModelRef::parse(&model_ref);
+    let provider_name = config
+        .provider
+        .clone()
+        .or_else(|| reference.provider().map(str::to_string));
+    let entry = provider_name
+        .as_deref()
+        .and_then(|name| settings.providers.iter().find(|entry| entry.name == name));
+    let spec = state.agent_factory().models().settings_for(&reference);
+
+    let source = if !settings.has_providers() {
+        // An agent with no persisted directory was injected in-process; reporting `console` or
+        // `env` here would misattribute it.
+        "runtime"
+    } else {
+        match settings.source {
+            crate::llm_config::SettingsSource::Console => "console",
+            crate::llm_config::SettingsSource::Environment => "env",
+        }
     };
 
-    // Only tuning values are read from the agent: they reflect what was applied, not merely what
-    // was described on disk.
-    let tuning = agent.as_ref().map(|agent| {
-        let cfg = agent.config();
-        (cfg.default_model.clone(), cfg.temperature, cfg.max_tokens)
-    });
-
-    match described {
-        Some((config, source)) => {
-            let (model, temperature, max_tokens) = match tuning {
-                Some((model, temperature, max_tokens)) => (model, temperature, max_tokens),
-                None => (config.model.clone(), config.temperature, config.max_tokens),
-            };
-            let api_key_configured = config.has_api_key();
-
-            Ok(ActiveProviderInfo {
-                configured,
-                source,
-                protocol: config.protocol,
-                model,
-                base_url: Some(config.base_url),
-                api_key_configured,
-                temperature,
-                max_tokens,
-            })
-        }
-        None => {
-            let (model, temperature, max_tokens) = match tuning {
-                Some((model, temperature, max_tokens)) => (model, temperature, max_tokens),
-                None => ("gpt-4o-mini".to_string(), None, None),
-            };
-
-            Ok(ActiveProviderInfo {
-                configured,
-                // An agent with no persisted or environment description was injected in-process;
-                // reporting `console` or `env` here would misattribute it.
-                source: if configured { "runtime" } else { "none" },
-                protocol: "openai".to_string(),
-                model,
-                base_url: None,
-                api_key_configured: false,
-                temperature,
-                max_tokens,
-            })
-        }
-    }
+    Ok(ActiveProviderInfo {
+        configured: true,
+        source,
+        protocol: entry
+            .map(|entry| entry.protocol.clone())
+            .unwrap_or_else(|| "openai".to_string()),
+        model: model_ref,
+        upstream_model: config.default_model.clone(),
+        provider: provider_name,
+        base_url: entry.map(|entry| entry.base_url.clone()),
+        api_key_configured: entry.is_some_and(ProviderEntry::has_api_key),
+        temperature: config.temperature,
+        max_tokens: config.max_tokens,
+        context_length: config.context_length.or(spec.context_length),
+        capabilities: spec.capabilities,
+    })
 }
 
 /// Handler for `GET /api/v1/providers`.
@@ -251,6 +342,8 @@ async fn list_providers(
     State(state): State<ApiState>,
 ) -> Result<Json<ProvidersCatalogResponse>, ApiError> {
     let active = active_provider_info(&state)?;
+    let settings = state.node_settings();
+    let default_provider = settings.default_provider.as_deref();
 
     let available_protocols = vec![
         ProtocolDescriptor {
@@ -270,115 +363,274 @@ async fn list_providers(
         },
     ];
 
-    let presets = vec![
-        ProviderPreset {
-            id: "openai",
-            name: "OpenAI Official",
-            protocol: "openai",
-            base_url: "https://api.openai.com/v1",
-        },
-        ProviderPreset {
-            id: "anthropic",
-            name: "Anthropic Claude",
-            protocol: "anthropic",
-            base_url: "https://api.anthropic.com/v1",
-        },
-        ProviderPreset {
-            id: "deepseek",
-            name: "DeepSeek",
-            protocol: "openai",
-            base_url: "https://api.deepseek.com/v1",
-        },
-        ProviderPreset {
-            id: "ollama",
-            name: "Ollama (Local)",
-            protocol: "openai",
-            base_url: "http://127.0.0.1:11434/v1",
-        },
-        ProviderPreset {
-            id: "vllm",
-            name: "vLLM (Local / Server)",
-            protocol: "openai",
-            base_url: "http://127.0.0.1:8000/v1",
-        },
-        ProviderPreset {
-            id: "openrouter",
-            name: "OpenRouter",
-            protocol: "openai",
-            base_url: "https://openrouter.ai/api/v1",
-        },
-        ProviderPreset {
-            id: "siliconflow",
-            name: "SiliconFlow (硅基流动)",
-            protocol: "openai",
-            base_url: "https://api.siliconflow.cn/v1",
-        },
-    ];
+    let presets = provider_presets()
+        .into_iter()
+        .map(|preset| ProviderPreset {
+            id: preset.id,
+            name: preset.name,
+            protocol: preset.protocol,
+            base_url: preset.base_url,
+        })
+        .collect();
 
     Ok(Json(ProvidersCatalogResponse {
         active,
         available_protocols,
         presets,
+        providers: settings
+            .providers
+            .iter()
+            .map(|entry| ProviderInfo::from_entry(entry, default_provider))
+            .collect(),
+        default_provider: settings.default_provider,
+        default_model: settings.default_model,
     }))
 }
 
 /// Handler for `PUT /api/v1/providers/active`.
 ///
-/// Order of operations is *validate → persist → apply*: the provider client is built first so an
-/// unreachable protocol or malformed URL never reaches disk, and the running node is only
-/// reconfigured once the choice is durable. A node that fails the intermediate step keeps serving
-/// its previous provider.
+/// Legacy single-endpoint activation: it registers (or replaces) one named endpoint and makes it
+/// the default. Order is *validate → persist → apply*, so an unreachable protocol or malformed URL
+/// never reaches disk and the running node keeps serving its previous directory on failure.
 async fn activate_provider(
     State(state): State<ApiState>,
     Json(payload): Json<ActivateProviderRequest>,
 ) -> Result<Json<ActivateProviderResponse>, ApiError> {
-    let config = LlmProviderConfig {
-        protocol: payload.protocol.trim().to_lowercase(),
-        base_url: payload.base_url.trim().to_string(),
-        model: payload.model.trim().to_string(),
-        // An explicit empty string means "no credential", which is the same thing as omitting it.
-        api_key: payload.api_key.filter(|key| !key.trim().is_empty()),
+    let protocol = payload.protocol.trim().to_lowercase();
+    let base_url = payload.base_url.trim().to_string();
+    let model = payload.model.trim().to_string();
+
+    if model.is_empty() {
+        return Err(ApiError::BadRequest(
+            "Model identifier must not be empty".to_string(),
+        ));
+    }
+
+    let mut settings = state.node_settings();
+    let name = payload
+        .provider_name
+        .as_deref()
+        .map(str::trim)
+        .filter(|name| !name.is_empty())
+        .map(str::to_string)
+        .or_else(|| settings.default_provider.clone())
+        .unwrap_or_else(|| derive_provider_name(&base_url));
+
+    let existing = settings
+        .providers
+        .iter()
+        .find(|entry| entry.name == name)
+        .cloned();
+    // An omitted credential keeps the stored one, which is what lets the console edit a URL
+    // without forcing the operator to retype a secret it never received.
+    let api_key = payload
+        .api_key
+        .filter(|key| !key.trim().is_empty())
+        .or_else(|| existing.as_ref().and_then(|entry| entry.api_key.clone()));
+
+    let entry = ProviderEntry {
+        name: name.clone(),
+        protocol: protocol.clone(),
+        base_url: base_url.clone(),
+        api_key: api_key.clone(),
         temperature: payload.temperature,
         max_tokens: payload.max_tokens,
     };
 
-    let provider = config.resolve().map_err(ApiError::BadRequest)?;
+    // Validate the endpoint description before it can reach disk: an unsupported protocol or a
+    // scheme-less URL is exactly the mistake this ordering exists to catch.
+    kanon_llm::build_provider(&protocol, base_url, api_key, model.clone())
+        .map_err(ApiError::BadRequest)?;
+
+    settings.providers.retain(|entry| entry.name != name);
+    settings.providers.push(entry);
+    settings.default_provider = Some(name.clone());
+    settings.default_model = Some(qualify_model_reference(&model, &name, &settings));
+
     state
-        .system_config()
-        .save(&config)
-        .map_err(ApiError::Internal)?;
+        .apply_node_settings(settings)
+        .map_err(ApiError::BadRequest)?;
 
-    let agent = state.apply_llm_provider("kanon-core", provider, config.agent_config());
-
+    let active = active_provider_info(&state)?;
     tracing::info!(
-        protocol = %config.protocol,
-        base_url = %config.base_url,
-        model = %agent.config().default_model,
-        temperature = ?agent.config().temperature,
-        max_tokens = ?agent.config().max_tokens,
-        "LLM provider activated through the control plane; effective immediately"
+        provider = %name,
+        protocol = %protocol,
+        model = %active.model,
+        "Model provider activated through the control plane; effective immediately"
     );
 
     Ok(Json(ActivateProviderResponse {
         applied: true,
-        message: format!(
-            "Provider '{}' activated; new messages use it immediately",
-            config.model
-        ),
-        active: active_provider_info(&state)?,
+        message: format!("Provider '{name}' activated; new messages use it immediately"),
+        active,
     }))
+}
+
+/// Handler for `POST /api/v1/providers`.
+async fn upsert_provider(
+    State(state): State<ApiState>,
+    Json(payload): Json<UpsertProviderRequest>,
+) -> Result<Json<ProvidersCatalogResponse>, ApiError> {
+    let name = payload.name.trim().to_string();
+    if name.is_empty() {
+        return Err(ApiError::BadRequest(
+            "Provider name must not be empty".to_string(),
+        ));
+    }
+    let protocol = payload.protocol.trim().to_lowercase();
+    let base_url = payload.base_url.trim().to_string();
+
+    let mut settings = state.node_settings();
+    let existing = settings
+        .providers
+        .iter()
+        .find(|entry| entry.name == name)
+        .cloned();
+
+    let api_key = if payload.clear_api_key {
+        None
+    } else {
+        payload
+            .api_key
+            .filter(|key| !key.trim().is_empty())
+            .or_else(|| existing.as_ref().and_then(|entry| entry.api_key.clone()))
+    };
+
+    let entry = ProviderEntry {
+        name: name.clone(),
+        protocol: protocol.clone(),
+        base_url: base_url.clone(),
+        api_key: api_key.clone(),
+        temperature: payload.temperature,
+        max_tokens: payload.max_tokens,
+    };
+
+    let model = payload
+        .model
+        .as_deref()
+        .map(|model| qualify_model_reference(model, &name, &settings));
+
+    kanon_llm::build_provider(
+        &protocol,
+        base_url,
+        api_key,
+        model.clone().unwrap_or_default(),
+    )
+    .map_err(ApiError::BadRequest)?;
+
+    if payload.make_default
+        && model.is_none()
+        && settings.default_provider.as_deref() != Some(&name)
+    {
+        return Err(ApiError::BadRequest(format!(
+            "provider '{name}' cannot become the default without a model reference"
+        )));
+    }
+
+    settings.providers.retain(|entry| entry.name != name);
+    settings.providers.push(entry);
+    // Configuring the first endpoint together with a model makes it the default: leaving that
+    // unset would leave the console showing a provider the node does not actually use.
+    let becomes_default =
+        payload.make_default || (settings.default_provider.is_none() && model.is_some());
+    if becomes_default {
+        settings.default_provider = Some(name);
+        if let Some(model) = model {
+            settings.default_model = Some(model);
+        }
+    }
+
+    state
+        .apply_node_settings(settings)
+        .map_err(ApiError::BadRequest)?;
+    list_providers(State(state)).await
+}
+
+/// Handler for `PUT /api/v1/providers/default`.
+async fn set_default_provider(
+    State(state): State<ApiState>,
+    Json(payload): Json<SetDefaultProviderRequest>,
+) -> Result<Json<ProvidersCatalogResponse>, ApiError> {
+    let name = payload.provider.trim().to_string();
+    let mut settings = state.node_settings();
+
+    if !settings.providers.iter().any(|entry| entry.name == name) {
+        return Err(ApiError::NotFound(format!(
+            "provider '{name}' is not configured"
+        )));
+    }
+
+    match payload
+        .model
+        .as_deref()
+        .map(str::trim)
+        .filter(|m| !m.is_empty())
+    {
+        Some(model) => {
+            settings.default_model = Some(qualify_model_reference(model, &name, &settings))
+        }
+        None => {
+            // Keep the current model only when it already belongs to the new default provider;
+            // otherwise the node would send one endpoint's model id to another endpoint.
+            let belongs = settings
+                .default_model
+                .as_deref()
+                .map(|model| ModelRef::parse(model).provider() == Some(name.as_str()))
+                .unwrap_or(false);
+            if !belongs {
+                return Err(ApiError::BadRequest(format!(
+                    "a model reference served by '{name}' is required when changing the default provider"
+                )));
+            }
+        }
+    }
+
+    settings.default_provider = Some(name);
+    state
+        .apply_node_settings(settings)
+        .map_err(ApiError::BadRequest)?;
+    list_providers(State(state)).await
+}
+
+/// Handler for `POST /api/v1/providers/delete`.
+async fn delete_provider(
+    State(state): State<ApiState>,
+    Json(payload): Json<DeleteProviderRequest>,
+) -> Result<Json<ProvidersCatalogResponse>, ApiError> {
+    let name = payload.name.trim().to_string();
+    let mut settings = state.node_settings();
+    let before = settings.providers.len();
+    settings.providers.retain(|entry| entry.name != name);
+
+    if settings.providers.len() == before {
+        return Err(ApiError::NotFound(format!(
+            "provider '{name}' is not configured"
+        )));
+    }
+
+    // Models belong to the endpoint that serves them: keeping them would leave references to a
+    // credential that no longer exists.
+    settings.models.retain(|spec| spec.provider != name);
+
+    if settings.default_provider.as_deref() == Some(name.as_str()) {
+        settings.default_provider = settings.providers.first().map(|entry| entry.name.clone());
+        settings.default_model = None;
+    }
+
+    state
+        .apply_node_settings(settings)
+        .map_err(ApiError::BadRequest)?;
+    list_providers(State(state)).await
 }
 
 /// Handler for `DELETE /api/v1/providers/active`.
 ///
-/// Clearing removes the persisted provider and disables chat on the running node. The environment
-/// bootstrap is deliberately *not* re-applied: it seeds a node at startup and must not resurrect
-/// a provider the operator just removed.
+/// Removes every configured endpoint and disables chat on the running node. The model catalog is
+/// cleared with them; the reply policy is preserved because it is an unrelated preference.
 async fn clear_active_provider(
     State(state): State<ApiState>,
 ) -> Result<Json<ActivateProviderResponse>, ApiError> {
-    state.system_config().clear().map_err(ApiError::Internal)?;
-    state.clear_llm_provider();
+    state.clear_node_providers().map_err(ApiError::BadRequest)?;
 
     tracing::info!("LLM provider cleared through the control plane; chat is now disabled");
 
@@ -396,29 +648,63 @@ async fn test_provider(
     Json(payload): Json<TestProviderRequest>,
 ) -> Result<Json<TestProviderResponse>, ApiError> {
     let prompt = payload.prompt.unwrap_or_else(|| "ping".to_string());
+    let settings = state.node_settings();
 
     let (provider, model): (Arc<dyn LlmProvider>, String) = match (
         payload.protocol,
         payload.base_url,
     ) {
         (Some(proto), Some(url)) => {
-            let model = payload.model.unwrap_or_else(|| "gpt-4o-mini".to_string());
-            // Built through the shared factory so a protocol accepted at activation time is
-            // accepted here too, with identical wire semantics.
-            let provider = kanon_llm::build_provider(&proto, url, payload.api_key, model.clone())
-                .map_err(ApiError::BadRequest)?;
-            (provider, model)
+            let raw_model = payload.model.unwrap_or_else(|| "gpt-4o-mini".to_string());
+            // A test request must be sent to the endpoint being tested, so any provider prefix is
+            // stripped only when it names that endpoint.
+            let model = ModelRef::parse(&raw_model);
+            let upstream = match model.provider() {
+                Some(prefix) if prefix != derive_provider_name(&url) => model.canonical(),
+                _ => model.model().to_string(),
+            };
+            let provider =
+                kanon_llm::build_provider(&proto, url, payload.api_key, upstream.clone())
+                    .map_err(ApiError::BadRequest)?;
+            (provider, upstream)
         }
         _ => {
-            if let Some(agent) = state.agent() {
-                let model = payload
-                    .model
-                    .unwrap_or_else(|| agent.config().default_model.clone());
-                (agent.provider().clone(), model)
-            } else {
+            let active = active_provider_info(&state)?;
+            if !active.configured {
                 return Err(ApiError::BadRequest(
                     "No LLM provider is configured on this node; please specify protocol and base_url to test".to_string(),
                 ));
+            }
+
+            let entry = active
+                .provider
+                .as_deref()
+                .and_then(|name| settings.providers.iter().find(|entry| entry.name == name))
+                .cloned();
+
+            match entry {
+                Some(entry) => {
+                    let model = payload.model.unwrap_or(active.upstream_model);
+                    let provider = kanon_llm::build_provider(
+                        &entry.protocol,
+                        entry.base_url,
+                        entry.api_key,
+                        model.clone(),
+                    )
+                    .map_err(ApiError::BadRequest)?;
+                    (provider, model)
+                }
+                None => {
+                    // An agent injected in-process has no persisted endpoint description; its own
+                    // client is the only truthful thing to probe.
+                    let agent = state.agent().ok_or_else(|| {
+                        ApiError::Unavailable(
+                            "No LLM provider is configured on this node".to_string(),
+                        )
+                    })?;
+                    let model = payload.model.unwrap_or(active.upstream_model);
+                    (agent.provider().clone(), model)
+                }
             }
         }
     };
@@ -477,6 +763,9 @@ pub struct FetchModelsRequest {
     /// Optional API key credential.
     #[serde(default)]
     pub api_key: Option<String>,
+    /// Provider name used for discovery; defaults to one derived from the base URL.
+    #[serde(default)]
+    pub provider: Option<String>,
 }
 
 /// Response payload containing list of model IDs available on the provider.
@@ -484,9 +773,14 @@ pub struct FetchModelsRequest {
 pub struct FetchModelsResponse {
     /// Discovered model identifiers.
     pub models: Vec<String>,
+    /// Full catalog candidates with endpoint-reported metadata.
+    pub candidates: Vec<ModelSpec>,
 }
 
 /// Handler for `POST /api/v1/providers/models`.
+///
+/// Reads the endpoint's own model listing. The rich `candidates` are what the console stores in
+/// the model catalog; `models` is kept as the flat identifier list older clients expect.
 async fn fetch_models(
     State(_state): State<ApiState>,
     Json(payload): Json<FetchModelsRequest>,
@@ -499,136 +793,45 @@ async fn fetch_models(
         ));
     }
 
-    let client = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(10))
-        .build()
-        .map_err(|e| ApiError::Internal(format!("Failed to build HTTP client: {e}")))?;
+    let provider = payload
+        .provider
+        .as_deref()
+        .map(str::trim)
+        .filter(|name| !name.is_empty())
+        .map(str::to_string)
+        .unwrap_or_else(|| derive_provider_name(&base_url));
 
-    let models = if protocol == "anthropic" {
-        // Query Anthropic models endpoint (GET /v1/models)
-        let models_url = if base_url.ends_with("/models") {
-            base_url
-        } else if base_url.ends_with("/v1") {
-            format!("{base_url}/models")
-        } else {
-            format!("{base_url}/v1/models")
-        };
-        let mut req = client.get(&models_url);
-        if let Some(ref key) = payload.api_key {
-            if !key.trim().is_empty() {
-                req = req
-                    .header("x-api-key", key.trim())
-                    .header("anthropic-version", "2023-06-01");
-            }
-        }
-
-        let resp = req.send().await.map_err(|e| {
-            ApiError::Internal(format!(
-                "Failed to connect to Anthropic provider at {models_url}: {e}"
-            ))
-        })?;
-
-        if !resp.status().is_success() {
-            let status = resp.status();
-            let text = resp.text().await.unwrap_or_default();
-            let msg = if status == reqwest::StatusCode::UNAUTHORIZED {
-                if payload.api_key.as_deref().unwrap_or("").trim().is_empty() {
-                    format!(
-                        "Anthropic provider returned HTTP 401 Unauthorized: API key is required but was not provided. Upstream: {text}"
-                    )
-                } else {
-                    format!(
-                        "Anthropic provider returned HTTP 401 Unauthorized: Authentication failed (check API key credentials). Upstream: {text}"
-                    )
-                }
-            } else {
-                format!("Anthropic provider returned HTTP {status}: {text}")
-            };
-            return Err(ApiError::Internal(msg));
-        }
-
-        let json: serde_json::Value = resp.json().await.map_err(|e| {
-            ApiError::Internal(format!("Failed to parse models response JSON: {e}"))
-        })?;
-
-        extract_model_ids(&json)
-    } else {
-        // OpenAI-compatible /v1/models (compatible with DeepSeek, Ollama, SiliconFlow, vLLM, OpenRouter, etc.)
-        let models_url = if base_url.ends_with("/models") {
-            base_url
-        } else if base_url.ends_with("/v1") {
-            format!("{base_url}/models")
-        } else {
-            format!("{base_url}/v1/models")
-        };
-
-        let mut req = client.get(&models_url);
-        if let Some(ref key) = payload.api_key {
-            if !key.trim().is_empty() {
-                req = req.bearer_auth(key.trim());
-            }
-        }
-
-        let resp = req.send().await.map_err(|e| {
-            ApiError::Internal(format!(
-                "Failed to connect to provider at {models_url}: {e}"
-            ))
-        })?;
-
-        if !resp.status().is_success() {
-            let status = resp.status();
-            let text = resp.text().await.unwrap_or_default();
-            let msg = if status == reqwest::StatusCode::UNAUTHORIZED {
-                if payload.api_key.as_deref().unwrap_or("").trim().is_empty() {
-                    format!(
-                        "Provider returned HTTP 401 Unauthorized: API key is required but was not provided. Upstream: {text}"
-                    )
-                } else {
-                    format!(
-                        "Provider returned HTTP 401 Unauthorized: Authentication failed (check API key credentials). Upstream: {text}"
-                    )
-                }
-            } else {
-                format!("Provider returned HTTP {status}: {text}")
-            };
-            return Err(ApiError::Internal(msg));
-        }
-
-        let json: serde_json::Value = resp.json().await.map_err(|e| {
-            ApiError::Internal(format!("Failed to parse models response JSON: {e}"))
-        })?;
-
-        extract_model_ids(&json)
+    let entry = ProviderEntry {
+        name: provider,
+        protocol: protocol.to_string(),
+        base_url,
+        api_key: payload.api_key,
+        temperature: None,
+        max_tokens: None,
     };
 
-    Ok(Json(FetchModelsResponse { models }))
+    let candidates = crate::model_discovery::discover_models(&entry)
+        .await
+        .map_err(ApiError::Upstream)?;
+    let models = candidates.iter().map(|spec| spec.model.clone()).collect();
+
+    Ok(Json(FetchModelsResponse { models, candidates }))
 }
 
-/// Extracts model identifiers from either OpenAI standard `{ data: [{ id: ... }] }`
-/// or Ollama `{ models: [{ name: ... }] }` payload formats.
-fn extract_model_ids(json: &serde_json::Value) -> Vec<String> {
-    let mut list = Vec::new();
-    // OpenAI standard: { "data": [ { "id": "..." } ] }
-    if let Some(data) = json.get("data").and_then(|d| d.as_array()) {
-        for item in data {
-            if let Some(id) = item.get("id").and_then(|s| s.as_str()) {
-                list.push(id.to_string());
-            }
+/// Qualifies a model reference with a provider name unless it already names a configured one.
+///
+/// `deepseek-chat` becomes `xiaomi/deepseek-chat` for the `xiaomi` default; an aggregator's
+/// `anthropic/claude-3.5-sonnet` is kept verbatim when `anthropic` is not a configured endpoint,
+/// because there the slash is part of the upstream model id.
+fn qualify_model_reference(model: &str, provider: &str, settings: &NodeSettings) -> String {
+    let reference = ModelRef::parse(model);
+    match reference.provider() {
+        Some(prefix)
+            if settings.providers.iter().any(|entry| entry.name == prefix)
+                || prefix == provider =>
+        {
+            reference.canonical()
         }
+        _ => format!("{provider}/{}", reference.model()),
     }
-    // Ollama native: { "models": [ { "name": "..." } ] }
-    if list.is_empty() {
-        if let Some(models) = json.get("models").and_then(|m| m.as_array()) {
-            for item in models {
-                if let Some(name) = item.get("name").and_then(|s| s.as_str()) {
-                    list.push(name.to_string());
-                } else if let Some(id) = item.get("id").and_then(|s| s.as_str()) {
-                    list.push(id.to_string());
-                }
-            }
-        }
-    }
-    list.sort();
-    list.dedup();
-    list
 }

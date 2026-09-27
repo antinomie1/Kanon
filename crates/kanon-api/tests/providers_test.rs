@@ -84,7 +84,8 @@ async fn activate_persists_and_applies_without_restart() {
     assert_eq!(body["applied"], json!(true));
     assert_eq!(body["active"]["configured"], json!(true));
     assert_eq!(body["active"]["source"], json!("console"));
-    assert_eq!(body["active"]["model"], json!("unit-test-model"));
+    assert_eq!(body["active"]["model"], json!("local/unit-test-model"));
+    assert_eq!(body["active"]["upstream_model"], json!("unit-test-model"));
     assert_eq!(body["active"]["protocol"], json!("openai"));
     assert_eq!(body["active"]["api_key_configured"], json!(true));
 

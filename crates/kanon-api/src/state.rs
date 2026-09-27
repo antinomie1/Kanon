@@ -9,20 +9,21 @@
 //! provider is configured. In that case `/api/v1/chat/completions` answers `503` explicitly.
 
 use std::path::PathBuf;
-use std::sync::Arc;
+use std::sync::{Arc, RwLock};
 use std::time::Instant;
 
 use kanon_adapter_milky::MilkyAdapter;
 use kanon_core::{
-    EventIngress, InstanceRegistry, McpConfigStore, McpPool, SkillStore, Supervisor, ToggleStore,
+    EventIngress, InstanceRegistry, McpConfigStore, McpPool, ReplyPolicyStore, SkillStore,
+    Supervisor, ToggleStore,
 };
 use kanon_llm::{
     Agent, AgentConfig, AgentFactory, AgentSlot, LlmProvider, Memory, PersonaRegistry,
-    SessionManager, SlidingWindowMemory,
+    ProviderRuntime, SessionManager, SlidingWindowMemory,
 };
 
 use crate::error::ApiError;
-use crate::llm_config::SystemConfigStore;
+use crate::llm_config::{NodeSettings, SystemConfigStore};
 use crate::observability::Observability;
 use crate::plugin_config::PluginConfigStore;
 
@@ -68,6 +69,13 @@ struct ApiStateInner {
     config_store: Arc<PluginConfigStore>,
     /// Persistence for node-level system settings, including the console-selected provider.
     system_config: Arc<SystemConfigStore>,
+    /// Node-wide reply policy shared with the pipeline worker.
+    reply_policy: Arc<ReplyPolicyStore>,
+    /// In-memory view of the persisted model-routing settings.
+    ///
+    /// Kept alongside the store so a read (listing providers, resolving a model) never touches the
+    /// filesystem, while every write goes through [`ApiState::apply_node_settings`].
+    node_settings: Arc<RwLock<NodeSettings>>,
     /// Milky platform adapter owned by this node, absent when the composition root registered none.
     ///
     /// Held as the concrete type rather than through the registry's `dyn PlatformAdapter`, because
@@ -203,6 +211,65 @@ impl ApiState {
         &self.inner.system_config
     }
 
+    /// Node-wide reply policy shared with the pipeline worker.
+    pub fn reply_policy(&self) -> &Arc<ReplyPolicyStore> {
+        &self.inner.reply_policy
+    }
+
+    /// Snapshot of the persisted model-routing settings.
+    pub fn node_settings(&self) -> NodeSettings {
+        self.inner
+            .node_settings
+            .read()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone()
+    }
+
+    /// Validates, persists and applies model-routing settings, then publishes them.
+    ///
+    /// Order is *validate → persist → apply → publish*: nothing reaches disk before the description
+    /// is known-good, and the in-memory snapshot is updated only after the running node accepted
+    /// the directory, so a failed apply cannot leave the console describing a node that does not
+    /// exist.
+    pub fn apply_node_settings(&self, settings: NodeSettings) -> Result<(), String> {
+        settings.reply_policy.validate()?;
+        for provider in &settings.providers {
+            provider.validate()?;
+        }
+
+        self.inner.system_config.save_node_settings(&settings)?;
+        self.inner.factory.configure(
+            "kanon-core",
+            ProviderRuntime {
+                providers: settings.providers.clone(),
+                default_provider: settings.default_provider.clone(),
+                default_model: settings.default_model.clone(),
+                models: settings.models.clone(),
+            },
+        )?;
+        self.inner.reply_policy.set(settings.reply_policy);
+        *self
+            .inner
+            .node_settings
+            .write()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = settings;
+        Ok(())
+    }
+
+    /// Removes every configured provider, disabling conversational routing.
+    ///
+    /// The reply policy is preserved: clearing the model endpoint must not silently reset an
+    /// unrelated operator preference.
+    pub fn clear_node_providers(&self) -> Result<(), String> {
+        let mut settings = self.node_settings();
+        settings.providers.clear();
+        settings.default_provider = None;
+        settings.default_model = None;
+        // The model catalog describes models of the endpoints being removed, so it goes with them.
+        settings.models.clear();
+        self.apply_node_settings(settings)
+    }
+
     /// Milky platform adapter handle, when this node hosts one.
     pub fn milky(&self) -> Option<&Arc<MilkyAdapter>> {
         self.inner.milky.as_ref()
@@ -242,6 +309,7 @@ pub struct ApiStateBuilder {
     mcp_config: Option<Arc<McpConfigStore>>,
     skills: Option<Arc<SkillStore>>,
     system_config: Option<Arc<SystemConfigStore>>,
+    node_settings: Option<NodeSettings>,
     milky: Option<Arc<MilkyAdapter>>,
     config_base_dir: Option<PathBuf>,
     observability: Option<Arc<Observability>>,
@@ -276,6 +344,7 @@ impl ApiStateBuilder {
             mcp_config: None,
             skills: None,
             system_config: None,
+            node_settings: None,
             milky: None,
             config_base_dir: None,
             observability: None,
@@ -407,6 +476,16 @@ impl ApiStateBuilder {
         self
     }
 
+    /// Seeds the node's model-routing settings.
+    ///
+    /// The composition root loads them from `data/system.json` (falling back to the
+    /// `KANON_LLM_*` environment) and hands them over; the builder never reads the file itself so
+    /// an embedded gateway or a test cannot accidentally adopt a real node's configuration.
+    pub fn with_node_settings(mut self, settings: NodeSettings) -> Self {
+        self.node_settings = Some(settings);
+        self
+    }
+
     /// Shares the Milky platform adapter this node registered.
     ///
     /// The gateway never constructs the adapter itself: registration must happen before
@@ -480,12 +559,34 @@ impl ApiStateBuilder {
         ));
 
         // A provider the builder was handed is installed into the shared slot; dropping it
-        // silently would leave the node reporting a provider it cannot use.
+        // silently would leave the node reporting a provider it cannot use. A caller that supplied
+        // model-routing settings instead gets the named-provider directory applied here, which is
+        // how the composition root restores `data/system.json` at startup.
+        let node_settings = self.node_settings.unwrap_or_default();
         if let Some(agent) = self.agent {
             slot.set(Some(agent));
         } else if let Some(pending) = self.pending_llm {
             factory.install(pending.name, pending.provider, pending.config);
+        } else if node_settings.has_providers() {
+            if let Err(err) = factory.configure(
+                "kanon-core",
+                ProviderRuntime {
+                    providers: node_settings.providers.clone(),
+                    default_provider: node_settings.default_provider.clone(),
+                    default_model: node_settings.default_model.clone(),
+                    models: node_settings.models.clone(),
+                },
+            ) {
+                // A malformed persisted directory must not prevent the node from starting: the
+                // gateway still serves its management API, and the operator can fix the endpoint
+                // from the console. Reporting it loudly is what keeps that recoverable.
+                tracing::error!(
+                    error = %err,
+                    "Persisted model provider directory is invalid; the node starts without a provider"
+                );
+            }
         }
+        let reply_policy = Arc::new(ReplyPolicyStore::new(node_settings.reply_policy));
 
         let instances = self.instances.unwrap_or_default();
         let plugin_state = self.plugin_state.unwrap_or_default();
@@ -523,6 +624,8 @@ impl ApiStateBuilder {
                 skills,
                 config_store,
                 system_config,
+                reply_policy,
+                node_settings: Arc::new(RwLock::new(node_settings)),
                 milky: self.milky,
                 observability,
                 ingress: self.ingress,

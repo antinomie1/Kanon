@@ -6,8 +6,8 @@
 
 use kanon_adapter_milky::mapping::{
     self, CHANNEL_FRIEND, CHANNEL_GROUP, CHANNEL_TEMP, CUSTOM_SEGMENT_PREFIX, ChannelScene,
-    MappingError, channel_id, delivery_target, inbound_message, outbound_segment, outbound_segments,
-    parse_channel_id, render_text,
+    MappingError, channel_id, delivery_target, inbound_message, outbound_segment,
+    outbound_segments, parse_channel_id, render_text,
 };
 use kanon_adapter_milky::protocol::{Event, IncomingSegment, OutgoingSegment};
 use kanon_proto::v1::message_segment::Segment;
@@ -135,9 +135,10 @@ fn friend_message_maps_to_pipeline_request() {
 
     let metadata = request.metadata.expect("metadata should be present");
     assert_eq!(
-        metadata.fields.get("milky.message_scene").map(|value| value
-            .kind
-            .clone()),
+        metadata
+            .fields
+            .get("milky.message_scene")
+            .map(|value| value.kind.clone()),
         Some(Some(kanon_proto::prost_types::value::Kind::StringValue(
             "friend".to_string()
         )))

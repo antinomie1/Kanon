@@ -12,7 +12,9 @@ use tokio_stream::StreamExt;
 
 use crate::error::GatewayError;
 use crate::gateway::providers::sse::SseDecoder;
-use crate::gateway::types::{ChatRequest, ChatResponse, Role, TokenUsage, ToolCall};
+use crate::gateway::types::{
+    ChatMessage, ChatRequest, ChatResponse, ContentPart, Role, TokenUsage, ToolCall,
+};
 use crate::gateway::{ChatChunk, ChatChunkStream, LlmProvider};
 
 static CALL_ID_COUNTER: AtomicU64 = AtomicU64::new(1);
@@ -63,6 +65,8 @@ mod wire {
         InputText { text: String },
         #[serde(rename = "output_text")]
         OutputText { text: String },
+        #[serde(rename = "input_image")]
+        InputImage { image_url: String },
     }
 
     #[derive(Debug, Serialize)]
@@ -131,6 +135,32 @@ mod wire {
         pub output_tokens: Option<u32>,
         pub total_tokens: Option<u32>,
     }
+}
+
+/// Builds the content parts of a Responses API user message, including any images.
+///
+/// The textual projection is emitted first so a model that ignores images still receives the
+/// caption and the surrounding conversation.
+fn user_content(msg: &ChatMessage) -> Vec<wire::ResponsesContentPart> {
+    let mut content = Vec::new();
+    if let Some(text) = msg.content.as_ref().filter(|text| !text.is_empty()) {
+        content.push(wire::ResponsesContentPart::InputText { text: text.clone() });
+    }
+    for part in msg.parts.as_deref().unwrap_or_default() {
+        match part {
+            ContentPart::Text { text } => {
+                content.push(wire::ResponsesContentPart::InputText { text: text.clone() });
+            }
+            ContentPart::Image { .. } => {
+                let Some(image_url) = part.resolved_image_url() else {
+                    tracing::warn!("Dropping an image part that resolved to no URL");
+                    continue;
+                };
+                content.push(wire::ResponsesContentPart::InputImage { image_url });
+            }
+        }
+    }
+    content
 }
 
 /// Client for the OpenAI Responses API (`/v1/responses`).
@@ -218,10 +248,9 @@ impl LlmProvider for OpenAiResponsesProvider {
                     }
                 }
                 Role::User => {
-                    let text = msg.content.clone().unwrap_or_default();
                     input.push(wire::ResponsesInputItem::Message {
                         role: "user".to_string(),
-                        content: vec![wire::ResponsesContentPart::InputText { text }],
+                        content: user_content(msg),
                     });
                 }
                 Role::Assistant => {
@@ -407,10 +436,9 @@ impl LlmProvider for OpenAiResponsesProvider {
                     }
                 }
                 Role::User => {
-                    let text = msg.content.clone().unwrap_or_default();
                     input.push(wire::ResponsesInputItem::Message {
                         role: "user".to_string(),
-                        content: vec![wire::ResponsesContentPart::InputText { text }],
+                        content: user_content(msg),
                     });
                 }
                 Role::Assistant => {

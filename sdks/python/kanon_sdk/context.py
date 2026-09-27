@@ -3,7 +3,7 @@
 import asyncio
 import uuid
 from pathlib import Path
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional
 
 from google.protobuf.json_format import ParseDict
 from google.protobuf.struct_pb2 import Struct
@@ -113,6 +113,7 @@ class CoreHandle:
         text: str,
         event_id: Optional[str] = None,
         metadata: Optional[Dict[str, Any]] = None,
+        segments: Optional[List[Dict[str, Any]]] = None,
     ) -> pb.IngestEventResponse:
         """Pushes one inbound platform message into the Core pipeline.
 
@@ -120,13 +121,28 @@ class CoreHandle:
             platform: Adapter platform identifier, e.g. ``"telegram"``.
             channel_id: Platform-side conversation/channel/group identifier.
             sender_id: Platform-side identifier of the message author.
-            text: Raw inbound text. Rich media is intentionally out of scope for
-                this primitive; adapters may describe it through ``metadata``.
+            text: Raw inbound text. Kept for adapters and events that carry only
+                plain text; for anything the model must *see* (mentions, images,
+                audio, replies), describe it through ``segments`` instead of
+                encoding it into this string.
             event_id: Optional caller-supplied idempotency/deduplication id. When
                 omitted a random ``uuid4().hex`` is generated, so every call
                 still carries a non-empty id.
             metadata: Optional JSON-compatible mapping forwarded to Core as a
                 ``google.protobuf.Struct`` (nested dicts/lists are supported).
+                Platform-neutral well-known keys such as
+                ``"kanon.conversation_kind"`` and ``"kanon.bot_mentioned"``
+                belong here, because Core (not the adapter) applies the reply
+                policy to them.
+            segments: Optional inbound message content in proto-JSON segment
+                shape, e.g. ``{"text": {"content": "hi"}}``,
+                ``{"image": {"url": "https://...", "mime_type": "image/png"}}``
+                or ``{"mention": {"target_user_id": "abc"}}``. This is the rule
+                for rich media: every part of the message the model may need is
+                expressed as a typed segment, never as flattened strings or
+                metadata, so Core renders one canonical model-visible message.
+                Each entry must set exactly one ``MessageSegment`` variant;
+                omitting the argument keeps the previous text-only behaviour.
 
         Returns:
             The raw ``pb.IngestEventResponse``. ``accepted`` reflects Core's
@@ -135,6 +151,10 @@ class CoreHandle:
             success. ``event_id`` echoes the id used for this event.
 
         Raises:
+            ValueError: If a ``segments`` entry sets no ``MessageSegment``
+                variant. Such an entry carries no content the model could
+                render, so failing here names the offending index instead of
+                shipping an empty segment Core would have to ignore.
             grpc.aio.AioRpcError: If the shared channel could not reach Core, or
                 Core answered with an error status. Deliberately not swallowed:
                 "Core unreachable" and "Core rejected the event" are different
@@ -153,6 +173,25 @@ class CoreHandle:
             event_metadata = Struct()
             ParseDict(metadata, event_metadata)
 
+        # Segments travel in proto-JSON shape so adapters can forward platform
+        # JSON-derived dicts directly. ParseDict is the same mapping helper used
+        # for metadata, and it fails loudly on a malformed payload rather than
+        # silently dropping a part of the user's message.
+        event_segments: List[pb.MessageSegment] = []
+        if segments is not None:
+            for index, segment in enumerate(segments):
+                parsed_segment = pb.MessageSegment()
+                ParseDict(segment, parsed_segment)
+                # An empty dict parses without error but leaves the `segment`
+                # oneof unset; such an entry has no content the model could
+                # render, so reject it with the index instead of forwarding a
+                # valueless segment Core would have to ignore.
+                if parsed_segment.WhichOneof("segment") is None:
+                    raise ValueError(
+                        f"segments[{index}] does not set any MessageSegment variant"
+                    )
+                event_segments.append(parsed_segment)
+
         # Both the outer request and the nested event carry the platform: Core's
         # pipeline worker prefers event.platform and only falls back to the outer
         # field, so setting both keeps routing unambiguous.
@@ -165,6 +204,7 @@ class CoreHandle:
                 sender_id=sender_id,
                 raw_text=text,
                 metadata=event_metadata,
+                segments=event_segments,
             ),
         )
 

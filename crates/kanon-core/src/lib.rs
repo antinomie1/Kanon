@@ -10,6 +10,7 @@
 //! `crates/kanon`.
 
 pub mod adapter;
+pub mod conversation;
 pub mod instance;
 pub mod ipc;
 pub mod manifest;
@@ -23,6 +24,10 @@ pub mod toggle;
 pub use adapter::{
     AdapterDescriptor, AdapterError, AdapterKind, AdapterRegistry, EventIngress, IngestError,
     PlatformAdapter,
+};
+pub use conversation::{
+    ConversationKind, META_BOT_MENTIONED, META_CONVERSATION_KIND, ReplyMode, ReplyPolicy,
+    ReplyPolicyStore, bot_mentioned,
 };
 pub use instance::{
     BotInstance, DEFAULT_INSTANCE_CATALOG, InstanceDraft, InstanceError, InstanceRegistry,
@@ -39,9 +44,9 @@ pub use mcp::{
     prune_attachments,
 };
 pub use pipeline::{
-    CommandRouter, DEFAULT_OUTBOUND_QUEUE_CAPACITY, DeliveryOutcome, MatchedCommand,
+    CommandRouter, DEFAULT_OUTBOUND_QUEUE_CAPACITY, DeliveryOutcome, MODEL_COMMAND, MatchedCommand,
     NEW_SESSION_COMMAND, PipelineEngine, PipelineObserver, PipelineResult, PipelineStage,
-    PreFilterChain, PreFilterOutcome,
+    PreFilterChain, PreFilterOutcome, build_user_message,
 };
 pub use shutdown::shutdown_signal;
 pub use skill::{

@@ -298,7 +298,28 @@ impl ToolRouter {
         user_input: &str,
         hosts: &[Arc<dyn ToolHost>],
     ) -> Result<ToolRouterOutput, ToolRouterError> {
-        match self.agent.run(session_id, user_input, hosts).await {
+        self.map_result(self.agent.run(session_id, user_input, hosts).await)
+    }
+
+    /// Executes the tool calling loop for a fully built user message.
+    ///
+    /// Used by the pipeline so a turn that referenced media reaches the provider with its
+    /// multimodal parts intact; plain text callers keep using [`ToolRouter::execute`].
+    pub async fn execute_message(
+        &self,
+        session_id: &str,
+        message: crate::gateway::types::ChatMessage,
+        hosts: &[Arc<dyn ToolHost>],
+    ) -> Result<ToolRouterOutput, ToolRouterError> {
+        self.map_result(self.agent.run_message(session_id, message, hosts).await)
+    }
+
+    /// Projects an agent run result into the router's output type.
+    fn map_result(
+        &self,
+        result: Result<crate::agent::AgentOutput, AgentError>,
+    ) -> Result<ToolRouterOutput, ToolRouterError> {
+        match result {
             Ok(output) => Ok(ToolRouterOutput {
                 content: output.content,
                 executed_tools: output.executed_tools,

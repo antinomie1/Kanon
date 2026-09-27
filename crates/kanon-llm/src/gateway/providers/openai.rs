@@ -13,7 +13,9 @@ use tokio_stream::StreamExt;
 
 use crate::error::GatewayError;
 use crate::gateway::providers::sse::SseDecoder;
-use crate::gateway::types::{ChatMessage, ChatRequest, ChatResponse, Role, TokenUsage, ToolCall};
+use crate::gateway::types::{
+    ChatMessage, ChatRequest, ChatResponse, ContentPart, Role, TokenUsage, ToolCall,
+};
 use crate::gateway::{ChatChunk, ChatChunkStream, LlmProvider};
 
 /// Private wire structures representing the standard OpenAI Chat Completions JSON schema.
@@ -38,8 +40,9 @@ mod wire {
     #[derive(Debug, Serialize, Deserialize)]
     pub struct OpenAiMessageWire {
         pub role: String,
+        /// Plain text for a classic message, or an array of content parts for a multimodal one.
         #[serde(skip_serializing_if = "Option::is_none")]
-        pub content: Option<String>,
+        pub content: Option<serde_json::Value>,
         #[serde(skip_serializing_if = "Option::is_none")]
         pub tool_calls: Option<Vec<OpenAiToolCallWire>>,
         #[serde(skip_serializing_if = "Option::is_none")]
@@ -228,11 +231,47 @@ impl OpenAiChatProvider {
 
         wire::OpenAiMessageWire {
             role,
-            content: msg.content.clone(),
+            content: message_content(msg),
             tool_calls,
             tool_call_id: msg.tool_call_id.clone(),
         }
     }
+}
+
+/// Renders a message's content in the OpenAI wire shape.
+///
+/// A message with multimodal parts becomes a content array (`text` + `image_url` blocks); every
+/// other message stays a plain string, which is what endpoints that predate vision expect. A part
+/// whose image cannot be materialized is dropped with a warning rather than sent as a broken URL.
+fn message_content(msg: &ChatMessage) -> Option<serde_json::Value> {
+    let has_parts = msg.has_parts();
+    if !has_parts {
+        return msg.content.clone().map(serde_json::Value::String);
+    }
+
+    let mut blocks: Vec<serde_json::Value> = Vec::new();
+    if let Some(text) = msg.content.as_ref().filter(|text| !text.is_empty()) {
+        blocks.push(serde_json::json!({ "type": "text", "text": text }));
+    }
+    for part in msg.parts.as_deref().unwrap_or_default() {
+        match part {
+            ContentPart::Text { text: part_text } => {
+                blocks.push(serde_json::json!({ "type": "text", "text": part_text }));
+            }
+            ContentPart::Image { .. } => {
+                let Some(url) = part.resolved_image_url() else {
+                    tracing::warn!("Dropping an image part that resolved to no URL");
+                    continue;
+                };
+                blocks.push(serde_json::json!({
+                    "type": "image_url",
+                    "image_url": { "url": url },
+                }));
+            }
+        }
+    }
+
+    Some(serde_json::Value::Array(blocks))
 }
 
 #[async_trait]

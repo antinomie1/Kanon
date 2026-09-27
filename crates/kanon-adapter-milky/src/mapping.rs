@@ -217,7 +217,7 @@ pub fn inbound_message(
         return Ok(None);
     };
 
-    let inbound = translate_incoming_message(data);
+    let inbound = translate_incoming_message(data, self_id);
     let event_id = format!(
         "{platform}:{self_id}:{}:{}:{}",
         inbound.channel_id, inbound.sender_id, inbound.message_seq
@@ -256,7 +256,10 @@ struct IncomingTranslation {
 }
 
 /// Translates the scene-specific payload of an inbound message.
-fn translate_incoming_message(message: &IncomingMessage) -> IncomingTranslation {
+///
+/// `self_id` is needed to answer whether the bot itself was addressed, which the core's reply
+/// policy consumes; it is the only platform fact the policy cannot infer.
+fn translate_incoming_message(message: &IncomingMessage, self_id: i64) -> IncomingTranslation {
     let (scene, peer_id, message_seq, sender_id, segments, sender_name, extra) = match message {
         IncomingMessage::Friend {
             peer_id,
@@ -330,6 +333,19 @@ fn translate_incoming_message(message: &IncomingMessage) -> IncomingTranslation 
     metadata_fields.insert(META_MESSAGE_SEQ.to_string(), json!(message_seq));
     metadata_fields.insert(META_PEER_ID.to_string(), json!(peer_id));
     metadata_fields.insert(META_SENDER_ID.to_string(), json!(sender_id));
+    // Platform-neutral facts the core's reply policy consumes. Milky reports the scene and the
+    // mention targets; deciding whether they mean "answer this" stays a core (instance) decision.
+    metadata_fields.insert(
+        kanon_core::META_CONVERSATION_KIND.to_string(),
+        json!(match scene {
+            ChannelScene::Group => "group",
+            ChannelScene::Friend | ChannelScene::Temp => "private",
+        }),
+    );
+    metadata_fields.insert(
+        kanon_core::META_BOT_MENTIONED.to_string(),
+        json!(mentions_bot(segments, self_id)),
+    );
     if let Some(name) = sender_name {
         metadata_fields.insert(META_SENDER_NAME.to_string(), Value::String(name));
     }
@@ -345,6 +361,18 @@ fn translate_incoming_message(message: &IncomingMessage) -> IncomingTranslation 
         segments: segments.iter().map(incoming_segment).collect(),
         metadata: json_to_struct(&Value::Object(metadata_fields)),
     }
+}
+
+/// Whether a Milky message addresses the bot itself.
+///
+/// `@all` counts: the mention does include the bot, and a bot configured to answer when mentioned
+/// should not ignore exactly the announcement every participant is expected to see.
+pub fn mentions_bot(segments: &[IncomingSegment], self_id: i64) -> bool {
+    segments.iter().any(|segment| match segment {
+        IncomingSegment::Mention(data) => data.user_id == self_id,
+        IncomingSegment::MentionAll => true,
+        _ => false,
+    })
 }
 
 /// Renders the human-readable text of a Milky message.
@@ -368,7 +396,8 @@ pub fn render_text(segments: &[IncomingSegment]) -> String {
             IncomingSegment::MentionAll => rendered.push_str("@all"),
             IncomingSegment::Face(_) => rendered.push_str("[face]"),
             // The quoted message is carried by the reply *segment*, so it is not inlined here:
-            // duplicating it would make the model believe the quote was said again.
+            // duplicating it would make the model believe the quote was said again. The
+            // model-context builder reads the segment itself when a quote is useful.
             IncomingSegment::Reply(_) => {}
             IncomingSegment::Image(_) => rendered.push_str("[image]"),
             IncomingSegment::Record(_) => rendered.push_str("[voice]"),

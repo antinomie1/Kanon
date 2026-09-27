@@ -6,6 +6,12 @@
 
 use crate::gateway::types::{ChatMessage, ToolCall};
 
+/// Token cost attributed to one image part.
+///
+/// Providers bill an image as a flat block whose size depends on its resolution, which the
+/// estimator cannot know; a constant keeps the budget from ignoring media entirely.
+const IMAGE_PART_TOKENS: usize = 256;
+
 /// Estimates the token count of a plain string slice.
 ///
 /// Heuristic:
@@ -44,6 +50,17 @@ pub fn estimate_message_tokens(msg: &ChatMessage) -> usize {
 
     if let Some(ref content) = msg.content {
         total += estimate_text_tokens(content);
+    }
+
+    // Multimodal parts are additional payload: providers transmit both the textual projection in
+    // `content` and the parts, so both are counted.
+    if let Some(ref parts) = msg.parts {
+        for part in parts {
+            total += match part {
+                crate::gateway::types::ContentPart::Text { text } => estimate_text_tokens(text),
+                crate::gateway::types::ContentPart::Image { .. } => IMAGE_PART_TOKENS,
+            };
+        }
     }
 
     if let Some(ref tool_calls) = msg.tool_calls {

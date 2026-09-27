@@ -26,14 +26,20 @@
 //! - `KANON_LLM_MODEL` — default model identifier.
 //! - `KANON_LLM_PROTOCOL` — `openai` (default), `openai_responses` or `anthropic`.
 //! - `RUST_LOG` — standard `tracing` filter directive.
+//!
+//! Model routing itself lives in `data/system.json`: a named provider directory plus a per-model
+//! settings catalog, both editable through the console. A model is addressed as
+//! `<provider>/<model-id>`; the `KANON_LLM_*` variables only seed that directory when it is empty,
+//! registering the endpoint under the preset name its base URL matches. The same document carries
+//! the node-wide reply policy inherited by every instance without an override.
 
 use std::net::SocketAddr;
 use std::sync::Arc;
 
 use kanon_adapter_milky::{MilkyAdapter, MilkyConfig};
-use kanon_api::llm_config::resolve_bootstrap;
 use kanon_api::{
-    ApiServer, ApiState, LlmProviderConfig, Observability, SystemConfigStore, WebhookAdapter,
+    ApiServer, ApiState, LlmProviderConfig, NodeSettings, Observability, SystemConfigStore,
+    WebhookAdapter,
 };
 use kanon_core::ipc::{CoreApiService, CoreIpcServer, DEFAULT_INGEST_QUEUE_CAPACITY};
 use kanon_core::pipeline::PipelineEngine;
@@ -151,9 +157,15 @@ async fn main() -> StartupResult<()> {
     let milky_adapter = register_milky_adapter(&supervisor).await?;
 
     // --- Management gateway state & agent engine --------------------------------------
-    // The state owns one agent factory (and the provider slot inside it), shared with the
-    // pipeline worker and the IPC service, so a provider configured later through the console is
-    // observed by all three without a restart.
+    // The state owns one agent factory (and the named provider directory inside it), shared with
+    // the pipeline worker and the IPC service, so a provider configured later through the console
+    // is observed by all three without a restart.
+    //
+    // Bootstrap order: providers saved by the console win over the environment, because the console
+    // is how an operator changes the node after it started. The settings are validated and applied
+    // by the builder itself, so a bootstrapped directory and a console-configured one are applied
+    // through exactly the same path.
+    let node_settings = bootstrap_node_settings()?;
     let state = ApiState::builder(supervisor.clone())
         .with_milky_adapter(milky_adapter)
         .with_observability(observability.clone())
@@ -163,6 +175,7 @@ async fn main() -> StartupResult<()> {
         .with_mcp_pool(mcp_pool.clone())
         .with_mcp_config(mcp_config.clone())
         .with_skill_store(skills.clone())
+        .with_node_settings(node_settings)
         .with_native_tools(vec![Arc::new(ReadSkillTool::new(
             skills.clone(),
             plugin_state.clone(),
@@ -178,30 +191,18 @@ async fn main() -> StartupResult<()> {
     // Publish instance prompts as personas before the first message can arrive.
     sync_instance_personas(&instances.list().await, state.personas());
 
-    // Bootstrap order: a provider saved by the console wins over the environment, because the
-    // console is how an operator changes the node after it started. Installation goes through
-    // `apply_llm_provider`, the very same path the console uses, so a bootstrapped provider and a
-    // console-configured one are constructed identically (shared memory, personas, trace hooks).
-    match bootstrap_provider()? {
-        Some((config, source)) => {
-            let provider = config
-                .resolve()
-                .map_err(|err| format!("Invalid LLM provider from {source}: {err}"))?;
-            tracing::info!(
-                source = %source,
-                protocol = %config.protocol,
-                base_url = %config.base_url,
-                model = %config.model,
-                "LLM provider configured for conversational pipeline and sandbox chat"
-            );
-            state.apply_llm_provider("kanon-core", provider, config.agent_config());
-        }
-        None => {
-            tracing::warn!(
-                "No LLM provider is configured (data/system.json and KANON_LLM_BASE_URL are both empty); \
-                 chat completions and conversational LLM routing are disabled"
-            );
-        }
+    match state.agent() {
+        Some(agent) => tracing::info!(
+            model = %agent.config().model_ref(),
+            provider = ?agent.config().provider,
+            temperature = ?agent.config().temperature,
+            max_tokens = ?agent.config().max_tokens,
+            "LLM provider configured for conversational pipeline and sandbox chat"
+        ),
+        None => tracing::warn!(
+            "No LLM provider is configured (data/system.json and KANON_LLM_BASE_URL are both empty); \
+             chat completions and conversational LLM routing are disabled"
+        ),
     }
 
     // The pipeline never awaits platform I/O: replies are queued and an independent dispatcher
@@ -212,6 +213,7 @@ async fn main() -> StartupResult<()> {
             .with_agent_factory(state.agent_factory().clone())
             .with_instances(instances.clone())
             .with_toggles(plugin_state.clone())
+            .with_reply_policy(state.reply_policy().clone())
             .with_mcp_pool(mcp_pool.clone()),
     );
     let pipeline_worker = engine.clone().start_worker(event_rx);
@@ -319,23 +321,42 @@ async fn main() -> StartupResult<()> {
     Ok(())
 }
 
-/// Resolves the provider a freshly started node should use.
+/// Resolves the model-routing settings a freshly started node should use.
 ///
-/// A provider persisted through the management console takes precedence over the
-/// `KANON_LLM_*` environment bootstrap; the returned label names the source for the startup log.
-/// A malformed persisted document is a hard startup error rather than a silent fallback, because
-/// running without the operator's chosen provider is exactly the surprise this precedence exists
-/// to prevent.
-fn bootstrap_provider() -> StartupResult<Option<(LlmProviderConfig, &'static str)>> {
+/// A directory persisted through the management console takes precedence over the `KANON_LLM_*`
+/// environment bootstrap; the environment is only synthesized when the document carries no
+/// provider at all. A malformed persisted document is a hard startup error rather than a silent
+/// fallback, because running without the operator's chosen provider is exactly the surprise this
+/// precedence exists to prevent.
+fn bootstrap_node_settings() -> StartupResult<NodeSettings> {
     let store = SystemConfigStore::default();
-    let persisted = store.load().map_err(|err| {
+    let persisted = store.load_node_settings().map_err(|err| {
         format!(
             "Failed to load node system configuration at {}: {err}",
             store.path().display()
         )
     })?;
 
-    Ok(resolve_bootstrap(persisted, LlmProviderConfig::from_env()))
+    if persisted.has_providers() {
+        tracing::info!(
+            providers = ?persisted.providers.iter().map(|entry| entry.name.as_str()).collect::<Vec<_>>(),
+            default_model = ?persisted.default_model,
+            "Model provider directory loaded from data/system.json"
+        );
+        return Ok(persisted);
+    }
+
+    match LlmProviderConfig::from_env() {
+        Some(config) => {
+            tracing::info!(
+                base_url = %config.base_url,
+                model = %config.model,
+                "No provider in data/system.json; using the KANON_LLM_* environment bootstrap"
+            );
+            Ok(config.into_node_settings())
+        }
+        None => Ok(persisted),
+    }
 }
 
 /// Builds and registers the Milky platform adapter.

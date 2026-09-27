@@ -17,16 +17,18 @@ use tokio::sync::{Mutex, RwLock, mpsc};
 use tokio::task::JoinHandle;
 
 use kanon_llm::tool_router::ToolRouter;
-use kanon_llm::{AgentFactory, AgentSlot, strip_reasoning_tags};
+use kanon_llm::{AgentFactory, AgentSlot, ModelRef, ModelSpec, strip_reasoning_tags};
 use kanon_proto::v1::message_segment::Segment;
 use kanon_proto::v1::{
     DeliverMessageRequest, IngestEventRequest, MessageSegment, PipelineEventRequest,
 };
 
 use crate::adapter::{AdapterDescriptor, AdapterError, AdapterKind};
+use crate::conversation::{ConversationKind, ReplyPolicyStore, bot_mentioned};
 use crate::instance::InstanceRegistry;
 use crate::mcp::McpPool;
 use crate::pipeline::command::CommandRouter;
+use crate::pipeline::context::build_user_message;
 use crate::pipeline::dead_letter::DeadLetterWriter;
 use crate::pipeline::observer::{PipelineObserver, PipelineStage};
 use crate::pipeline::pre_filter::{PreFilterChain, PreFilterOutcome};
@@ -90,6 +92,31 @@ pub enum PipelineResult {
         /// Confirmation delivered back to the conversation.
         replies: Vec<MessageSegment>,
     },
+    /// The built-in `/model` command selected a model for one instance.
+    ModelSelected {
+        /// Instance whose model override was changed.
+        instance_id: String,
+        /// Canonical `<provider>/<model-id>` reference now in effect.
+        model: String,
+        /// Confirmation delivered back to the conversation.
+        replies: Vec<MessageSegment>,
+    },
+    /// The built-in `/model` command listed the models an operator may switch to.
+    ModelListed {
+        /// Instance the listing was produced for.
+        instance_id: String,
+        /// Number of listed models.
+        count: usize,
+        /// Listing delivered back to the conversation.
+        replies: Vec<MessageSegment>,
+    },
+    /// The instance's reply policy decided not to answer this event.
+    ReplySuppressed {
+        /// Instance whose policy suppressed the reply.
+        instance_id: String,
+        /// Human-readable reason, suitable for logs and traces.
+        reason: String,
+    },
     /// No enabled bot instance claims the event's platform, so nothing may answer it.
     NoInstance {
         /// Platform that nobody claimed.
@@ -101,6 +128,13 @@ pub enum PipelineResult {
 
 /// Name of the built-in session command, handled by the core and never by the model.
 pub const NEW_SESSION_COMMAND: &str = "new";
+
+/// Name of the built-in model command, handled by the core and never by the model.
+///
+/// `/model` lists the models the node knows about; `/model <index>` switches the model of the
+/// instance the command was issued to. It is resolved before plugin commands so a plugin can never
+/// shadow it, and long before the LLM, which must never see it as conversation text.
+pub const MODEL_COMMAND: &str = "model";
 
 /// Identity of one conversation inside an instance: channel plus sender.
 ///
@@ -131,6 +165,49 @@ pub struct DeliveryOutcome {
     pub message_id: String,
 }
 
+/// Builds an outbound text reply segment.
+fn text_reply(content: impl Into<String>) -> MessageSegment {
+    MessageSegment {
+        segment: Some(Segment::Text(kanon_proto::v1::TextSegment {
+            content: content.into(),
+        })),
+    }
+}
+
+/// Renders the `/model` listing as plain text.
+fn render_model_list(options: &[(String, Option<ModelSpec>)], current: Option<&str>) -> String {
+    if options.is_empty() {
+        return "当前没有可用模型；请先在控制台配置提供商和模型。".to_string();
+    }
+
+    let mut rendered = String::from("可用模型：\n");
+    for (index, (reference, spec)) in options.iter().enumerate() {
+        rendered.push_str(&format!("{}. {reference}", index + 1));
+        if let Some(context_length) = spec.as_ref().and_then(|spec| spec.context_length) {
+            rendered.push_str(&format!(" (上下文 {context_length})"));
+        }
+        if current == Some(reference.as_str()) {
+            rendered.push_str(" ✓ 当前");
+        }
+        rendered.push('\n');
+    }
+    rendered.push_str("回复 /model <序号> 切换当前实例模型。");
+    rendered
+}
+
+/// Draws the sample used by the probability reply mode.
+///
+/// Derived from the event id so the same event always yields the same decision (a retry cannot
+/// flip a drop into a reply), while distinct events are independent. `RandomState` is randomly
+/// seeded per process, so the sequence is not predictable from the outside.
+fn reply_sample(event_id: &str) -> f32 {
+    use std::hash::{BuildHasher, Hash, Hasher};
+
+    let mut hasher = std::collections::hash_map::RandomState::new().build_hasher();
+    event_id.hash(&mut hasher);
+    (hasher.finish() % 10_000) as f32 / 10_000.0
+}
+
 /// Central event processing engine driving the message pipeline.
 pub struct PipelineEngine {
     /// Reference to the process supervisor managing active plugin hosts and adapters.
@@ -152,6 +229,11 @@ pub struct PipelineEngine {
     instances: Option<Arc<InstanceRegistry>>,
     /// Global enable switches shared with the control plane.
     toggles: Option<Arc<ToggleStore>>,
+    /// Node-wide reply policy, when the control plane provides one.
+    ///
+    /// Optional for the same reason as the instance catalog: an embedded pipeline without a policy
+    /// store keeps answering everything, which is the pre-policy behaviour.
+    reply_policy: Option<Arc<ReplyPolicyStore>>,
     /// MCP servers contributing tools alongside plugin hosts.
     mcp: Option<Arc<McpPool>>,
     /// Optional lifecycle observer used by the management control plane for tracing.
@@ -179,6 +261,7 @@ impl PipelineEngine {
             agent_factory: None,
             instances: None,
             toggles: None,
+            reply_policy: None,
             mcp: None,
             observer: None,
             dead_letter: Arc::new(DeadLetterWriter::default()),
@@ -234,6 +317,12 @@ impl PipelineEngine {
     /// Shares the global enable switches used for per-instance policy resolution.
     pub fn with_toggles(mut self, toggles: Arc<ToggleStore>) -> Self {
         self.toggles = Some(toggles);
+        self
+    }
+
+    /// Shares the node-wide reply policy used when an instance does not override it.
+    pub fn with_reply_policy(mut self, policy: Arc<ReplyPolicyStore>) -> Self {
+        self.reply_policy = Some(policy);
         self
     }
 
@@ -740,14 +829,19 @@ impl PipelineEngine {
 
         // Phase 2a: Built-in commands, resolved by the core itself.
         //
-        // `/new` rotates the session of the conversation that issued it. It is matched before
-        // plugin commands (so a plugin can never shadow it) and long before the LLM, which must
-        // never receive it as conversation text.
+        // `/new` rotates the session of the conversation that issued it and `/model` lists or
+        // switches the instance's model. Both are matched before plugin commands (so a plugin can
+        // never shadow them) and long before the LLM, which must never receive them as
+        // conversation text.
         if let Some(instance) = instance.as_ref()
-            && let Some((cmd_name, _args)) = CommandRouter::parse_command(&text_candidate)
-            && cmd_name.eq_ignore_ascii_case(NEW_SESSION_COMMAND)
+            && let Some((cmd_name, args)) = CommandRouter::parse_command(&text_candidate)
         {
-            return self.handle_new_session(&filtered_event, instance).await;
+            if cmd_name.eq_ignore_ascii_case(NEW_SESSION_COMMAND) {
+                return self.handle_new_session(&filtered_event, instance).await;
+            }
+            if cmd_name.eq_ignore_ascii_case(MODEL_COMMAND) {
+                return self.handle_model_command(instance, &args).await;
+            }
         }
 
         if let Some((cmd_name, args)) = CommandRouter::parse_command(&text_candidate) {
@@ -805,6 +899,41 @@ impl PipelineEngine {
             }
         }
 
+        // Phase 2c: Reply policy gate.
+        //
+        // Evaluated after commands and before the model: built-in and plugin slash commands always
+        // answer, while an unaddressed group message never reaches the LLM when the instance asked
+        // to be mentioned first. Pre-filters have already run, so a plugin still observes every
+        // inbound event — this gate only decides whether the *bot* answers.
+        if let Some(instance) = instance.as_ref() {
+            let kind = ConversationKind::from_metadata(filtered_event.metadata.as_ref());
+            let mentioned = bot_mentioned(filtered_event.metadata.as_ref());
+            let policy = instance.effective_reply_policy(
+                self.reply_policy
+                    .as_ref()
+                    .map(|store| store.get())
+                    .unwrap_or_default(),
+            );
+            let sample = reply_sample(&filtered_event.event_id);
+            if !policy.should_reply(kind, mentioned, sample) {
+                let reason = format!(
+                    "reply policy '{}' suppressed a {} conversation (mentioned={mentioned})",
+                    policy.describe(),
+                    kind.as_str()
+                );
+                tracing::info!(
+                    instance_id = %instance.id,
+                    event_id = %filtered_event.event_id,
+                    reason = %reason,
+                    "Reply suppressed by the instance reply policy"
+                );
+                return PipelineResult::ReplySuppressed {
+                    instance_id: instance.id.clone(),
+                    reason,
+                };
+            }
+        }
+
         // Phase 3: Conversational message (unmatched by command router, routed to LLM if enabled)
         // The agent is resolved per event so a provider configured or cleared at runtime is
         // honoured immediately; an empty slot means "no conversational LLM" and passes through.
@@ -820,7 +949,17 @@ impl PipelineEngine {
             None => self.agent.current(),
         };
 
-        if !text_candidate.is_empty()
+        // An image may only be attached when the model that will serve the turn accepts one;
+        // otherwise the placeholder text stays, which is what a text-only endpoint expects.
+        let vision = match (self.agent_factory.as_ref(), resolved_agent.as_ref()) {
+            (Some(factory), Some(agent)) => factory
+                .models()
+                .supports_vision(&ModelRef::parse(&agent.config().model_ref())),
+            _ => false,
+        };
+        let user_message = build_user_message(&filtered_event, vision);
+
+        if (user_message.content.is_some() || user_message.has_parts())
             && let Some(agent) = resolved_agent
         {
             let router = ToolRouter::from_arc(agent.clone());
@@ -872,7 +1011,7 @@ impl PipelineEngine {
             }
 
             match router
-                .execute(&session_id, &text_candidate, &active_hosts)
+                .execute_message(&session_id, user_message, &active_hosts)
                 .await
             {
                 Ok(output) => {
@@ -993,6 +1132,120 @@ impl PipelineEngine {
         }
     }
 
+    /// Handles the built-in `/model` command for one instance.
+    ///
+    /// With no argument — or one that is not a valid index — it lists the models an operator may
+    /// switch to. With a valid 1-based index it persists the choice on the instance, so a restart
+    /// does not silently move the conversation back to the previous model.
+    async fn handle_model_command(
+        &self,
+        instance: &crate::instance::BotInstance,
+        args: &[String],
+    ) -> PipelineResult {
+        let options = self.model_options(instance);
+        let current = instance
+            .model
+            .clone()
+            .or_else(|| self.node_model_reference());
+
+        let selected = args
+            .first()
+            .and_then(|arg| arg.trim().parse::<usize>().ok())
+            .filter(|index| *index >= 1 && *index <= options.len());
+
+        let Some(index) = selected else {
+            return PipelineResult::ModelListed {
+                instance_id: instance.id.clone(),
+                count: options.len(),
+                replies: vec![text_reply(render_model_list(&options, current.as_deref()))],
+            };
+        };
+
+        let target = options[index - 1].0.clone();
+        let Some(registry) = self.instances.as_ref() else {
+            // Unreachable in the node (the instance gate implies a registry), but a missing
+            // registry must not silently pretend the switch succeeded.
+            tracing::error!(
+                instance_id = %instance.id,
+                "Built-in /model received without an instance catalog; ignoring command"
+            );
+            return PipelineResult::ModelListed {
+                instance_id: instance.id.clone(),
+                count: options.len(),
+                replies: vec![text_reply(render_model_list(&options, current.as_deref()))],
+            };
+        };
+
+        match registry.set_model(&instance.id, Some(target.clone())).await {
+            Ok(_) => {
+                tracing::info!(
+                    instance_id = %instance.id,
+                    model = %target,
+                    "Built-in /model switched the instance model"
+                );
+                PipelineResult::ModelSelected {
+                    instance_id: instance.id.clone(),
+                    model: target.clone(),
+                    replies: vec![text_reply(format!("已切换当前实例模型为 {target}。"))],
+                }
+            }
+            Err(err) => {
+                tracing::error!(
+                    instance_id = %instance.id,
+                    model = %target,
+                    error = %err,
+                    "Failed to persist the model selected by built-in /model"
+                );
+                PipelineResult::ModelListed {
+                    instance_id: instance.id.clone(),
+                    count: options.len(),
+                    replies: vec![text_reply(format!("切换模型失败：{err}"))],
+                }
+            }
+        }
+    }
+
+    /// Selectable models, in listing order, with their catalog settings when known.
+    ///
+    /// The node's default model and the instance's current model are always present even when the
+    /// catalog is empty, so `/model` stays useful on a freshly configured node.
+    fn model_options(
+        &self,
+        instance: &crate::instance::BotInstance,
+    ) -> Vec<(String, Option<ModelSpec>)> {
+        let mut options: Vec<(String, Option<ModelSpec>)> = self
+            .agent_factory
+            .as_ref()
+            .map(|factory| {
+                factory
+                    .models()
+                    .list()
+                    .into_iter()
+                    .map(|spec| (spec.full_name(), Some(spec)))
+                    .collect()
+            })
+            .unwrap_or_default();
+
+        for extra in [self.node_model_reference(), instance.model.clone()]
+            .into_iter()
+            .flatten()
+        {
+            if !options.iter().any(|(reference, _)| reference == &extra) {
+                options.push((extra, None));
+            }
+        }
+
+        options
+    }
+
+    /// Canonical model reference of the node's default agent, when configured.
+    fn node_model_reference(&self) -> Option<String> {
+        self.agent_factory
+            .as_ref()
+            .and_then(|factory| factory.default_model())
+            .or_else(|| self.agent.current().map(|agent| agent.config().model_ref()))
+    }
+
     /// Runs the asynchronous worker loop, draining events from the ingest receiver.
     ///
     /// For every ingested event, the worker runs the pipeline and routes any outbound
@@ -1084,6 +1337,40 @@ impl PipelineEngine {
                         "Pipeline rotated conversation session via built-in /new"
                     );
                 }
+                PipelineResult::ModelSelected {
+                    instance_id, model, ..
+                } => {
+                    tracing::info!(
+                        platform = %platform,
+                        channel_id = %channel_id,
+                        instance_id = %instance_id,
+                        model = %model,
+                        "Pipeline switched the instance model via built-in /model"
+                    );
+                }
+                PipelineResult::ModelListed {
+                    instance_id, count, ..
+                } => {
+                    tracing::info!(
+                        platform = %platform,
+                        channel_id = %channel_id,
+                        instance_id = %instance_id,
+                        count = %count,
+                        "Pipeline listed models via built-in /model"
+                    );
+                }
+                PipelineResult::ReplySuppressed {
+                    instance_id,
+                    reason,
+                } => {
+                    tracing::info!(
+                        platform = %platform,
+                        channel_id = %channel_id,
+                        instance_id = %instance_id,
+                        reason = %reason,
+                        "Pipeline suppressed a reply by policy"
+                    );
+                }
                 PipelineResult::NoInstance { .. } => {
                     // Already logged with the platform in `process_event`; nothing was delivered.
                 }
@@ -1101,6 +1388,8 @@ impl PipelineEngine {
                 PipelineResult::CommandExecuted { replies, .. } => replies,
                 PipelineResult::LlmReplied { replies, .. } => replies,
                 PipelineResult::SessionRotated { replies, .. } => replies,
+                PipelineResult::ModelSelected { replies, .. } => replies,
+                PipelineResult::ModelListed { replies, .. } => replies,
                 _ => &[][..],
             };
 

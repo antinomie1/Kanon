@@ -27,9 +27,18 @@
 //! | `POST` | `/api/v1/sessions/:id/reset` | Clear history, keep persona and variables |
 //! | `POST` | `/api/v1/sessions/:id/persona` | Hot-swap the session persona |
 //! | `GET` | `/api/v1/personas` | Persona catalog |
-//! | `GET` | `/api/v1/providers` | Provider catalog plus the node's effective provider |
-//! | `PUT` | `/api/v1/providers/active` | Configure the node's provider (persisted, live) |
-//! | `DELETE` | `/api/v1/providers/active` | Clear the node's provider |
+//! | `GET` | `/api/v1/providers` | Named provider directory plus the node's effective provider |
+//! | `POST` | `/api/v1/providers` | Create or replace one named provider endpoint |
+//! | `PUT` | `/api/v1/providers/active` | Configure a provider as the default (persisted, live) |
+//! | `DELETE` | `/api/v1/providers/active` | Clear every provider |
+//! | `PUT` | `/api/v1/providers/default` | Change the default provider and model |
+//! | `POST` | `/api/v1/providers/delete` | Remove one named provider |
+//! | `GET` | `/api/v1/models` | Per-model settings catalog (`provider/model-id`) |
+//! | `PUT` | `/api/v1/models` | Upsert one model catalog entry |
+//! | `POST` | `/api/v1/models/delete` | Remove one model catalog entry |
+//! | `POST` | `/api/v1/models/discover` | Read a provider's own model listing |
+//! | `GET` | `/api/v1/system/reply-policy` | Node-wide reply policy |
+//! | `PUT` | `/api/v1/system/reply-policy` | Update the node-wide reply policy |
 //! | `GET` | `/api/v1/skills` | Installed skills with their node-wide switch |
 //! | `POST` | `/api/v1/skills` | Install a skill from a zip archive or local directory |
 //! | `DELETE` | `/api/v1/skills/:id` | Remove an installed skill |
@@ -48,6 +57,7 @@ pub mod instances;
 pub mod mcp;
 pub mod metrics;
 pub mod milky;
+pub mod models;
 pub mod personas;
 pub mod plugins;
 pub mod providers;
@@ -78,6 +88,7 @@ pub fn api_router() -> Router<ApiState> {
         .merge(chat::routes())
         .merge(system::routes())
         .merge(providers::routes())
+        .merge(models::routes())
 }
 
 /// Fallback handler returning a structured `404` for unknown paths.

@@ -160,6 +160,7 @@ impl SqliteMemory {
                  session_key TEXT NOT NULL,
                  role TEXT NOT NULL,
                  content TEXT,
+                 parts TEXT,
                  tool_calls TEXT,
                  tool_call_id TEXT,
                  name TEXT,
@@ -168,6 +169,26 @@ impl SqliteMemory {
 
              CREATE INDEX IF NOT EXISTS idx_messages_session ON messages(session_key, id);",
         )?;
+
+        // A database created before multimodal messages existed has no `parts` column. Adding it
+        // explicitly (instead of failing the query) keeps an operator's history usable across the
+        // upgrade; SQLite cannot express `ADD COLUMN IF NOT EXISTS`, so the schema is inspected.
+        let has_parts: bool = {
+            let mut stmt = conn.prepare("SELECT name FROM pragma_table_info('messages')")?;
+            let mut rows = stmt.query([])?;
+            let mut found = false;
+            while let Some(row) = rows.next()? {
+                let name: String = row.get(0)?;
+                if name == "parts" {
+                    found = true;
+                    break;
+                }
+            }
+            found
+        };
+        if !has_parts {
+            conn.execute_batch("ALTER TABLE messages ADD COLUMN parts TEXT;")?;
+        }
 
         Ok(Self {
             conn: Arc::new(Mutex::new(conn)),
@@ -239,7 +260,7 @@ impl SqliteMemory {
 
             // Query historical messages ordered chronologically
             let mut msg_stmt = conn.prepare(
-                "SELECT role, content, tool_calls, tool_call_id, name 
+                "SELECT role, content, parts, tool_calls, tool_call_id, name 
                  FROM messages 
                  WHERE session_key = ?1 
                  ORDER BY id ASC",
@@ -250,9 +271,10 @@ impl SqliteMemory {
             while let Some(row) = msg_rows.next()? {
                 let role_str: String = row.get(0)?;
                 let content: Option<String> = row.get(1)?;
-                let tool_calls_json: Option<String> = row.get(2)?;
-                let tool_call_id: Option<String> = row.get(3)?;
-                let name: Option<String> = row.get(4)?;
+                let parts_json: Option<String> = row.get(2)?;
+                let tool_calls_json: Option<String> = row.get(3)?;
+                let tool_call_id: Option<String> = row.get(4)?;
+                let name: Option<String> = row.get(5)?;
 
                 let role = match role_str.as_str() {
                     "system" => Role::System,
@@ -264,10 +286,20 @@ impl SqliteMemory {
 
                 let tool_calls: Option<Vec<ToolCall>> =
                     tool_calls_json.and_then(|s| serde_json::from_str(&s).ok());
+                // A row whose parts cannot be decoded keeps its textual projection: failing the
+                // whole session load over one malformed media payload would hide the conversation.
+                let parts = parts_json.and_then(|s| match serde_json::from_str(&s) {
+                    Ok(parts) => Some(parts),
+                    Err(err) => {
+                        tracing::warn!(error = %err, "Dropping undecodable message parts");
+                        None
+                    }
+                });
 
                 loaded_messages.push(ChatMessage {
                     role,
                     content,
+                    parts,
                     tool_calls,
                     tool_call_id,
                     name,
@@ -338,6 +370,10 @@ impl Memory for SqliteMemory {
             .tool_calls
             .as_ref()
             .and_then(|calls| serde_json::to_string(calls).ok());
+        let parts_json = message
+            .parts
+            .as_ref()
+            .and_then(|parts| serde_json::to_string(parts).ok());
 
         let now = current_timestamp();
 
@@ -351,12 +387,13 @@ impl Memory for SqliteMemory {
                 params![session_key, now],
             )?;
             tx.execute(
-                "INSERT INTO messages (session_key, role, content, tool_calls, tool_call_id, name, created_at)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+                "INSERT INTO messages (session_key, role, content, parts, tool_calls, tool_call_id, name, created_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
                 params![
                     session_key,
                     role_str,
                     message.content,
+                    parts_json,
                     tool_calls_json,
                     message.tool_call_id,
                     message.name,
@@ -417,14 +454,19 @@ impl Memory for SqliteMemory {
                     .tool_calls
                     .as_ref()
                     .and_then(|calls| serde_json::to_string(calls).ok());
+                let parts_json = message
+                    .parts
+                    .as_ref()
+                    .and_then(|parts| serde_json::to_string(parts).ok());
 
                 tx.execute(
-                    "INSERT INTO messages (session_key, role, content, tool_calls, tool_call_id, name, created_at)
-                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+                    "INSERT INTO messages (session_key, role, content, parts, tool_calls, tool_call_id, name, created_at)
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
                     params![
                         session_key,
                         role_str,
                         message.content,
+                        parts_json,
                         tool_calls_json,
                         message.tool_call_id,
                         message.name,
@@ -589,14 +631,19 @@ impl Memory for SqliteMemory {
                     .tool_calls
                     .as_ref()
                     .and_then(|calls| serde_json::to_string(calls).ok());
+                let parts_json = message
+                    .parts
+                    .as_ref()
+                    .and_then(|parts| serde_json::to_string(parts).ok());
 
                 tx.execute(
-                    "INSERT INTO messages (session_key, role, content, tool_calls, tool_call_id, name, created_at)
-                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+                    "INSERT INTO messages (session_key, role, content, parts, tool_calls, tool_call_id, name, created_at)
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
                     params![
                         session_key,
                         role_str,
                         message.content,
+                        parts_json,
                         tool_calls_json,
                         message.tool_call_id,
                         message.name,

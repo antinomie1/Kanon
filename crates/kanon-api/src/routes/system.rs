@@ -1,4 +1,5 @@
-//! Node system configuration inspection endpoint (`GET /api/v1/system/config`).
+//! Node system configuration inspection (`GET /api/v1/system/config`) and the node-wide reply
+//! policy (`/api/v1/system/reply-policy`).
 
 use axum::Json;
 use axum::Router;
@@ -6,11 +7,19 @@ use axum::extract::State;
 use axum::routing::get;
 use serde::Serialize;
 
+use kanon_core::ReplyPolicy;
+
+use crate::error::ApiError;
 use crate::state::ApiState;
 
-/// Registers the system configuration route.
+/// Registers the system configuration routes.
 pub fn routes() -> Router<ApiState> {
-    Router::new().route("/api/v1/system/config", get(system_config))
+    Router::new()
+        .route("/api/v1/system/config", get(system_config))
+        .route(
+            "/api/v1/system/reply-policy",
+            get(get_reply_policy).put(put_reply_policy),
+        )
 }
 
 /// Comprehensive node and system configuration payload.
@@ -32,6 +41,8 @@ pub struct SystemConfigResponse {
     pub webhook: WebhookConfigSection,
     /// LLM provider and agent configuration.
     pub llm: LlmConfigSection,
+    /// Node-wide reply policy inherited by instances without an override.
+    pub reply_policy: ReplyPolicy,
     /// Host operating system and architecture.
     pub environment: EnvironmentSection,
 }
@@ -148,10 +159,47 @@ async fn system_config(
         memory_window: 40,
         webhook,
         llm,
+        reply_policy: state.reply_policy().get(),
         environment: EnvironmentSection {
             os: std::env::consts::OS,
             arch: std::env::consts::ARCH,
             rust_edition: "2024",
         },
     }))
+}
+
+/// Response describing the node-wide reply policy.
+#[derive(Debug, Serialize)]
+pub struct ReplyPolicyResponse {
+    /// The effective policy.
+    pub policy: ReplyPolicy,
+    /// Human-readable rendering of the policy, for console display.
+    pub description: String,
+}
+
+/// Handler for `GET /api/v1/system/reply-policy`.
+async fn get_reply_policy(State(state): State<ApiState>) -> Json<ReplyPolicyResponse> {
+    let policy = state.reply_policy().get();
+    Json(ReplyPolicyResponse {
+        description: policy.describe(),
+        policy,
+    })
+}
+
+/// Handler for `PUT /api/v1/system/reply-policy`.
+///
+/// The policy is applied through the same path as every other node setting, so the in-memory
+/// snapshot, the running pipeline and `data/system.json` can never disagree.
+async fn put_reply_policy(
+    State(state): State<ApiState>,
+    Json(policy): Json<ReplyPolicy>,
+) -> Result<Json<ReplyPolicyResponse>, ApiError> {
+    let mut settings = state.node_settings();
+    settings.reply_policy = policy;
+    state
+        .apply_node_settings(settings)
+        .map_err(ApiError::BadRequest)?;
+
+    tracing::info!(policy = %policy.describe(), "Node-wide reply policy updated");
+    Ok(get_reply_policy(State(state)).await)
 }

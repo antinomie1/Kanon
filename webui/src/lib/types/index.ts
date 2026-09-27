@@ -74,7 +74,31 @@ export interface SystemConfig {
   memory_window: number;
   webhook: WebhookConfig;
   llm: LlmConfig;
+  /** Node-wide reply policy inherited by instances without an override. */
+  reply_policy: ReplyPolicy;
   environment: EnvironmentConfig;
+}
+
+// Node-wide reply policy
+/** How an instance or the node decides whether to answer a group conversation. */
+export type ReplyMode = 'always' | 'mention' | 'probability' | 'never';
+
+/**
+ * Reply policy of an instance or of the node as a whole.
+ *
+ * `probability` is only consulted by the `probability` mode and must stay within `0..=1`; the
+ * server rejects values outside that range rather than clamping them, so a typo is visible.
+ */
+export interface ReplyPolicy {
+  mode: ReplyMode;
+  probability: number;
+}
+
+/** Response of `GET`/`PUT /api/v1/system/reply-policy`. */
+export interface ReplyPolicyResponse {
+  policy: ReplyPolicy;
+  /** Human-readable rendering of the policy, produced by the node. */
+  description: string;
 }
 
 // Bot instance types
@@ -103,6 +127,8 @@ export interface BotInstanceView {
   persona_id: string | null;
   system_prompt: string | null;
   model: string | null;
+  /** Reply-policy override; `null` inherits the node-wide policy. */
+  reply_policy: ReplyPolicy | null;
   plugins: Record<string, ItemPolicy>;
   skills: Record<string, ItemPolicy>;
   mcp: Record<string, ItemPolicy>;
@@ -112,6 +138,8 @@ export interface BotInstanceView {
 export interface InstancesResponse {
   total: number;
   enabled: number;
+  /** Node-wide reply policy inherited by instances without an override. */
+  node_reply_policy: ReplyPolicy;
   instances: BotInstanceView[];
 }
 
@@ -122,6 +150,8 @@ export interface InstanceRequest {
   persona_id?: string | null;
   system_prompt?: string | null;
   model?: string | null;
+  /** `null` (or omitted) inherits the node-wide reply policy. */
+  reply_policy?: ReplyPolicy | null;
   plugins?: Record<string, ItemPolicy>;
   skills?: Record<string, ItemPolicy>;
   mcp?: Record<string, ItemPolicy>;
@@ -134,16 +164,93 @@ export interface InstanceMutationResponse {
 }
 
 // Provider & Models types
+/** Input modalities and behaviours a model advertises. */
+export interface ModelCapabilities {
+  vision: boolean;
+  audio: boolean;
+  video: boolean;
+  tool_calling: boolean;
+  reasoning: boolean;
+}
+
+/** Provenance of a model's settings, so the console can explain where a value came from. */
+export type ModelSettingsSource = 'unknown' | 'upstream' | 'manual';
+
+/**
+ * One catalog entry, addressed as `<provider>/<model>`.
+ *
+ * Context window and modalities belong to a model *as served by an endpoint*, which is why the
+ * catalog is keyed by the full reference instead of the bare model id.
+ */
+export interface ModelSpec {
+  provider: string;
+  model: string;
+  display_name?: string;
+  context_length?: number;
+  max_output_tokens?: number;
+  capabilities: ModelCapabilities;
+  temperature?: number;
+  source?: ModelSettingsSource;
+}
+
+/** Response of `GET /api/v1/models` and every model mutation. */
+export interface ModelsResponse {
+  models: ModelSpec[];
+  total: number;
+  default_model: string | null;
+  /** Provider names a model reference may use. */
+  providers: string[];
+}
+
+/** Request body of `POST /api/v1/models/delete`. */
+export interface DeleteModelRequest {
+  /** Canonical `<provider>/<model-id>` reference to remove. */
+  reference: string;
+}
+
+/** Request body of `POST /api/v1/models/discover`. */
+export interface DiscoverModelsRequest {
+  provider: string;
+  /** When true the discovered entries are also stored in the catalog. */
+  persist: boolean;
+}
+
+/** Response of `POST /api/v1/models/discover`. */
+export interface DiscoverModelsResponse {
+  provider: string;
+  discovered: ModelSpec[];
+  /** Entries added or refreshed; zero when `persist` was false. */
+  persisted: number;
+}
+
 export interface ActiveProviderInfo {
   configured: boolean;
   /** Where the effective provider comes from: console selection, environment bootstrap, or none. */
   source: 'console' | 'env' | 'runtime' | 'none';
   protocol: string;
+  /** Canonical `<provider>/<model-id>` reference in effect. */
   model: string;
+  /** Model id actually sent upstream (the provider prefix stripped). */
+  upstream_model: string;
+  /** Provider endpoint serving the default model. */
+  provider: string | null;
   base_url: string | null;
   api_key_configured: boolean;
   temperature: number | null;
   max_tokens: number | null;
+  context_length: number | null;
+  capabilities: ModelCapabilities;
+}
+
+/** One configured named endpoint, credential excluded. */
+export interface ProviderInfo {
+  name: string;
+  protocol: string;
+  base_url: string;
+  api_key_configured: boolean;
+  temperature: number | null;
+  max_tokens: number | null;
+  is_default: boolean;
 }
 
 export interface ProtocolDescriptor {
@@ -161,8 +268,41 @@ export interface ProviderPreset {
 
 export interface ProvidersCatalog {
   active: ActiveProviderInfo;
+  /** Every configured provider endpoint. */
+  providers: ProviderInfo[];
+  /** Name of the endpoint used for unprefixed model references. */
+  default_provider: string | null;
+  /** Canonical model reference the node answers with by default. */
+  default_model: string | null;
   available_protocols: ProtocolDescriptor[];
   presets: ProviderPreset[];
+}
+
+/** Request body of `POST /api/v1/providers` (create or replace one named endpoint). */
+export interface UpsertProviderRequest {
+  name: string;
+  protocol: string;
+  base_url: string;
+  /** Omitted keeps the stored credential. */
+  api_key?: string;
+  /** Explicitly removes the stored credential. */
+  clear_api_key?: boolean;
+  temperature?: number;
+  max_tokens?: number;
+  make_default?: boolean;
+  /** Model reference to answer with; required when making a new default. */
+  model?: string;
+}
+
+/** Request body of `PUT /api/v1/providers/default`. */
+export interface SetDefaultProviderRequest {
+  provider: string;
+  model?: string;
+}
+
+/** Request body of `POST /api/v1/providers/delete`. */
+export interface DeleteProviderRequest {
+  name: string;
 }
 
 /** Payload for `PUT /api/v1/providers/active`; mirrors the `KANON_LLM_*` variables. */
@@ -173,6 +313,8 @@ export interface ActivateProviderRequest {
   api_key?: string;
   temperature?: number;
   max_tokens?: number;
+  /** Optional endpoint name; the server derives one from the base URL when omitted. */
+  provider_name?: string;
 }
 
 export interface ActivateProviderResponse {
@@ -195,6 +337,23 @@ export interface TestProviderResponse {
   model: string;
   reply: string | null;
   error: string | null;
+}
+
+/** Request body of `POST /api/v1/providers/models`. */
+export interface FetchModelsRequest {
+  protocol?: string;
+  base_url: string;
+  api_key?: string;
+  /** Provider name used for discovery; the server derives one from the URL when omitted. */
+  provider?: string;
+}
+
+/** Response of `POST /api/v1/providers/models`. */
+export interface FetchModelsResponse {
+  /** Flat identifier list older clients expect. */
+  models: string[];
+  /** Full catalog candidates carrying the metadata the endpoint reported. */
+  candidates: ModelSpec[];
 }
 
 // Plugin & Supervisor types
@@ -403,7 +562,11 @@ export interface AdaptersResponse {
  */
 export type MilkyTransport = 'sse' | 'websocket';
 
-export type MilkyConnectionState = 'disabled' | 'connecting' | 'connected' | 'error';
+export type MilkyConnectionState =
+  | 'disabled'
+  | 'connecting'
+  | 'connected'
+  | 'error';
 
 export interface MilkyConfig {
   enabled: boolean;
@@ -588,31 +751,6 @@ export interface ChatCompletionResponse {
   turns: number;
   finish_reason?: string;
   executed_tools: ExecutedTool[];
-}
-
-// Multi-provider & Model management (Two-tier provider/model hierarchy)
-export interface CustomModel {
-  id: string;
-  name?: string;
-}
-
-export interface CustomProvider {
-  id: string;
-  name: string;
-  protocol: 'openai' | 'openai_responses' | 'anthropic';
-  base_url: string;
-  api_key: string;
-  models: CustomModel[];
-}
-
-export interface FetchModelsRequest {
-  protocol?: string;
-  base_url: string;
-  api_key?: string;
-}
-
-export interface FetchModelsResponse {
-  models: string[];
 }
 
 // QQ Official Adapter QR Login & Polling

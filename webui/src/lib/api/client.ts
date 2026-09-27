@@ -5,6 +5,10 @@ import type {
   CallPluginToolResponse,
   ChatCompletionRequest,
   ChatCompletionResponse,
+  DeleteModelRequest,
+  DeleteProviderRequest,
+  DiscoverModelsRequest,
+  DiscoverModelsResponse,
   FetchModelsRequest,
   FetchModelsResponse,
   InstallPluginResponse,
@@ -18,6 +22,8 @@ import type {
   MilkyConfigView,
   MilkyTestReport,
   MilkyTestRequest,
+  ModelSpec,
+  ModelsResponse,
   NodeHealth,
   PersonasResponse,
   PluginConfigResponse,
@@ -27,7 +33,10 @@ import type {
   ProvidersCatalog,
   QQOfficialPollLoginResponse,
   QQOfficialQrLoginResponse,
+  ReplyPolicy,
+  ReplyPolicyResponse,
   SessionsResponse,
+  SetDefaultProviderRequest,
   SkillCatalog,
   SkillStateResponse,
   SystemConfig,
@@ -35,6 +44,7 @@ import type {
   TestProviderResponse,
   ToolCatalog,
   UpsertMcpServerRequest,
+  UpsertProviderRequest,
 } from '../types';
 
 export class ApiError extends Error {
@@ -107,7 +117,33 @@ export const api = {
   },
 
   getSystemConfig: () => request<SystemConfig>('/api/v1/system/config'),
+  // Node-wide reply policy inherited by every instance that carries no override.
+  getReplyPolicy: () =>
+    request<ReplyPolicyResponse>('/api/v1/system/reply-policy'),
+  setReplyPolicy: (policy: ReplyPolicy) =>
+    request<ReplyPolicyResponse>('/api/v1/system/reply-policy', {
+      method: 'PUT',
+      body: JSON.stringify(policy),
+    }),
+
   getProviders: () => request<ProvidersCatalog>('/api/v1/providers'),
+  // Named-endpoint directory: a model is addressed as `<provider>/<model-id>`, so every mutation
+  // here changes how the node routes those references and returns the refreshed catalog.
+  upsertProvider: (req: UpsertProviderRequest) =>
+    request<ProvidersCatalog>('/api/v1/providers', {
+      method: 'POST',
+      body: JSON.stringify(req),
+    }),
+  setDefaultProvider: (req: SetDefaultProviderRequest) =>
+    request<ProvidersCatalog>('/api/v1/providers/default', {
+      method: 'PUT',
+      body: JSON.stringify(req),
+    }),
+  deleteProvider: (req: DeleteProviderRequest) =>
+    request<ProvidersCatalog>('/api/v1/providers/delete', {
+      method: 'POST',
+      body: JSON.stringify(req),
+    }),
   // Provider selection is a node property, not a browser one: this persists it to
   // data/system.json and applies it to the running node immediately.
   activateProvider: (req: ActivateProviderRequest) =>
@@ -126,6 +162,26 @@ export const api = {
     }),
   fetchModels: (req: FetchModelsRequest) =>
     request<FetchModelsResponse>('/api/v1/providers/models', {
+      method: 'POST',
+      body: JSON.stringify(req),
+    }),
+
+  // Model catalog: per-model context window, modalities and sampling overrides keyed by reference.
+  getModels: () => request<ModelsResponse>('/api/v1/models'),
+  // The body is the whole entry; the server forces `source: "manual"` because an operator's value
+  // is a decision, not a discovery result.
+  upsertModel: (spec: ModelSpec) =>
+    request<ModelsResponse>('/api/v1/models', {
+      method: 'PUT',
+      body: JSON.stringify(spec),
+    }),
+  deleteModel: (req: DeleteModelRequest) =>
+    request<ModelsResponse>('/api/v1/models/delete', {
+      method: 'POST',
+      body: JSON.stringify(req),
+    }),
+  discoverModels: (req: DiscoverModelsRequest) =>
+    request<DiscoverModelsResponse>('/api/v1/models/discover', {
       method: 'POST',
       body: JSON.stringify(req),
     }),
@@ -268,7 +324,8 @@ export const api = {
 
   // Milky platform adapter: an account-level configuration that is validated, persisted to
   // data/system.json and hot-applied to the running adapter in one call.
-  getMilkyConfig: () => request<MilkyConfigView>('/api/v1/adapters/milky/config'),
+  getMilkyConfig: () =>
+    request<MilkyConfigView>('/api/v1/adapters/milky/config'),
   updateMilkyConfig: (req: MilkyConfigRequest) =>
     request<MilkyConfigView>('/api/v1/adapters/milky/config', {
       method: 'PUT',

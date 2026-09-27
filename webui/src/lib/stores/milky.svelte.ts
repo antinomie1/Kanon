@@ -1,4 +1,4 @@
-import { api, ApiError } from '../api/client';
+import { ApiError, api } from '../api/client';
 import type {
   MilkyConfig,
   MilkyConfigView,
@@ -204,7 +204,9 @@ class MilkyStore {
         base_url: this.formBaseUrl,
         transport: this.formTransport,
         // An empty form field keeps the stored credential; removal is requested explicitly.
-        access_token: this.formClearToken ? undefined : this.formToken || undefined,
+        access_token: this.formClearToken
+          ? undefined
+          : this.formToken || undefined,
         clear_access_token: this.formClearToken,
       });
       this.applyView(view);

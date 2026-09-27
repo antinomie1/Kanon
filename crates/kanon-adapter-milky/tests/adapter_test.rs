@@ -14,9 +14,7 @@ use kanon_adapter_milky::adapter::{ConnectionState, MilkyAdapter, MilkyStatus};
 use kanon_adapter_milky::config::MilkyConfig;
 use kanon_core::{EventIngress, PlatformAdapter};
 use kanon_proto::v1::message_segment::Segment;
-use kanon_proto::v1::{
-    DeliverMessageRequest, IngestEventRequest, MessageSegment, TextSegment,
-};
+use kanon_proto::v1::{DeliverMessageRequest, IngestEventRequest, MessageSegment, TextSegment};
 use serde_json::json;
 use tokio::sync::mpsc;
 
@@ -102,7 +100,9 @@ async fn sse_stream_ingests_messages_and_delivers_replies() {
 
     let ingested = next_ingest(&mut receiver).await;
     assert_eq!(ingested.platform, "milky");
-    let request = ingested.event.expect("the ingest request should carry an event");
+    let request = ingested
+        .event
+        .expect("the ingest request should carry an event");
     assert_eq!(request.channel_id, "friend:20002");
     assert_eq!(request.sender_id, "20002");
     assert_eq!(request.raw_text, "hello");
@@ -297,7 +297,11 @@ async fn apply_swaps_the_endpoint_without_a_restart() {
     first.wait_for_subscription(0).await;
     first.push_event(friend_message_event(1, 20002, "from first"));
     assert_eq!(
-        next_ingest(&mut receiver).await.event.expect("event").raw_text,
+        next_ingest(&mut receiver)
+            .await
+            .event
+            .expect("event")
+            .raw_text,
         "from first"
     );
 
@@ -312,7 +316,11 @@ async fn apply_swaps_the_endpoint_without_a_restart() {
     second.wait_for_subscription(0).await;
     second.push_event(friend_message_event(2, 20002, "from second"));
     assert_eq!(
-        next_ingest(&mut receiver).await.event.expect("event").raw_text,
+        next_ingest(&mut receiver)
+            .await
+            .event
+            .expect("event")
+            .raw_text,
         "from second"
     );
 
@@ -391,7 +399,11 @@ async fn configuration_before_start_connects_once_started() {
     fake.wait_for_subscription(0).await;
     fake.push_event(friend_message_event(9, 20002, "late start"));
     assert_eq!(
-        next_ingest(&mut receiver).await.event.expect("event").raw_text,
+        next_ingest(&mut receiver)
+            .await
+            .event
+            .expect("event")
+            .raw_text,
         "late start"
     );
 }
@@ -488,7 +500,11 @@ async fn unroutable_channel_fails_explicitly() {
         .await
         .expect_err("a bare peer number is not routable");
 
-    assert!(error.to_string().contains("does not name a Milky conversation"));
+    assert!(
+        error
+            .to_string()
+            .contains("does not name a Milky conversation")
+    );
     assert!(fake.calls().is_empty());
 }
 
