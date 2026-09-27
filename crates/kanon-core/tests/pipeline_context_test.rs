@@ -298,14 +298,25 @@ fn the_sender_id_and_time_are_included_only_when_the_policy_asks() {
         &event,
         &caps(false),
         &ContextPolicy {
+            include_channel_id: true,
             include_sender_id: true,
             include_timestamp: true,
         },
     );
     let content = on.content.unwrap_or_default();
+    assert!(content.contains("[群号: group:1]"), "{content}");
     assert!(content.contains("[发送者: 1705702687]"), "{content}");
+
+    // The timestamp is rendered in the host's local timezone, so the exact value depends on the
+    // machine running the test; the shape (`YYYY-MM-DD HH:MM:SS`) and the label are what matter.
+    let timestamp = content
+        .split("[时间: ")
+        .nth(1)
+        .and_then(|rest| rest.split(']').next())
+        .unwrap_or_default();
+    assert_eq!(timestamp.len(), 19, "unexpected timestamp: {content}");
     assert!(
-        content.contains("[时间: 1970-01-01 00:00:00 UTC]"),
-        "{content}"
+        !timestamp.contains("UTC"),
+        "local time must not be labelled UTC: {content}"
     );
 }

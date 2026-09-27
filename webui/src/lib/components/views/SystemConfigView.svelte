@@ -50,6 +50,7 @@ $effect(() => {
 });
 
 let contextDraft = $state<ContextPolicy>({
+  include_channel_id: false,
   include_sender_id: false,
   include_timestamp: false,
 });
@@ -272,6 +273,23 @@ function copySocketPath(path: string) {
     </div>
 
     <div class="mt-5 space-y-4">
+      <label class="flex items-start justify-between gap-4 cursor-pointer select-none">
+        <span>
+          <span class="block text-sm font-medium text-zinc-800 dark:text-zinc-200">{t('context.channel_id')}</span>
+          <span class="block text-xs text-zinc-500 mt-0.5">{t('context.channel_id_hint')}</span>
+        </span>
+        <input
+          type="checkbox"
+          checked={contextDraft.include_channel_id}
+          onchange={(e) =>
+            saveContextPolicy({
+              ...contextDraft,
+              include_channel_id: e.currentTarget.checked,
+            })}
+          class="mt-1 rounded text-indigo-600 focus:ring-0 w-4 h-4 shrink-0"
+        />
+      </label>
+
       <label class="flex items-start justify-between gap-4 cursor-pointer select-none">
         <span>
           <span class="block text-sm font-medium text-zinc-800 dark:text-zinc-200">{t('context.sender_id')}</span>

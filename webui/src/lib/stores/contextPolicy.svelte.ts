@@ -6,6 +6,7 @@ import { t } from './i18n.svelte';
 export function describeContextPolicy(policy: ContextPolicy | null): string {
   if (!policy) return '-';
   const parts: string[] = [];
+  if (policy.include_channel_id) parts.push(t('context.channel_id'));
   if (policy.include_sender_id) parts.push(t('context.sender_id'));
   if (policy.include_timestamp) parts.push(t('context.timestamp'));
   return parts.length > 0 ? parts.join(' + ') : t('context.none');

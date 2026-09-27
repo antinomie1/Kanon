@@ -119,6 +119,13 @@ pub enum PipelineResult {
         /// Human-readable reason, suitable for logs and traces.
         reason: String,
     },
+    /// A built-in informational command (`/help`, `/info`) answered by the core itself.
+    BuiltinReplied {
+        /// Built-in command that produced the answer.
+        command: String,
+        /// Answer delivered back to the conversation.
+        replies: Vec<MessageSegment>,
+    },
     /// No enabled bot instance claims the event's platform, so nothing may answer it.
     NoInstance {
         /// Platform that nobody claimed.
@@ -137,6 +144,12 @@ pub const NEW_SESSION_COMMAND: &str = "new";
 /// instance the command was issued to. It is resolved before plugin commands so a plugin can never
 /// shadow it, and long before the LLM, which must never see it as conversation text.
 pub const MODEL_COMMAND: &str = "model";
+
+/// Name of the built-in help command.
+pub const HELP_COMMAND: &str = "help";
+
+/// Name of the built-in system-info command.
+pub const INFO_COMMAND: &str = "info";
 
 /// Identity of one conversation inside an instance: channel plus sender.
 ///
@@ -165,6 +178,14 @@ pub struct DeliveryOutcome {
     pub platform: String,
     /// Platform-assigned message identifier, when reported.
     pub message_id: String,
+}
+
+/// Linux kernel release, when readable; other platforms report only their OS name.
+fn kernel_release() -> Option<String> {
+    std::fs::read_to_string("/proc/sys/kernel/osrelease")
+        .ok()
+        .map(|release| release.trim().to_string())
+        .filter(|release| !release.is_empty())
 }
 
 /// Removes leading `@mention` tokens from a message before slash-command parsing.
@@ -858,21 +879,29 @@ impl PipelineEngine {
         // Phase 2a: Built-in commands, resolved by the core itself.
         //
         // `/new` rotates the session of the conversation that issued it and `/model` lists or
-        // switches the instance's model. Both are matched before plugin commands (so a plugin can
-        // never shadow them) and long before the LLM, which must never receive them as
-        // conversation text.
+        // switches the instance's model; `/help` and `/info` report the command catalog and the
+        // node's runtime facts. All are matched before plugin commands (so a plugin can never
+        // shadow them) and long before the LLM, which must never receive them as conversation text.
         //
         // Group platforms render a mention as leading text (`@bot /model`), so mentions are
         // stripped before parsing; otherwise a command typed in a group would never be recognised.
         let command_text = strip_leading_mentions(&text_candidate);
-        if let Some(instance) = instance.as_ref()
-            && let Some((cmd_name, args)) = CommandRouter::parse_command(command_text)
-        {
-            if cmd_name.eq_ignore_ascii_case(NEW_SESSION_COMMAND) {
+        if let Some((cmd_name, args)) = CommandRouter::parse_command(command_text) {
+            if cmd_name.eq_ignore_ascii_case(NEW_SESSION_COMMAND)
+                && let Some(instance) = instance.as_ref()
+            {
                 return self.handle_new_session(&filtered_event, instance).await;
             }
-            if cmd_name.eq_ignore_ascii_case(MODEL_COMMAND) {
+            if cmd_name.eq_ignore_ascii_case(MODEL_COMMAND)
+                && let Some(instance) = instance.as_ref()
+            {
                 return self.handle_model_command(instance, &args).await;
+            }
+            if cmd_name.eq_ignore_ascii_case(HELP_COMMAND) {
+                return self.handle_help_command(&hosts);
+            }
+            if cmd_name.eq_ignore_ascii_case(INFO_COMMAND) {
+                return self.handle_info_command(instance.as_ref(), &filtered_event);
             }
         }
 
@@ -1314,6 +1343,103 @@ impl PipelineEngine {
             .or_else(|| self.agent.current().map(|agent| agent.config().model_ref()))
     }
 
+    /// Answers the built-in `/help` command.
+    ///
+    /// Lists the core's own commands first and then every command the active plugin hosts declare,
+    /// so one message tells a user everything they can type without opening the console.
+    fn handle_help_command(&self, hosts: &[Arc<crate::supervisor::ManagedHost>]) -> PipelineResult {
+        let mut rendered = String::from("内置指令：\n");
+        rendered.push_str("/new — 开始新会话\n");
+        rendered.push_str("/model — 列出可用模型；/model <序号> 切换当前实例模型\n");
+        rendered.push_str("/help — 显示本帮助\n");
+        rendered.push_str("/info — 显示系统与运行信息\n");
+
+        // Command names are deduplicated: two plugins claiming the same name would otherwise show
+        // up twice, while routing already resolves that collision deterministically.
+        let mut plugin_commands: Vec<(String, String, String)> = Vec::new();
+        for host in hosts {
+            for plugin in &host.meta {
+                for command in &plugin.commands {
+                    let name = command.name.trim().trim_start_matches('/').to_string();
+                    if name.is_empty() || plugin_commands.iter().any(|(seen, ..)| *seen == name) {
+                        continue;
+                    }
+                    plugin_commands.push((
+                        name,
+                        command.description.trim().to_string(),
+                        command.usage.trim().to_string(),
+                    ));
+                }
+            }
+        }
+
+        if !plugin_commands.is_empty() {
+            plugin_commands.sort_by(|left, right| left.0.cmp(&right.0));
+            rendered.push_str("\n插件指令：\n");
+            for (name, description, usage) in plugin_commands {
+                rendered.push('/');
+                rendered.push_str(&name);
+                if !description.is_empty() {
+                    rendered.push_str(" — ");
+                    rendered.push_str(&description);
+                }
+                if !usage.is_empty() {
+                    rendered.push_str("（用法: ");
+                    rendered.push_str(&usage);
+                    rendered.push('）');
+                }
+                rendered.push('\n');
+            }
+        }
+
+        PipelineResult::BuiltinReplied {
+            command: HELP_COMMAND.to_string(),
+            replies: vec![text_reply(rendered)],
+        }
+    }
+
+    /// Answers the built-in `/info` command.
+    ///
+    /// Deliberately short: platform, one line of host facts, local time and the model this
+    /// conversation is served by. Anything more belongs in the console, not in a chat message.
+    fn handle_info_command(
+        &self,
+        instance: Option<&crate::instance::BotInstance>,
+        event: &PipelineEventRequest,
+    ) -> PipelineResult {
+        let now = crate::time::now_unix();
+        let timezone = match crate::time::local_offset_seconds(now) {
+            Some(offset) => format!(" {}", crate::time::format_offset(offset)),
+            None => String::new(),
+        };
+
+        let mut rendered = String::new();
+        rendered.push_str(&format!(
+            "系统: {} {} ({})\n",
+            std::env::consts::OS,
+            kernel_release().unwrap_or_default(),
+            std::env::consts::ARCH
+        ));
+        rendered.push_str(&format!(
+            "时间: {}{timezone}\n",
+            crate::time::format_local(now)
+        ));
+        if let Some(instance) = instance {
+            rendered.push_str(&format!("实例: {} ({})\n", instance.name, instance.id));
+        }
+        let model = instance
+            .and_then(|instance| instance.model.clone())
+            .or_else(|| self.node_model_reference())
+            .unwrap_or_else(|| "未配置".to_string());
+        rendered.push_str(&format!("模型: {model}\n"));
+        rendered.push_str(&format!("适配器: {}", event.platform));
+
+        PipelineResult::BuiltinReplied {
+            command: INFO_COMMAND.to_string(),
+            replies: vec![text_reply(rendered)],
+        }
+    }
+
     /// Runs the asynchronous worker loop, draining events from the ingest receiver.
     ///
     /// For every ingested event, the worker runs the pipeline and routes any outbound
@@ -1439,6 +1565,14 @@ impl PipelineEngine {
                         "Pipeline suppressed a reply by policy"
                     );
                 }
+                PipelineResult::BuiltinReplied { command, .. } => {
+                    tracing::info!(
+                        platform = %platform,
+                        channel_id = %channel_id,
+                        command = %command,
+                        "Pipeline answered a built-in informational command"
+                    );
+                }
                 PipelineResult::NoInstance { .. } => {
                     // Already logged with the platform in `process_event`; nothing was delivered.
                 }
@@ -1458,6 +1592,7 @@ impl PipelineEngine {
                 PipelineResult::SessionRotated { replies, .. } => replies,
                 PipelineResult::ModelSelected { replies, .. } => replies,
                 PipelineResult::ModelListed { replies, .. } => replies,
+                PipelineResult::BuiltinReplied { replies, .. } => replies,
                 _ => &[][..],
             };
 

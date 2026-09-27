@@ -19,6 +19,7 @@ pub mod pipeline;
 pub mod shutdown;
 pub mod skill;
 pub mod supervisor;
+mod time;
 pub mod toggle;
 
 pub use adapter::{
@@ -45,9 +46,9 @@ pub use mcp::{
     prune_attachments,
 };
 pub use pipeline::{
-    CommandRouter, DEFAULT_OUTBOUND_QUEUE_CAPACITY, DeliveryOutcome, MODEL_COMMAND, MatchedCommand,
-    NEW_SESSION_COMMAND, PipelineEngine, PipelineObserver, PipelineResult, PipelineStage,
-    PreFilterChain, PreFilterOutcome, build_user_message,
+    CommandRouter, DEFAULT_OUTBOUND_QUEUE_CAPACITY, DeliveryOutcome, HELP_COMMAND, INFO_COMMAND,
+    MODEL_COMMAND, MatchedCommand, NEW_SESSION_COMMAND, PipelineEngine, PipelineObserver,
+    PipelineResult, PipelineStage, PreFilterChain, PreFilterOutcome, build_user_message,
 };
 pub use shutdown::shutdown_signal;
 pub use skill::{

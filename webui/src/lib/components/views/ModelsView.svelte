@@ -10,6 +10,7 @@ import {
   Trash2,
   X,
 } from 'lucide-svelte';
+import { tick } from 'svelte';
 import { t } from '../../stores/i18n.svelte';
 import {
   CAPABILITY_FLAGS,
@@ -88,10 +89,16 @@ let visibleModels = $derived(
     : modelsStore.models,
 );
 
-function startAdd() {
+async function startAdd() {
   draft = blankDraft(provider || filterProvider || undefined);
   editingRef = null;
   isAdding = true;
+  // The add form sits at the end of the list, so it is scrolled into view instead of leaving the
+  // operator to hunt for it after clicking.
+  await tick();
+  document
+    .getElementById('models-add-row')
+    ?.scrollIntoView({ behavior: 'smooth', block: 'center' });
 }
 
 function startEdit(spec: ModelSpec) {
@@ -410,7 +417,10 @@ function sourceLabel(source: ModelSpec['source']): string {
 
       <!-- Add row -->
       {#if isAdding}
-        <div class="bg-white dark:bg-zinc-900 border border-indigo-300 dark:border-indigo-800 ring-1 ring-indigo-200 dark:ring-indigo-900 rounded-xl p-4 shadow-xs space-y-4">
+        <div
+          id="models-add-row"
+          class="bg-white dark:bg-zinc-900 border border-indigo-300 dark:border-indigo-800 ring-1 ring-indigo-200 dark:ring-indigo-900 rounded-xl p-4 shadow-xs space-y-4"
+        >
           <div class="flex items-center gap-2">
             <Plus class="w-4 h-4 text-indigo-500" />
             <span class="font-semibold text-sm text-zinc-900 dark:text-zinc-100">{t('models.add')}</span>

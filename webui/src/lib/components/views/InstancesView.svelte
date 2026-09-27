@@ -462,6 +462,14 @@ $effect(() => {
 
             <div class="space-y-2 {instancesStore.formContextInherit ? 'opacity-50 pointer-events-none' : ''}">
               <label class="flex items-center justify-between gap-4 text-sm text-zinc-700 dark:text-zinc-300 cursor-pointer select-none">
+                <span>{t('context.channel_id')}</span>
+                <input
+                  type="checkbox"
+                  bind:checked={instancesStore.formIncludeChannelId}
+                  class="rounded text-indigo-600 focus:ring-0 w-4 h-4"
+                />
+              </label>
+              <label class="flex items-center justify-between gap-4 text-sm text-zinc-700 dark:text-zinc-300 cursor-pointer select-none">
                 <span>{t('context.sender_id')}</span>
                 <input
                   type="checkbox"

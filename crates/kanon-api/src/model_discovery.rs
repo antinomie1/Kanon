@@ -157,17 +157,16 @@ fn parse_model_entry(provider: &str, item: &Value) -> Option<ModelSpec> {
     )
     .or_else(|| nested_u32(item, "top_provider", "max_completion_tokens"));
 
-    // The endpoint's own modality metadata is authoritative; when it says nothing (the common case
-    // for OpenAI-compatible endpoints that return bare ids) the capabilities are inferred from the
-    // model id, so a vision or audio model is not stored as text-only.
-    let mut capabilities = match item
+    // Only what the endpoint reports is stored: capability guesses from a model id are not made,
+    // because a wrong guess costs an upstream 400 and the console is where an operator corrects it.
+    let mut capabilities = spec.capabilities;
+    if let Some(modalities) = item
         .get("architecture")
         .and_then(|architecture| architecture.get("input_modalities"))
         .and_then(Value::as_array)
     {
-        Some(modalities) => capabilities_from_modalities(modalities),
-        None => ModelCapabilities::infer_from_model_id(id),
-    };
+        capabilities = capabilities_from_modalities(modalities);
+    }
 
     // OpenRouter-style listings advertise the request parameters a model accepts; tool calling and
     // a reasoning channel are exactly the two the node routes on.

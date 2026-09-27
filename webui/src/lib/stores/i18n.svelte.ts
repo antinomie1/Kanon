@@ -447,7 +447,10 @@ export const dictionaries = {
     // Reply policy (shared by the instance form and the node settings)
     'context.title': 'Context extras',
     'context.hint':
-      'Choose what the node adds to every prompt besides the message itself. Both are off by default: a sender id is personal data and a wall-clock time is not part of what the user said.',
+      'Choose what the node adds to every prompt besides the message itself. All are off by default: ids are personal data and a wall-clock time is not part of what the user said.',
+    'context.channel_id': 'Group / channel id',
+    'context.channel_id_hint':
+      'Prepend the conversation id (group number / channel id).',
     'context.sender_id': 'Sender id',
     'context.sender_id_hint':
       'Prepend the platform sender id (QQ number / openid) to the prompt.',
@@ -1036,7 +1039,9 @@ export const dictionaries = {
     // 回复策略（实例表单与节点设置共用）
     'context.title': '上下文附加信息',
     'context.hint':
-      '选择节点在消息本身之外额外加入提示词的内容。两项默认关闭：发送者 ID 属于个人数据，时间也不是用户说的话。',
+      '选择节点在消息本身之外额外加入提示词的内容。三项默认关闭：各种 ID 属于个人数据，时间也不是用户说的话。',
+    'context.channel_id': '群号 / 频道 ID',
+    'context.channel_id_hint': '在提示词中加入会话 ID（群号 / 频道 ID）。',
     'context.sender_id': '发送者 ID',
     'context.sender_id_hint': '在提示词中加入平台发送者 ID（QQ 号 / openid）。',
     'context.timestamp': '消息时间',

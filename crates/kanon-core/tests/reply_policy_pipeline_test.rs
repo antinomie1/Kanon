@@ -429,3 +429,46 @@ fn reply_text(replies: &[kanon_proto::v1::MessageSegment]) -> String {
         })
         .unwrap_or_default()
 }
+
+#[tokio::test]
+async fn help_lists_the_builtin_commands() {
+    let registry = Arc::new(InstanceRegistry::in_memory());
+    instance(&registry, None).await;
+    let engine = factory_harness(registry);
+
+    match engine
+        .process_event(event("h1", "/help", "private", false))
+        .await
+    {
+        PipelineResult::BuiltinReplied { command, replies } => {
+            assert_eq!(command, "help");
+            let text = reply_text(&replies);
+            for expected in ["/new", "/model", "/help", "/info"] {
+                assert!(text.contains(expected), "missing {expected}: {text}");
+            }
+        }
+        other => panic!("unexpected result: {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn info_reports_host_time_model_and_adapter() {
+    let registry = Arc::new(InstanceRegistry::in_memory());
+    instance(&registry, None).await;
+    let engine = factory_harness(registry);
+
+    match engine
+        .process_event(event("i1", "/info", "private", false))
+        .await
+    {
+        PipelineResult::BuiltinReplied { command, replies } => {
+            assert_eq!(command, "info");
+            let text = reply_text(&replies);
+            assert!(text.contains("系统:"), "{text}");
+            assert!(text.contains("时间:"), "{text}");
+            assert!(text.contains("模型: local/test-model"), "{text}");
+            assert!(text.contains("适配器: policy"), "{text}");
+        }
+        other => panic!("unexpected result: {other:?}"),
+    }
+}

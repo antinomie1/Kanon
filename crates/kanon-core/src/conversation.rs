@@ -240,11 +240,15 @@ pub const META_TIMESTAMP_TEXT: &str = "kanon.timestamp_text";
 
 /// Whether identifying or contextual extras are prepended to the model prompt.
 ///
-/// Both default to `false`: a sender id is personal data and a wall-clock time is not part of what
-/// the user said, so including them is an explicit operator decision — which is why the switch
-/// exists at all.
+/// All default to `false`: a sender id and a group number are personal data, and a wall-clock time
+/// is not part of what the user said, so including any of them is an explicit operator decision —
+/// which is why the switches exist at all. Each is independent so an operator can, for example,
+/// add the time without ever exposing who wrote the message.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub struct ContextPolicy {
+    /// Whether the conversation id (group number, channel id, …) is included in the prompt.
+    #[serde(default)]
+    pub include_channel_id: bool,
     /// Whether the platform sender id (QQ number, openid, …) is included in the prompt.
     #[serde(default)]
     pub include_sender_id: bool,

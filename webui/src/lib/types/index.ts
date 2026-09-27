@@ -103,6 +103,8 @@ export interface ReplyPolicy {
  * user said, so including either is an explicit operator decision.
  */
 export interface ContextPolicy {
+  /** Include the conversation id (group number, channel id, …) in the prompt. */
+  include_channel_id: boolean;
   /** Include the platform sender id (QQ number, openid, …) in the prompt. */
   include_sender_id: boolean;
   /** Include the message timestamp in the prompt. */

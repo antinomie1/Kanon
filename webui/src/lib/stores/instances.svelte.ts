@@ -69,6 +69,7 @@ class InstancesStore {
   formReplyProbability = $state(0.5);
   /** `true` sends `context_policy: null`, inheriting the node-wide context policy. */
   formContextInherit = $state(true);
+  formIncludeChannelId = $state(false);
   formIncludeSenderId = $state(false);
   formIncludeTimestamp = $state(false);
   formPlugins = $state<Record<string, ItemPolicy>>({});
@@ -222,6 +223,7 @@ class InstancesStore {
     this.formReplyPolicyMode = 'inherit';
     this.formReplyProbability = 0.5;
     this.formContextInherit = true;
+    this.formIncludeChannelId = false;
     this.formIncludeSenderId = false;
     this.formIncludeTimestamp = false;
     this.formPlugins = {};
@@ -285,6 +287,7 @@ class InstancesStore {
       context_policy: this.formContextInherit
         ? null
         : {
+            include_channel_id: this.formIncludeChannelId,
             include_sender_id: this.formIncludeSenderId,
             include_timestamp: this.formIncludeTimestamp,
           },

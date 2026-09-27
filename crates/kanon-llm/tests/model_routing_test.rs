@@ -161,27 +161,3 @@ fn an_entry_without_a_provider_or_model_id_is_rejected() {
     assert!(catalog.upsert(ModelSpec::new("", "model")).is_err());
     assert!(catalog.upsert(ModelSpec::new("provider", "  ")).is_err());
 }
-
-#[test]
-fn capabilities_are_inferred_from_well_known_model_ids() {
-    // Endpoints that return bare ids used to leave every model text-only, which silently dropped
-    // the image a user sent. The inference is a heuristic, so only family markers count.
-    let vision = ModelCapabilities::infer_from_model_id("qwen2.5-vl-72b");
-    assert!(
-        vision.vision && vision.text,
-        "a VL model must accept images"
-    );
-
-    let audio = ModelCapabilities::infer_from_model_id("gpt-4o-audio-preview");
-    assert!(audio.audio, "an audio model must accept audio input");
-
-    let reasoner = ModelCapabilities::infer_from_model_id("deepseek-reasoner");
-    assert!(reasoner.reasoning && reasoner.tool_calling);
-
-    let plain = ModelCapabilities::infer_from_model_id("mimo-v2.6-flash");
-    assert!(
-        !plain.vision,
-        "a plain chat model must not be assumed to accept images"
-    );
-    assert!(plain.text && plain.tool_calling);
-}
