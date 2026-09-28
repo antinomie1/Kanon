@@ -210,6 +210,34 @@ fn kernel_release() -> Option<String> {
         .filter(|release| !release.is_empty())
 }
 
+/// Human-readable name of the running system.
+///
+/// "linux" says almost nothing to a user; the distribution (`Ubuntu 24.04.1 LTS`) identifies the
+/// host far better. Linux exposes it through `os-release`; other platforms fall back to their
+/// generic name, because there is no portable API for a marketing version and shelling out to a
+/// platform tool for one chat line is not worth it.
+fn distribution_name() -> String {
+    #[cfg(target_os = "linux")]
+    {
+        if let Ok(release) = std::fs::read_to_string("/etc/os-release") {
+            for key in ["PRETTY_NAME", "NAME"] {
+                let prefix = format!("{key}=");
+                if let Some(value) = release
+                    .lines()
+                    .find_map(|line| line.trim().strip_prefix(&prefix))
+                {
+                    let value = value.trim().trim_matches('"');
+                    if !value.is_empty() {
+                        return value.to_string();
+                    }
+                }
+            }
+        }
+    }
+
+    std::env::consts::OS.to_string()
+}
+
 /// Removes leading `@mention` tokens from a message before slash-command parsing.
 ///
 /// A group platform renders a mention as leading text, so a command typed at the bot arrives as
@@ -1470,7 +1498,7 @@ impl PipelineEngine {
         let mut rendered = String::new();
         rendered.push_str(&format!(
             "系统: {} {} ({})\n",
-            std::env::consts::OS,
+            distribution_name(),
             kernel_release().unwrap_or_default(),
             std::env::consts::ARCH
         ));

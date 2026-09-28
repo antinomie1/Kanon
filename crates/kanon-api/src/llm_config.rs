@@ -557,14 +557,6 @@ impl SystemConfigStore {
         self.write_document(&document)
     }
 
-    /// Persists only the node-wide reply policy, preserving every other section.
-    pub fn save_reply_policy(&self, policy: ReplyPolicy) -> Result<(), String> {
-        policy.validate()?;
-        let mut document = self.read_document()?.unwrap_or_default();
-        document.reply_policy = Some(policy);
-        self.write_document(&document)
-    }
-
     /// Reads and parses the document, returning `None` when the file does not exist.
     fn read_document(&self) -> Result<Option<SystemConfigDocument>, String> {
         if !self.path.exists() {

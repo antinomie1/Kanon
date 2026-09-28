@@ -368,7 +368,12 @@ fn bootstrap_node_settings() -> StartupResult<NodeSettings> {
                 model = %config.model,
                 "No provider in data/system.json; using the KANON_LLM_* environment bootstrap"
             );
-            Ok(config.into_node_settings())
+            // The environment only seeds the *provider*; policies persisted in the document are
+            // the operator's own settings and must survive an environment-driven start.
+            let mut settings = config.into_node_settings();
+            settings.reply_policy = persisted.reply_policy;
+            settings.context_policy = persisted.context_policy;
+            Ok(settings)
         }
         None => Ok(persisted),
     }

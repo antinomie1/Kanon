@@ -215,18 +215,20 @@ fn saving_node_settings_mirrors_the_legacy_section_and_round_trips() {
         .expect("mirrored provider");
     assert_eq!(legacy.model, "mimo-v2.6-flash");
 
-    // The reply policy is persisted in the same document as the providers.
+    // Both operator policies are persisted in the same document as the providers, so a restart
+    // applies them without any further console action.
     let updated = NodeSettings {
         reply_policy: kanon_core::ReplyPolicy::new(kanon_core::ReplyMode::Mention),
+        context_policy: kanon_core::ContextPolicy {
+            include_sender_id: true,
+            ..kanon_core::ContextPolicy::default()
+        },
         ..reloaded
     };
-    store.save_node_settings(&updated).expect("save policy");
-    assert_eq!(
-        store
-            .load_node_settings()
-            .expect("reload")
-            .reply_policy
-            .mode,
-        kanon_core::ReplyMode::Mention
-    );
+    store.save_node_settings(&updated).expect("save policies");
+
+    let reloaded = store.load_node_settings().expect("reload");
+    assert_eq!(reloaded.reply_policy.mode, kanon_core::ReplyMode::Mention);
+    assert!(reloaded.context_policy.include_sender_id);
+    assert!(!reloaded.context_policy.include_timestamp);
 }

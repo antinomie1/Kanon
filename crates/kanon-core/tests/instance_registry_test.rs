@@ -251,3 +251,41 @@ async fn update_preserves_session_history_and_validates_input() {
         .expect_err("unknown instance must be rejected");
     assert!(matches!(missing, InstanceError::NotFound(_)));
 }
+
+#[tokio::test]
+async fn instance_policies_survive_a_restart() {
+    use kanon_core::{ContextPolicy, ReplyMode, ReplyPolicy};
+
+    let dir = tempfile::tempdir().expect("temp dir");
+    let path = dir.path().join("instances.json");
+    let registry = InstanceRegistry::open(&path).await.expect("open catalog");
+
+    let mut submitted = draft("Policy Bot", true, &["qqofficial"]);
+    submitted.reply_policy = Some(ReplyPolicy {
+        mode: ReplyMode::Mention,
+        probability: 0.5,
+    });
+    submitted.context_policy = Some(ContextPolicy {
+        include_channel_id: true,
+        include_sender_id: false,
+        include_timestamp: true,
+    });
+    registry.create(submitted).await.expect("create instance");
+
+    // Both policies are part of the instance record, so a restart applies them immediately instead
+    // of waiting for a console visit.
+    let reloaded = InstanceRegistry::open(&path).await.expect("reopen catalog");
+    let instance = reloaded
+        .list()
+        .await
+        .into_iter()
+        .next()
+        .expect("instance stored");
+
+    let reply = instance.reply_policy.expect("reply policy stored");
+    assert_eq!(reply.mode, ReplyMode::Mention);
+    let context = instance.context_policy.expect("context policy stored");
+    assert!(context.include_channel_id);
+    assert!(context.include_timestamp);
+    assert!(!context.include_sender_id);
+}

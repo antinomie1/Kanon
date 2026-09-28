@@ -472,3 +472,157 @@ async fn info_reports_host_time_model_and_adapter() {
         other => panic!("unexpected result: {other:?}"),
     }
 }
+
+/// Provider that records every request so the assembled prompt can be asserted.
+struct RecordingProvider {
+    requests: Arc<std::sync::Mutex<Vec<ChatRequest>>>,
+}
+
+#[async_trait]
+impl LlmProvider for RecordingProvider {
+    async fn chat(&self, request: &ChatRequest) -> Result<ChatResponse, GatewayError> {
+        self.requests
+            .lock()
+            .expect("requests lock")
+            .push(request.clone());
+        Ok(ChatResponse {
+            content: Some("ok".to_string()),
+            tool_calls: Vec::new(),
+            finish_reason: Some("stop".to_string()),
+            usage: None,
+        })
+    }
+}
+
+/// Builds a pipeline whose provider records prompts, with a node-wide context policy.
+#[allow(clippy::type_complexity)]
+fn context_harness(
+    registry: Arc<InstanceRegistry>,
+    node_context: kanon_core::ContextPolicy,
+) -> (Arc<PipelineEngine>, Arc<std::sync::Mutex<Vec<ChatRequest>>>) {
+    let temp = tempfile::tempdir().expect("temp dir");
+    let supervisor = Arc::new(Supervisor::new(Some(temp.path().to_path_buf()), None));
+    std::mem::forget(temp);
+
+    let requests = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let memory: Arc<dyn Memory> = Arc::new(SlidingWindowMemory::new(20));
+    let agent = Arc::new(
+        Agent::builder(
+            "context-test",
+            Arc::new(RecordingProvider {
+                requests: requests.clone(),
+            }),
+        )
+        .memory(memory)
+        .model("test-model")
+        .build(),
+    );
+
+    let engine = Arc::new(
+        PipelineEngine::new(supervisor)
+            .with_tool_router(Arc::new(ToolRouter::from_arc(agent)))
+            .with_instances(registry)
+            .with_context_policy(Arc::new(kanon_core::ContextPolicyStore::new(node_context))),
+    );
+
+    (engine, requests)
+}
+
+/// Creates an enabled instance whose context policy is set explicitly.
+async fn instance_with_context(
+    registry: &InstanceRegistry,
+    context_policy: Option<kanon_core::ContextPolicy>,
+) -> String {
+    registry
+        .create(InstanceDraft {
+            name: "Context Bot".to_string(),
+            enabled: true,
+            adapters: vec!["policy".to_string()],
+            persona_id: None,
+            system_prompt: None,
+            model: None,
+            reply_policy: None,
+            context_policy,
+            plugins: Default::default(),
+            skills: Default::default(),
+            mcp: Default::default(),
+        })
+        .await
+        .expect("create instance")
+        .id
+}
+
+/// Renders the user turn of the most recent provider request.
+fn last_user_prompt(requests: &Arc<std::sync::Mutex<Vec<ChatRequest>>>) -> String {
+    requests
+        .lock()
+        .expect("requests lock")
+        .last()
+        .and_then(|request| {
+            request
+                .messages
+                .iter()
+                .rev()
+                .find(|message| message.role == kanon_llm::Role::User)
+        })
+        .and_then(|message| message.content.clone())
+        .unwrap_or_default()
+}
+
+#[tokio::test]
+async fn the_node_context_policy_is_applied_from_the_first_event() {
+    let registry = Arc::new(InstanceRegistry::in_memory());
+    instance_with_context(&registry, None).await;
+    let (engine, requests) = context_harness(
+        registry,
+        kanon_core::ContextPolicy {
+            include_channel_id: true,
+            include_sender_id: false,
+            include_timestamp: false,
+        },
+    );
+
+    let result = engine
+        .process_event(event("ctx1", "hello", "group", true))
+        .await;
+    assert!(
+        matches!(result, PipelineResult::LlmReplied { .. }),
+        "unexpected result: {result:?}"
+    );
+
+    let prompt = last_user_prompt(&requests);
+    assert!(prompt.contains("[群号: group:1]"), "{prompt}");
+    assert!(!prompt.contains("[发送者"), "{prompt}");
+    assert!(!prompt.contains("[时间"), "{prompt}");
+}
+
+#[tokio::test]
+async fn the_instance_context_policy_overrides_the_node_one() {
+    let registry = Arc::new(InstanceRegistry::in_memory());
+    instance_with_context(
+        &registry,
+        Some(kanon_core::ContextPolicy {
+            include_channel_id: false,
+            include_sender_id: true,
+            include_timestamp: false,
+        }),
+    )
+    .await;
+    // The node policy asks for the opposite; the instance wins.
+    let (engine, requests) = context_harness(
+        registry,
+        kanon_core::ContextPolicy {
+            include_channel_id: true,
+            include_sender_id: false,
+            include_timestamp: false,
+        },
+    );
+
+    engine
+        .process_event(event("ctx2", "hello", "group", true))
+        .await;
+
+    let prompt = last_user_prompt(&requests);
+    assert!(prompt.contains("[发送者: user:1]"), "{prompt}");
+    assert!(!prompt.contains("[群号"), "{prompt}");
+}
