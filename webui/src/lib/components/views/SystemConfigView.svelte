@@ -178,17 +178,6 @@ function copySocketPath(path: string) {
         </span>
       </div>
 
-      <!-- Platform Webhook -->
-      <div class="p-4 bg-zinc-50 dark:bg-zinc-950/50 rounded-xl border border-zinc-100 dark:border-zinc-800/80">
-        <span class="text-zinc-400 block mb-1.5">{t('providers.webhook_adapter')}</span>
-        <span class="text-zinc-900 dark:text-zinc-100 flex items-center justify-between font-medium text-sm">
-          <span>{providersStore.systemConfig?.webhook.platform ?? 'webhook'}</span>
-          <span class="text-xs {providersStore.systemConfig?.webhook.callback_configured ? 'text-emerald-500' : 'text-zinc-400'}">
-            {providersStore.systemConfig?.webhook.callback_configured ? 'Outbound Active' : 'Inbound Only'}
-          </span>
-        </span>
-      </div>
-
       <!-- OS and Architecture -->
       <div class="p-4 bg-zinc-50 dark:bg-zinc-950/50 rounded-xl border border-zinc-100 dark:border-zinc-800/80">
         <span class="text-zinc-400 block mb-1.5">{t('providers.os_arch')}</span>

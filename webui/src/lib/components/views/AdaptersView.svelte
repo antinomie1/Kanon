@@ -1,5 +1,5 @@
 <script lang="ts">
-import { QrCode, Radio, RefreshCw, Send, Settings } from 'lucide-svelte';
+import { QrCode, Radio, RefreshCw, Settings } from 'lucide-svelte';
 import { api } from '../../api/client';
 import { t } from '../../stores/i18n.svelte';
 import { milkyStore } from '../../stores/milky.svelte';
@@ -34,14 +34,6 @@ let configPluginId = $state<string | null>(null);
 /** QQ Official QR binding dialog. */
 let qrModalOpen = $state(false);
 
-// Quick ingest test form.
-let testPlatform = $state('webhook');
-let testChannel = $state('general');
-let testSender = $state('alice');
-let testMessage = $state('Hello Kanon!');
-let ingesting = $state(false);
-let ingestResult = $state<string | null>(null);
-
 /** Loads the adapter catalog and keeps the Milky store in step with it. */
 async function load() {
   loading = true;
@@ -49,13 +41,6 @@ async function load() {
   try {
     const res = await api.getAdapters();
     adapters = res.adapters;
-    if (
-      adapters.length > 0 &&
-      !adapters.some((adapter) => adapter.platform === testPlatform)
-    ) {
-      // Keep the simulator pointed at a platform the node actually serves.
-      testPlatform = adapters[0].platform;
-    }
     await Promise.all([milkyStore.ensureLoaded(), onebotStore.ensureLoaded()]);
   } catch (e) {
     error = e instanceof Error ? e.message : String(e);
@@ -74,25 +59,6 @@ function openMilkyConfig() {
 function openOneBotConfig() {
   onebotConfigOpen = true;
   void onebotStore.load();
-}
-
-/** Pushes one synthetic event into a platform's Fast-ACK ingest endpoint. */
-async function sendTestEvent() {
-  ingesting = true;
-  ingestResult = null;
-  try {
-    const res = await api.ingestEvent(testPlatform, {
-      channel_id: testChannel,
-      sender_id: testSender,
-      text: testMessage,
-      event_id: `test_${Date.now()}`,
-    });
-    ingestResult = `Fast-ACK Accepted! Event ID: ${res.event_id}`;
-  } catch (e) {
-    ingestResult = `Ingest rejected: ${e instanceof Error ? e.message : String(e)}`;
-  } finally {
-    ingesting = false;
-  }
 }
 
 $effect(() => {
@@ -250,72 +216,6 @@ $effect(() => {
     {/if}
   </div>
 
-  <!-- Simulated inbound events: a debugging aid for the Fast-ACK data plane, kept at the bottom of
-       the page so it never competes with the adapters themselves. -->
-  <div
-    class="p-5 rounded-xl border border-zinc-200 dark:border-zinc-800 bg-white dark:bg-zinc-900 shadow-2xs space-y-3.5"
-  >
-    <div class="flex items-center gap-2">
-      <Send class="w-4.5 h-4.5 text-zinc-500" />
-      <h4 class="text-sm sm:text-base font-semibold text-zinc-900 dark:text-zinc-100">
-        Simulate Inbound Event (Fast-ACK)
-      </h4>
-    </div>
-    <div class="space-y-3 text-xs sm:text-sm">
-      <div class="grid grid-cols-3 gap-2.5">
-        <div>
-          <!-- svelte-ignore a11y_label_has_associated_control -->
-          <label class="block text-xs font-sans text-zinc-500 mb-1">Platform</label>
-          <input
-            type="text"
-            bind:value={testPlatform}
-            class="w-full px-3 py-2 rounded-lg bg-zinc-50 dark:bg-zinc-950 border border-zinc-200 dark:border-zinc-800 font-mono text-xs sm:text-sm focus:outline-hidden"
-          />
-        </div>
-        <div>
-          <!-- svelte-ignore a11y_label_has_associated_control -->
-          <label class="block text-xs font-sans text-zinc-500 mb-1">Channel ID</label>
-          <input
-            type="text"
-            bind:value={testChannel}
-            class="w-full px-3 py-2 rounded-lg bg-zinc-50 dark:bg-zinc-950 border border-zinc-200 dark:border-zinc-800 font-mono text-xs sm:text-sm focus:outline-hidden"
-          />
-        </div>
-        <div>
-          <!-- svelte-ignore a11y_label_has_associated_control -->
-          <label class="block text-xs font-sans text-zinc-500 mb-1">Sender ID</label>
-          <input
-            type="text"
-            bind:value={testSender}
-            class="w-full px-3 py-2 rounded-lg bg-zinc-50 dark:bg-zinc-950 border border-zinc-200 dark:border-zinc-800 font-mono text-xs sm:text-sm focus:outline-hidden"
-          />
-        </div>
-      </div>
-      <div>
-        <!-- svelte-ignore a11y_label_has_associated_control -->
-        <label class="block text-xs font-sans text-zinc-500 mb-1">Message Content</label>
-        <input
-          type="text"
-          bind:value={testMessage}
-          class="w-full px-3 py-2 rounded-lg bg-zinc-50 dark:bg-zinc-950 border border-zinc-200 dark:border-zinc-800 text-xs sm:text-sm focus:outline-hidden"
-        />
-      </div>
-      <button
-        onclick={sendTestEvent}
-        disabled={ingesting}
-        class="w-full py-2 bg-zinc-900 hover:bg-zinc-800 dark:bg-zinc-100 dark:hover:bg-zinc-200 text-white dark:text-zinc-900 rounded-lg font-medium transition cursor-pointer text-xs sm:text-sm disabled:opacity-50"
-      >
-        {ingesting ? 'Pushing into Tokio queue...' : 'Send Event to Pipeline'}
-      </button>
-      {#if ingestResult}
-        <div
-          class="p-2.5 rounded-lg bg-zinc-100 dark:bg-zinc-800 font-mono text-xs text-zinc-700 dark:text-zinc-300"
-        >
-          {ingestResult}
-        </div>
-      {/if}
-    </div>
-  </div>
 </div>
 
 <!-- Milky adapter configuration drawer: the built-in adapter's second-level view, mirroring how

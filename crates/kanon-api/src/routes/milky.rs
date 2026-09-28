@@ -1,8 +1,8 @@
 //! Milky platform adapter management (`/api/v1/adapters/milky/*`).
 //!
 //! # Why the adapter has its own management surface
-//! Every other adapter is configured before the node starts — the bundled webhook bridge from the
-//! environment, plugin adapters from their manifest. Milky is a *platform account*: an operator
+//! Every other adapter is configured before the node starts — from the environment or from its own
+//! configuration document. Milky is a *platform account*: an operator
 //! connects a QQ number, may need to change the endpoint when the protocol implementation moves,
 //! and must be able to see whether the account is actually online. That is console work, so the
 //! configuration is validated, persisted to `data/system.json` and applied to the running adapter

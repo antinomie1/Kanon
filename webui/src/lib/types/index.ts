@@ -39,13 +39,6 @@ export interface NodeHealth {
 }
 
 // System configuration types
-export interface WebhookConfig {
-  platform: string;
-  callback_configured: boolean;
-  callback_url: string | null;
-  signature_verification: boolean;
-}
-
 export interface LlmConfig {
   configured: boolean;
   /** Where the effective provider comes from: console selection, environment bootstrap, or none. */
@@ -72,7 +65,6 @@ export interface SystemConfig {
   run_dir: string;
   data_dir: string;
   memory_window: number;
-  webhook: WebhookConfig;
   llm: LlmConfig;
   /** Node-wide reply policy inherited by instances without an override. */
   reply_policy: ReplyPolicy;

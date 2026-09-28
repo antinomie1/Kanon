@@ -358,14 +358,6 @@ export const api = {
       method: 'POST',
       body: JSON.stringify(req),
     }),
-  ingestEvent: (platform: string, payload: Record<string, unknown>) =>
-    request<{ accepted: boolean; event_id: string }>(
-      `/api/v1/adapters/${encodeURIComponent(platform)}/ingest`,
-      {
-        method: 'POST',
-        body: JSON.stringify(payload),
-      },
-    ),
   requestQQOfficialLoginQr: (bindHost?: string) =>
     request<QQOfficialQrLoginResponse>('/api/v1/adapters/qqofficial/login/qr', {
       method: 'POST',

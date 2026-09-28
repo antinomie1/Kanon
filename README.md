@@ -46,7 +46,6 @@ variables (the complete list is in [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) 
 | `KANON_LLM_API_KEY` | unset | provider credential |
 | `KANON_LLM_MODEL` | `gpt-4o-mini` | default model identifier |
 | `KANON_LLM_PROTOCOL` | `openai` | `openai`, `openai_responses` or `anthropic` |
-| `KANON_WEBHOOK_CALLBACK_URL` | unset | outbound callback for the bundled webhook adapter |
 | `KANON_ONEBOT_WS_URL` | unset | OneBot v11 forward WebSocket endpoint or reverse listener URL; setting it enables the adapter |
 | `KANON_ONEBOT_TRANSPORT` | `forward_websocket` | `forward_websocket` or `reverse_websocket` |
 | `KANON_ONEBOT_TOKEN` | unset | OneBot bearer access token |

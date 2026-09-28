@@ -707,8 +707,6 @@ sequenceDiagram
 | 环境变量 | 默认值 | 说明 |
 | :--- | :--- | :--- |
 | `KANON_API_ADDR` | `127.0.0.1:8080` | 管理网关监听地址（默认仅回环，避免误暴露） |
-| `KANON_WEBHOOK_PLATFORM` | `webhook` | 内置 Webhook 适配器服务的平台标识（入站路径 `/api/v1/adapters/<平台>/ingest`） |
-| `KANON_WEBHOOK_CALLBACK_URL` | 未设置 | 出站回调地址；未设置时适配器仅支持入站，控制面显示 `connected: false`，出站投递显式报错而非假装成功 |
 | `KANON_LLM_BASE_URL` | 未设置 | 模型网关基址；未设置时聊天调试端点显式返回 `503`，绝不以假 Provider 掩盖缺失配置 |
 | `KANON_LLM_API_KEY` | 未设置 | 模型服务凭证 |
 | `KANON_LLM_MODEL` | `gpt-4o-mini` | 默认模型标识 |
@@ -757,9 +755,8 @@ sequenceDiagram
   `./data/dead_letter/<platform>_<YYYY-MM-DD>.jsonl`；
 - 每条死信记录包含 `event_id`（全链路追踪关联 ID）、`platform`、`target_id`、`channel_id`、`reason`（失败原因/熔断说明）、`timestamp_millis`（毫秒时间戳）以及结构化的 `segments` 消息段载荷，为不可逆投递失败提供完整的审计追溯与运维离线补发对账能力。
 
-**Webhook 鉴权与出站退避重试**：
-- **HMAC-SHA256 签名校验**：配置 `secret` 时，入站 `/api/v1/adapters/{platform}/ingest` 严格校验 `X-Hub-Signature-256` / `X-Kanon-Signature`（恒定时间比对防时序攻击），验签失败直接返回 HTTP 401 `unauthorized`；出站自动为 Payload 计算签名并注入请求头。
-- **指数退避重试策略**：出站遇网络断连、超时或 HTTP 5xx / 429 瞬态错误时，执行指数退避重试（默认 2 次重试，初始间隔 50ms）；遇到 HTTP 4xx 客户端错误则判定为永久故障，绝不盲目重试。
+**通用入站鉴权**：`POST /api/v1/adapters/{platform}/ingest` 对所有已注册适配器开放（内置或插件），并在入站前调用该适配器的
+`verify_inbound`（默认放行）；实现签名校验的适配器可据此在进入核心管道之前拒绝伪造载荷，失败以 HTTP 401 显式返回。
 
 **插件侧能力**：声明 `[adapter]` 但未实现出站钩子的插件会收到明确的失败响应（`success=false` + 原因），
 核心据此记录投递失败 —— 契约不允许「假成功」。三语言 SDK 的默认 `on_deliver_message` / `onDeliverMessage` 均已改为显式拒绝。

@@ -27,7 +27,6 @@ async fn system_config_reports_runtime_parameters() {
     assert!(body["data_dir"].as_str().is_some());
     assert_eq!(body["memory_window"], 40);
 
-    assert_eq!(body["webhook"]["platform"], "webhook");
     assert_eq!(body["llm"]["configured"], true);
     assert_eq!(body["llm"]["model"], "mock-model");
     assert!(body["environment"]["os"].as_str().is_some());

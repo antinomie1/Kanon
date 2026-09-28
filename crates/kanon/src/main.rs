@@ -11,10 +11,6 @@
 //!
 //! # Environment
 //! - `KANON_API_ADDR` — management gateway bind address (default `127.0.0.1:8080`).
-//! - `KANON_WEBHOOK_PLATFORM` — platform id served by the bundled webhook adapter (default
-//!   `webhook`); inbound messages POST to `/api/v1/adapters/<platform>/ingest`.
-//! - `KANON_WEBHOOK_CALLBACK_URL` — outbound callback URL; when unset the adapter stays
-//!   inbound-only and reports `connected: false` instead of pretending to deliver.
 //! - `KANON_MILKY_BASE_URL` — Milky protocol implementation base URL; when set, the Milky adapter
 //!   is enabled at startup. A configuration saved through the console wins over this bootstrap.
 //! - `KANON_MILKY_TOKEN` — shared `access_token` for the Milky implementation.
@@ -44,7 +40,6 @@ use kanon_adapter_milky::{MilkyAdapter, MilkyConfig};
 use kanon_adapter_onebot::{OneBotAdapter, OneBotConfig};
 use kanon_api::{
     ApiServer, ApiState, LlmProviderConfig, NodeSettings, Observability, SystemConfigStore,
-    WebhookAdapter,
 };
 use kanon_core::ipc::{CoreApiService, CoreIpcServer, DEFAULT_INGEST_QUEUE_CAPACITY};
 use kanon_core::pipeline::PipelineEngine;
@@ -62,9 +57,6 @@ use tracing_subscriber::util::SubscriberInitExt;
 
 /// Default management gateway bind address (loopback only, never exposed by accident).
 const DEFAULT_API_ADDR: &str = "127.0.0.1:8080";
-
-/// Default platform identifier served by the bundled webhook adapter.
-const DEFAULT_WEBHOOK_PLATFORM: &str = "webhook";
 
 /// Fallible startup result type shared by the binary entrypoint helpers.
 type StartupResult<T> = Result<T, Box<dyn std::error::Error + Send + Sync>>;
@@ -297,7 +289,6 @@ async fn main() -> StartupResult<()> {
     );
 
     // --- Platform adapters ------------------------------------------------------------
-    register_webhook_adapter(&supervisor).await?;
     for (platform, error) in supervisor.adapters().start_all(ingress.clone()).await {
         tracing::error!(platform = %platform, error = %error, "Adapter failed to start");
     }
@@ -462,41 +453,6 @@ async fn register_onebot_adapter(
         "OneBot v11 adapter registered"
     );
     Ok(adapter)
-}
-
-/// Registers the bundled webhook adapter from environment configuration.
-///
-/// The adapter is always registered: inbound ingress works out of the box (a fresh node can be
-/// driven by `curl`), while outbound delivery stays explicitly disabled until a callback URL is
-/// provided, which the console reports as `connected: false`.
-async fn register_webhook_adapter(supervisor: &Arc<Supervisor>) -> StartupResult<()> {
-    let platform = std::env::var("KANON_WEBHOOK_PLATFORM")
-        .unwrap_or_else(|_| DEFAULT_WEBHOOK_PLATFORM.to_string());
-    let callback_url = std::env::var("KANON_WEBHOOK_CALLBACK_URL")
-        .ok()
-        .filter(|url| !url.trim().is_empty());
-    let secret = std::env::var("KANON_WEBHOOK_SECRET")
-        .ok()
-        .filter(|s| !s.trim().is_empty());
-
-    let mut adapter = WebhookAdapter::new(platform.clone(), None, callback_url.clone())?;
-    if let Some(sec) = secret {
-        tracing::info!(platform = %platform, "Webhook adapter configured with HMAC-SHA256 signature verification");
-        adapter = adapter.with_secret(sec);
-    }
-
-    supervisor.adapters().register(Arc::new(adapter)).await?;
-
-    if callback_url.is_some() {
-        tracing::info!(platform = %platform, "Webhook adapter registered with outbound callback");
-    } else {
-        tracing::info!(
-            platform = %platform,
-            "Webhook adapter registered inbound-only (KANON_WEBHOOK_CALLBACK_URL is unset)"
-        );
-    }
-
-    Ok(())
 }
 
 /// Installs the `tracing` subscriber with both console output and the log broadcast layer.

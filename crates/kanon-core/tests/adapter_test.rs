@@ -603,13 +603,16 @@ async fn test_partitioned_outbound_dispatch_queue_saturation_drop() {
     // Send 80 messages: 1 is in-flight, 64 fit into the queue, and remaining ~15 must drop
     for i in 0..80 {
         sender
-            .send(DeliverMessageRequest {
-                platform: "blocked_plat".to_string(),
-                channel_id: format!("c-{i}"),
-                recipient_id: "u1".to_string(),
-                segments: vec![],
-                event_id: format!("evt-drop-{i}"),
-            }.into())
+            .send(
+                DeliverMessageRequest {
+                    platform: "blocked_plat".to_string(),
+                    channel_id: format!("c-{i}"),
+                    recipient_id: "u1".to_string(),
+                    segments: vec![],
+                    event_id: format!("evt-drop-{i}"),
+                }
+                .into(),
+            )
             .await
             .expect("send to global outbound queue");
     }
@@ -699,17 +702,20 @@ async fn platform_circuit_breaker_trips_and_persists_to_dead_letter() {
     // 2. Send 5 messages: all 5 fail in the adapter, reaching the failure_threshold (5)
     for i in 1..=5 {
         sender
-            .send(DeliverMessageRequest {
-                platform: "unstable_im".to_string(),
-                channel_id: format!("chan-{i}"),
-                recipient_id: "user1".to_string(),
-                segments: vec![MessageSegment {
-                    segment: Some(Segment::Text(TextSegment {
-                        content: format!("msg {i}"),
-                    })),
-                }],
-                event_id: format!("evt-fail-{i}"),
-            }.into())
+            .send(
+                DeliverMessageRequest {
+                    platform: "unstable_im".to_string(),
+                    channel_id: format!("chan-{i}"),
+                    recipient_id: "user1".to_string(),
+                    segments: vec![MessageSegment {
+                        segment: Some(Segment::Text(TextSegment {
+                            content: format!("msg {i}"),
+                        })),
+                    }],
+                    event_id: format!("evt-fail-{i}"),
+                }
+                .into(),
+            )
             .await
             .expect("enqueue message");
     }
@@ -748,17 +754,20 @@ async fn platform_circuit_breaker_trips_and_persists_to_dead_letter() {
 
     // 4. Send a 6th message while circuit is Open: must be fast-skipped WITHOUT calling deliver()
     sender
-        .send(DeliverMessageRequest {
-            platform: "unstable_im".to_string(),
-            channel_id: "chan-short-circuit".to_string(),
-            recipient_id: "user1".to_string(),
-            segments: vec![MessageSegment {
-                segment: Some(Segment::Text(TextSegment {
-                    content: "short circuited".to_string(),
-                })),
-            }],
-            event_id: "evt-short-circuit-6".to_string(),
-        }.into())
+        .send(
+            DeliverMessageRequest {
+                platform: "unstable_im".to_string(),
+                channel_id: "chan-short-circuit".to_string(),
+                recipient_id: "user1".to_string(),
+                segments: vec![MessageSegment {
+                    segment: Some(Segment::Text(TextSegment {
+                        content: "short circuited".to_string(),
+                    })),
+                }],
+                event_id: "evt-short-circuit-6".to_string(),
+            }
+            .into(),
+        )
         .await
         .expect("enqueue message");
 

@@ -45,9 +45,9 @@
 //! the same timeline as pipeline stages.
 //!
 //! ## Data plane
-//! Platform adapters terminate the microkernel's platform boundary. [`adapters::WebhookAdapter`]
-//! is bundled as a generic HTTP bridge; further adapters — in-process or plugin-provided — plug
-//! into the same [`kanon_core::PlatformAdapter`] contract and appear on `GET /api/v1/adapters`.
+//! Platform adapters terminate the kernel's platform boundary: in-process adapters and
+//! plugin-provided ones both implement the same [`kanon_core::PlatformAdapter`] contract and
+//! appear on `GET /api/v1/adapters`.
 
 pub mod adapters;
 pub mod error;
@@ -62,7 +62,6 @@ pub mod state;
 pub mod system;
 pub mod ws;
 
-pub use adapters::WebhookAdapter;
 pub use error::ApiError;
 pub use kanon_core::ToggleStore;
 pub use llm_config::{

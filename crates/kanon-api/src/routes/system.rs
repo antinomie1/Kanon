@@ -41,8 +41,6 @@ pub struct SystemConfigResponse {
     pub data_dir: String,
     /// Session memory sliding window depth.
     pub memory_window: usize,
-    /// Platform webhook adapter status.
-    pub webhook: WebhookConfigSection,
     /// LLM provider and agent configuration.
     pub llm: LlmConfigSection,
     /// Node-wide reply policy inherited by instances without an override.
@@ -51,19 +49,6 @@ pub struct SystemConfigResponse {
     pub context_policy: ContextPolicy,
     /// Host operating system and architecture.
     pub environment: EnvironmentSection,
-}
-
-/// Webhook adapter configuration details.
-#[derive(Debug, Serialize)]
-pub struct WebhookConfigSection {
-    /// Inbound platform identifier.
-    pub platform: String,
-    /// Whether outbound webhook delivery callback is configured.
-    pub callback_configured: bool,
-    /// Outbound callback URL.
-    pub callback_url: Option<String>,
-    /// Whether HMAC-SHA256 signature verification is active.
-    pub signature_verification: bool,
 }
 
 /// LLM provider configuration details.
@@ -104,25 +89,6 @@ pub struct EnvironmentSection {
 async fn system_config(
     State(state): State<ApiState>,
 ) -> Result<Json<SystemConfigResponse>, crate::error::ApiError> {
-    let webhook_adapter = state.supervisor().adapters().get("webhook").await;
-    let callback_url_env = std::env::var("KANON_WEBHOOK_CALLBACK_URL")
-        .ok()
-        .filter(|s| !s.trim().is_empty());
-    let secret_env = std::env::var("KANON_WEBHOOK_SECRET")
-        .ok()
-        .filter(|s| !s.trim().is_empty());
-
-    let webhook = WebhookConfigSection {
-        platform: std::env::var("KANON_WEBHOOK_PLATFORM").unwrap_or_else(|_| "webhook".to_string()),
-        callback_configured: webhook_adapter
-            .as_ref()
-            .map(|w| w.is_connected())
-            .unwrap_or(false)
-            || callback_url_env.is_some(),
-        callback_url: callback_url_env,
-        signature_verification: secret_env.is_some(),
-    };
-
     // Report the *effective* provider (console selection first, environment bootstrap second)
     // rather than merely echoing the environment, which may have been overridden at runtime.
     // A failure to read the persisted document is surfaced rather than masked by a default.
@@ -163,7 +129,6 @@ async fn system_config(
             .to_string_lossy()
             .to_string(),
         memory_window: 40,
-        webhook,
         llm,
         reply_policy: state.reply_policy().get(),
         context_policy: state.context_policy().get(),

@@ -41,7 +41,7 @@ export const dictionaries = {
       'Per-model context window, modalities and sampling overrides, keyed by provider reference',
     'title.system': 'System Configuration',
     'subtitle.system':
-      'Microkernel IPC socket, runtime & data paths, memory window, and platform webhook parameters',
+      'Kernel IPC socket, runtime & data paths, memory window and policy defaults',
 
     // General & Status
     'status.healthy': 'Healthy',
@@ -356,7 +356,6 @@ export const dictionaries = {
     'providers.run_dir': 'Run Directory',
     'providers.data_dir': 'Data Directory',
     'providers.memory_window': 'Memory Sliding Window',
-    'providers.webhook_adapter': 'Platform Webhook',
     'providers.signature_verify': 'HMAC Signature Verification',
     'providers.env_title': 'Runtime Environment',
     'providers.os_arch': 'OS & Architecture',
@@ -987,7 +986,6 @@ export const dictionaries = {
     'providers.run_dir': '运行时目录 (Run Dir)',
     'providers.data_dir': '持久化数据目录 (Data Dir)',
     'providers.memory_window': '会话记忆滑动窗口大小',
-    'providers.webhook_adapter': '内置 Webhook 适配器',
     'providers.signature_verify': 'HMAC-SHA256 签名校验',
     'providers.env_title': '系统环境参数',
     'providers.os_arch': '操作系统与架构',
