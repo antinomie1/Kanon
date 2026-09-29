@@ -1655,6 +1655,21 @@ impl PipelineEngine {
         };
 
         let mut rendered = String::new();
+        #[cfg(target_os = "macos")]
+        {
+            // Separate the product version from the Darwin kernel release on the same line.
+            let architecture = match std::env::consts::ARCH {
+                "aarch64" => "ARM64 (aarch64)",
+                "x86_64" => "x86-64 (x86_64)",
+                architecture => architecture,
+            };
+            rendered.push_str(&format!(
+                "System: {} | Kernel: Darwin {} | Arch: {architecture}\n",
+                distribution_name(),
+                kernel_release().unwrap_or_else(|| "unknown".to_string())
+            ));
+        }
+        #[cfg(not(target_os = "macos"))]
         rendered.push_str(&format!(
             "系统: {} {} ({})\n",
             distribution_name(),

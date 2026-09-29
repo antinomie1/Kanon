@@ -463,6 +463,9 @@ async fn info_reports_host_time_model_and_adapter() {
         PipelineResult::BuiltinReplied { command, replies } => {
             assert_eq!(command, "info");
             let text = reply_text(&replies);
+            #[cfg(target_os = "macos")]
+            assert!(text.starts_with("System: macOS "), "{text}");
+            #[cfg(not(target_os = "macos"))]
             assert!(text.contains("系统:"), "{text}");
             assert!(text.contains("时间:"), "{text}");
             assert!(text.contains("模型: local/test-model"), "{text}");
@@ -502,9 +505,13 @@ async fn info_reports_macos_product_and_kernel_versions() {
         PipelineResult::BuiltinReplied { command, replies } => {
             assert_eq!(command, "info");
             let text = reply_text(&replies);
+            let architecture = match std::env::consts::ARCH {
+                "aarch64" => "ARM64 (aarch64)",
+                "x86_64" => "x86-64 (x86_64)",
+                architecture => architecture,
+            };
             let expected = format!(
-                "系统: macOS {product_version} {kernel_version} ({})",
-                std::env::consts::ARCH
+                "System: macOS {product_version} | Kernel: Darwin {kernel_version} | Arch: {architecture}"
             );
             assert_eq!(text.lines().next(), Some(expected.as_str()));
         }
