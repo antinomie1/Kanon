@@ -9,44 +9,39 @@
 //! process supervisor and the Axum management gateway in one process, wiring the observability hub
 //! into both the `tracing` pipeline and the lifecycle trace bus.
 //!
-//! # Environment
-//! - `KANON_API_ADDR` — management gateway bind address (default `127.0.0.1:8080`).
-//! - `KANON_MILKY_BASE_URL` — Milky protocol implementation base URL; when set, the Milky adapter
-//!   is enabled at startup. A configuration saved through the console wins over this bootstrap.
-//! - `KANON_MILKY_TOKEN` — shared `access_token` for the Milky implementation.
-//! - `KANON_MILKY_PLATFORM` — platform identifier owned by the Milky adapter (default `milky`).
-//! - `KANON_MILKY_TRANSPORT` — inbound event transport, `sse` (default) or `websocket`.
-//! - `KANON_ONEBOT_WS_URL` — OneBot v11 forward endpoint or reverse listener URL.
-//! - `KANON_ONEBOT_TRANSPORT` — `forward_websocket` (default) or `reverse_websocket`.
-//! - `KANON_ONEBOT_TOKEN` — shared OneBot access token.
-//! - `KANON_ONEBOT_PLATFORM` — platform identifier (default `onebot`).
-//! - `KANON_LLM_BASE_URL` — model provider base URL; when unset, chat debugging is disabled and
-//!   `/api/v1/chat/completions` answers `503` instead of inventing a fake provider.
-//! - `KANON_LLM_API_KEY` — provider credential.
-//! - `KANON_LLM_MODEL` — default model identifier.
-//! - `KANON_LLM_PROTOCOL` — `openai` (default), `openai_responses` or `anthropic`.
-//! - `RUST_LOG` — standard `tracing` filter directive.
+//! # Configuration
+//! The node reads no environment variables: all of its configuration lives in
+//! `data/system.json`. The `startup` section holds what is needed before anything is served and
+//! is edited by hand (the console never writes it); every field is optional:
 //!
-//! Model routing itself lives in `data/system.json`: a named provider directory plus a per-model
-//! settings catalog, both editable through the console. A model is addressed as
-//! `<provider>/<model-id>`; the `KANON_LLM_*` variables only seed that directory when it is empty,
-//! registering the endpoint under the preset name its base URL matches and making its model the
-//! node's single global default model. The same document carries the node-wide reply policy
-//! inherited by every instance without an override.
+//! ```json
+//! {
+//!   "startup": {
+//!     "api_addr": "127.0.0.1:8080",
+//!     "log": "info",
+//!     "run_dir": "/run/kanon",
+//!     "typescript_runtime": "/usr/bin/node"
+//!   }
+//! }
+//! ```
+//!
+//! Model routing lives in the same document: a named provider directory plus a per-model settings
+//! catalog, both editable through the console. A model is addressed as `<provider>/<model-id>`,
+//! and exactly one of them is the node's global default model. The document also carries the
+//! node-wide reply and context policies and the OneBot and Milky adapter sections.
 //!
 //! Conversations are durable: history, compaction summaries and session records live in
 //! `data/sessions.db`, and the operator's personas in `data/personas.json`. Both are opened before
 //! anything is served, and a file that cannot be read stops startup instead of being replaced by an
 //! empty one.
 
-use std::net::SocketAddr;
 use std::sync::Arc;
 
-use kanon_adapter_milky::{MilkyAdapter, MilkyConfig};
-use kanon_adapter_onebot::{OneBotAdapter, OneBotConfig};
+use kanon_adapter_milky::MilkyAdapter;
+use kanon_adapter_onebot::OneBotAdapter;
 use kanon_api::{
-    ApiServer, ApiState, DEFAULT_SESSION_DB, LlmProviderConfig, NodeSettings, Observability,
-    PersonaStore, SystemConfigStore, open_session_manager,
+    ApiServer, ApiState, DEFAULT_SESSION_DB, NodeSettings, Observability, PersonaStore,
+    StartupConfig, SystemConfigStore, open_session_manager,
 };
 use kanon_core::ipc::{CoreApiService, CoreIpcServer, DEFAULT_INGEST_QUEUE_CAPACITY};
 use kanon_core::pipeline::PipelineEngine;
@@ -62,26 +57,25 @@ use tracing_subscriber::EnvFilter;
 use tracing_subscriber::layer::SubscriberExt;
 use tracing_subscriber::util::SubscriberInitExt;
 
-/// Default management gateway bind address (loopback only, never exposed by accident).
-const DEFAULT_API_ADDR: &str = "127.0.0.1:8080";
-
 /// Fallible startup result type shared by the binary entrypoint helpers.
 type StartupResult<T> = Result<T, Box<dyn std::error::Error + Send + Sync>>;
 
 #[tokio::main]
 async fn main() -> StartupResult<()> {
+    // Read before anything else: the log filter and the socket directory come from here.
+    let startup = load_startup()?;
     let observability = Arc::new(Observability::new());
-    init_tracing(observability.clone());
-
-    let api_addr = resolve_api_addr()?;
+    init_tracing(observability.clone(), &startup.log)?;
 
     // --- Core microkernel & supervisor ------------------------------------------------
     let (event_tx, event_rx) = mpsc::channel(DEFAULT_INGEST_QUEUE_CAPACITY);
     let ingress = EventIngress::new(event_tx);
-    let default_ipc = CoreIpcServer::with_default_path(CoreApiService::new(ingress.clone()));
-    let socket_path = default_ipc.socket_path().to_path_buf();
-
-    let supervisor = Arc::new(Supervisor::new(None, Some(socket_path.clone())));
+    // The supervisor owns the socket layout: `core.sock` lives in the run directory it resolves.
+    let supervisor = Arc::new(
+        Supervisor::new(startup.run_dir.clone(), None)
+            .with_typescript_runtime(startup.typescript_runtime.clone()),
+    );
+    let socket_path = supervisor.core_sock_path().to_path_buf();
 
     // --- Bot instances ----------------------------------------------------------------
     // Instances decide whether inbound platform traffic is answered at all: with no enabled
@@ -325,7 +319,7 @@ async fn main() -> StartupResult<()> {
         tracing::error!(platform = %platform, error = %error, "Adapter failed to start");
     }
 
-    let api_server = ApiServer::bind(api_addr, state).await?;
+    let api_server = ApiServer::bind(startup.api_addr, state).await?;
     let bound_addr = api_server.local_addr();
 
     let api_task = tokio::spawn(async move {
@@ -368,60 +362,43 @@ async fn main() -> StartupResult<()> {
     Ok(())
 }
 
-/// Resolves the model-routing settings a freshly started node should use.
+/// Loads the node's `startup` settings from `data/system.json`.
+fn load_startup() -> StartupResult<StartupConfig> {
+    let store = SystemConfigStore::default();
+    store.load_startup().map_err(|err| {
+        format!(
+            "Failed to load the startup settings from {}: {err}",
+            store.path().display()
+        )
+        .into()
+    })
+}
+
+/// Loads the model-routing settings saved in `data/system.json`.
 ///
-/// A directory persisted through the management console takes precedence over the `KANON_LLM_*`
-/// environment bootstrap; the environment is only synthesized when the document carries no
-/// provider at all. A malformed persisted document is a hard startup error rather than a silent
-/// fallback, because running without the operator's chosen provider is exactly the surprise this
-/// precedence exists to prevent.
+/// A malformed document is a hard startup error rather than a silent fallback, because running
+/// without the operator's chosen provider is exactly the surprise that must not happen.
 fn bootstrap_node_settings() -> StartupResult<NodeSettings> {
     let store = SystemConfigStore::default();
-    let persisted = store.load_node_settings().map_err(|err| {
+    let settings = store.load_node_settings().map_err(|err| {
         format!(
             "Failed to load node system configuration at {}: {err}",
             store.path().display()
         )
     })?;
-
-    if persisted.has_providers() {
-        tracing::info!(
-            providers = ?persisted.providers.iter().map(|entry| entry.name.as_str()).collect::<Vec<_>>(),
-            default_model = ?persisted.default_model,
-            "Model provider directory loaded from data/system.json"
-        );
-        return Ok(persisted);
-    }
-
-    match LlmProviderConfig::from_env() {
-        Some(config) => {
-            tracing::info!(
-                base_url = %config.base_url,
-                model = %config.model,
-                "No provider in data/system.json; using the KANON_LLM_* environment bootstrap"
-            );
-            // The environment only seeds the *provider*; policies persisted in the document are
-            // the operator's own settings and must survive an environment-driven start.
-            let mut settings = config.into_node_settings();
-            settings.reply_policy = persisted.reply_policy;
-            settings.context_policy = persisted.context_policy;
-            Ok(settings)
-        }
-        None => Ok(persisted),
-    }
+    tracing::info!(
+        providers = ?settings.providers.iter().map(|entry| entry.name.as_str()).collect::<Vec<_>>(),
+        default_model = ?settings.default_model,
+        "Model provider directory loaded from data/system.json"
+    );
+    Ok(settings)
 }
 
-/// Builds and registers the Milky platform adapter.
+/// Builds and registers the Milky platform adapter from its `data/system.json` section.
 ///
-/// # Precedence
-/// A configuration saved through the console is the node's own and wins over the
-/// `KANON_MILKY_*` environment bootstrap, mirroring how the model provider is resolved: the
-/// environment seeds a fresh deployment, the console is how it is changed afterwards. Unlike the
-/// provider, a malformed *environment* value does not prevent the node from starting — the Milky
-/// adapter is one optional platform among many, and refusing to boot the whole node over it would
-/// be a worse failure than reporting it and staying disabled. A malformed *stored* document is
-/// still a hard error, because that file is the node's own state and silently ignoring it would
-/// start a node that does not do what its configuration says.
+/// Without a saved section the adapter is registered disabled, ready to be configured in the
+/// console. A malformed section is a hard error: that file is the node's own state, and silently
+/// ignoring it would start a node that does not do what its configuration says.
 async fn register_milky_adapter(supervisor: &Arc<Supervisor>) -> StartupResult<Arc<MilkyAdapter>> {
     let store = SystemConfigStore::default();
     let persisted = store.load_milky().map_err(|err| {
@@ -431,28 +408,12 @@ async fn register_milky_adapter(supervisor: &Arc<Supervisor>) -> StartupResult<A
         )
     })?;
 
-    let (config, source) = match persisted {
-        Some(config) => (config, "data/system.json"),
-        None => match MilkyConfig::from_env() {
-            Ok(Some(config)) => (config, "environment"),
-            Ok(None) => (MilkyConfig::default(), "defaults"),
-            Err(err) => {
-                tracing::error!(
-                    error = %err,
-                    "Ignoring an invalid KANON_MILKY_* bootstrap; the Milky adapter stays disabled"
-                );
-                (MilkyConfig::default(), "defaults")
-            }
-        },
-    };
-
-    let adapter = Arc::new(MilkyAdapter::new(config)?);
+    let adapter = Arc::new(MilkyAdapter::new(persisted.unwrap_or_default())?);
     supervisor.adapters().register(adapter.clone()).await?;
 
     let status = adapter.status();
     if status.enabled {
         tracing::info!(
-            source = %source,
             platform = %status.platform,
             base_url = %status.base_url,
             transport = %status.transport,
@@ -468,20 +429,20 @@ async fn register_milky_adapter(supervisor: &Arc<Supervisor>) -> StartupResult<A
     Ok(adapter)
 }
 
-/// Registers OneBot v11, preferring saved settings over the environment bootstrap.
+/// Registers OneBot v11 from its `data/system.json` section, disabled when none is saved.
 async fn register_onebot_adapter(
     supervisor: &Arc<Supervisor>,
 ) -> StartupResult<Arc<OneBotAdapter>> {
     let store = SystemConfigStore::default();
-    let config = match store.load_onebot().map_err(|err| {
-        format!(
-            "Failed to load OneBot configuration from {}: {err}",
-            store.path().display()
-        )
-    })? {
-        Some(config) => config,
-        None => OneBotConfig::from_env()?.unwrap_or_default(),
-    };
+    let config = store
+        .load_onebot()
+        .map_err(|err| {
+            format!(
+                "Failed to load OneBot configuration from {}: {err}",
+                store.path().display()
+            )
+        })?
+        .unwrap_or_default();
     let adapter = Arc::new(OneBotAdapter::new(config)?);
     supervisor.adapters().register(adapter.clone()).await?;
     tracing::info!(
@@ -496,21 +457,19 @@ async fn register_onebot_adapter(
 ///
 /// The WebSocket layer is attached to the same registry as the formatter, so `/ws/v1/logs`
 /// observes exactly what operators see on stdout — no second, divergent logging path.
-fn init_tracing(observability: Arc<Observability>) {
-    let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
+///
+/// `log` is the `startup.log` filter directive; an invalid one stops startup rather than silently
+/// logging at some other level.
+fn init_tracing(observability: Arc<Observability>, log: &str) -> StartupResult<()> {
+    let filter = EnvFilter::try_new(log)
+        .map_err(|err| format!("Invalid startup.log filter '{log}': {err}"))?;
 
     tracing_subscriber::registry()
         .with(filter)
         .with(tracing_subscriber::fmt::layer())
         .with(observability.logs.layer())
         .init();
-}
-
-/// Resolves the management gateway bind address from the environment.
-fn resolve_api_addr() -> StartupResult<SocketAddr> {
-    let raw = std::env::var("KANON_API_ADDR").unwrap_or_else(|_| DEFAULT_API_ADDR.to_string());
-    raw.parse::<SocketAddr>()
-        .map_err(|err| format!("Invalid KANON_API_ADDR '{raw}': {err}").into())
+    Ok(())
 }
 
 /// Discovers plugins in the specified directory and launches their host processes.

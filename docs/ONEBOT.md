@@ -9,8 +9,8 @@ not implemented.
 
 1. Open **Plugins & Adapters**, then the **OneBot v11** configuration drawer.
 2. Choose a connection direction, enter the WebSocket URL and the matching access token.
-3. Enable and save. Saved settings live in `data/system.json` and take precedence over environment
-   variables at the next startup. Saving applies them immediately to the running adapter.
+3. Enable and save. Saved settings live in the `onebot` section of `data/system.json` and are
+   applied immediately to the running adapter.
 4. Create or enable a bot instance bound to platform `onebot`. A connected adapter alone does not
    make the pipeline answer messages; the instance, reply policy and model/plugin configuration
    still determine responses.
@@ -25,13 +25,18 @@ The OneBot implementation listens; Kanon connects. Enable the implementation's f
 WebSocket server and use its address, normally `ws://127.0.0.1:6700/`. Do not use its `/api` or
 `/event` endpoint, which each carry only one half of the protocol.
 
-For a fresh deployment, environment configuration is equivalent to the console:
+For a fresh deployment, writing the section into `data/system.json` before the first start is
+equivalent to the console:
 
-```sh
-KANON_ONEBOT_WS_URL=ws://127.0.0.1:6700/ \
-KANON_ONEBOT_TRANSPORT=forward_websocket \
-KANON_ONEBOT_TOKEN=replace-with-your-token \
-./target/release/kanon
+```json
+{
+  "onebot": {
+    "enabled": true,
+    "transport": "forward_websocket",
+    "ws_url": "ws://127.0.0.1:6700/",
+    "access_token": "replace-with-your-token"
+  }
+}
 ```
 
 `wss://` is supported with normal certificate validation. Kanon sends
@@ -42,18 +47,22 @@ not in the URL. Failed connections retry with backoff from 500 ms to 30 seconds.
 
 Kanon listens; the OneBot implementation connects. For example, configure Kanon with:
 
-```sh
-KANON_ONEBOT_WS_URL=ws://0.0.0.0:6701/onebot \
-KANON_ONEBOT_TRANSPORT=reverse_websocket \
-KANON_ONEBOT_TOKEN=replace-with-your-token \
-./target/release/kanon
+```json
+{
+  "onebot": {
+    "enabled": true,
+    "transport": "reverse_websocket",
+    "ws_url": "ws://0.0.0.0:6701/onebot",
+    "access_token": "replace-with-your-token"
+  }
+}
 ```
 
 Configure the implementation's **reverse universal WebSocket** URL as
 `ws://<kanon-host>:6701/onebot`, using the same token. `0.0.0.0` is a bind address, not the
 destination to put in the remote client. Use `127.0.0.1` for same-machine-only connections.
 The listener URL must name a literal IP address and a nonzero port. It is separate from the
-management gateway, so do not reuse `KANON_API_ADDR`'s port.
+management gateway, so do not reuse the port of `startup.api_addr`.
 
 The client must send the standard `X-Client-Role: Universal` and positive `X-Self-ID` headers.
 The configured path and bearer token are checked before upgrading. A second simultaneous client

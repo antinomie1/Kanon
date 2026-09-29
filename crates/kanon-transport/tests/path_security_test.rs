@@ -52,21 +52,10 @@ impl Drop for EnvVarGuard {
 }
 
 #[test]
-fn default_run_dir_prefers_kanon_run_dir_env() {
-    let _guard = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
-    let custom = "/tmp/test-kanon-custom-run-dir";
-    let _env = EnvVarGuard::set("KANON_RUN_DIR", custom);
-
-    let dir = default_run_dir();
-    assert_eq!(dir, PathBuf::from(custom));
-}
-
-#[test]
 #[cfg(unix)]
 fn default_run_dir_falls_back_to_uid_isolated_tmp_when_xdg_empty() {
     let _guard = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
-    let _env1 = EnvVarGuard::remove("KANON_RUN_DIR");
-    let _env2 = EnvVarGuard::remove("XDG_RUNTIME_DIR");
+    let _env = EnvVarGuard::remove("XDG_RUNTIME_DIR");
 
     let dir = default_run_dir();
     let uid = unsafe { libc::getuid() };
@@ -77,9 +66,8 @@ fn default_run_dir_falls_back_to_uid_isolated_tmp_when_xdg_empty() {
 #[cfg(unix)]
 fn default_run_dir_uses_xdg_runtime_dir_when_present() {
     let _guard = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
-    let _env1 = EnvVarGuard::remove("KANON_RUN_DIR");
     let xdg = "/tmp/fake-xdg-runtime-1000";
-    let _env2 = EnvVarGuard::set("XDG_RUNTIME_DIR", xdg);
+    let _env = EnvVarGuard::set("XDG_RUNTIME_DIR", xdg);
 
     let dir = default_run_dir();
     assert_eq!(dir, PathBuf::from(xdg).join("kanon").join("run"));

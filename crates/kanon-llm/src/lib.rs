@@ -50,7 +50,7 @@ pub use gateway::providers::{
 pub use gateway::{
     ChatChunk, ChatChunkStream, ChatMessage, ChatRequest, ChatResponse, ContentPart, LlmGateway,
     LlmProvider, ProviderSetup, Role, SUPPORTED_PROTOCOLS, TokenUsage, ToolCall, ToolDefinition,
-    build_provider, provider_from_env, strip_reasoning_tags,
+    build_provider, strip_reasoning_tags,
 };
 pub use layout::{canonical_json, canonical_tools, normalize_request};
 pub use memory::{InMemory, Memory, MemorySnapshot, SessionMemory};

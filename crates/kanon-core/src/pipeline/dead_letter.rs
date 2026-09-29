@@ -14,7 +14,7 @@ use kanon_proto::v1::{DeliverMessageRequest, MessageSegment, PipelineEventReques
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-/// Default directory for storing dead letter records when not configured via environment.
+/// Directory holding the dead-letter records, relative to the node working directory.
 pub const DEFAULT_DEAD_LETTER_DIR: &str = "./data/dead_letter";
 
 /// Which way a dead-lettered message was travelling.
@@ -65,7 +65,7 @@ pub struct DeadLetterWriter {
 
 impl Default for DeadLetterWriter {
     fn default() -> Self {
-        Self::new(Self::default_dir())
+        Self::new(DEFAULT_DEAD_LETTER_DIR)
     }
 }
 
@@ -75,16 +75,6 @@ impl DeadLetterWriter {
         Self {
             base_dir: base_dir.into(),
         }
-    }
-
-    /// Resolves the base dead letter directory, consulting `KANON_DEAD_LETTER_DIR` first.
-    pub fn default_dir() -> PathBuf {
-        if let Ok(dir) = std::env::var("KANON_DEAD_LETTER_DIR")
-            && !dir.trim().is_empty()
-        {
-            return PathBuf::from(dir);
-        }
-        PathBuf::from(DEFAULT_DEAD_LETTER_DIR)
     }
 
     /// Returns the active base directory.

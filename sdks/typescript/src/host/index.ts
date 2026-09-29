@@ -178,13 +178,10 @@ async function main(): Promise<void> {
     }
   }
 
-  const pluginPath =
-    pluginArg ||
-    process.env.KANON_PLUGIN_MANIFEST ||
-    process.env.KANON_PLUGIN_ENTRYPOINT;
+  const pluginPath = pluginArg;
 
   if (!pluginPath) {
-    console.error("Error: No plugin specified via --plugin or KANON_PLUGIN_MANIFEST");
+    console.error("Error: No plugin specified via --plugin");
     process.exit(1);
   }
 

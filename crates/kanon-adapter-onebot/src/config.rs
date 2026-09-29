@@ -131,32 +131,4 @@ impl OneBotConfig {
             .clone()
             .unwrap_or_else(|| self.platform.clone())
     }
-
-    /// Loads an enabled deployment when KANON_ONEBOT_WS_URL is set.
-    pub fn from_env() -> Result<Option<Self>, String> {
-        let ws_url = match std::env::var("KANON_ONEBOT_WS_URL") {
-            Ok(s) if !s.trim().is_empty() => s,
-            _ => return Ok(None),
-        };
-        let transport = match std::env::var("KANON_ONEBOT_TRANSPORT").as_deref() {
-            Ok("forward_websocket") | Err(_) => TransportKind::ForwardWebsocket,
-            Ok("reverse_websocket") => TransportKind::ReverseWebsocket,
-            _ => {
-                return Err(
-                    "KANON_ONEBOT_TRANSPORT must be forward_websocket or reverse_websocket".into(),
-                );
-            }
-        };
-        Self {
-            enabled: true,
-            ws_url,
-            transport,
-            platform: std::env::var("KANON_ONEBOT_PLATFORM")
-                .unwrap_or_else(|_| DEFAULT_PLATFORM.into()),
-            access_token: std::env::var("KANON_ONEBOT_TOKEN").ok(),
-            ..Self::default()
-        }
-        .prepare()
-        .map(Some)
-    }
 }

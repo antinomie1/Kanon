@@ -760,16 +760,16 @@ sequenceDiagram
 微内核（`crates/kanon-core`）与网关（`crates/kanon-api`）在此仅以库形式被装配 —— 二者自身不再提供任何可执行文件，
 整个工程的可执行产物只有 `kanon` 与开发者 CLI `kanon-dev`。
 
-| 环境变量 | 默认值 | 说明 |
-| :--- | :--- | :--- |
-| `KANON_API_ADDR` | `127.0.0.1:8080` | 管理网关监听地址（默认仅回环，避免误暴露） |
-| `KANON_LLM_BASE_URL` | 未设置 | 模型网关基址；未设置时聊天调试端点显式返回 `503`，绝不以假 Provider 掩盖缺失配置 |
-| `KANON_LLM_API_KEY` | 未设置 | 模型服务凭证 |
-| `KANON_LLM_MODEL` | `gpt-4o-mini` | 默认模型标识 |
-| `KANON_LLM_PROTOCOL` | `openai` | `openai` / `openai_responses` / `anthropic`，未知取值在启动期直接报错 |
-| `RUST_LOG` | `info` | 标准 `tracing` 过滤指令 |
+节点不读取任何环境变量，全部配置都在 `data/system.json`：提供商、模型、策略与适配器由控制台编辑；`startup` 小节由运维手工编辑、下次启动生效，控制台从不写入。所有键都可省略，出现未知键时启动直接失败而不是被忽略。
 
-`KANON_LLM_*` 只在 `data/system.json` 尚无提供商时用于播种：把端点登记为与其 Base URL 匹配的预设名，并把 `KANON_LLM_MODEL` 设为全局默认模型（形如 `<provider>/<model-id>`）。
+| `startup` 键 | 默认值 | 说明 |
+| :--- | :--- | :--- |
+| `api_addr` | `127.0.0.1:8080` | 管理网关监听地址（默认仅回环，避免误暴露） |
+| `log` | `info` | 标准 `tracing` 过滤指令 |
+| `run_dir` | 平台运行时目录 | IPC 套接字（`core.sock`、`host_<id>.sock`）所在目录 |
+| `typescript_runtime` | 依次在 `PATH` 中查找 `bun`、`node` | TypeScript 插件的解释器 |
+
+需要预置配置的部署（容器镜像、CI）直接随附一份准备好的 `data/system.json`。Supervisor 向宿主子进程注入的 `KANON_HOST_ID` / `KANON_HOST_SOCK` / `KANON_CORE_SOCK`（以及 Windows 上的 `KANON_IPC_TOKEN`）属于进程启动契约，不是运维配置。
 
 节点的运行时状态都在工作目录下的 `./data/`：
 

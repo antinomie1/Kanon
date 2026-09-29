@@ -1,7 +1,7 @@
 //! Tests for node system-configuration persistence (`data/system.json`).
 
 use kanon_api::llm_config::NodeSettings;
-use kanon_api::{LlmProviderConfig, SystemConfigStore};
+use kanon_api::{LlmProviderConfig, StartupConfig, SystemConfigStore};
 use kanon_llm::ProviderEntry;
 
 fn sample() -> LlmProviderConfig {
@@ -203,7 +203,7 @@ fn provider_names_are_derived_from_presets_and_hosts() {
 }
 
 #[test]
-fn the_environment_bootstrap_registers_one_provider_and_makes_its_model_the_default() {
+fn a_single_endpoint_description_becomes_one_provider_and_the_default_model() {
     let settings = sample().into_node_settings();
 
     assert_eq!(settings.providers.len(), 1);
@@ -212,7 +212,9 @@ fn the_environment_bootstrap_registers_one_provider_and_makes_its_model_the_defa
         settings.default_model.as_deref(),
         Some("deepseek/deepseek-flash")
     );
-    settings.validate().expect("the bootstrap must be valid");
+    settings
+        .validate()
+        .expect("the migrated settings must be valid");
 
     // An aggregator id keeps everything after the endpoint prefix.
     let aggregator = LlmProviderConfig {
@@ -256,4 +258,31 @@ fn saving_node_settings_round_trips_models_and_policies() {
     assert_eq!(reloaded.reply_policy.mode, kanon_core::ReplyMode::Mention);
     assert!(reloaded.context_policy.include_sender_id);
     assert!(!reloaded.context_policy.include_timestamp);
+}
+
+#[test]
+fn the_startup_section_survives_console_saves_and_rejects_unknown_keys() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let absent = SystemConfigStore::new(dir.path().join("absent.json"));
+    assert_eq!(absent.load_startup().unwrap(), StartupConfig::default());
+
+    let path = dir.path().join("system.json");
+    std::fs::write(
+        &path,
+        r#"{"startup": {"api_addr": "0.0.0.0:9000", "log": "debug"}}"#,
+    )
+    .unwrap();
+    let store = SystemConfigStore::new(&path);
+    let startup = store.load_startup().unwrap();
+    assert_eq!(startup.api_addr, "0.0.0.0:9000".parse().unwrap());
+    assert_eq!(startup.log, "debug");
+    assert!(startup.run_dir.is_none());
+
+    // The console rewrites the whole document; the hand-edited section must come through intact.
+    store.save_node_settings(&NodeSettings::default()).unwrap();
+    assert_eq!(store.load_startup().unwrap(), startup);
+
+    // A misspelt setting fails loudly instead of silently falling back to the default.
+    std::fs::write(&path, r#"{"startup": {"api_address": "0.0.0.0:9000"}}"#).unwrap();
+    assert!(store.load_startup().unwrap_err().contains("api_address"));
 }

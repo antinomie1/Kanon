@@ -212,14 +212,10 @@ async def main() -> None:
     core_sock_str = os.environ.get("KANON_CORE_SOCK")
     host_id = os.environ.get("KANON_HOST_ID", "host_py")
 
-    plugin_target = (
-        args.plugin
-        or os.environ.get("KANON_PLUGIN_MANIFEST")
-        or os.environ.get("KANON_PLUGIN_ENTRYPOINT")
-    )
+    plugin_target = args.plugin
 
     if not plugin_target:
-        print("Error: No plugin specified via --plugin or KANON_PLUGIN_MANIFEST", file=sys.stderr)
+        print("Error: No plugin specified via --plugin", file=sys.stderr)
         sys.exit(1)
 
     plugin = load_plugin_from_path(Path(plugin_target).resolve())

@@ -14,11 +14,12 @@
 //! adapter's settings, and vice versa. Unknown keys are carried through untouched so a newer
 //! component's settings survive a downgrade.
 //!
-//! # Precedence
-//! Providers saved here are the node's own configuration and win over the `KANON_LLM_*`
-//! environment bootstrap. Environment variables remain the way to deploy a node with a provider
-//! out of the box (containers, CI); the console is the way to change it afterwards. The Milky
-//! adapter's configuration follows the same precedence.
+//! # Configuration comes from files, never the environment
+//! Everything an operator configures lives in this document: providers, models, policies and
+//! adapters (usually edited through the console), plus the `startup` section the node reads
+//! before it serves anything (edited by hand, applied on the next start). A deployment ships a
+//! prepared `data/system.json` instead of environment variables, so the node's configuration is
+//! always exactly what one file says.
 //!
 //! # One default model, no default provider
 //! The node answers with exactly one *global default model* (`default_model`, a canonical
@@ -27,6 +28,7 @@
 //! still carry `default_provider` and the single-endpoint `llm` section; both are read (the latter
 //! is migrated into a named provider) and never written back.
 
+use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 
 use kanon_adapter_milky::MilkyConfig;
@@ -169,10 +171,8 @@ impl NodeSettings {
     }
 }
 
-/// Serializable description of one model provider, as the `KANON_LLM_*` environment describes it.
-///
-/// Field names mirror the environment variables. The same shape is what a document written before
-/// named providers existed stored under `llm`, so it doubles as the migration source.
+/// Single-endpoint provider description stored under `llm` by documents written before named
+/// providers existed. Read only to migrate such a document.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct LlmProviderConfig {
     /// Wire protocol: `openai`, `openai_responses` or `anthropic`.
@@ -190,6 +190,39 @@ pub struct LlmProviderConfig {
     /// Maximum generation tokens applied to the node's agent, when set.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_tokens: Option<u32>,
+}
+
+/// Settings the node needs before it serves anything, stored under `startup`.
+///
+/// The console never writes this section; an operator edits it by hand and it takes effect on the
+/// next start. Unknown keys are rejected so a misspelt setting fails loudly instead of being
+/// ignored.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct StartupConfig {
+    /// Management gateway bind address; loopback by default so it is never exposed by accident.
+    pub api_addr: SocketAddr,
+    /// `tracing` filter directive, such as `info` or `kanon_core=debug,info`.
+    pub log: String,
+    /// Directory for the IPC sockets. When unset, the platform runtime directory is used
+    /// (`$XDG_RUNTIME_DIR/kanon/run`, or a per-user directory under `/tmp`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub run_dir: Option<PathBuf>,
+    /// Interpreter for TypeScript plugins. When unset, `bun` and then `node` are looked up on
+    /// `PATH`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub typescript_runtime: Option<PathBuf>,
+}
+
+impl Default for StartupConfig {
+    fn default() -> Self {
+        Self {
+            api_addr: SocketAddr::from(([127, 0, 0, 1], 8080)),
+            log: "info".to_string(),
+            run_dir: None,
+            typescript_runtime: None,
+        }
+    }
 }
 
 /// Root document persisted in `data/system.json`.
@@ -223,6 +256,9 @@ struct SystemConfigDocument {
     /// OneBot v11 adapter configuration, when saved.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     onebot: Option<OneBotConfig>,
+    /// Startup settings; carried through every write, never changed by the console.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    startup: Option<StartupConfig>,
     /// Every unrecognized key is carried through verbatim.
     ///
     /// The document is shared, forward-compatible node state: writing the provider must never
@@ -232,34 +268,9 @@ struct SystemConfigDocument {
 }
 
 impl LlmProviderConfig {
-    /// Reads a provider description from the `KANON_LLM_*` environment variables.
-    ///
-    /// Returns `None` when `KANON_LLM_BASE_URL` is unset or blank, which means "no provider
-    /// configured by the environment" rather than an error. The variable set matches
-    /// [`kanon_llm::provider_from_env`], which serves the standalone core binary.
-    pub fn from_env() -> Option<Self> {
-        let base_url = std::env::var("KANON_LLM_BASE_URL").ok()?;
-        let base_url = base_url.trim().to_string();
-        if base_url.is_empty() {
-            return None;
-        }
-
-        Some(Self {
-            protocol: std::env::var("KANON_LLM_PROTOCOL").unwrap_or_else(|_| "openai".to_string()),
-            base_url,
-            model: std::env::var("KANON_LLM_MODEL").unwrap_or_else(|_| "gpt-4o-mini".to_string()),
-            api_key: std::env::var("KANON_LLM_API_KEY")
-                .ok()
-                .filter(|key| !key.trim().is_empty()),
-            temperature: None,
-            max_tokens: None,
-        })
-    }
-
     /// Converts this single-endpoint description into the named directory form.
     ///
-    /// Used for the `KANON_LLM_*` environment bootstrap and for migrating a legacy document: the
-    /// endpoint is registered under a name derived from its base URL so the resulting model
+    /// Used for migrating a legacy document: the endpoint is registered under a name derived from its base URL so the resulting model
     /// reference is exactly what the console would have produced, and that model becomes the
     /// node's global default.
     pub fn into_node_settings(&self) -> NodeSettings {
@@ -364,6 +375,14 @@ impl SystemConfigStore {
     /// Path of the persisted document.
     pub fn path(&self) -> &Path {
         &self.path
+    }
+
+    /// Loads the startup settings, falling back to the defaults when the section is absent.
+    pub fn load_startup(&self) -> Result<StartupConfig, String> {
+        Ok(self
+            .read_document()?
+            .and_then(|document| document.startup)
+            .unwrap_or_default())
     }
 
     /// Loads the persisted OneBot v11 configuration.

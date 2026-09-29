@@ -68,7 +68,8 @@ pub mod ws;
 pub use error::ApiError;
 pub use kanon_core::ToggleStore;
 pub use llm_config::{
-    LlmProviderConfig, NodeSettings, SystemConfigStore, derive_provider_name, provider_presets,
+    LlmProviderConfig, NodeSettings, StartupConfig, SystemConfigStore, derive_provider_name,
+    provider_presets,
 };
 pub use metrics::{MetricsRegistry, RuntimeGauges};
 pub use observability::{

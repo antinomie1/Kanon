@@ -379,10 +379,6 @@ const PROTO_LOADER_OPTIONS: protoLoader.Options = {
 
 /** Locates the canonical proto IDL file across workspaces. */
 export function findProtoPath(): string {
-  if (process.env.KANON_PROTO_PATH && fs.existsSync(process.env.KANON_PROTO_PATH)) {
-    return process.env.KANON_PROTO_PATH;
-  }
-
   let current = __dirname;
   for (let i = 0; i < 6; i++) {
     const candidate = path.join(current, "proto/kanon/v1/plugin.proto");

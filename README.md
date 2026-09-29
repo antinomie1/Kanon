@@ -46,21 +46,28 @@ cargo build --release      # builds exactly the two shipped executables
 ./target/release/kanon     # start the node
 ```
 
-The management gateway listens on `127.0.0.1:8080` by default. Frequently used environment
-variables (the complete list is in [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) §9.4):
+The management gateway listens on `127.0.0.1:8080` by default. The node reads no environment
+variables: its whole configuration is `data/system.json`. Providers, models, policies and adapters
+are edited in the console; the `startup` section is edited by hand and applies on the next start.
+Every key is optional, and an unknown key stops startup instead of being ignored:
 
-| Variable | Default | Purpose |
+```json
+{
+  "startup": {
+    "api_addr": "127.0.0.1:8080",
+    "log": "info",
+    "run_dir": "/run/kanon",
+    "typescript_runtime": "/usr/bin/node"
+  }
+}
+```
+
+| Key | Default | Purpose |
 | :--- | :--- | :--- |
-| `KANON_API_ADDR` | `127.0.0.1:8080` | management gateway bind address (loopback only) |
-| `KANON_LLM_BASE_URL` | unset | model provider base URL; when unset, chat and conversational routing stay disabled |
-| `KANON_LLM_API_KEY` | unset | provider credential |
-| `KANON_LLM_MODEL` | `gpt-4o-mini` | default model identifier |
-| `KANON_LLM_PROTOCOL` | `openai` | `openai`, `openai_responses` or `anthropic` |
-| `KANON_ONEBOT_WS_URL` | unset | OneBot v11 forward WebSocket endpoint or reverse listener URL; setting it enables the adapter |
-| `KANON_ONEBOT_TRANSPORT` | `forward_websocket` | `forward_websocket` or `reverse_websocket` |
-| `KANON_ONEBOT_TOKEN` | unset | OneBot bearer access token |
-| `KANON_RUN_DIR` | platform runtime dir | overrides where IPC sockets (`core.sock`, `host_<id>.sock`) are created |
-| `RUST_LOG` | `info` | standard `tracing` filter directives |
+| `api_addr` | `127.0.0.1:8080` | management gateway bind address (loopback only) |
+| `log` | `info` | `tracing` filter directives |
+| `run_dir` | platform runtime dir | where IPC sockets (`core.sock`, `host_<id>.sock`) are created |
+| `typescript_runtime` | `bun`, then `node`, from `PATH` | interpreter for TypeScript plugins |
 
 At runtime the node reads plugins from `./plugins`, keeps operator state in `./data/`, and creates its
 IPC sockets under the platform runtime directory (`$XDG_RUNTIME_DIR/kanon/run/` on Linux). The state
@@ -73,9 +80,7 @@ files under `./data/`:
 | `personas.json` | the personas you add in the console (the built-in base assistant is not stored) |
 | `sessions.db` | conversation history, compaction summaries and session records |
 
-The `KANON_LLM_*` variables only seed `system.json` when it has no provider yet: the endpoint is
-registered under the preset name its base URL matches, and `KANON_LLM_MODEL` becomes the global
-default model.
+To deploy a preconfigured node (a container image, CI), ship a prepared `data/system.json`.
 
 ## Console
 

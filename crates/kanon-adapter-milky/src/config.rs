@@ -50,15 +50,6 @@ pub const RECONNECT_INITIAL_BACKOFF: Duration = Duration::from_millis(500);
 /// still be noticed within half a minute once it returns.
 pub const RECONNECT_MAX_BACKOFF: Duration = Duration::from_secs(30);
 
-/// Environment variable holding the protocol implementation base URL.
-pub const ENV_BASE_URL: &str = "KANON_MILKY_BASE_URL";
-/// Environment variable holding the shared `access_token`.
-pub const ENV_ACCESS_TOKEN: &str = "KANON_MILKY_TOKEN";
-/// Environment variable overriding the platform identifier.
-pub const ENV_PLATFORM: &str = "KANON_MILKY_PLATFORM";
-/// Environment variable selecting the inbound transport.
-pub const ENV_TRANSPORT: &str = "KANON_MILKY_TRANSPORT";
-
 /// Inbound event transport used to receive pushed events.
 ///
 /// Milky implementations expose one `/event` endpoint that upgrades to WebSocket or falls back to
@@ -312,37 +303,5 @@ impl MilkyConfig {
         self.access_token
             .as_ref()
             .map(|token| format!("Bearer {token}"))
-    }
-
-    /// Reads a configuration from the `KANON_MILKY_*` environment variables.
-    ///
-    /// Returns `Ok(None)` when [`ENV_BASE_URL`] is unset or blank, which means "the environment
-    /// does not deploy a Milky adapter" rather than an error. A present but malformed value is a
-    /// hard error: silently ignoring it would start a node that looks configured but answers on
-    /// no platform, which is precisely the surprise this bootstrap exists to avoid.
-    pub fn from_env() -> Result<Option<Self>, ConfigError> {
-        let base_url = match std::env::var(ENV_BASE_URL) {
-            Ok(value) if !value.trim().is_empty() => value,
-            _ => return Ok(None),
-        };
-
-        let platform = std::env::var(ENV_PLATFORM).unwrap_or_else(|_| DEFAULT_PLATFORM.to_string());
-        let transport = match std::env::var(ENV_TRANSPORT) {
-            Ok(raw) if !raw.trim().is_empty() => TransportKind::from_str(&raw)?,
-            _ => TransportKind::default(),
-        };
-
-        let config = Self {
-            enabled: true,
-            platform,
-            display_name: None,
-            base_url,
-            access_token: std::env::var(ENV_ACCESS_TOKEN)
-                .ok()
-                .filter(|token| !token.trim().is_empty()),
-            transport,
-        };
-
-        config.prepare().map(Some)
     }
 }

@@ -526,6 +526,8 @@ pub struct Supervisor {
     config_versions: Arc<RwLock<HashMap<String, u64>>>,
     /// Plugins whose launch was prevented or deferred due to missing runtime environments.
     unavailable_plugins: Arc<RwLock<HashMap<String, UnavailablePlugin>>>,
+    /// Interpreter for TypeScript plugins; `bun`, then `node`, from `PATH` when unset.
+    typescript_runtime: Option<PathBuf>,
 }
 
 impl std::fmt::Debug for Supervisor {
@@ -660,7 +662,15 @@ impl Supervisor {
             adapters: Arc::new(AdapterRegistry::new()),
             config_versions: Arc::new(RwLock::new(HashMap::new())),
             unavailable_plugins: Arc::new(RwLock::new(HashMap::new())),
+            typescript_runtime: None,
         }
+    }
+
+    /// Uses `runtime` (a `bun` or `node` binary) for TypeScript plugins instead of the `PATH`
+    /// lookup, as the node's `startup.typescript_runtime` setting asks.
+    pub fn with_typescript_runtime(mut self, runtime: Option<PathBuf>) -> Self {
+        self.typescript_runtime = runtime;
+        self
     }
 
     /// Records a plugin as unavailable due to missing runtime environments or dependencies.
@@ -872,7 +882,6 @@ impl Supervisor {
             .env("KANON_HOST_ID", host_id)
             .env("KANON_HOST_SOCK", &socket_path)
             .env("KANON_CORE_SOCK", &self.core_sock_path)
-            .env("KANON_RUN_DIR", &self.run_dir)
             .kill_on_drop(true);
 
         let mut child = cmd.spawn()?;
@@ -1007,21 +1016,11 @@ impl Supervisor {
                             }
                         })?;
 
-                        let host_script = std::env::var("KANON_PYTHON_HOST_PATH")
-                            .map(PathBuf::from)
-                            .ok()
-                            .or_else(|| find_file_upwards(parent, "sdks/python/kanon_host/main.py"))
-                            .or_else(|| find_file_upwards(parent, "kanon_host/main.py"))
-                            .ok_or_else(|| SupervisorError::RuntimeUnavailable {
-                                runtime: "python".to_string(),
-                                reason:
-                                    "Could not locate Python host runner script (kanon_host/main.py)"
-                                        .to_string(),
-                            })?;
-
-                        let host_script_str = host_script.to_string_lossy();
+                        // The host runner ships with the SDK, which the plugin's environment
+                        // depends on, so it is run from there: no path to configure, and it works
+                        // wherever the plugin is installed.
                         let manifest_str = manifest_path_ref.to_string_lossy();
-                        let args = [host_script_str.as_ref(), "--plugin", manifest_str.as_ref()];
+                        let args = ["-m", "kanon_host.main", "--plugin", manifest_str.as_ref()];
 
                         self.launch_host(
                             &host_id,
@@ -1041,9 +1040,9 @@ impl Supervisor {
                             }
                         })?;
 
-                        let node_bin = std::env::var("KANON_NODE_BIN")
-                            .map(PathBuf::from)
-                            .ok()
+                        let node_bin = self
+                            .typescript_runtime
+                            .clone()
                             .or_else(|| find_binary_in_path("bun"))
                             .or_else(|| find_binary_in_path("node"))
                             .ok_or_else(|| SupervisorError::RuntimeUnavailable {
@@ -1051,9 +1050,13 @@ impl Supervisor {
                                 reason: "Neither bun nor node was found in PATH".to_string(),
                             })?;
 
-                        let host_script = std::env::var("KANON_TS_HOST_PATH")
-                            .map(PathBuf::from)
-                            .ok()
+                        // A plugin that depends on the SDK carries the host runner in its own
+                        // `node_modules`; inside a Kanon checkout the built SDK is used instead.
+                        let installed_host = parent
+                            .join("node_modules/@kanon/sdk-and-host/dist/src/host/index.js");
+                        let host_script = installed_host
+                            .is_file()
+                            .then_some(installed_host)
                             .or_else(|| find_file_upwards(parent, "sdks/typescript/dist/src/host/index.js"))
                             .or_else(|| find_file_upwards(parent, "dist/src/host/index.js"))
                             .ok_or_else(|| SupervisorError::RuntimeUnavailable {

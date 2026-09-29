@@ -131,9 +131,9 @@ pub const SUPPORTED_PROTOCOLS: [&str; 3] = ["openai", "openai_responses", "anthr
 
 /// Instantiates the wire client for one provider configuration.
 ///
-/// This is the single owner of the protocol switch: the environment bootstrap
-/// ([`provider_from_env`]) and the management gateway's provider endpoints both build their
-/// clients here, so a protocol accepted in one path can never be rejected by the other.
+/// This is the single owner of the protocol switch: every provider the node builds, from the
+/// saved directory or from the console, goes through here, so a protocol accepted in one path can
+/// never be rejected by another.
 ///
 /// `protocol` accepts `openai` (alias `openai_chat`), `openai_responses` and `anthropic`;
 /// any other value is rejected explicitly instead of silently falling back to a default.
@@ -169,33 +169,6 @@ pub fn build_provider(
     };
 
     Ok(provider)
-}
-
-/// Configures an [`LlmProvider`] and default model name from standard environment variables:
-///
-/// - `KANON_LLM_BASE_URL` — model provider base URL. If unset or empty, returns `Ok(None)`.
-/// - `KANON_LLM_MODEL` — default model name (default: `gpt-4o-mini`).
-/// - `KANON_LLM_API_KEY` — provider credential (optional).
-/// - `KANON_LLM_PROTOCOL` — protocol wire format: `openai` (or `openai_chat`), `openai_responses`, or `anthropic`.
-pub fn provider_from_env() -> Result<Option<ProviderSetup>, String> {
-    let Ok(base_url) = std::env::var("KANON_LLM_BASE_URL") else {
-        return Ok(None);
-    };
-    let base_url = base_url.trim().to_string();
-    if base_url.is_empty() {
-        return Ok(None);
-    }
-
-    let model = std::env::var("KANON_LLM_MODEL").unwrap_or_else(|_| "gpt-4o-mini".to_string());
-    let api_key = std::env::var("KANON_LLM_API_KEY")
-        .ok()
-        .filter(|s| !s.trim().is_empty());
-    let protocol = std::env::var("KANON_LLM_PROTOCOL").unwrap_or_else(|_| "openai".to_string());
-
-    let provider = build_provider(&protocol, base_url, api_key, model.clone())
-        .map_err(|err| format!("{err} (from KANON_LLM_PROTOCOL)"))?;
-
-    Ok(Some((provider, model)))
 }
 
 /// Returns the part of a model response that may be shown to an end user.

@@ -18,20 +18,16 @@ pub const DEFAULT_RUN_DIR: &str = "./run";
 
 /// Resolves the default runtime directory for Kanon IPC endpoints.
 ///
+/// The node's `startup.run_dir` setting overrides this; the SDKs never call it for a host, which
+/// always receives its socket path from the supervisor.
+///
 /// # Resolution Priority:
-/// 1. If `KANON_RUN_DIR` environment variable is set and non-empty, use that path.
-/// 2. On Unix:
+/// 1. On Unix:
 ///    - If `XDG_RUNTIME_DIR` is set and non-empty, use `$XDG_RUNTIME_DIR/kanon/run`.
 ///    - Otherwise, fallback to `/tmp/kanon-run-$UID/` using `libc::getuid()` to isolate
 ///      sockets by user ID and prevent local privilege hijacking in containerized environments.
-/// 3. On non-Unix: fallback to the local relative directory `./run`.
+/// 2. On non-Unix: fallback to the local relative directory `./run`.
 pub fn default_run_dir() -> PathBuf {
-    if let Ok(dir) = std::env::var("KANON_RUN_DIR")
-        && !dir.trim().is_empty()
-    {
-        return PathBuf::from(dir);
-    }
-
     #[cfg(unix)]
     {
         if let Ok(xdg_runtime) = std::env::var("XDG_RUNTIME_DIR")
