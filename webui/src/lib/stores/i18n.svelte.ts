@@ -140,6 +140,12 @@ export const dictionaries = {
     // Tool catalog
     'tools.title': 'Tool Catalog',
     'bash.title': 'Who may ask the AI to run Bash',
+    'bash.sandbox_title': 'Container sandbox',
+    'bash.network': 'Allow public Internet access',
+    'bash.sandbox_hint':
+      'Only the dedicated workspace is shared. Host/LAN/metadata addresses are blocked. Missing Docker or runtime image denies execution.',
+    'bash.image': 'Prepared sandbox image',
+    'bash.processes': 'process/thread limit',
     'bash.hint':
       'Access follows the current sender. Obvious destructive commands are checked for every sender.',
     'bash.mode': 'Access mode',
@@ -813,6 +819,12 @@ export const dictionaries = {
     // Tool catalog
     'tools.title': '工具列表',
     'bash.title': '谁可以让 AI 执行 Bash',
+    'bash.sandbox_title': '容器沙箱',
+    'bash.network': '允许公网联网',
+    'bash.sandbox_hint':
+      '只共享独立工作区，阻止宿主、内网和元数据地址。Docker 或运行镜像缺失时会拒绝执行。',
+    'bash.image': '已准备的沙箱镜像',
+    'bash.processes': '进程/线程上限',
     'bash.hint':
       '只按本轮发送者判断权限；对每个用户都会做明显危险指令的基础检查。',
     'bash.mode': '权限模式',

@@ -38,8 +38,22 @@ async fn get_bash_policy(State(state): State<ApiState>) -> Json<BashPolicy> {
 /// Persists permission changes before publishing them to the execution gate.
 async fn put_bash_policy(
     State(state): State<ApiState>,
-    Json(policy): Json<BashPolicy>,
+    Json(mut submitted): Json<serde_json::Value>,
 ) -> Result<Json<BashPolicy>, ApiError> {
+    // Older clients edit only the caller lists. Preserve runtime security settings unless the
+    // operator explicitly includes them, rather than silently re-enabling network access.
+    let object = submitted
+        .as_object_mut()
+        .ok_or_else(|| ApiError::BadRequest("Bash policy must be an object".into()))?;
+    if !object.contains_key("sandbox") {
+        object.insert(
+            "sandbox".into(),
+            serde_json::to_value(state.bash_policy().get().sandbox)
+                .map_err(|err| ApiError::BadRequest(err.to_string()))?,
+        );
+    }
+    let policy: BashPolicy =
+        serde_json::from_value(submitted).map_err(|err| ApiError::BadRequest(err.to_string()))?;
     let mut settings = state.node_settings();
     settings.bash_policy = policy;
     state

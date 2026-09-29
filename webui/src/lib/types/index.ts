@@ -832,7 +832,19 @@ export interface BashPrincipal {
 
 /** Permission to ask the AI to execute Bash; denial wins in either mode. */
 export interface BashPolicy {
+  sandbox: BashSandboxConfig;
   mode: 'allowlist' | 'denylist';
   allowlist: BashPrincipal[];
   denylist: BashPrincipal[];
+}
+
+/** Operator-owned runtime; model calls cannot change sandbox limits or mounts. */
+export interface BashSandboxConfig {
+  endpoint: string;
+  image: string;
+  network: boolean;
+  memory_mb: number;
+  cpus: number;
+  pids_limit: number;
+  file_size_mb: number;
 }

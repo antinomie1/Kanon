@@ -166,7 +166,10 @@ async fn main() -> StartupResult<()> {
     // through exactly the same path.
     let node_settings = bootstrap_node_settings()?;
     let bash_policy = Arc::new(BashPolicyStore::new(node_settings.bash_policy.clone()));
-    let bash_tool = Arc::new(BashTool::new(".", bash_policy.clone())?);
+    let bash_tool = Arc::new(BashTool::new(
+        kanon_core::DEFAULT_BASH_WORKSPACE,
+        bash_policy.clone(),
+    )?);
 
     // The persona library is the built-in base assistant plus the operator's saved personas. A
     // malformed `data/personas.json` is a hard startup error rather than a silent fallback, for the

@@ -37,9 +37,11 @@ pub enum BashAccessMode {
 }
 
 /// Persisted caller policy, independent of the command safety policy.
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct BashPolicy {
+    /// Mandatory Docker sandbox configuration, controlled only by the operator.
+    pub sandbox: super::BashSandboxConfig,
     /// Whether access is restricted to the allowlist or open except for the denylist.
     pub mode: BashAccessMode,
     /// Explicitly permitted platform-scoped senders.
@@ -51,6 +53,7 @@ pub struct BashPolicy {
 impl BashPolicy {
     /// Rejects empty identities rather than accepting a policy that cannot match real events.
     pub fn validate(&self) -> Result<(), String> {
+        self.sandbox.validate()?;
         for entry in self.allowlist.iter().chain(&self.denylist) {
             if entry.platform.trim().is_empty()
                 || entry.user_id.trim().is_empty()
@@ -77,6 +80,11 @@ impl BashPolicy {
         }
         self.mode == BashAccessMode::Denylist || self.allowlist.contains(caller)
     }
+}
+
+/// Returns the adapter-provided identity for an independently owned execution worker.
+pub(super) fn current_caller() -> Option<BashPrincipal> {
+    CALLER.try_with(Clone::clone).ok()
 }
 
 /// Live policy shared by the management API, availability hint and execution gate.

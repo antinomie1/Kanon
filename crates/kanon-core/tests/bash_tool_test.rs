@@ -38,6 +38,7 @@ async fn run(tool: &BashTool, args: Value) -> Result<String, String> {
 }
 
 #[tokio::test]
+#[ignore = "requires local Docker and the sandbox/bash runtime image"]
 async fn static_commands_quotes_pipelines_and_failures_are_executed() {
     let dir = tempfile::tempdir().unwrap();
     let tool = BashTool::new(dir.path(), permitted()).unwrap();
@@ -76,6 +77,7 @@ async fn static_commands_quotes_pipelines_and_failures_are_executed() {
 }
 
 #[tokio::test]
+#[ignore = "requires local Docker and the sandbox/bash runtime image"]
 async fn obvious_risks_are_blocked_before_any_spawn() {
     let dir = tempfile::tempdir().unwrap();
     let sentinel = dir.path().join("keep");
@@ -127,6 +129,7 @@ async fn obvious_risks_are_blocked_before_any_spawn() {
 }
 
 #[tokio::test]
+#[ignore = "requires local Docker and the sandbox/bash runtime image"]
 async fn cwd_validation_and_argument_validation_fail_explicitly() {
     let dir = tempfile::tempdir().unwrap();
     let outside = tempfile::tempdir().unwrap();
@@ -139,13 +142,7 @@ async fn cwd_validation_and_argument_validation_fail_explicitly() {
             .unwrap(),
     )
     .unwrap();
-    assert_eq!(
-        output["stdout"],
-        format!(
-            "{}\n",
-            dir.path().canonicalize().unwrap().join("child").display()
-        )
-    );
+    assert_eq!(output["stdout"], "/workspace/child\n");
     for args in [
         json!({"command":"pwd", "cwd":".."}),
         json!({"command":"pwd", "cwd":"escape"}),
@@ -161,6 +158,7 @@ async fn cwd_validation_and_argument_validation_fail_explicitly() {
 }
 
 #[tokio::test]
+#[ignore = "requires local Docker and the sandbox/bash runtime image"]
 async fn timeout_cleans_up_a_pipeline_and_large_output_is_bounded() {
     let dir = tempfile::tempdir().unwrap();
     let tool = BashTool::new(dir.path(), permitted()).unwrap();
@@ -186,6 +184,7 @@ async fn timeout_cleans_up_a_pipeline_and_large_output_is_bounded() {
 }
 
 #[tokio::test]
+#[ignore = "requires local Docker and the sandbox/bash runtime image"]
 async fn interpreters_scripts_and_normal_bash_syntax_are_allowed() {
     let dir = tempfile::tempdir().unwrap();
     let tool = BashTool::new(dir.path(), permitted()).unwrap();
@@ -245,6 +244,7 @@ async fn interpreters_scripts_and_normal_bash_syntax_are_allowed() {
 }
 
 #[tokio::test]
+#[ignore = "requires local Docker and the sandbox/bash runtime image"]
 async fn caller_permissions_cannot_be_forged_or_shared_between_group_turns() {
     let dir = tempfile::tempdir().unwrap();
     let policy = permitted();
@@ -347,6 +347,7 @@ impl LlmProvider for InsistentModel {
 }
 
 #[tokio::test]
+#[ignore = "requires local Docker and the sandbox/bash runtime image"]
 async fn pipeline_identity_enforces_permissions_even_when_the_model_calls_bash() {
     let dir = tempfile::tempdir().unwrap();
     let policy = permitted();
@@ -468,6 +469,7 @@ impl LlmProvider for LayoutModel {
 }
 
 #[tokio::test]
+#[ignore = "requires local Docker and the sandbox/bash runtime image"]
 async fn availability_keeps_multimodal_history_and_compaction_prefix_intact() {
     let dir = tempfile::tempdir().unwrap();
     let policy = permitted();
@@ -546,6 +548,7 @@ async fn availability_keeps_multimodal_history_and_compaction_prefix_intact() {
 }
 
 #[tokio::test]
+#[ignore = "requires local Docker and the sandbox/bash runtime image"]
 async fn streaming_enriches_the_user_message_once_before_persistence() {
     let dir = tempfile::tempdir().unwrap();
     let policy = permitted();

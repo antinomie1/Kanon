@@ -1,0 +1,460 @@
+//! Docker-backed execution. There is deliberately no unsandboxed fallback.
+
+use std::collections::HashMap;
+use std::path::{Path, PathBuf};
+use std::sync::{
+    Arc,
+    atomic::{AtomicU64, Ordering},
+};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
+
+use bollard::Docker;
+use bollard::container::LogOutput;
+use bollard::models::{
+    ContainerCreateBody, HealthConfig, HostConfig, HostConfigCgroupnsModeEnum, HostConfigLogConfig,
+    Mount, MountBindOptions, MountTypeEnum, ResourcesUlimits,
+};
+use bollard::query_parameters::{
+    AttachContainerOptionsBuilder, CreateContainerOptionsBuilder, RemoveContainerOptionsBuilder,
+};
+use futures_util::StreamExt;
+use serde::{Deserialize, Serialize};
+use tokio::sync::{OwnedSemaphorePermit, oneshot};
+
+use super::{BashPolicyStore, BashPrincipal, MAX_BASH_OUTPUT_BYTES};
+
+/// Independent host directory exposed to the sandbox, never the node's configuration directory.
+pub const DEFAULT_BASH_WORKSPACE: &str = "./data/bash/workspace";
+
+/// Operator-owned container settings. Model arguments cannot modify these fields.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct BashSandboxConfig {
+    /// Local Docker socket or Windows named pipe; remote daemons are not accepted.
+    pub endpoint: String,
+    /// Prepared image carrying the Kanon sandbox bootstrap contract.
+    pub image: String,
+    /// Allow public IPv4 networking; private/host/metadata destinations remain blocked.
+    pub network: bool,
+    /// Container RAM and swap ceiling, in MiB.
+    pub memory_mb: u32,
+    /// CPU quota measured in cores.
+    pub cpus: f64,
+    /// Maximum number of processes/threads in the container.
+    pub pids_limit: u32,
+    /// Maximum size of an individual output file, in MiB.
+    pub file_size_mb: u32,
+}
+
+impl Default for BashSandboxConfig {
+    fn default() -> Self {
+        Self {
+            endpoint: if cfg!(windows) {
+                "npipe:////./pipe/docker_engine"
+            } else {
+                "unix:///var/run/docker.sock"
+            }
+            .into(),
+            image: "kanon-bash-sandbox:1".into(),
+            network: true,
+            memory_mb: 512,
+            cpus: 1.0,
+            pids_limit: 128,
+            file_size_mb: 512,
+        }
+    }
+}
+
+impl BashSandboxConfig {
+    /// Validates all operator settings before persistence or daemon access.
+    pub fn validate(&self) -> Result<(), String> {
+        if !(self.endpoint.starts_with("unix:///")
+            || self.endpoint.starts_with("npipe:////./pipe/"))
+            || self.endpoint.contains('\0')
+        {
+            return Err("Sandbox endpoint must be a local unix socket or named pipe".into());
+        }
+        if self.image.is_empty()
+            || self.image.starts_with('-')
+            || !self
+                .image
+                .bytes()
+                .all(|ch| ch.is_ascii_alphanumeric() || b"._-/:@".contains(&ch))
+        {
+            return Err("Invalid sandbox image reference".into());
+        }
+        if !(64..=8192).contains(&self.memory_mb)
+            || !self.cpus.is_finite()
+            || !(0.1..=8.0).contains(&self.cpus)
+            || !(16..=512).contains(&self.pids_limit)
+            || !(1..=8192).contains(&self.file_size_mb)
+        {
+            return Err("Invalid sandbox resource limits".into());
+        }
+        Ok(())
+    }
+}
+
+/// Checks the local daemon and prepared image, returning an immutable image id for execution.
+pub(super) async fn probe(config: &BashSandboxConfig) -> Result<(Docker, String), String> {
+    config.validate()?;
+    #[cfg(unix)]
+    let docker = Docker::connect_with_unix(
+        config
+            .endpoint
+            .strip_prefix("unix://")
+            .ok_or("This host requires a Unix Docker socket")?,
+        10,
+        bollard::API_DEFAULT_VERSION,
+    );
+    #[cfg(windows)]
+    let docker =
+        Docker::connect_with_named_pipe(config.endpoint.as_str(), 10, bollard::API_DEFAULT_VERSION);
+    #[cfg(not(any(unix, windows)))]
+    return Err("Docker sandbox is unsupported on this host".into());
+    let docker = docker
+        .map_err(|err| format!("Docker sandbox unavailable: {err}"))?
+        .negotiate_version()
+        .await
+        .map_err(|err| format!("Docker sandbox unavailable: {err}"))?;
+    let info = docker
+        .info()
+        .await
+        .map_err(|err| format!("Docker sandbox unavailable: {err}"))?;
+    if info.os_type.as_deref() != Some("linux")
+        || info.memory_limit != Some(true)
+        || info.swap_limit != Some(true)
+        || info.cpu_cfs_quota != Some(true)
+        || info.pids_limit != Some(true)
+        || !info
+            .security_options
+            .as_ref()
+            .is_some_and(|options| options.iter().any(|option| option.contains("seccomp")))
+    {
+        return Err(
+            "Sandbox requires a Linux Docker daemon with memory/CPU/PID limits and seccomp".into(),
+        );
+    }
+    let image = docker
+        .inspect_image(&config.image)
+        .await
+        .map_err(|err| format!("Sandbox image unavailable; build sandbox/bash first: {err}"))?;
+    let image_config = image
+        .config
+        .ok_or("Sandbox image has no runtime configuration")?;
+    if image.os.as_deref() != Some("linux")
+        || image_config
+            .labels
+            .as_ref()
+            .and_then(|labels| labels.get("org.kanon.bash-sandbox.version"))
+            .map(String::as_str)
+            != Some("1")
+        || image_config
+            .volumes
+            .as_ref()
+            .is_some_and(|volumes| !volumes.is_empty())
+    {
+        return Err("Image does not satisfy the Kanon sandbox runtime contract".into());
+    }
+    Ok((docker, image.id.ok_or("Sandbox image has no immutable id")?))
+}
+
+/// Chooses a non-root execution identity matching the node's workspace ownership when possible.
+pub(super) fn identity() -> (u32, u32) {
+    #[cfg(unix)]
+    {
+        // SAFETY: these identity queries have no pointers or side effects.
+        let (uid, gid) = unsafe { (libc::geteuid(), libc::getegid()) };
+        if uid != 0 {
+            return (uid, gid);
+        }
+    }
+    (65534, 65534)
+}
+
+/// Starts an independently owned worker, so dropping a caller cannot abandon container creation.
+pub(super) async fn execute(
+    root: PathBuf,
+    cwd: PathBuf,
+    command: String,
+    seconds: u64,
+    policy: Arc<BashPolicyStore>,
+    caller: BashPrincipal,
+    slot: OwnedSemaphorePermit,
+) -> Result<String, String> {
+    let (cancel, receiver) = oneshot::channel();
+    let _cancel = CancelOnDrop(Some(cancel));
+    let task = tokio::spawn(async move {
+        let _slot = slot;
+        run(root, cwd, command, seconds, policy, caller, receiver).await
+    });
+    task.await
+        .map_err(|err| format!("Sandbox worker failed: {err}"))?
+}
+
+struct CancelOnDrop(Option<oneshot::Sender<()>>);
+impl Drop for CancelOnDrop {
+    fn drop(&mut self) {
+        if let Some(cancel) = self.0.take() {
+            let _ = cancel.send(());
+        }
+    }
+}
+
+async fn run(
+    root: PathBuf,
+    cwd: PathBuf,
+    command: String,
+    seconds: u64,
+    policy: Arc<BashPolicyStore>,
+    caller: BashPrincipal,
+    mut cancel: oneshot::Receiver<()>,
+) -> Result<String, String> {
+    let config = policy.get().sandbox;
+    let (docker, image) = probe(&config).await?;
+    if !matches!(cancel.try_recv(), Err(oneshot::error::TryRecvError::Empty)) {
+        return Err("Sandbox execution cancelled".into());
+    }
+    static NEXT: AtomicU64 = AtomicU64::new(0);
+    let name = format!(
+        "kanon-bash-{}-{}-{}",
+        std::process::id(),
+        NEXT.fetch_add(1, Ordering::Relaxed),
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map_err(|err| err.to_string())?
+            .as_nanos()
+    );
+    let body = container_body(&root, &cwd, &command, seconds, &config, image)?;
+    // Creation is owned by this worker and never cancelled with the caller: after a successful
+    // create we know the exact container that must be removed, including a not-yet-started one.
+    let created = docker
+        .create_container(
+            Some(CreateContainerOptionsBuilder::default().name(&name).build()),
+            body,
+        )
+        .await;
+    let id = match created {
+        Ok(created) => created.id,
+        Err(err) => {
+            let _ = docker
+                .remove_container(
+                    &name,
+                    Some(
+                        RemoveContainerOptionsBuilder::default()
+                            .force(true)
+                            .v(true)
+                            .build(),
+                    ),
+                )
+                .await;
+            return Err(format!("Failed to create sandbox: {err}"));
+        }
+    };
+    let outcome = async {
+        if !matches!(cancel.try_recv(), Err(oneshot::error::TryRecvError::Empty)) { return Err("Sandbox execution cancelled".into()); }
+        if !policy.get().allows(Some(&caller)) { return Err("Bash execution denied: permission was revoked".into()); }
+        let mut attached = docker.attach_container(&id, Some(AttachContainerOptionsBuilder::default().stdout(true).stderr(true).stream(true).build())).await.map_err(|err| err.to_string())?;
+        if !matches!(cancel.try_recv(), Err(oneshot::error::TryRecvError::Empty)) { return Err("Sandbox execution cancelled".into()); }
+        if !policy.get().allows(Some(&caller)) { return Err("Bash execution denied: permission was revoked".into()); }
+        docker.start_container(&id, None).await.map_err(|err| format!("Failed to start sandbox: {err}"))?;
+        let mut output = Capture::default();
+        let start = std::time::Instant::now();
+        let io = async {
+            let read = async {
+                while let Some(frame) = attached.output.next().await {
+                    match frame.map_err(|err| err.to_string())? {
+                        LogOutput::StdErr { message } => output.append(false, &message),
+                        LogOutput::StdOut { message } | LogOutput::Console { message } => output.append(true, &message),
+                        LogOutput::StdIn { .. } => {}
+                    }
+                }
+                Ok::<_, String>(())
+            };
+            let wait = async {
+                let stream = docker.wait_container(&id, None);
+                tokio::pin!(stream);
+                match stream.next().await.ok_or("Sandbox returned no exit status")? {
+                    Ok(result) => Ok(result.status_code),
+                    Err(bollard::errors::Error::DockerContainerWaitError { code, .. }) => Ok(code),
+                    Err(error) => Err(error.to_string()),
+                }
+            };
+            tokio::try_join!(read, wait).map(|(_, code)| code)
+        };
+        let result = tokio::select! {
+            _ = &mut cancel => return Err("Sandbox execution cancelled".into()),
+            result = tokio::time::timeout(Duration::from_secs(seconds + 3), io) => result,
+        };
+        let state = docker.inspect_container(&id, None).await.map_err(|err| format!("Sandbox state inspection failed: {err}"))?.state;
+        let oom = state.as_ref().and_then(|state| state.oom_killed).unwrap_or(false);
+        let (code, timed_out) = match result {
+            Ok(Ok(code)) => (Some(code), !oom && (code == 124 || code == 137 && start.elapsed().as_secs() >= seconds)),
+            Ok(Err(err)) => return Err(format!("Sandbox output/wait failed: {err}")),
+            Err(_) => (None, true),
+        };
+        let result = serde_json::json!({"stdout":String::from_utf8_lossy(&output.stdout), "stderr":String::from_utf8_lossy(&output.stderr),
+            "exit_code":code, "timed_out":timed_out, "oom_killed":oom, "stdout_truncated":output.stdout_truncated,
+            "stderr_truncated":output.stderr_truncated, "sandbox":true, "workspace":"/workspace"}).to_string();
+        if code == Some(0) && !timed_out && !oom { Ok(result) } else { Err(result) }
+    }.await;
+    // Force-removal targets the whole container, so setsid/detached children cannot survive a call.
+    docker
+        .remove_container(
+            &id,
+            Some(
+                RemoveContainerOptionsBuilder::default()
+                    .force(true)
+                    .v(true)
+                    .build(),
+            ),
+        )
+        .await
+        .map_err(|err| format!("Sandbox cleanup failed for {id}: {err}"))?;
+    outcome
+}
+
+fn container_body(
+    root: &Path,
+    cwd: &Path,
+    command: &str,
+    seconds: u64,
+    config: &BashSandboxConfig,
+    image: String,
+) -> Result<ContainerCreateBody, String> {
+    let source = root
+        .to_str()
+        .ok_or("Sandbox workspace must have a UTF-8 path")?;
+    let relative = cwd.strip_prefix(root).map_err(|err| err.to_string())?;
+    let workdir = format!(
+        "/workspace/{}",
+        relative
+            .components()
+            .map(|component| component.as_os_str().to_str().ok_or("Invalid cwd encoding"))
+            .collect::<Result<Vec<_>, _>>()?
+            .join("/")
+    );
+    let (uid, gid) = identity();
+    let memory = i64::from(config.memory_mb) * 1024 * 1024;
+    Ok(ContainerCreateBody {
+        image: Some(image),
+        user: Some("0:0".into()),
+        entrypoint: Some(vec!["/usr/local/libexec/kanon-sandbox-init".into()]),
+        cmd: Some(vec![
+            uid.to_string(),
+            gid.to_string(),
+            seconds.to_string(),
+            command.into(),
+        ]),
+        working_dir: Some(workdir),
+        open_stdin: Some(false),
+        tty: Some(false),
+        healthcheck: Some(HealthConfig {
+            test: Some(vec!["NONE".into()]),
+            ..Default::default()
+        }),
+        env: Some(vec![
+            "HOME=/tmp".into(),
+            "LANG=C.UTF-8".into(),
+            "BASH_ENV=".into(),
+            "ENV=".into(),
+            "LD_PRELOAD=".into(),
+            "LD_LIBRARY_PATH=".into(),
+            "LD_AUDIT=".into(),
+        ]),
+        labels: Some(HashMap::from([(
+            "org.kanon.bash-sandbox.managed".into(),
+            "1".into(),
+        )])),
+        host_config: Some(HostConfig {
+            init: Some(true),
+            privileged: Some(false),
+            readonly_rootfs: Some(true),
+            cap_drop: Some(vec!["ALL".into()]),
+            // The trusted image bootstrap needs only these setup capabilities. setpriv removes
+            // every capability and bounding-set bit before timeout/Bash/Python/Node start.
+            cap_add: Some(
+                ["NET_ADMIN", "SETUID", "SETGID", "SETPCAP"]
+                    .map(str::to_string)
+                    .to_vec(),
+            ),
+            security_opt: Some(vec!["no-new-privileges=true".into()]),
+            memory: Some(memory),
+            memory_swap: Some(memory),
+            nano_cpus: Some((config.cpus * 1e9) as i64),
+            pids_limit: Some(i64::from(config.pids_limit)),
+            network_mode: Some(if config.network { "bridge" } else { "none" }.into()),
+            extra_hosts: Some(vec!["host.docker.internal:host-gateway".into()]),
+            ipc_mode: Some("private".into()),
+            cgroupns_mode: Some(HostConfigCgroupnsModeEnum::PRIVATE),
+            sysctls: Some(HashMap::from([
+                ("net.ipv6.conf.all.disable_ipv6".into(), "1".into()),
+                ("net.ipv6.conf.default.disable_ipv6".into(), "1".into()),
+            ])),
+            tmpfs: Some(HashMap::from([(
+                "/tmp".into(),
+                "rw,nosuid,nodev,size=128m,mode=1777".into(),
+            )])),
+            mounts: Some(vec![Mount {
+                typ: Some(MountTypeEnum::BIND),
+                source: Some(source.into()),
+                target: Some("/workspace".into()),
+                read_only: Some(false),
+                bind_options: Some(MountBindOptions {
+                    non_recursive: Some(true),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            }]),
+            ulimits: Some(vec![
+                ResourcesUlimits {
+                    name: Some("nofile".into()),
+                    soft: Some(4096),
+                    hard: Some(4096),
+                },
+                ResourcesUlimits {
+                    name: Some("fsize".into()),
+                    soft: Some(i64::from(config.file_size_mb) * 1024 * 1024),
+                    hard: Some(i64::from(config.file_size_mb) * 1024 * 1024),
+                },
+                ResourcesUlimits {
+                    name: Some("core".into()),
+                    soft: Some(0),
+                    hard: Some(0),
+                },
+            ]),
+            log_config: Some(HostConfigLogConfig {
+                typ: Some("local".into()),
+                config: Some(HashMap::from([
+                    ("max-size".into(), "1m".into()),
+                    ("max-file".into(), "1".into()),
+                    ("compress".into(), "false".into()),
+                ])),
+            }),
+            ..Default::default()
+        }),
+        ..Default::default()
+    })
+}
+
+#[derive(Default)]
+struct Capture {
+    stdout: Vec<u8>,
+    stderr: Vec<u8>,
+    stdout_truncated: bool,
+    stderr_truncated: bool,
+}
+impl Capture {
+    fn append(&mut self, stdout: bool, bytes: &[u8]) {
+        let (data, truncated) = if stdout {
+            (&mut self.stdout, &mut self.stdout_truncated)
+        } else {
+            (&mut self.stderr, &mut self.stderr_truncated)
+        };
+        let retain = bytes
+            .len()
+            .min(MAX_BASH_OUTPUT_BYTES.saturating_sub(data.len()));
+        data.extend_from_slice(&bytes[..retain]);
+        *truncated |= retain < bytes.len();
+    }
+}

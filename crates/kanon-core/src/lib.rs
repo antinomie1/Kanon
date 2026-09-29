@@ -28,8 +28,8 @@ pub use adapter::{
     PlatformAdapter,
 };
 pub use bash::{
-    BashAccessMode, BashAvailabilityHook, BashPolicy, BashPolicyStore, BashPrincipal, BashTool,
-    with_bash_caller,
+    BashAccessMode, BashAvailabilityHook, BashPolicy, BashPolicyStore, BashPrincipal,
+    BashSandboxConfig, BashTool, DEFAULT_BASH_WORKSPACE, with_bash_caller,
 };
 pub use conversation::{
     ContextPolicy, ContextPolicyStore, ConversationKind, META_BOT_MENTIONED,

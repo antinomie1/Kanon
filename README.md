@@ -100,7 +100,7 @@ OneBot v11 can also be configured under **Plugins & Adapters → OneBot v11** in
 Both forward and reverse universal WebSockets are supported. See [the OneBot setup guide](docs/ONEBOT.md)
 for connection examples, account binding, message support and the typed client covering 29 common APIs.
 
-## Guarded Bash tool
+## Sandboxed Bash tool
 
 The node registers `bash` as a native tool alongside `read_skill`. In **Tools**, configure who may
 ask the AI to execute it. Kanon has no node-wide administrator role, so this policy belongs only to
@@ -115,7 +115,8 @@ The policy is stored in `data/system.json` under `bash_policy` and can also be r
   "bash_policy": {
     "mode": "allowlist",
     "allowlist": [{ "platform": "onebot", "user_id": "123456" }],
-    "denylist": []
+    "denylist": [],
+    "sandbox": { "network": true }
   }
 }
 ```
@@ -137,20 +138,59 @@ It also rejects `find -delete`, destructive `git reset --hard` / forced `git cle
 `printf '%s' '-v'` or `printf -- '-v'` remains available. Git and ripgrep helpers, including `rg -z`,
 are allowed like other scripts and subprocesses.
 
-`cwd` defaults to `.` and must resolve inside the node workspace, including through symlinks. This
-bounds the **starting directory**, not subsequent filesystem access or a script's own `cd` calls.
-Each call has a 15-second default timeout (1–120 seconds), a four-process concurrency limit, no stdin,
-and at most 64 KiB retained per stdout/stderr stream. Child environments omit provider credentials
-and Bash startup injection variables, while preserving the OS PATH and home directory so installed
-interpreters and development tools remain usable. Timeout and cancellation kill the process group.
-Results report stdout, stderr, exit code, timeout and truncation; nonzero exits are tool failures.
-Both the availability hint and execution probe for an executable Bash; execution requires a Unix host.
+Every command, including Python/Node and external subprocesses, runs in a mandatory **Docker
+container sandbox**. No host Bash execution path or unsafe fallback remains. Only the dedicated
+`./data/bash/workspace` directory is mounted at `/workspace`; node configuration, provider keys,
+plugins, the host home directory and Docker socket are not exposed. `cwd` is relative to that
+workspace. Writable workspace files persist between calls and are shared by authorized senders.
+The container system filesystem is read-only and user code runs as a non-root UID with no
+capabilities and `no-new-privileges`. PID, IPC and cgroup namespaces remain private.
 
-This is an accident-prevention guard for trusted, authorized users, **not a sandbox**. Interpreter
-code, external scripts and dynamic command names can perform operations outside these checks, with
-the node account's filesystem permissions. Use an appropriately restricted OS account or container
-when actual filesystem confinement is needed. The sender permission gate remains authoritative even
-when the model ignores an unavailable hint.
+Networking defaults to **public IPv4 Internet access**, as selected by the operator. Host/LAN and
+cloud metadata address ranges are blocked; only DNS to configured resolvers and established replies
+are exempted. New inbound connections are refused, IPv6 is disabled, and no ports are published.
+Set `bash_policy.sandbox.network` to `false` or disable it in Tools for a completely disconnected
+container. Model arguments cannot change network mode, mounts, resource ceilings or runtime images.
+
+Defaults are 512 MiB RAM (including swap ceiling), one CPU, 128 processes/threads, 512 MiB per file,
+a 128 MiB temporary filesystem, bounded container logs and 64 KiB retained per stdout/stderr stream.
+Each call has a 15-second default execution budget (1–120 seconds), plus bounded container setup and
+cleanup. Timeout and caller cancellation remove the entire container, including detached child
+processes. An image-side watchdog limits execution if the node disappears. Resource values can be
+configured under `bash_policy.sandbox`; the writable workspace has no aggregate disk quota, so its
+host filesystem should have appropriate capacity or an operator-applied quota.
+
+Prepare the trusted image separately (Kanon does not pull images or install packages):
+
+```bash
+docker build -t kanon-bash-sandbox:1 sandbox/bash
+```
+
+The image provides Bash, Python 3.12, Node 24, npm, Git and ripgrep. An operator can extend it with
+additional dependencies, preserving the trusted bootstrap and runtime label. The node uses a native
+Docker API client, not a Docker CLI subprocess. It requires a **local Linux Docker daemon** with
+seccomp and memory/CPU/PID controls; Linux Docker Engine and Docker Desktop's Linux mode provide the
+runtime. The default socket is `unix:///var/run/docker.sock` on Unix and
+`npipe:////./pipe/docker_engine` on Windows. Override `bash_policy.sandbox.endpoint` for a local
+rootless/custom socket; remote TCP/SSH endpoints are rejected. Docker or image unavailability denies
+execution explicitly while the node and other tools remain available.
+
+The trusted image bootstrap briefly uses only network/identity setup capabilities to install the
+firewall, then drops the entire capability bounding set before launching user code. Custom images
+must be operator-trusted. The image is pinned by immutable id for each call, health checks are
+disabled, and images declaring extra volumes are rejected. Existing workspaces are not silently
+chowned; when running the node as root, prepare existing workspace ownership for UID/GID 65534.
+
+The sender permission gate remains authoritative even when the model ignores an unavailable hint.
+The container boundary protects host files and processes; it shares the Docker daemon's Linux kernel
+and intentionally permits access to the selected workspace and public network. It is not a separate
+virtual machine, and host kernel/Docker security remains part of the deployment boundary.
+
+Container integration tests are separate from the runtime-free workspace suite:
+
+```bash
+cargo test -p kanon-core --test bash_tool_test --test bash_sandbox_test -- --ignored --test-threads=1
+```
 
 ## Build outputs
 

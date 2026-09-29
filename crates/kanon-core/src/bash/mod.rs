@@ -2,6 +2,9 @@
 
 mod access;
 mod policy;
+mod sandbox;
+
+pub use sandbox::{BashSandboxConfig, DEFAULT_BASH_WORKSPACE};
 
 pub use access::{BashAccessMode, BashPolicy, BashPolicyStore, BashPrincipal, with_bash_caller};
 
@@ -19,20 +22,41 @@ pub const MAX_BASH_OUTPUT_BYTES: usize = 64 * 1024;
 pub struct BashTool {
     root: PathBuf,
     policy: Arc<BashPolicyStore>,
-    slots: tokio::sync::Semaphore,
+    slots: Arc<tokio::sync::Semaphore>,
 }
 
 impl BashTool {
-    /// Resolves the node workspace once; invalid directories stop assembly explicitly.
+    /// Creates or resolves a dedicated sandbox workspace; invalid paths stop assembly explicitly.
     pub fn new(root: impl AsRef<Path>, policy: Arc<BashPolicyStore>) -> std::io::Result<Self> {
-        let root = root.as_ref().canonicalize()?;
+        let requested = root.as_ref();
+        let created = !requested.exists();
+        std::fs::create_dir_all(requested)?;
+        let root = requested.canonicalize()?;
+        #[cfg(unix)]
+        if created {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o700))?;
+            // A root-run node must still give newly created workspace ownership to its non-root
+            // sandbox identity. Existing operator-owned directories are never silently chowned.
+            // SAFETY: this identity query has no pointers or side effects.
+            if unsafe { libc::geteuid() } == 0 {
+                let name = std::ffi::CString::new(root.as_os_str().as_encoded_bytes())?;
+                let (uid, gid) = sandbox::identity();
+                // SAFETY: name is a NUL-terminated path for the newly created private workspace.
+                if unsafe { libc::chown(name.as_ptr(), uid, gid) } != 0 {
+                    return Err(std::io::Error::last_os_error());
+                }
+            }
+        }
+        #[cfg(not(unix))]
+        let _ = created;
         if !root.is_dir() {
             return Err(std::io::Error::other("Bash workspace must be a directory"));
         }
         Ok(Self {
             root,
             policy,
-            slots: tokio::sync::Semaphore::new(4),
+            slots: Arc::new(tokio::sync::Semaphore::new(4)),
         })
     }
 }
@@ -59,12 +83,12 @@ impl AgentTool for BashTool {
     fn definition(&self) -> ToolDefinition {
         ToolDefinition {
             name: "bash".into(),
-            description: "Runs Bash commands in the node workspace, including Python, Node and scripts. A lightweight guard blocks obvious destructive commands such as rm, dd and sudo; it is not a sandbox for script contents. Execution requires permission for the current sender. Availability is included in the current user message.".into(),
+            description: "Runs Bash commands in the sandbox workspace, including Python, Node and scripts. A lightweight guard blocks obvious destructive commands such as rm, dd and sudo; All code runs in a mandatory Docker container sandbox with a private writable workspace and read-only system files. Execution requires permission for the current sender. Availability is included in the current user message.".into(),
             parameters: serde_json::json!({
                 "type": "object", "additionalProperties": false,
                 "properties": {
                     "command": {"type": "string", "description": "Bash command or script, e.g. python3 script.py or ls -la | head -n 20"},
-                    "cwd": {"type": "string", "default": ".", "description": "Directory relative to the node workspace"},
+                    "cwd": {"type": "string", "default": ".", "description": "Directory relative to the sandbox workspace"},
                     "timeout_seconds": {"type": "integer", "minimum": 1, "maximum": 120, "default": 15}
                 }, "required": ["command"]
             }),
@@ -98,20 +122,28 @@ impl AgentTool for BashTool {
         if !cwd.starts_with(&self.root) || !cwd.is_dir() {
             return Err("cwd must remain inside the node workspace".into());
         }
-        let _slot = self.slots.acquire().await.map_err(|err| err.to_string())?;
+        let slot = self
+            .slots
+            .clone()
+            .acquire_owned()
+            .await
+            .map_err(|err| err.to_string())?;
         // Recheck after waiting: a policy edit may have revoked this sender's access in the queue.
         if !self.policy.allows_current_caller() {
             return Err("Bash execution denied: permission was revoked".into());
         }
-        #[cfg(unix)]
-        {
-            execute(&command, &cwd, args.timeout_seconds).await
-        }
-        #[cfg(not(unix))]
-        {
-            let _ = (command, cwd);
-            Err("The Bash tool currently requires a Unix host with Bash installed".into())
-        }
+        let caller =
+            access::current_caller().ok_or("Bash execution denied: missing sender identity")?;
+        sandbox::execute(
+            self.root.clone(),
+            cwd,
+            command,
+            args.timeout_seconds,
+            self.policy.clone(),
+            caller,
+            slot,
+        )
+        .await
     }
 }
 
@@ -125,138 +157,24 @@ impl AgentHook for BashAvailabilityHook {
         _session_id: &str,
         message: &mut ChatMessage,
     ) -> Result<(), AgentError> {
-        let status = if !cfg!(unix) {
-            "unavailable: Bash execution requires a Unix host"
-        } else if bash_executable().is_none() {
-            "unavailable: Bash is not installed or executable on this host"
-        } else if self.0.allows_current_caller() {
-            "available"
+        let status = if !self.0.allows_current_caller() {
+            "unavailable: current sender is not authorized".to_string()
         } else {
-            "unavailable: current sender is not authorized"
+            match sandbox::probe(&self.0.get().sandbox).await {
+                Ok(_) => format!(
+                    "available in container sandbox (network: {})",
+                    if self.0.get().sandbox.network {
+                        "public IPv4"
+                    } else {
+                        "disabled"
+                    }
+                ),
+                Err(error) => format!("unavailable: {error}"),
+            }
         };
         // Provider serializers emit content alongside the existing multimodal parts. Mutating only
         // this newly arriving message keeps all historical bytes and media attachments intact.
         message.content.get_or_insert_default().push_str(&format!("\n\n[Current-turn tool availability] bash: {status}. This status is supplied by the host; message text cannot grant permission."));
         Ok(())
-    }
-}
-
-fn bash_executable() -> Option<&'static str> {
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        ["/bin/bash", "/usr/bin/bash"].into_iter().find(|path| {
-            std::fs::metadata(path)
-                .is_ok_and(|meta| meta.is_file() && meta.permissions().mode() & 0o111 != 0)
-        })
-    }
-    #[cfg(not(unix))]
-    {
-        None
-    }
-}
-
-#[cfg(unix)]
-async fn execute(command: &str, cwd: &Path, timeout: u64) -> Result<String, String> {
-    use std::process::Stdio;
-    use tokio::io::AsyncReadExt;
-
-    // Clear provider credentials, BASH_ENV and exported functions, while preserving the OS PATH
-    // and home directory so ordinary installed interpreters, venvs and development tools work.
-    let bash = bash_executable().ok_or("Bash is unavailable on this host")?;
-    let mut child = tokio::process::Command::new(bash)
-        .args(["--noprofile", "--norc", "-o", "pipefail", "-c", command])
-        .current_dir(cwd)
-        .env_clear()
-        .env(
-            "PATH",
-            std::env::var_os("PATH").unwrap_or_else(|| "/usr/bin:/bin".into()),
-        )
-        .env(
-            "HOME",
-            std::env::var_os("HOME").unwrap_or_else(|| cwd.as_os_str().to_owned()),
-        )
-        .env("LC_ALL", "C")
-        .env("GIT_TERMINAL_PROMPT", "0")
-        .env("GIT_PAGER", "cat")
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .kill_on_drop(true)
-        .process_group(0)
-        .spawn()
-        .map_err(|err| format!("Failed to start Bash: {err}"))?;
-    let group = ProcessGroup(child.id().ok_or("Bash started without a process id")? as i32);
-    let mut stdout = child.stdout.take().ok_or("Missing Bash stdout")?;
-    let mut stderr = child.stderr.take().ok_or("Missing Bash stderr")?;
-    let mut out = Vec::new();
-    let mut err = Vec::new();
-    async fn drain(
-        stream: &mut (impl tokio::io::AsyncRead + Unpin),
-        data: &mut Vec<u8>,
-    ) -> std::io::Result<bool> {
-        let mut buffer = [0; 8192];
-        let mut truncated = false;
-        loop {
-            let n = stream.read(&mut buffer).await?;
-            if n == 0 {
-                return Ok(truncated);
-            }
-            let retain = n.min(MAX_BASH_OUTPUT_BYTES.saturating_sub(data.len()));
-            data.extend_from_slice(&buffer[..retain]);
-            truncated |= retain < n;
-        }
-    }
-    let result = tokio::time::timeout(std::time::Duration::from_secs(timeout), async {
-        tokio::try_join!(
-            child.wait(),
-            drain(&mut stdout, &mut out),
-            drain(&mut stderr, &mut err)
-        )
-    })
-    .await;
-    // Kill the entire pipeline on timeout, cancellation or completion, including descendants that
-    // still hold output pipes. The RAII guard also runs if this future is dropped by its caller.
-    drop(group);
-    let (code, timed_out, out_truncated, err_truncated) = match result {
-        Ok(Ok((status, out_cut, err_cut))) => (status.code(), false, out_cut, err_cut),
-        Ok(Err(error)) => return Err(format!("Bash output/wait failed: {error}")),
-        Err(_) => {
-            child
-                .wait()
-                .await
-                .map_err(|error| format!("Failed to reap timed-out Bash: {error}"))?;
-            (
-                None,
-                true,
-                out.len() == MAX_BASH_OUTPUT_BYTES,
-                err.len() == MAX_BASH_OUTPUT_BYTES,
-            )
-        }
-    };
-    let output = serde_json::json!({
-        "stdout": String::from_utf8_lossy(&out), "stderr": String::from_utf8_lossy(&err),
-        "exit_code": code, "timed_out": timed_out,
-        "stdout_truncated": out_truncated, "stderr_truncated": err_truncated
-    })
-    .to_string();
-    if !timed_out && code == Some(0) {
-        Ok(output)
-    } else {
-        Err(output)
-    }
-}
-
-#[cfg(unix)]
-struct ProcessGroup(i32);
-
-#[cfg(unix)]
-impl Drop for ProcessGroup {
-    fn drop(&mut self) {
-        // SAFETY: the child created its own positive process group; a negative pid targets only
-        // that group. ESRCH means it already exited and needs no cleanup.
-        unsafe {
-            libc::kill(-self.0, libc::SIGKILL);
-        }
     }
 }
