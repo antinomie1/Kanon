@@ -22,6 +22,13 @@ an explicit development mode).
   WebUI is an independent frontend that talks to it over HTTP.
 - **Plugin-owned persistence** — plugins read and write their own `./data/plugins/<id>/`, so the core
   never becomes a data proxy.
+- **Conversations survive restarts** — history, summaries and session records live in
+  `./data/sessions.db`, so after a restart (or after a bot instance is edited) the next message
+  continues the same conversation. A database that cannot be opened stops startup instead of
+  silently starting with amnesia.
+- **Cache-friendly prompts** — every request is laid out static-first (tools, one system block,
+  append-only history, then the current turn), and long conversations are compacted once, using the
+  provider's cache, instead of being trimmed message by message. Cache hits are exported as metrics.
 
 ## Requirements
 
@@ -53,7 +60,33 @@ variables (the complete list is in [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) 
 | `RUST_LOG` | `info` | standard `tracing` filter directives |
 
 At runtime the node reads plugins from `./plugins`, keeps operator state in `./data/`, and creates its
-IPC sockets under the platform runtime directory (`$XDG_RUNTIME_DIR/kanon/run/` on Linux).
+IPC sockets under the platform runtime directory (`$XDG_RUNTIME_DIR/kanon/run/` on Linux). The state
+files under `./data/`:
+
+| File | Holds |
+| :--- | :--- |
+| `system.json` | provider endpoints (with credentials, mode `0600`), the model catalog, the **global default model**, reply and context policies, adapter settings |
+| `instances.json` | bot instances and their `/new` session generations |
+| `personas.json` | the personas you add in the console (the built-in base assistant is not stored) |
+| `sessions.db` | conversation history, compaction summaries and session records |
+
+The `KANON_LLM_*` variables only seed `system.json` when it has no provider yet: the endpoint is
+registered under the preset name its base URL matches, and `KANON_LLM_MODEL` becomes the global
+default model.
+
+## Console
+
+The WebUI (`webui/`, built with Svelte 5 and served by the node) manages everything above:
+
+- **Model Providers** — add endpoints (with connectivity tests that use the stored key server-side)
+  and pick the one **global default model**. Providers are only endpoints; there is no "default
+  provider". Instances may still override the model for themselves.
+- **Personas** — add, edit and delete persona presets. A persona is fixed prompt text placed at the
+  top of every request; only a minimal base assistant ships with the node.
+- **Sessions** — tracked conversations with turn and token counters; bind a persona to one session
+  or reset it.
+- **Instances**, **Plugins & Adapters**, **Pipeline & Logs**, **Chat** and **System Settings** cover
+  the rest of the node.
 
 OneBot v11 can also be configured under **Plugins & Adapters → OneBot v11** in the console.
 Both forward and reverse universal WebSockets are supported. See [the OneBot setup guide](docs/ONEBOT.md)
@@ -83,7 +116,7 @@ cargo build --workspace                           # everything, including the fi
 | `crates/kanon` | node entrypoint — assembles the libraries into a running process |
 | `crates/kanon-core` | event loop, message pipeline, host supervisor, adapter contract |
 | `crates/kanon-api` | REST + WebSocket management gateway |
-| `crates/kanon-llm` | model gateway, session memory and tool-calling state machine |
+| `crates/kanon-llm` | model gateway, static-first prompt layout, append-only session memory with cache-safe compaction, and the tool-calling state machine |
 | `crates/kanon-transport` | cross-platform IPC (Unix sockets, authenticated loopback TCP) |
 | `crates/kanon-storage` | embedded KV storage and data directory isolation |
 | `crates/kanon-proto` | Protobuf/gRPC contract and generated stubs |

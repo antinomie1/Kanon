@@ -129,7 +129,7 @@ kanon/
 │   ├── rust/                       # Rust 插件开发 SDK (kanon-sdk)
 │   ├── python/                     # Python 插件开发 SDK (kanon-sdk-python)
 │   └── typescript/                 # TypeScript 插件开发 SDK (kanon-sdk-ts)
-└── webui/                          # 前后端完全独立的现代 Web 控制台 (Vue 3 / React SPA)
+└── webui/                          # 前后端完全独立的现代 Web 控制台 (Svelte 5 SPA)
 ```
 
 **构建产物与程序入口 (Build Outputs)**：
@@ -585,9 +585,11 @@ export default class GreetingPlugin extends Plugin {
 Rust 核心全权主导 LLM 的生命周期与推理编排，确保高并发下的 Token 预算控制与流式吞吐：
 - **统一模型网关**：内置支持 OpenAI-compatible、DeepSeek、Claude、Ollama 等多端点协议，支持动态权重与故障自动重试。
 - **全局会话上下文管理 (Session Memory)**：
-  - 基于 `channel_id:sender_id` 分配会话上下文。
+  - 基于 `channel_id:sender_id` 分配会话上下文，实例会话键为 `instance:<id>:<会话>#<代数>`（`/new` 使代数加一）。
   - 会话记忆**仅追加**、不做滑动窗口：上下文增长到模型窗口的一定比例时，才做一次缓存友好的摘要压缩（见 8.7）。
-  - 支持 System Persona（人设提示词）动态装配。
+  - **会话持久化**：历史、摘要与会话记录（人设绑定、计数器、状态）统一落盘至 `./data/sessions.db`，重启节点或编辑实例后对话原地续接（见 8.8）。
+- **人设 (Persona)**：人设是放在每次请求最前面的**固定文本**，由运营者在控制台「人设」页增删（`data/personas.json`）；节点只自带一个极简的基础助手（`assistant`，只读、不可删除，未选择其他人设时使用）。人设不再支持模板变量，也不再自带预设库（见 8.6）。
+- **模型选择**：提供商只是端点（协议、地址、密钥）；节点只有**一个全局默认模型**（`<provider>/<model-id>`），实例可单独覆盖。不存在“默认提供商/当前生效提供商”这类第二个决定（见 9.2）。
 
 ### 8.2 模型推理通道的可见性边界 (Reasoning Visibility)
 
@@ -665,7 +667,7 @@ sequenceDiagram
 
 ### 8.7 会话记忆：仅追加与缓存友好的压缩 (Append-only Memory & Cache-safe Compaction)
 
-**为什么不用滑动窗口**：每轮丢弃最旧一条消息会让其后所有内容的绝对偏移和前缀全部改变，服务商缓存整段历史全部失效、每轮按首次读取计费。因此记忆层（`Memory` trait，默认 `InMemory`，可插拔 `SqliteMemory`）**只追加**：除 `compact_history` 与 `clear` 外，任何操作都不得删除或重排消息。会话历史里只有用户 / 助手 / 工具消息；人设与技能目录每次请求时组装进系统块，不按会话存储（避免系统提示词出现第二个数据源）。摘要与历史并列保存（`MemorySnapshot { summary, messages }` 一次性读取，读者不会看到某次压缩的摘要配上另一次的历史）。
+**为什么不用滑动窗口**：每轮丢弃最旧一条消息会让其后所有内容的绝对偏移和前缀全部改变，服务商缓存整段历史全部失效、每轮按首次读取计费。因此记忆层（`Memory` trait；节点用 `SqliteMemory`，嵌入式与测试可用 `InMemory`）**只追加**：除 `compact_history` 与 `clear` 外，任何操作都不得删除或重排消息。会话历史里只有用户 / 助手 / 工具消息；人设与技能目录每次请求时组装进系统块，不按会话存储（避免系统提示词出现第二个数据源）。摘要与历史并列保存（`MemorySnapshot { summary, messages }` 一次性读取，读者不会看到某次压缩的摘要配上另一次的历史）。
 
 **何时压缩**：一轮回复完成后，若上下文 token（优先取服务商返回的 `prompt_tokens + completion_tokens`，缺失时用估算）达到模型上下文窗口的 70%（窗口取自模型目录，未知时按 32,768 估计；`CompactionPolicy` 可调），则压缩一次；历史少于 4 条、或未停在完整的助手回复上（等待回答的用户消息、工具循环中途）时不压缩。压缩在后台执行，用户不会因此等待。
 
@@ -675,7 +677,23 @@ sequenceDiagram
 
 **并发语义**：压缩读取快照后要花数秒等待模型，期间会话照常进行，所以 `compact_history(covered, summary)` **只移除快照覆盖的前 `covered` 条**，之后追加的消息原样保留；同一会话同一时间只有一个压缩任务（同会话再次触发直接跳过）。SQLite 后端在一个事务内删除前缀并写入摘要，失败不丢历史；旧库（含 `system_prompt` 列）自动补 `summary` 列后继续使用。
 
-**边界**：默认节点使用进程内 `InMemory`（重启后会话历史与摘要清空）；`SqliteMemory` 是已就绪的持久化后端，尚未由 `kanon` 组合根默认装配。流式聊天（沙盒 `text/event-stream`）不触发自动压缩，`Agent::compact_session` 可手动触发。
+**边界**：节点使用 `SqliteMemory`（`data/sessions.db`，见 8.8）；嵌入式场景与测试可换用进程内 `InMemory`。流式聊天（沙盒 `text/event-stream`）不触发自动压缩，`Agent::compact_session` 可手动触发。
+
+### 8.8 会话持久化与续接 (Durable Sessions)
+
+一段对话由两部分组成，重启后要原地续接，两部分都必须落盘：
+
+| 部分 | 内容 | 所有者 | 落盘 |
+| :--- | :--- | :--- | :--- |
+| 历史 | 用户 / 助手 / 工具消息与压缩摘要 | `Memory`（`SqliteMemory`） | `data/sessions.db` 的 `messages` / `sessions` 表，追加与压缩均在事务内 |
+| 会话记录 | 人设绑定、变量、轮次与 Token 计数、状态、作用域 | `SessionManager` | 同一数据库的 `session_meta` 表（每会话一份 JSON），**写穿 (write-through)**：每次变更立即落盘 |
+
+会话键由“实例 + 会话 + 代数”确定，而实例目录（`data/instances.json`）与 `/new` 的代数计数同样持久化——因此**重启节点后**，或**编辑实例后**（改名、改策略、改适配器；`update` 保留实例标识与代数），下一条消息落在同一个会话里，模型看到的仍是原有历史、摘要与人设。控制台的会话列表在重启后立即可见。
+
+- **写入开销**：写穿只在记录真正变化时发生（流水线每条消息都会重复绑定实例人设，绑定不变时不写库），且在 `DashMap` 分片锁释放后进行，不阻塞其他会话。
+- **失败语义**：会话记录写入失败会以 `error` 级别记录日志，但不会把已生成的回复变成错误；历史写入失败则照常向上报错（缓存绝不领先于数据库）。数据库无法打开或读取（文件损坏、目录不可写）时，节点**启动失败**而不是静默退化为空的内存会话表——那会让机器人看起来忘了所有对话。
+- **重置与删除人设**：`/sessions/{id}/reset` 同时清空历史与摘要并持久化计数归零，保留人设与变量；删除人设会解绑并持久化所有使用它的会话。
+- **已知局限**：历史中的图片若以平台 URL 保存，URL 过期后模型服务商可能拒绝含该图片的请求（沿用原有行为，持久化只是让历史存活得更久）；此时可用 `/new` 开启新会话，或等待压缩把旧消息折叠为摘要。
 
 ---
 
@@ -701,7 +719,7 @@ sequenceDiagram
 | `POST` | `/api/v1/plugins/{id}/restart` | 重启指定插件所在的宿主进程（依赖 Supervisor 记录的启动配方） |
 | `POST` | `/api/v1/plugins/{id}/actions/{action}` | 触发插件的**管理动作**（运维操作，永不进入模型的函数列表；区别于 `tools`） |
 | `GET` | `/api/v1/tools` | 列出模型当前可调用的**全部工具**及其提供方（内置 / 插件 / MCP），名称与分发规则和模型实际收到的完全一致 |
-| `GET` | `/api/v1/sessions` | 分页查询会话元数据（Turn 计数、Token 消耗、活跃时间、Persona、作用域） |
+| `GET` | `/api/v1/sessions` | 分页查询会话记录（Turn 计数、Token 消耗、活跃时间、Persona、作用域）；记录持久化，节点重启后仍可见 |
 | `POST` | `/api/v1/sessions/{id}/reset` | 安全重置会话历史，保留配置变量与人设 |
 | `POST` | `/api/v1/sessions/{id}/persona` | 动态热切换指定会话的生效人设；`persona_id` 为空/`null` 即解除绑定（使用基础助手） |
 | `GET` | `/api/v1/personas` | 查询人设库：内置基础助手（`builtin`，只读）、运营者自建人设（`custom`）与实例自带提示词生成的人设（`instance`），并标注被哪些实例引用 |
@@ -754,7 +772,20 @@ sequenceDiagram
 | `KANON_LLM_PROTOCOL` | `openai` | `openai` / `openai_responses` / `anthropic`，未知取值在启动期直接报错 |
 | `RUST_LOG` | `info` | 标准 `tracing` 过滤指令 |
 
-插件配置持久化位置遵循数据隔离规范：`./data/plugins/<plugin_id>/config.json`，采用「临时文件 + `rename`」原子提交，
+`KANON_LLM_*` 只在 `data/system.json` 尚无提供商时用于播种：把端点登记为与其 Base URL 匹配的预设名，并把 `KANON_LLM_MODEL` 设为全局默认模型（形如 `<provider>/<model-id>`）。
+
+节点的运行时状态都在工作目录下的 `./data/`：
+
+| 文件 | 内容 |
+| :--- | :--- |
+| `system.json` | 提供商端点（含密钥，权限 `0600`）、模型目录、**全局默认模型**、回复与上下文策略、适配器配置 |
+| `instances.json` | Bot 实例目录（适配器归属、人设/模型/策略覆盖、`/new` 会话代数） |
+| `personas.json` | 运营者自建人设（基础助手内置，不落盘） |
+| `sessions.db` | 对话历史、压缩摘要与会话记录（SQLite WAL，见 8.8）；启动时无法打开即启动失败 |
+| `toggles.json`、`mcp.json`、`skills/`、`attachments/`、`dead_letter/` | 插件/技能/MCP 开关、MCP 服务器定义、已安装技能、工具附件、出站死信 |
+| `plugins/<id>/` | 各插件的专属数据目录 |
+
+以上 JSON 文档均采用「临时文件 + `rename`」原子提交。插件配置持久化位置遵循数据隔离规范：`./data/plugins/<plugin_id>/config.json`，
 写入顺序为 **校验 → 宿主热重载确认 → 落盘**，宿主拒绝时不会留下半更新配置。
 
 **CAS 乐观并发控制与单调版本向量 (CAS Optimistic Concurrency Control)**：
@@ -849,6 +880,10 @@ sequenceDiagram
 | **Linux IPC 路径与权限安全** | 默认目录权限宽松或依赖不可靠的共享 `/tmp/`，面临符号链接劫持与多租户权限越界 | **基于 UID 隔离的 `/tmp/kanon-run-$UID/` 降级路径 + 强制 `0700` 权限收敛与符号链接深度拦截** | 消除本地多用户非特权攻击者对 UDS 套接字的窃听、替换与权限越界风险。 |
 | **插件配置并发更新竞争** | 多并发热更新时缺乏时序锁，后发请求可能被先发慢请求覆盖产生时序倒退 | **CAS (Compare-And-Swap) 乐观并发控制与单调版本向量**（冲突返回 HTTP 409 Conflict，三语言 SDK 验证版本号） | 保证跨进程与控制面配置更新的严格线性一致性与时序安全性。 |
 | **出站平台级联雪崩与抖动** | 外部平台接口严重劣化或停机时，出站重试导致单平台队列严重堵塞甚至反压 | **单平台独立短路熔断器 (Circuit Breaker)**（连续 5 次失败转为 Open，极速短路，30s 半开自愈探测） | 避免无效重试持续消耗系统资源，保护底层连接池。 |
+| **提示词缓存命中率** | 提示词按“身份 → 上下文 → 指令”随意拼接，动态信息（时间、发送者）混进系统提示词，工具列表顺序随注册/宿主启动顺序变化 | **静态→动态分层**：工具 → 单条系统块 → 仅追加历史 → 当前轮；工具与 Schema 稳定排序；人设为纯静态文本（见 8.6） | 每轮只有尾部变化，前缀稳定命中服务商缓存；`kanon_llm_cached_prompt_tokens_total` 可直接度量命中率。 |
+| **会话记忆与缓存** | 滑动窗口每轮丢弃最旧消息，其后所有内容的偏移改变，整段历史缓存全部失效 | **仅追加记忆 + 缓存友好的压缩**：阈值触发一次同前缀摘要，摘要挂载到新前缀（见 8.7） | 前缀只在压缩那一刻变化一次，其余时间稳定增长；摘要请求本身也吃缓存。 |
+| **模型选择语义** | “默认提供商”与“默认模型”两个可能互相矛盾的设置，控制台还要展示“当前生效提供商” | **只有一个全局默认模型**（`PUT /api/v1/models/default`），提供商仅为端点；模型引用必须带已配置的提供商前缀，不再隐式回退 | 消除第二个数据源与隐式回退；配置错误在写入前即被拒绝。 |
+| **会话续接** | 会话历史与元数据只在内存，重启或编辑实例后对话断裂 | **历史 + 会话记录统一落盘 `data/sessions.db`**，会话键由持久化的实例与代数确定，打开失败即启动失败（见 8.8） | 重启节点、编辑实例后对话原地续接，且不会静默退化为失忆。 |
 | **出站饱和丢包与死信排查** | 队列背压打满或永久失败后丢弃消息仅有日志，无法离线对账与重放补发 | **按平台与日期分片的死信冷存储归档 (DLQ JSONL)**（落地 `./data/dead_letter/<platform>_<date>.jsonl`） | 实现不可逆出站失败的审计追踪与离线排查能力。 |
 
 ---
@@ -860,9 +895,10 @@ sequenceDiagram
 ### 12.1 存储模型边界 (Storage Model Boundaries)
 - **无内置全局集中式 KV 存储**：微内核已彻底移除原存根性质的内存 KV 模块（`crates/kanon-storage/src/kv.rs` 已删除）。`BotApiService.SetStorage` 与 `GetStorage` 端点当前显式返回 `Status::unimplemented`。
 - **本地专属存储第一原则**：所有业务持久化（用户状态、业务缓存等）必须在插件所属的 `./data/plugins/<plugin_id>/` 独立目录中本地持久化（推荐 SQLite、DuckDB 或文件系统）。核心不代理业务读写，亦不提供跨插件共享的分布式数据库抽象。
-- **会话元数据运行时与持久化边界 (Session Metadata vs History Boundary)**：
-  - **对话历史与摘要持久化**：`SqliteMemory`（`crates/kanon-llm/src/sqlite_memory.rs`）以 SQLite WAL 模式持久化仅追加的对话历史与压缩摘要，压缩在单个事务内完成，单会话内具备串行写入一致性与跨进程重启持久性；默认节点当前装配的是进程内 `InMemory`（见 8.7）。
-  - **会话运行时状态瞬态性 (`RuntimeSessionMetadata`)**：`SessionMetadata`（即 `RuntimeSessionMetadata`，包含动态局部变量 `variables`、活跃轮次计数 `turn_count`、空闲超时探测状态）由 `SessionManager` 在内存（DashMap）中维护，为运行期瞬态数据。微内核重启时运行时活跃会话计数与内存变量将平滑重置，而底层对话消息历史完整保留。
+- **会话历史与会话记录的持久化边界 (Session History vs Record)**：
+  - **对话历史与摘要**：`SqliteMemory`（`crates/kanon-llm/src/sqlite_memory.rs`）以 SQLite WAL 模式持久化仅追加的对话历史与压缩摘要，压缩在单个事务内完成，单会话内具备串行写入一致性与跨进程重启持久性。
+  - **会话记录 (`SessionMetadata`)**：人设绑定、变量、轮次与 Token 计数、状态由 `SessionManager` 在内存（DashMap）中维护，并经 `SqliteSessionStore` **写穿**到同一个 `data/sessions.db`；节点启动时一次性加载。写入失败记录 `error` 日志但不使回复失败，库无法打开/读取则启动失败（见 8.8）。
+  - **未持久化的仅有**：进行中的后台压缩任务与同会话去重集合（重启后自然重新评估）。
 
 ### 12.2 宿主环境与语言运行时依赖 (Language Host Runtime Dependencies)
 - **Rust 核心自包含**：节点二进制 `kanon`（以及开发者 CLI `kanon-dev`）为零动态外部依赖的单一原生二进制；`kanon-core` / `kanon-api` 等 crate 仅提供库，不产出可执行文件。
