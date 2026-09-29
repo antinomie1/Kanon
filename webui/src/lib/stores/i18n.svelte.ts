@@ -141,7 +141,7 @@ export const dictionaries = {
     'tools.title': 'Tool Catalog',
     'bash.title': 'Who may ask the AI to run Bash',
     'bash.hint':
-      'Only the current sender grants access. High-risk commands remain blocked for everyone.',
+      'Access follows the current sender. Obvious destructive commands are checked for every sender.',
     'bash.mode': 'Access mode',
     'bash.allowlist_mode': 'Allowlist: listed users only',
     'bash.denylist_mode': 'Denylist: everyone except listed users',
@@ -813,7 +813,8 @@ export const dictionaries = {
     // Tool catalog
     'tools.title': '工具列表',
     'bash.title': '谁可以让 AI 执行 Bash',
-    'bash.hint': '只按本轮发送者判断权限；所有用户的高风险指令都会被拦截。',
+    'bash.hint':
+      '只按本轮发送者判断权限；对每个用户都会做明显危险指令的基础检查。',
     'bash.mode': '权限模式',
     'bash.allowlist_mode': '白名单：仅指定用户可用',
     'bash.denylist_mode': '黑名单：除指定用户外都可用',

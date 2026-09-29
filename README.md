@@ -124,30 +124,33 @@ Identity comes from the current inbound event before plugin filtering. A session
 message, model argument or claimed identity cannot grant access. Overlapping turns in a group have
 separate caller scopes. Console chat and plugin-originated LLM requests have no verified sender and
 are denied, even in denylist mode. The tool definition remains in the model's fixed tool list for
-every sender; the host appends its current availability **after history at the request tail**.
+every sender; the host appends availability **inside the originating user message**, before it is
+stored. Tool-loop requests and compaction reuse that history without adding synthetic user turns.
 Execution rechecks the live policy regardless of what the model requests.
 
-Commands use a conservative static subset of Bash: quoted literal arguments, pipelines, `&&`, `||`,
-semicolon-separated lists and newlines. The default executable allowlist is `echo`, `printf`, `pwd`,
-`ls`, `cat`, `head`, `tail`, `wc`, `grep`, `rg`, `cut`, `tr`, `du`, `df`, `uname`, `whoami`, `id`, `ps`,
-`uptime`, `sleep`, `seq`, `true`, `false`, and Git `status`/`diff`/`log`/`show`/`ls-files`/`rev-parse`.
-For example: `ls -la | head -n 20` or `git status --short`. Git pagers, fsmonitor, diff/signature helpers and
-ripgrep subprocess helpers are disabled. Programs are resolved only from trusted system directories.
-Git accepts an explicit set of common diagnostic flags; unknown options are also rejected.
+Commands run with normal Bash semantics, including **Python, Node, scripts, assignments, loops,
+expansions, globbing, pipes and redirection**. There is no executable or Git-option allowlist. The
+lightweight guard checks recognizable static command heads before execution: `rm`, `rmdir`, `dd`,
+`sudo`/`su`/`doas`, disk formatting/partitioning/wiping, mounting, shutdown/reboot and `killall`.
+It also rejects `find -delete`, destructive `git reset --hard` / forced `git clean`, and option-position
+`printf -v` assignments (whose indexed targets can evaluate shell code). Normal formatting with
+`printf '%s' '-v'` or `printf -- '-v'` remains available. Git and ripgrep helpers, including `rg -z`,
+are allowed like other scripts and subprocesses.
 
-`rm`, `dd`, `sudo`, permission/ownership changes, disk formatting, arbitrary executables, scripts,
-interpreters, launchers, assignments, shell evaluation, expansions, redirection and background jobs
-are blocked before **any** command in the request starts. Quote glob/regex characters as literals;
-globbing is unavailable. There is no model-supplied safety override. `cwd` defaults to `.` and must
-resolve inside the node workspace, including through symlinks. Each call has a 15-second default
-timeout (1–120 seconds), a four-process concurrency limit, no stdin, a clean child environment, and
-at most 64 KiB retained per stdout/stderr stream. Timeout and cancellation kill the whole process
-group. Results report stdout, stderr, exit code, timeout and truncation; nonzero exits are tool
-failures. Bash execution currently requires a Unix host with Bash installed.
+`cwd` defaults to `.` and must resolve inside the node workspace, including through symlinks. This
+bounds the **starting directory**, not subsequent filesystem access or a script's own `cd` calls.
+Each call has a 15-second default timeout (1–120 seconds), a four-process concurrency limit, no stdin,
+and at most 64 KiB retained per stdout/stderr stream. Child environments omit provider credentials
+and Bash startup injection variables, while preserving the OS PATH and home directory so installed
+interpreters and development tools remain usable. Timeout and cancellation kill the process group.
+Results report stdout, stderr, exit code, timeout and truncation; nonzero exits are tool failures.
+Both the availability hint and execution probe for an executable Bash; execution requires a Unix host.
 
-This is a diagnostic command guard, not an OS sandbox: allowed commands retain the node account's
-read access, including paths outside `cwd`. Operators should use an appropriately restricted account
-or container when granting access to untrusted users.
+This is an accident-prevention guard for trusted, authorized users, **not a sandbox**. Interpreter
+code, external scripts and dynamic command names can perform operations outside these checks, with
+the node account's filesystem permissions. Use an appropriately restricted OS account or container
+when actual filesystem confinement is needed. The sender permission gate remains authoritative even
+when the model ignores an unavailable hint.
 
 ## Build outputs
 

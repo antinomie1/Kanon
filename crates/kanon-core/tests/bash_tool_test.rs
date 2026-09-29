@@ -13,7 +13,8 @@ use kanon_core::{
 };
 use kanon_llm::tool_router::ToolRouter;
 use kanon_llm::{
-    Agent, AgentTool, ChatRequest, ChatResponse, GatewayError, LlmProvider, Role, ToolCall,
+    Agent, AgentTool, ChatMessage, ChatRequest, ChatResponse, ContentPart, GatewayError, InMemory,
+    LlmProvider, Memory, Role, ToolCall,
 };
 use kanon_proto::v1::PipelineEventRequest;
 use serde_json::{Value, json};
@@ -75,7 +76,7 @@ async fn static_commands_quotes_pipelines_and_failures_are_executed() {
 }
 
 #[tokio::test]
-async fn destructive_and_indirect_commands_are_blocked_before_any_spawn() {
+async fn obvious_risks_are_blocked_before_any_spawn() {
     let dir = tempfile::tempdir().unwrap();
     let sentinel = dir.path().join("keep");
     std::fs::write(&sentinel, "keep").unwrap();
@@ -90,41 +91,30 @@ async fn destructive_and_indirect_commands_are_blocked_before_any_spawn() {
         "true && dd if=keep of=lost",
         "sudo ls",
         "mkfs.ext4 disk",
-        "eval 'rm keep'",
-        "bash -c 'rm keep'",
         "env rm keep",
         "command rm keep",
         "xargs rm",
         "find . -delete",
-        "find . -exec rm '{}' ';'",
         "busybox rm keep",
-        "python3 -c 'import os; os.remove(\"keep\")'",
-        "./script.sh",
-        "/tmp/ls",
-        "$(printf rm) keep",
-        "`printf rm` keep",
-        "$CMD keep",
-        "r? keep",
-        "${x} keep",
-        "ls > keep",
-        "cat < keep",
-        "echo ok &",
         "(rm keep)",
         "if true; then rm keep; fi",
-        "PATH=/tmp ls",
-        "source script.sh",
-        "sort -rokeep keep",
-        "rg --pre=script.sh keep",
         "git clean -fd",
         "git reset --hard",
-        "git -c alias.hack=whatever hack",
-        "git diff --output=keep",
-        "git diff --out=keep",
-        "git show --ext-dif",
-        "git log --show-sig",
-        "git log --help",
-        "git log --unknown-future-option",
-        "git show --textconv",
+        "printf -v 'x[$(: > printf-pwn)]' value",
+        "printf -v'x[$(: > printf-pwn)]' value",
+        "builtin printf -v 'x[$(: > printf-pwn)]' value",
+        "command printf -v target '%s' value",
+        "VALUE=ok printf -v target '%s' value",
+        ">sink rm keep",
+        "$'rm' keep",
+        "$'r\\x6d' keep",
+        "$'rm\\0ignored' keep",
+        "2>/dev/null printf -v target '%s' value",
+        "$'printf' -v target '%s' value",
+        "env -u UNUSED rm keep",
+        "printf keep | xargs -I '{}' rm '{}'",
+        "git -C . clean -fd",
+        "find . -exec rm '{}' ';'",
     ] {
         let error = run(&tool, json!({"command": command})).await.unwrap_err();
         assert!(
@@ -132,6 +122,7 @@ async fn destructive_and_indirect_commands_are_blocked_before_any_spawn() {
             "{command}: {error}"
         );
         assert_eq!(std::fs::read_to_string(&sentinel).unwrap(), "keep");
+        assert!(!dir.path().join("printf-pwn").exists());
     }
 }
 
@@ -195,58 +186,61 @@ async fn timeout_cleans_up_a_pipeline_and_large_output_is_bounded() {
 }
 
 #[tokio::test]
-async fn read_only_git_commands_disable_repository_execution_helpers() {
+async fn interpreters_scripts_and_normal_bash_syntax_are_allowed() {
     let dir = tempfile::tempdir().unwrap();
-    let git = |args: &[&str]| {
-        let output = std::process::Command::new("git")
-            .current_dir(dir.path())
-            .args(args)
-            .output()
-            .unwrap();
-        assert!(
-            output.status.success(),
-            "{}",
-            String::from_utf8_lossy(&output.stderr)
-        );
-    };
-    git(&["init"]);
-    std::fs::write(dir.path().join("note"), "before\n").unwrap();
-    git(&["add", "note"]);
-    git(&[
-        "-c",
-        "user.name=Test",
-        "-c",
-        "user.email=test@example.invalid",
-        "commit",
-        "-m",
-        "fixture",
-    ]);
-    let helper = dir.path().join("helper.sh");
-    std::fs::write(&helper, "#!/bin/sh\nprintf unsafe > helper-ran\n").unwrap();
-    use std::os::unix::fs::PermissionsExt;
-    std::fs::set_permissions(&helper, std::fs::Permissions::from_mode(0o755)).unwrap();
-    git(&["config", "core.fsmonitor", helper.to_str().unwrap()]);
-    git(&["config", "diff.external", helper.to_str().unwrap()]);
-    git(&["config", "log.showSignature", "true"]);
-    git(&["config", "gpg.program", helper.to_str().unwrap()]);
-    git(&["config", "diff.unsafe.textconv", helper.to_str().unwrap()]);
-    std::fs::write(dir.path().join(".gitattributes"), "note diff=unsafe\n").unwrap();
-    std::fs::write(dir.path().join("note"), "after\n").unwrap();
     let tool = BashTool::new(dir.path(), permitted()).unwrap();
+    std::fs::write(dir.path().join("script.py"), "from pathlib import Path\nPath('python-output').write_text('python')\nprint('python-ok')\n").unwrap();
+    std::fs::write(
+        dir.path().join("script.js"),
+        "require('fs').writeFileSync('node-output', 'node'); console.log('node-ok');\n",
+    )
+    .unwrap();
     for command in [
-        "git status --short",
-        "git diff",
-        "git show HEAD",
-        "git log -1",
-        "git ls-files",
-        "git rev-parse HEAD",
+        "python3 script.py",
+        "node script.js",
+        "value=hello; mkdir -p nested; echo \"$value\" > nested/message; cat nested/*",
+        "for file in nested/*; do cat \"$file\"; done",
+        "printf '%s\\n' \"$(cat nested/message)\"",
+        "python3 - <<'PY'\nprint('heredoc-ok')\nPY",
+        "python3 - <<'PY'\nrm = 'example'\nprint(rm)\nPY",
+        "node <<'JS'\nrm = 'example';\nconsole.log(rm);\nJS",
+        "cat <<'EOF'\nrm is only text\nEOF",
+        "case rm in\nrm) echo matched;;\nesac",
+        "command -v rm",
+        "find . -name '-delete'",
+        "printf -- '-v'; printf '%s' '-v'; echo '-vdata'",
+        "chmod +x script.py; cp script.py nested/copy.py; mv nested/copy.py nested/moved.py",
+        "git init; git add script.py; git -c user.name=Test -c user.email=test@example.invalid commit -m fixture; git log -1 --format=%s",
+        "git -C . clean -nfd",
     ] {
         let result = run(&tool, json!({"command":command})).await;
         assert!(result.is_ok(), "{command}: {result:?}");
-        assert!(
-            !dir.path().join("helper-ran").exists(),
-            "{command} must not run configured helpers"
-        );
+    }
+    assert_eq!(
+        std::fs::read_to_string(dir.path().join("python-output")).unwrap(),
+        "python"
+    );
+    assert_eq!(
+        std::fs::read_to_string(dir.path().join("node-output")).unwrap(),
+        "node"
+    );
+    assert_eq!(
+        std::fs::read_to_string(dir.path().join("nested/message")).unwrap(),
+        "hello\n"
+    );
+    if std::process::Command::new("rg")
+        .arg("--version")
+        .output()
+        .is_ok()
+    {
+        for command in [
+            "printf 'compressed\\n' | gzip > sample.gz",
+            "rg -z compressed sample.gz",
+            "rg --search-zip compressed sample.gz",
+        ] {
+            let result = run(&tool, json!({"command":command})).await;
+            assert!(result.is_ok(), "{command}: {result:?}");
+        }
     }
 }
 
@@ -383,6 +377,27 @@ async fn pipeline_identity_enforces_permissions_even_when_the_model_calls_bash()
     }
     let requests = model.requests.lock().unwrap();
     assert_eq!(requests.len(), 4);
+    assert_eq!(
+        requests[0]
+            .messages
+            .iter()
+            .filter(|message| message.role == Role::User)
+            .count(),
+        1
+    );
+    assert_eq!(
+        requests[1]
+            .messages
+            .iter()
+            .filter(|message| message.role == Role::User)
+            .count(),
+        1
+    );
+    assert_eq!(
+        requests[1].messages.last().unwrap().role,
+        Role::Tool,
+        "availability must not follow tool results as a new user turn"
+    );
     assert!(requests[1].messages.iter().any(|message| {
         message.role == Role::Tool
             && message
@@ -432,5 +447,138 @@ async fn pipeline_identity_enforces_permissions_even_when_the_model_calls_bash()
         serde_json::to_string(&requests[0].messages[..n - 1]).unwrap(),
         serde_json::to_string(&requests[2].messages[..n - 1]).unwrap(),
         "the actual availability hook must preserve every message before its tail hint"
+    );
+}
+
+/// Records conversation and compaction requests without requesting subprocess execution.
+#[derive(Default)]
+struct LayoutModel {
+    requests: Mutex<Vec<ChatRequest>>,
+}
+
+#[async_trait]
+impl LlmProvider for LayoutModel {
+    async fn chat(&self, request: &ChatRequest) -> Result<ChatResponse, GatewayError> {
+        self.requests.lock().unwrap().push(request.clone());
+        Ok(ChatResponse {
+            content: Some("reply or summary".into()),
+            ..ChatResponse::default()
+        })
+    }
+}
+
+#[tokio::test]
+async fn availability_keeps_multimodal_history_and_compaction_prefix_intact() {
+    let dir = tempfile::tempdir().unwrap();
+    let policy = permitted();
+    let memory = Arc::new(InMemory::new());
+    let model = Arc::new(LayoutModel::default());
+    let agent = Agent::builder("layout", model.clone())
+        .model("test")
+        .memory(memory.clone())
+        .tool(BashTool::new(dir.path(), policy.clone()).unwrap())
+        .hook(BashAvailabilityHook(policy))
+        .compaction(None)
+        .build();
+    let parts = vec![
+        ContentPart::image_url("https://example.invalid/image.png", None),
+        ContentPart::text("extra caption"),
+    ];
+    with_bash_caller(
+        caller("alice"),
+        agent.run_message(
+            "group",
+            ChatMessage::user_multimodal("first", parts.clone()),
+            &[],
+        ),
+    )
+    .await
+    .unwrap();
+    with_bash_caller(caller("mallory"), agent.run("group", "second", &[]))
+        .await
+        .unwrap();
+    let history = memory.snapshot("group").await.unwrap().messages;
+    assert_eq!(
+        history.len(),
+        4,
+        "availability must not create stored messages"
+    );
+    assert_eq!(history[0].parts, Some(parts));
+    assert_eq!(
+        history[0]
+            .content
+            .as_deref()
+            .unwrap()
+            .matches("[Current-turn tool availability]")
+            .count(),
+        1
+    );
+    assert!(
+        history[0]
+            .content
+            .as_deref()
+            .unwrap()
+            .contains("bash: available")
+    );
+    assert!(
+        history[2]
+            .content
+            .as_deref()
+            .unwrap()
+            .contains("not authorized")
+    );
+    assert!(agent.compact_session("group", &[]).await.unwrap());
+    let requests = model.requests.lock().unwrap();
+    assert_eq!(
+        &requests[1].messages[..history.len() - 1],
+        &history[..history.len() - 1]
+    );
+    assert_eq!(
+        &requests[2].messages[..history.len()],
+        history.as_slice(),
+        "compaction reuses history byte-for-byte even without caller scope"
+    );
+    assert_eq!(requests[2].messages.len(), history.len() + 1);
+    assert_eq!(
+        requests[2].messages.last().unwrap().content.as_deref(),
+        Some(kanon_llm::COMPACTION_INSTRUCTION)
+    );
+}
+
+#[tokio::test]
+async fn streaming_enriches_the_user_message_once_before_persistence() {
+    let dir = tempfile::tempdir().unwrap();
+    let policy = permitted();
+    let memory = Arc::new(InMemory::new());
+    let model = Arc::new(LayoutModel::default());
+    let agent = Agent::builder("stream-layout", model.clone())
+        .model("test")
+        .memory(memory.clone())
+        .tool(BashTool::new(dir.path(), policy.clone()).unwrap())
+        .hook(BashAvailabilityHook(policy))
+        .compaction(None)
+        .build();
+    let _stream = with_bash_caller(
+        caller("alice"),
+        agent.run_stream("group", "stream input", &[]),
+    )
+    .await
+    .unwrap();
+    let history = memory.snapshot("group").await.unwrap().messages;
+    assert_eq!(history.len(), 2);
+    assert!(
+        history[0]
+            .content
+            .as_deref()
+            .unwrap()
+            .contains("bash: available")
+    );
+    assert_eq!(
+        model.requests.lock().unwrap()[0]
+            .messages
+            .iter()
+            .filter(|message| message.role == Role::User)
+            .count(),
+        1
     );
 }

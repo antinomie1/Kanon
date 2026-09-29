@@ -24,20 +24,20 @@ use kanon_llm::prompt::{BASE_PERSONA_PROMPT, PersonaRegistry};
 use kanon_llm::session::SessionManager;
 use kanon_llm::{canonical_json, canonical_tools, normalize_request};
 
-/// Host-owned runtime status goes after history, never into tools or the system block.
+/// Host-owned runtime status enriches the originating turn, never tools or the system block.
 struct Availability(Arc<AtomicBool>);
 
 #[async_trait]
 impl AgentHook for Availability {
-    async fn on_llm_request(
+    async fn on_user_message(
         &self,
         _session: &str,
-        request: &mut ChatRequest,
+        message: &mut ChatMessage,
     ) -> Result<(), kanon_llm::AgentError> {
-        request.messages.push(ChatMessage::user(format!(
-            "bash available: {}",
+        message.content.get_or_insert_default().push_str(&format!(
+            "\n\nbash available: {}",
             self.0.load(Ordering::SeqCst)
-        )));
+        ));
         Ok(())
     }
 }
@@ -61,6 +61,15 @@ async fn runtime_tool_permission_changes_only_the_request_tail() {
         serde_json::to_string(&requests[1].tools).unwrap()
     );
     let n = requests[0].messages.len();
+    assert_eq!(
+        requests[0]
+            .messages
+            .iter()
+            .filter(|message| message.role == Role::User)
+            .count(),
+        1,
+        "availability belongs inside the originating user turn"
+    );
     assert_eq!(
         serde_json::to_string(&requests[0].messages[..n - 1]).unwrap(),
         serde_json::to_string(&requests[1].messages[..n - 1]).unwrap()

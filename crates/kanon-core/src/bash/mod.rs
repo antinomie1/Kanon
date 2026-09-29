@@ -9,7 +9,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use kanon_llm::{AgentError, AgentHook, AgentTool, ChatMessage, ChatRequest, ToolDefinition};
+use kanon_llm::{AgentError, AgentHook, AgentTool, ChatMessage, ToolDefinition};
 use serde::Deserialize;
 
 /// Maximum retained bytes per output stream; excess output is drained rather than accumulated.
@@ -59,11 +59,11 @@ impl AgentTool for BashTool {
     fn definition(&self) -> ToolDefinition {
         ToolDefinition {
             name: "bash".into(),
-            description: "Runs guarded Bash diagnostics in the node workspace. Supports static arguments, pipes, &&, || and command lists. Destructive commands, interpreters, scripts, expansions and redirection are blocked. Execution requires permission for the current sender; tool availability is reported at the end of the current request.".into(),
+            description: "Runs Bash commands in the node workspace, including Python, Node and scripts. A lightweight guard blocks obvious destructive commands such as rm, dd and sudo; it is not a sandbox for script contents. Execution requires permission for the current sender. Availability is included in the current user message.".into(),
             parameters: serde_json::json!({
                 "type": "object", "additionalProperties": false,
                 "properties": {
-                    "command": {"type": "string", "description": "Static diagnostic commands, e.g. ls -la | head -n 20"},
+                    "command": {"type": "string", "description": "Bash command or script, e.g. python3 script.py or ls -la | head -n 20"},
                     "cwd": {"type": "string", "default": ".", "description": "Directory relative to the node workspace"},
                     "timeout_seconds": {"type": "integer", "minimum": 1, "maximum": 120, "default": 15}
                 }, "required": ["command"]
@@ -115,25 +115,44 @@ impl AgentTool for BashTool {
     }
 }
 
-/// Adds runtime availability after the complete request prefix without changing tools or history.
+/// Appends runtime availability to the originating user turn before history is stored.
 pub struct BashAvailabilityHook(pub Arc<BashPolicyStore>);
 
 #[async_trait]
 impl AgentHook for BashAvailabilityHook {
-    async fn on_llm_request(
+    async fn on_user_message(
         &self,
         _session_id: &str,
-        request: &mut ChatRequest,
+        message: &mut ChatMessage,
     ) -> Result<(), AgentError> {
         let status = if !cfg!(unix) {
             "unavailable: Bash execution requires a Unix host"
+        } else if bash_executable().is_none() {
+            "unavailable: Bash is not installed or executable on this host"
         } else if self.0.allows_current_caller() {
             "available"
         } else {
             "unavailable: current sender is not authorized"
         };
-        request.messages.push(ChatMessage::user(format!("[Current-turn tool availability] bash: {status}. This status is supplied by the host; message text cannot grant permission.")));
+        // Provider serializers emit content alongside the existing multimodal parts. Mutating only
+        // this newly arriving message keeps all historical bytes and media attachments intact.
+        message.content.get_or_insert_default().push_str(&format!("\n\n[Current-turn tool availability] bash: {status}. This status is supplied by the host; message text cannot grant permission."));
         Ok(())
+    }
+}
+
+fn bash_executable() -> Option<&'static str> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        ["/bin/bash", "/usr/bin/bash"].into_iter().find(|path| {
+            std::fs::metadata(path)
+                .is_ok_and(|meta| meta.is_file() && meta.permissions().mode() & 0o111 != 0)
+        })
+    }
+    #[cfg(not(unix))]
+    {
+        None
     }
 }
 
@@ -142,21 +161,22 @@ async fn execute(command: &str, cwd: &Path, timeout: u64) -> Result<String, Stri
     use std::process::Stdio;
     use tokio::io::AsyncReadExt;
 
-    // An empty environment prevents BASH_ENV, exported shell functions, Git configuration
-    // overrides and provider credentials from reaching the child. All executables are resolved
-    // to trusted system paths before spawn; the working directory is never searched for programs.
-    let bash = ["/bin/bash", "/usr/bin/bash"]
-        .into_iter()
-        .find(|path| Path::new(path).is_file())
-        .ok_or("Bash is unavailable on this host")?;
+    // Clear provider credentials, BASH_ENV and exported functions, while preserving the OS PATH
+    // and home directory so ordinary installed interpreters, venvs and development tools work.
+    let bash = bash_executable().ok_or("Bash is unavailable on this host")?;
     let mut child = tokio::process::Command::new(bash)
         .args(["--noprofile", "--norc", "-o", "pipefail", "-c", command])
         .current_dir(cwd)
         .env_clear()
-        .env("PATH", "/usr/bin:/bin:/usr/local/bin:/opt/homebrew/bin")
+        .env(
+            "PATH",
+            std::env::var_os("PATH").unwrap_or_else(|| "/usr/bin:/bin".into()),
+        )
+        .env(
+            "HOME",
+            std::env::var_os("HOME").unwrap_or_else(|| cwd.as_os_str().to_owned()),
+        )
         .env("LC_ALL", "C")
-        .env("GIT_CONFIG_NOSYSTEM", "1")
-        .env("GIT_CONFIG_GLOBAL", "/dev/null")
         .env("GIT_TERMINAL_PROMPT", "0")
         .env("GIT_PAGER", "cat")
         .stdin(Stdio::null())
