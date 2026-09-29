@@ -11,6 +11,8 @@
 //! - [`layout`]: The static-first request layout and the normalization that keeps prompt prefixes stable.
 //! - [`memory`]: Append-only conversation memory: the [`Memory`] trait and the lock-free [`InMemory`] backend.
 //! - [`compaction`]: Cache-safe context compaction, the only way history gets shorter.
+//! - [`session`]: Session records (persona binding, counters, status) with optional write-through durability.
+//! - [`sqlite_memory`]: SQLite backends for history ([`SqliteMemory`]) and session records ([`SqliteSessionStore`]).
 //! - [`model`]: Model identity (`provider/model-id`), capabilities and the per-model settings catalog.
 //! - [`provider`]: Named provider endpoints and the `provider/model` routing they enable.
 //! - [`slot`]: Shared hot-swappable handle to the node's active agent runtime.
@@ -60,10 +62,10 @@ pub use prompt::{
 pub use provider::{ProviderEntry, ProviderRegistry, ResolvedProvider};
 pub use session::{
     RuntimeSessionMetadata, SessionKey, SessionManager, SessionMetadata, SessionScope,
-    SessionStatus,
+    SessionStatus, SessionStore,
 };
 pub use slot::AgentSlot;
-pub use sqlite_memory::{PersistentMemory, SqliteMemory};
+pub use sqlite_memory::{PersistentMemory, SqliteMemory, SqliteSessionStore};
 pub use token::{
     estimate_conversation_tokens, estimate_message_tokens, estimate_request_tokens,
     estimate_text_tokens, estimate_tokens,

@@ -60,6 +60,7 @@ pub mod persona_store;
 pub mod plugin_config;
 pub mod routes;
 pub mod server;
+pub mod session_storage;
 pub mod state;
 pub mod system;
 pub mod ws;
@@ -76,4 +77,5 @@ pub use observability::{
 pub use persona_store::PersonaStore;
 pub use plugin_config::PluginConfigStore;
 pub use server::{ApiServer, app};
+pub use session_storage::{DEFAULT_SESSION_DB, open_session_manager};
 pub use state::{ApiState, ApiStateBuilder, default_agent_config};

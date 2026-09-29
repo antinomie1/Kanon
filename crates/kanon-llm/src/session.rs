@@ -5,7 +5,10 @@
 //! - Session lifecycle status ([`SessionStatus`]);
 //! - Metadata tracking (turns, cumulative tokens, created/last active timestamps);
 //! - Dynamic session variables store;
-//! - Idle session sweeping and graceful session resets.
+//! - Idle session sweeping and graceful session resets;
+//! - Optional durability through a [`SessionStore`], so a conversation continues after the node
+//!   restarts: the history lives in [`Memory`], and everything else about the session (persona
+//!   binding, counters, status) is written through to the store on every change.
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -153,11 +156,13 @@ pub enum SessionStatus {
 /// Ephemeral runtime metadata and state attributes associated with an active conversation session.
 ///
 /// **Boundary & Persistence Semantics**:
-/// While conversational messages and chat history are durably persisted to disk via
-/// [`SqliteMemory`](crate::SqliteMemory), session turn tallies, dynamic variables, and idle status
-/// are managed in memory during process execution by [`SessionManager`].
+/// Conversational messages and summaries are owned by a [`Memory`] backend (durable with
+/// [`SqliteMemory`](crate::SqliteMemory)); this record — persona binding, variables, turn tallies,
+/// status — is owned by [`SessionManager`], which keeps it in memory and, when it has a
+/// [`SessionStore`], writes every change through so the session survives a restart intact.
 ///
-/// To make this lifecycle explicit in call sites, the [`RuntimeSessionMetadata`] type alias is provided.
+/// The [`RuntimeSessionMetadata`] type alias is kept for call sites that want to say "the record
+/// the manager tracks" rather than "a stored document".
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SessionMetadata {
     /// Unique session identifier key.
@@ -204,9 +209,21 @@ impl SessionMetadata {
     }
 }
 
-/// Explicit type alias for in-memory session metadata, clarifying that it is transient runtime
-/// state rather than durably serialized database records.
+/// Alias for the session record a [`SessionManager`] tracks.
 pub type RuntimeSessionMetadata = SessionMetadata;
+
+/// Durable copy of session metadata.
+///
+/// The store is synchronous on purpose: a write is one small row, and keeping it synchronous lets
+/// every [`SessionManager`] mutator stay a plain method instead of turning the whole session API
+/// async. Implementations must therefore be quick (an embedded database, not a network call).
+pub trait SessionStore: Send + Sync {
+    /// Loads every stored session record.
+    fn load_all(&self) -> Result<Vec<SessionMetadata>, MemoryError>;
+
+    /// Stores (inserts or replaces) one session record.
+    fn save(&self, metadata: &SessionMetadata) -> Result<(), MemoryError>;
+}
 
 /// Comprehensive session lifecycle and state manager.
 ///
@@ -219,6 +236,8 @@ pub struct SessionManager {
     metadata: DashMap<String, SessionMetadata>,
     /// Default session scope applied when creating sessions from raw keys.
     default_scope: SessionScope,
+    /// Durable copy of `metadata`, when the node keeps sessions across restarts.
+    store: Option<Arc<dyn SessionStore>>,
 }
 
 impl SessionManager {
@@ -228,6 +247,70 @@ impl SessionManager {
             memory,
             metadata: DashMap::new(),
             default_scope: SessionScope::ChannelUser,
+            store: None,
+        }
+    }
+
+    /// Makes the manager durable: every stored session is loaded now, and every later change is
+    /// written through.
+    ///
+    /// Loading is all-or-nothing and happens before the manager serves anything, so a store that
+    /// cannot be read fails startup instead of silently starting from an empty session list.
+    pub fn with_store(mut self, store: Arc<dyn SessionStore>) -> Result<Self, MemoryError> {
+        for record in store.load_all()? {
+            self.metadata.insert(record.session_key.clone(), record);
+        }
+        self.store = Some(store);
+        Ok(self)
+    }
+
+    /// Writes one record through to the store, if there is one.
+    ///
+    /// A failed write is logged, never swallowed and never fatal: losing a counter update must not
+    /// turn a delivered reply into an error, but an operator has to be able to see that the store
+    /// is failing.
+    fn persist(&self, metadata: &SessionMetadata) {
+        if let Some(store) = &self.store
+            && let Err(err) = store.save(metadata)
+        {
+            tracing::error!(
+                session_key = %metadata.session_key,
+                error = %err,
+                "Failed to persist session metadata; the session will not survive a restart"
+            );
+        }
+    }
+
+    /// Applies `change` to a session (creating it when missing) and persists it if `change`
+    /// reports that it altered anything.
+    ///
+    /// The store is written after the map's shard lock is released, so file I/O never blocks
+    /// other sessions.
+    fn update(&self, session_key: &str, change: impl FnOnce(&mut SessionMetadata) -> bool) {
+        let changed = {
+            let mut entry = self
+                .metadata
+                .entry(session_key.to_string())
+                .or_insert_with(|| SessionMetadata::new(session_key, self.default_scope.clone()));
+            change(&mut entry).then(|| entry.clone())
+        };
+        if let Some(record) = changed {
+            self.persist(&record);
+        }
+    }
+
+    /// Like [`Self::update`], but only for a session that already exists.
+    fn update_existing(
+        &self,
+        session_key: &str,
+        change: impl FnOnce(&mut SessionMetadata) -> bool,
+    ) {
+        let changed = self
+            .metadata
+            .get_mut(session_key)
+            .and_then(|mut entry| change(&mut entry).then(|| entry.clone()));
+        if let Some(record) = changed {
+            self.persist(&record);
         }
     }
 
@@ -244,18 +327,30 @@ impl SessionManager {
 
     /// Retrieves or initializes metadata for a given session key.
     pub fn get_or_create(&self, session_key: &str) -> SessionMetadata {
-        self.metadata
-            .entry(session_key.to_string())
-            .or_insert_with(|| SessionMetadata::new(session_key, self.default_scope.clone()))
-            .clone()
+        self.get_or_create_scoped(session_key, self.default_scope.clone())
     }
 
     /// Retrieves or initializes metadata with an explicit session scope.
     pub fn get_or_create_with_scope(&self, key: &SessionKey) -> SessionMetadata {
-        self.metadata
-            .entry(key.as_str().to_string())
-            .or_insert_with(|| SessionMetadata::new(key.as_str(), key.scope().clone()))
-            .clone()
+        self.get_or_create_scoped(key.as_str(), key.scope().clone())
+    }
+
+    /// Reads a session, creating (and persisting) it on first sight.
+    fn get_or_create_scoped(&self, session_key: &str, scope: SessionScope) -> SessionMetadata {
+        use dashmap::mapref::entry::Entry;
+
+        let (record, created) = match self.metadata.entry(session_key.to_string()) {
+            Entry::Occupied(existing) => (existing.get().clone(), false),
+            Entry::Vacant(slot) => {
+                let record = SessionMetadata::new(session_key, scope);
+                slot.insert(record.clone());
+                (record, true)
+            }
+        };
+        if created {
+            self.persist(&record);
+        }
+        record
     }
 
     /// Returns existing metadata for a session, if present.
@@ -266,26 +361,29 @@ impl SessionManager {
     /// Records an interaction turn, updating timestamps, turn counters, and token tallies.
     pub fn record_turn(&self, session_key: &str, turn_tokens: usize) {
         let now = current_unix_timestamp();
-        let mut entry = self
-            .metadata
-            .entry(session_key.to_string())
-            .or_insert_with(|| SessionMetadata::new(session_key, self.default_scope.clone()));
-
-        entry.last_active_at = now;
-        entry.turn_count += 1;
-        entry.total_tokens_used += turn_tokens;
-        entry.status = SessionStatus::Active;
+        self.update(session_key, |entry| {
+            entry.last_active_at = now;
+            entry.turn_count += 1;
+            entry.total_tokens_used += turn_tokens;
+            entry.status = SessionStatus::Active;
+            true
+        });
     }
 
     /// Sets the active persona identifier for a session.
+    ///
+    /// The pipeline calls this for every message of a conversation whose instance chose a persona,
+    /// so re-binding the persona a session already has is a no-op — and costs no write.
     pub fn set_persona(&self, session_key: &str, persona_id: impl Into<String>) {
         let pid = persona_id.into();
-        let mut entry = self
-            .metadata
-            .entry(session_key.to_string())
-            .or_insert_with(|| SessionMetadata::new(session_key, self.default_scope.clone()));
-        entry.persona_id = Some(pid);
-        entry.last_active_at = current_unix_timestamp();
+        self.update(session_key, |entry| {
+            if entry.persona_id.as_deref() == Some(pid.as_str()) {
+                return false;
+            }
+            entry.persona_id = Some(pid);
+            entry.last_active_at = current_unix_timestamp();
+            true
+        });
     }
 
     /// Returns the active persona identifier for a session, if configured.
@@ -301,22 +399,27 @@ impl SessionManager {
     /// Called when a persona is deleted: those sessions fall back to the base assistant instead of
     /// pointing at a persona that no longer exists.
     pub fn unbind_persona(&self, persona_id: &str) -> usize {
-        let mut unbound = 0;
+        let mut unbound = Vec::new();
         for mut entry in self.metadata.iter_mut() {
             if entry.persona_id.as_deref() == Some(persona_id) {
                 entry.persona_id = None;
-                unbound += 1;
+                unbound.push(entry.clone());
             }
         }
-        unbound
+        // Persisted after the iteration, so no shard lock is held across file I/O.
+        for record in &unbound {
+            self.persist(record);
+        }
+        unbound.len()
     }
 
     /// Removes the persona binding of one session, which then uses the base assistant.
     pub fn clear_persona(&self, session_key: &str) {
-        if let Some(mut meta) = self.metadata.get_mut(session_key) {
+        self.update_existing(session_key, |meta| {
             meta.persona_id = None;
             meta.last_active_at = current_unix_timestamp();
-        }
+            true
+        });
     }
 
     /// Sets a session-scoped state variable.
@@ -328,12 +431,11 @@ impl SessionManager {
     ) {
         let k = key.into();
         let v = value.into();
-        let mut entry = self
-            .metadata
-            .entry(session_key.to_string())
-            .or_insert_with(|| SessionMetadata::new(session_key, self.default_scope.clone()));
-        entry.variables.insert(k, v);
-        entry.last_active_at = current_unix_timestamp();
+        self.update(session_key, |entry| {
+            entry.variables.insert(k, v);
+            entry.last_active_at = current_unix_timestamp();
+            true
+        });
     }
 
     /// Retrieves a session-scoped variable value.
@@ -353,9 +455,12 @@ impl SessionManager {
 
     /// Removes a session-scoped variable.
     pub fn remove_variable(&self, session_key: &str, key: &str) -> Option<String> {
-        self.metadata
-            .get_mut(session_key)
-            .and_then(|mut m| m.variables.remove(key))
+        let mut removed = None;
+        self.update_existing(session_key, |meta| {
+            removed = meta.variables.remove(key);
+            removed.is_some()
+        });
+        removed
     }
 
     /// Clears the session history in memory, resets turn count and tokens,
@@ -363,36 +468,41 @@ impl SessionManager {
     pub async fn reset_session(&self, session_key: &str) -> Result<(), MemoryError> {
         self.memory.clear(session_key).await?;
 
-        if let Some(mut meta) = self.metadata.get_mut(session_key) {
+        self.update_existing(session_key, |meta| {
             meta.turn_count = 0;
             meta.total_tokens_used = 0;
             meta.status = SessionStatus::Active;
             meta.last_active_at = current_unix_timestamp();
-        }
+            true
+        });
 
         Ok(())
     }
 
     /// Marks a session as closed.
     pub fn close_session(&self, session_key: &str) {
-        if let Some(mut meta) = self.metadata.get_mut(session_key) {
+        self.update_existing(session_key, |meta| {
             meta.status = SessionStatus::Closed;
             meta.last_active_at = current_unix_timestamp();
-        }
+            true
+        });
     }
 
     /// Sweeps sessions that have been idle longer than `max_idle`, updating their status to `Idle`.
     ///
     /// Returns the number of sessions transitioned to idle.
     pub fn sweep_idle_sessions(&self, max_idle: Duration) -> usize {
-        let mut swept = 0;
+        let mut swept = Vec::new();
         for mut entry in self.metadata.iter_mut() {
             if entry.status == SessionStatus::Active && entry.is_idle(max_idle) {
                 entry.status = SessionStatus::Idle;
-                swept += 1;
+                swept.push(entry.clone());
             }
         }
-        swept
+        for record in &swept {
+            self.persist(record);
+        }
+        swept.len()
     }
 
     /// Returns the number of currently tracked sessions.

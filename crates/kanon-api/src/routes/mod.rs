@@ -25,7 +25,7 @@
 //! | `GET` | `/api/v1/plugins/:id/config` | Current values plus declaration schema |
 //! | `PUT` | `/api/v1/plugins/:id/config` | Validate, hot reload, then persist |
 //! | `POST` | `/api/v1/plugins/:id/restart` | Restart the owning host process |
-//! | `GET` | `/api/v1/sessions` | Paginated session metadata |
+//! | `GET` | `/api/v1/sessions` | Paginated session records (durable: still listed after a restart) |
 //! | `POST` | `/api/v1/sessions/:id/reset` | Clear history, keep persona and variables |
 //! | `POST` | `/api/v1/sessions/:id/persona` | Hot-swap the session persona |
 //! | `GET` | `/api/v1/personas` | Persona library: built-in, operator-defined and instance personas |

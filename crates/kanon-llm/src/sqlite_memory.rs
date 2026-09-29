@@ -14,7 +14,9 @@
 //! - Transactional commit points and WAL (Write-Ahead Logging) checkpoints;
 //! - Strict error semantics: write errors fail fast and prevent silent cache-DB divergence;
 //! - Batch inserts within transactional boundaries;
-//! - Filesystem directory integration (compatible with `kanon-storage`).
+//! - Filesystem directory integration (compatible with `kanon-storage`);
+//! - [`SqliteSessionStore`]: the durable copy of session metadata (persona binding, counters,
+//!   status), which can share the database file with the conversation history.
 
 use async_trait::async_trait;
 use dashmap::DashMap;
@@ -28,6 +30,7 @@ use tokio::sync::Mutex;
 use crate::error::MemoryError;
 use crate::gateway::types::{ChatMessage, Role, ToolCall};
 use crate::memory::{Memory, MemorySnapshot, SessionMemory};
+use crate::session::{SessionMetadata, SessionStore};
 
 /// Backward-compatible type alias for [`SqliteMemory`].
 pub type PersistentMemory = SqliteMemory;
@@ -496,5 +499,92 @@ impl Memory for SqliteMemory {
             Ok(count)
         })?;
         Ok(count as usize)
+    }
+}
+
+/// SQLite-backed [`SessionStore`]: one JSON document per session.
+///
+/// It opens its own connection, so it can point at the same database file as [`SqliteMemory`]
+/// (WAL mode lets the two write without blocking each other for long). The connection sits behind
+/// a plain mutex because [`SessionStore`] is synchronous by design: each call is one small
+/// statement, and a synchronous store keeps every session mutator a plain method.
+pub struct SqliteSessionStore {
+    conn: std::sync::Mutex<Connection>,
+}
+
+impl SqliteSessionStore {
+    /// How long a write waits for another connection's transaction before failing.
+    const BUSY_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
+
+    /// Opens (creating when needed) the session table in the database at `path`.
+    pub fn open(path: impl AsRef<Path>) -> Result<Self, MemoryError> {
+        Self::init(Connection::open(path)?)
+    }
+
+    /// Opens a private in-memory database, for tests.
+    pub fn open_in_memory() -> Result<Self, MemoryError> {
+        Self::init(Connection::open_in_memory()?)
+    }
+
+    fn init(conn: Connection) -> Result<Self, MemoryError> {
+        // Two connections write to one file, so a busy database is waited for instead of failing
+        // the write outright.
+        conn.busy_timeout(Self::BUSY_TIMEOUT)?;
+        conn.execute_batch(
+            "PRAGMA journal_mode = WAL;
+             PRAGMA synchronous = NORMAL;
+
+             CREATE TABLE IF NOT EXISTS session_meta (
+                 session_key TEXT PRIMARY KEY,
+                 data TEXT NOT NULL,
+                 updated_at INTEGER NOT NULL
+             );",
+        )?;
+        Ok(Self {
+            conn: std::sync::Mutex::new(conn),
+        })
+    }
+
+    /// Acquires the connection. A poisoned lock only means another writer panicked between two
+    /// statements; the connection itself is still consistent, so it is used as it is.
+    fn conn(&self) -> std::sync::MutexGuard<'_, Connection> {
+        self.conn
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+}
+
+impl SessionStore for SqliteSessionStore {
+    fn load_all(&self) -> Result<Vec<SessionMetadata>, MemoryError> {
+        let conn = self.conn();
+        let mut stmt = conn.prepare("SELECT session_key, data FROM session_meta")?;
+        let mut rows = stmt.query([])?;
+
+        let mut records = Vec::new();
+        while let Some(row) = rows.next()? {
+            let key: String = row.get(0)?;
+            let data: String = row.get(1)?;
+            // A record that cannot be decoded is an error, not a skipped row: dropping a session
+            // silently would look like the conversation was never there.
+            let record: SessionMetadata = serde_json::from_str(&data).map_err(|err| {
+                MemoryError::Serialization(format!("session '{key}' is unreadable: {err}"))
+            })?;
+            records.push(record);
+        }
+        Ok(records)
+    }
+
+    fn save(&self, metadata: &SessionMetadata) -> Result<(), MemoryError> {
+        let data = serde_json::to_string(metadata)
+            .map_err(|err| MemoryError::Serialization(err.to_string()))?;
+        self.conn().execute(
+            "INSERT INTO session_meta (session_key, data, updated_at)
+             VALUES (?1, ?2, ?3)
+             ON CONFLICT(session_key) DO UPDATE SET
+                 data = excluded.data,
+                 updated_at = excluded.updated_at",
+            params![metadata.session_key, data, current_timestamp()],
+        )?;
+        Ok(())
     }
 }

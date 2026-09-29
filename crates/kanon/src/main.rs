@@ -30,8 +30,14 @@
 //! Model routing itself lives in `data/system.json`: a named provider directory plus a per-model
 //! settings catalog, both editable through the console. A model is addressed as
 //! `<provider>/<model-id>`; the `KANON_LLM_*` variables only seed that directory when it is empty,
-//! registering the endpoint under the preset name its base URL matches. The same document carries
-//! the node-wide reply policy inherited by every instance without an override.
+//! registering the endpoint under the preset name its base URL matches and making its model the
+//! node's single global default model. The same document carries the node-wide reply policy
+//! inherited by every instance without an override.
+//!
+//! Conversations are durable: history, compaction summaries and session records live in
+//! `data/sessions.db`, and the operator's personas in `data/personas.json`. Both are opened before
+//! anything is served, and a file that cannot be read stops startup instead of being replaced by an
+//! empty one.
 
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -39,8 +45,8 @@ use std::sync::Arc;
 use kanon_adapter_milky::{MilkyAdapter, MilkyConfig};
 use kanon_adapter_onebot::{OneBotAdapter, OneBotConfig};
 use kanon_api::{
-    ApiServer, ApiState, LlmProviderConfig, NodeSettings, Observability, PersonaStore,
-    SystemConfigStore,
+    ApiServer, ApiState, DEFAULT_SESSION_DB, LlmProviderConfig, NodeSettings, Observability,
+    PersonaStore, SystemConfigStore, open_session_manager,
 };
 use kanon_core::ipc::{CoreApiService, CoreIpcServer, DEFAULT_INGEST_QUEUE_CAPACITY};
 use kanon_core::pipeline::PipelineEngine;
@@ -182,7 +188,13 @@ async fn main() -> StartupResult<()> {
         "Operator-defined personas loaded"
     );
 
+    // Conversations survive a restart: history and summaries, persona bindings and counters are
+    // stored in `data/sessions.db`, and an unreadable database stops startup instead of silently
+    // starting from an empty session list.
+    let sessions = open_session_manager(DEFAULT_SESSION_DB)?;
+
     let state = ApiState::builder(supervisor.clone())
+        .with_sessions(sessions)
         .with_personas(personas)
         .with_persona_store(persona_store)
         .with_milky_adapter(milky_adapter)
