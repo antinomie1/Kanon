@@ -472,6 +472,46 @@ async fn info_reports_host_time_model_and_adapter() {
     }
 }
 
+/// Checks the macOS reply against the OS tools rather than the implementation's APIs.
+#[cfg(target_os = "macos")]
+#[tokio::test]
+async fn info_reports_macos_product_and_kernel_versions() {
+    let read_version = |command: &str, argument: &str| {
+        let output = std::process::Command::new(command)
+            .arg(argument)
+            .output()
+            .expect("run macOS version command");
+        assert!(output.status.success(), "{command}: {output:?}");
+        let version = String::from_utf8(output.stdout)
+            .expect("UTF-8 version")
+            .trim()
+            .to_string();
+        assert!(!version.is_empty(), "{command} returned an empty version");
+        version
+    };
+    let product_version = read_version("sw_vers", "-productVersion");
+    let kernel_version = read_version("uname", "-r");
+    let registry = Arc::new(InstanceRegistry::in_memory());
+    instance(&registry, None).await;
+    let engine = factory_harness(registry);
+
+    match engine
+        .process_event(event("i2", "/info", "private", false))
+        .await
+    {
+        PipelineResult::BuiltinReplied { command, replies } => {
+            assert_eq!(command, "info");
+            let text = reply_text(&replies);
+            let expected = format!(
+                "系统: macOS {product_version} {kernel_version} ({})",
+                std::env::consts::ARCH
+            );
+            assert_eq!(text.lines().next(), Some(expected.as_str()));
+        }
+        other => panic!("unexpected result: {other:?}"),
+    }
+}
+
 /// Provider that records every request so the assembled prompt can be asserted.
 struct RecordingProvider {
     requests: Arc<std::sync::Mutex<Vec<ChatRequest>>>,

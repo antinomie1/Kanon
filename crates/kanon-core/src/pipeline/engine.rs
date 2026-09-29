@@ -251,20 +251,31 @@ pub struct DeliveryOutcome {
     pub message_id: String,
 }
 
-/// Linux kernel release, when readable; other platforms report only their OS name.
+/// Kernel release from macOS system APIs or Linux procfs, when readable.
 fn kernel_release() -> Option<String> {
-    std::fs::read_to_string("/proc/sys/kernel/osrelease")
-        .ok()
-        .map(|release| release.trim().to_string())
-        .filter(|release| !release.is_empty())
+    #[cfg(target_os = "macos")]
+    {
+        sysinfo::System::kernel_version().or_else(|| {
+            tracing::warn!("could not read macOS kernel version");
+            None
+        })
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    {
+        std::fs::read_to_string("/proc/sys/kernel/osrelease")
+            .ok()
+            .map(|release| release.trim().to_string())
+            .filter(|release| !release.is_empty())
+    }
 }
 
 /// Human-readable name of the running system.
 ///
 /// "linux" says almost nothing to a user; the distribution (`Ubuntu 24.04.1 LTS`) identifies the
-/// host far better. Linux exposes it through `os-release`; other platforms fall back to their
-/// generic name, because there is no portable API for a marketing version and shelling out to a
-/// platform tool for one chat line is not worth it.
+/// host far better. Linux exposes it through `os-release`; macOS exposes its product version
+/// through native system APIs. Use the numeric macOS version instead of a release-name lookup
+/// so newly released systems remain identifiable without updating a codename table.
 fn distribution_name() -> String {
     #[cfg(target_os = "linux")]
     {
@@ -282,6 +293,17 @@ fn distribution_name() -> String {
                 }
             }
         }
+    }
+
+    #[cfg(target_os = "macos")]
+    {
+        if let Some(version) = sysinfo::System::os_version() {
+            let version = version.trim();
+            if !version.is_empty() {
+                return format!("macOS {version}");
+            }
+        }
+        tracing::warn!("could not read macOS product version");
     }
 
     std::env::consts::OS.to_string()
