@@ -640,22 +640,45 @@ export interface SessionsResponse {
   total_pages?: number;
 }
 
+/** Where a persona comes from, which decides who may change it. */
+export type PersonaKind = 'builtin' | 'custom' | 'instance';
+
 export interface PersonaItem {
   /** Identifier used by the session and instance persona fields. */
   id: string;
   name: string;
   description: string;
-  /** Raw prompt template, including `{{variable}}` slots. */
-  template: string;
-  variables: string[];
-  required_variables: string[];
-  default_temperature: number | null;
-  default_model: string | null;
+  /** The system prompt, exactly as it is sent to the model. */
+  prompt: string;
+  /**
+   * `builtin` ships with the node (read-only), `custom` belongs to the operator, `instance` is
+   * generated from a bot instance's own prompt and edited on that instance.
+   */
+  kind: PersonaKind;
+  /** Bot instances that select this persona, which is what blocks its removal. */
+  used_by: string[];
 }
 
 export interface PersonasResponse {
   total: number;
+  /** The persona a conversation uses when none was chosen. */
+  base_persona_id: string;
   personas: PersonaItem[];
+}
+
+/** Body of `POST /api/v1/personas`; the id is derived from the name when omitted. */
+export interface CreatePersonaRequest {
+  id?: string;
+  name: string;
+  description?: string;
+  prompt: string;
+}
+
+/** Body of `PUT /api/v1/personas/{id}`; the id never changes. */
+export interface UpdatePersonaRequest {
+  name: string;
+  description?: string;
+  prompt: string;
 }
 
 // WebSocket Logs

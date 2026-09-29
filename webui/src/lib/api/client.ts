@@ -5,6 +5,7 @@ import type {
   ChatCompletionResponse,
   ContextPolicy,
   ContextPolicyResponse,
+  CreatePersonaRequest,
   DeleteModelRequest,
   DeleteProviderRequest,
   DiscoverModelsRequest,
@@ -44,6 +45,7 @@ import type {
   TestProviderRequest,
   TestProviderResponse,
   ToolCatalog,
+  UpdatePersonaRequest,
   UpsertMcpServerRequest,
   UpsertProviderRequest,
 } from '../types';
@@ -381,16 +383,32 @@ export const api = {
         method: 'POST',
       },
     ),
-  setSessionPersona: (sessionId: string, persona: string) =>
-    request<{ success: boolean }>(
+  // `null` removes the binding, after which the session uses the base assistant.
+  setSessionPersona: (sessionId: string, personaId: string | null) =>
+    request<{ session_key: string; persona_id: string | null }>(
       `/api/v1/sessions/${encodeURIComponent(sessionId)}/persona`,
       {
         method: 'POST',
-        body: JSON.stringify({ persona }),
+        body: JSON.stringify({ persona_id: personaId }),
       },
     ),
 
+  // Persona library: every mutation answers with the refreshed catalog.
   getPersonas: () => request<PersonasResponse>('/api/v1/personas'),
+  createPersona: (req: CreatePersonaRequest) =>
+    request<PersonasResponse>('/api/v1/personas', {
+      method: 'POST',
+      body: JSON.stringify(req),
+    }),
+  updatePersona: (id: string, req: UpdatePersonaRequest) =>
+    request<PersonasResponse>(`/api/v1/personas/${encodeURIComponent(id)}`, {
+      method: 'PUT',
+      body: JSON.stringify(req),
+    }),
+  deletePersona: (id: string) =>
+    request<PersonasResponse>(`/api/v1/personas/${encodeURIComponent(id)}`, {
+      method: 'DELETE',
+    }),
 
   chatCompletion: (req: ChatCompletionRequest) =>
     request<ChatCompletionResponse>('/api/v1/chat/completions', {

@@ -62,8 +62,10 @@ pub struct SessionPage {
 /// Request body for `POST /api/v1/sessions/:id/persona`.
 #[derive(Debug, Deserialize)]
 pub struct PersonaSwitchRequest {
-    /// Persona identifier to bind to the session.
-    pub persona_id: String,
+    /// Persona identifier to bind to the session; `null` or blank removes the binding, after which
+    /// the session uses the base assistant.
+    #[serde(default)]
+    pub persona_id: Option<String>,
 }
 
 /// Result of a persona switch.
@@ -71,9 +73,9 @@ pub struct PersonaSwitchRequest {
 pub struct PersonaSwitchResponse {
     /// Session that was updated.
     pub session_key: String,
-    /// Newly bound persona identifier.
-    pub persona_id: String,
-    /// Persona display name, for immediate console feedback.
+    /// Newly bound persona identifier; `null` when the binding was removed.
+    pub persona_id: Option<String>,
+    /// Display name of the persona now in effect, for immediate console feedback.
     pub persona_name: String,
 }
 
@@ -201,29 +203,39 @@ async fn set_persona(
     Path(session_id): Path<String>,
     Json(body): Json<PersonaSwitchRequest>,
 ) -> Result<Json<PersonaSwitchResponse>, ApiError> {
-    let persona_id = body.persona_id.trim().to_string();
-    if persona_id.is_empty() {
-        return Err(ApiError::BadRequest(
-            "Field 'persona_id' must not be empty".to_string(),
-        ));
-    }
-
-    let persona = state
-        .personas()
-        .get(&persona_id)
-        .ok_or_else(|| ApiError::NotFound(format!("Persona '{persona_id}' is not registered")))?;
+    let requested = body
+        .persona_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|id| !id.is_empty());
 
     // Binding a persona is itself a session-registering action: a console may pre-configure a
     // session before its first message arrives, so metadata is created on demand here.
     state.sessions().get_or_create(&session_id);
-    state.sessions().set_persona(&session_id, &persona_id);
+
+    let Some(persona_id) = requested else {
+        state.sessions().clear_persona(&session_id);
+        tracing::info!(session_id = %session_id, "Session persona binding removed by control plane");
+        return Ok(Json(PersonaSwitchResponse {
+            session_key: session_id,
+            persona_id: None,
+            persona_name: state.personas().base().name,
+        }));
+    };
+
+    let persona = state
+        .personas()
+        .get(persona_id)
+        .ok_or_else(|| ApiError::NotFound(format!("Persona '{persona_id}' is not registered")))?;
+
+    state.sessions().set_persona(&session_id, persona_id);
 
     state
         .observability()
         .events
         .publish(TraceEvent::PersonaSwitched {
             session_id: session_id.clone(),
-            persona_id: persona_id.clone(),
+            persona_id: persona_id.to_string(),
         });
 
     tracing::info!(
@@ -234,7 +246,7 @@ async fn set_persona(
 
     Ok(Json(PersonaSwitchResponse {
         session_key: session_id,
-        persona_id,
+        persona_id: Some(persona_id.to_string()),
         persona_name: persona.name,
     }))
 }

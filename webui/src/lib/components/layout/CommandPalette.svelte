@@ -9,6 +9,7 @@ import {
   RefreshCw,
   Search,
   Settings,
+  Sparkles,
   Sun,
   Terminal,
   Trash2,
@@ -57,10 +58,17 @@ const commands = $derived([
   },
   {
     id: 'sessions',
-    title: `${t('nav.sessions')} (Sessions & Personas)`,
+    title: `${t('nav.sessions')} (Sessions)`,
     category: 'Navigation',
     icon: Users,
     action: () => onSelectTab('sessions'),
+  },
+  {
+    id: 'personas',
+    title: `${t('nav.personas')} (Personas)`,
+    category: 'Navigation',
+    icon: Sparkles,
+    action: () => onSelectTab('personas'),
   },
   {
     id: 'providers',

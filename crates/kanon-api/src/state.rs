@@ -26,6 +26,7 @@ use kanon_llm::{
 use crate::error::ApiError;
 use crate::llm_config::{NodeSettings, SystemConfigStore};
 use crate::observability::Observability;
+use crate::persona_store::PersonaStore;
 use crate::plugin_config::PluginConfigStore;
 
 /// Default sliding-window depth applied when the builder must create a memory backend.
@@ -49,6 +50,8 @@ struct ApiStateInner {
     sessions: Arc<SessionManager>,
     /// Persona catalog backing the persona endpoints.
     personas: Arc<PersonaRegistry>,
+    /// Persistence of the operator-defined personas in `personas`.
+    persona_store: Arc<PersonaStore>,
     /// Live agent runtime backing chat completions, conversational pipeline turns and IPC
     /// `RequestLLM`.
     ///
@@ -124,6 +127,11 @@ impl ApiState {
     /// Persona registry handle.
     pub fn personas(&self) -> &Arc<PersonaRegistry> {
         &self.inner.personas
+    }
+
+    /// Persistence of the operator-defined personas.
+    pub fn persona_store(&self) -> &Arc<PersonaStore> {
+        &self.inner.persona_store
     }
 
     /// Agent runtime handle, if a model provider was configured.
@@ -400,6 +408,7 @@ pub struct ApiStateBuilder {
     version: String,
     sessions: Option<Arc<SessionManager>>,
     personas: Option<Arc<PersonaRegistry>>,
+    persona_store: Option<Arc<PersonaStore>>,
     memory: Option<Arc<dyn Memory>>,
     agent: Option<Arc<Agent>>,
     pending_llm: Option<PendingLlm>,
@@ -437,6 +446,7 @@ impl ApiStateBuilder {
             version: env!("CARGO_PKG_VERSION").to_string(),
             sessions: None,
             personas: None,
+            persona_store: None,
             memory: None,
             agent: None,
             pending_llm: None,
@@ -484,8 +494,17 @@ impl ApiStateBuilder {
     }
 
     /// Injects a pre-built persona registry.
+    ///
+    /// The composition root loads the operator's personas from the store and registers them before
+    /// handing the registry over, so the builder never reads `data/personas.json` itself.
     pub fn with_personas(mut self, personas: Arc<PersonaRegistry>) -> Self {
         self.personas = Some(personas);
+        self
+    }
+
+    /// Overrides where operator-defined personas are persisted (`data/personas.json` by default).
+    pub fn with_persona_store(mut self, store: Arc<PersonaStore>) -> Self {
+        self.persona_store = Some(store);
         self
     }
 
@@ -645,6 +664,9 @@ impl ApiStateBuilder {
             .sessions
             .unwrap_or_else(|| Arc::new(SessionManager::new(memory.clone())));
         let personas = self.personas.unwrap_or_default();
+        let persona_store = self
+            .persona_store
+            .unwrap_or_else(|| Arc::new(PersonaStore::default()));
 
         // Agent construction is centralised in the factory so the node agent, per-instance model
         // overrides and the console sandbox all share one memory, session manager, persona
@@ -728,6 +750,7 @@ impl ApiStateBuilder {
                 supervisor: self.supervisor,
                 sessions,
                 personas,
+                persona_store,
                 factory,
                 instances,
                 plugin_state,

@@ -7,6 +7,7 @@
 //! - [`agent`]: General-purpose agent engine for conversational bots and autonomous task workers.
 //! - [`error`]: Granular error types for gateway, agent, and tool routing.
 //! - [`gateway`]: Protocol-level LLM client implementations (OpenAI Chat, OpenAI Responses, Anthropic Messages).
+//! - [`prompt`]: Static personas and the hook that places them at the top of every request.
 //! - [`memory`]: Pluggable conversation memory subsystem with [`Memory`] trait and lock-free [`SlidingWindowMemory`].
 //! - [`model`]: Model identity (`provider/model-id`), capabilities and the per-model settings catalog.
 //! - [`provider`]: Named provider endpoints and the `provider/model` routing they enable.
@@ -47,7 +48,10 @@ pub use gateway::{
 };
 pub use memory::{ConversationManager, Memory, SessionMemory, SlidingWindowMemory};
 pub use model::{ModelCapabilities, ModelCatalog, ModelRef, ModelSettingsSource, ModelSpec};
-pub use prompt::{DynamicPromptHook, Persona, PersonaRegistry, PromptComposer, PromptTemplate};
+pub use prompt::{
+    BASE_PERSONA_ID, BASE_PERSONA_PROMPT, Persona, PersonaError, PersonaHook, PersonaKind,
+    PersonaRegistry, is_valid_slug,
+};
 pub use provider::{ProviderEntry, ProviderRegistry, ResolvedProvider};
 pub use session::{
     RuntimeSessionMetadata, SessionKey, SessionManager, SessionMetadata, SessionScope,

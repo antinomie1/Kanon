@@ -1,6 +1,5 @@
-//! Comprehensive integration tests for Kanon Session Management and Prompt/Persona System.
+//! Integration tests for Kanon session management and the persona system.
 
-use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -13,7 +12,8 @@ use kanon_llm::gateway::LlmProvider;
 use kanon_llm::gateway::types::{ChatMessage, ChatRequest, ChatResponse, Role};
 use kanon_llm::memory::SlidingWindowMemory;
 use kanon_llm::prompt::{
-    DynamicPromptHook, Persona, PersonaRegistry, PromptComposer, PromptTemplate,
+    BASE_PERSONA_ID, BASE_PERSONA_PROMPT, Persona, PersonaError, PersonaHook, PersonaKind,
+    PersonaRegistry,
 };
 use kanon_llm::session::{SessionKey, SessionManager, SessionScope, SessionStatus};
 
@@ -91,7 +91,7 @@ async fn injected_system_context_survives_the_persona_hook() {
         messages[0]
             .content
             .as_deref()
-            .is_some_and(|content| content.contains("Kanon")),
+            .is_some_and(|content| content == BASE_PERSONA_PROMPT),
         "the persona must own the base system message: {messages:?}"
     );
     assert_eq!(messages[1].role, Role::System);
@@ -229,127 +229,131 @@ async fn test_session_manager_idle_sweep() {
 }
 
 // =========================================================================
-// 2. Prompt Templating and Composition Tests
+// 2. Persona Registry Tests
 // =========================================================================
 
 #[test]
-fn test_prompt_template_parsing_and_rendering() {
-    let template_str =
-        "You are {{bot_name|Kanon}}, an assistant for {{user|friend}}. Mode: {{mode}}.";
-    let tmpl = PromptTemplate::parse(template_str);
-
-    assert_eq!(tmpl.raw(), template_str);
-
-    let vars_set = tmpl.variables();
-    assert_eq!(vars_set.len(), 3);
-    assert!(vars_set.contains(&"bot_name".to_string()));
-    assert!(vars_set.contains(&"user".to_string()));
-    assert!(vars_set.contains(&"mode".to_string()));
-
-    let required = tmpl.required_variables();
-    assert_eq!(required, vec!["mode".to_string()]);
-
-    // 1. Render with defaults for bot_name and user
-    let mut vars = HashMap::new();
-    vars.insert("mode".to_string(), "autonomous".to_string());
-    let rendered = tmpl.render(&vars);
-    assert_eq!(
-        rendered,
-        "You are Kanon, an assistant for friend. Mode: autonomous."
-    );
-
-    // 2. Render overriding defaults
-    vars.insert("bot_name".to_string(), "Sentinel".to_string());
-    vars.insert("user".to_string(), "Commander".to_string());
-    let rendered_custom = tmpl.render(&vars);
-    assert_eq!(
-        rendered_custom,
-        "You are Sentinel, an assistant for Commander. Mode: autonomous."
-    );
-
-    // 3. Render with missing required slot and custom fallback
-    let empty_vars = HashMap::new();
-    let fallback_rendered = tmpl.render_with_fallback(&empty_vars, "[UNSET]");
-    assert_eq!(
-        fallback_rendered,
-        "You are Kanon, an assistant for friend. Mode: [UNSET]."
-    );
-}
-
-#[test]
-fn test_prompt_composer_layered_assembly() {
-    let prompt = PromptComposer::new()
-        .identity("You are Kanon, a secure high-performance chatbot core.")
-        .context("Channel", "#production-alerts")
-        .context("Operator", "SysAdmin")
-        .instruction("Analyze incoming log traces and highlight fatal anomalies.")
-        .instruction("Output remediation commands when applicable.")
-        .tool_guidelines("Call diagnostic tools before suggesting manual intervention.")
-        .constraint("Never execute destructive shell commands without operator confirmation.")
-        .constraint("Output strictly in Markdown format.")
-        .compose();
-
-    assert!(prompt.contains("You are Kanon, a secure high-performance chatbot core."));
-    assert!(prompt.contains("## Current Context"));
-    assert!(prompt.contains("- Channel: #production-alerts"));
-    assert!(prompt.contains("- Operator: SysAdmin"));
-    assert!(prompt.contains("## Instructions"));
-    assert!(prompt.contains("- Analyze incoming log traces and highlight fatal anomalies."));
-    assert!(prompt.contains("## Tool Guidelines"));
-    assert!(prompt.contains("Call diagnostic tools before suggesting manual intervention."));
-    assert!(prompt.contains("## Constraints & Safety"));
-    assert!(
-        prompt
-            .contains("- Never execute destructive shell commands without operator confirmation.")
-    );
-}
-
-// =========================================================================
-// 3. Persona Registry Tests
-// =========================================================================
-
-#[test]
-fn test_persona_registry_presets_and_custom() {
+fn the_registry_ships_exactly_one_persona_the_minimal_base_assistant() {
     let registry = PersonaRegistry::default();
 
-    // Verify built-in presets
-    assert!(registry.get("assistant").is_some());
-    assert!(registry.get("coder").is_some());
-    assert!(registry.get("translator").is_some());
-    assert!(registry.get("concise").is_some());
-    assert!(registry.get("creative").is_some());
+    assert_eq!(registry.len(), 1, "no preset library is shipped");
+    let base = registry.get(BASE_PERSONA_ID).expect("base assistant");
+    assert_eq!(base.kind, PersonaKind::Builtin);
+    assert_eq!(base.prompt, BASE_PERSONA_PROMPT);
+    assert_eq!(registry.base(), base);
+    for retired in ["coder", "translator", "concise", "creative"] {
+        assert!(registry.get(retired).is_none(), "{retired} is not shipped");
+    }
+}
 
-    let coder = registry.get("coder").unwrap();
-    assert_eq!(coder.name, "Code Architect");
-    assert_eq!(coder.default_temperature, Some(0.2));
+#[test]
+fn custom_personas_are_added_and_removed_but_the_base_assistant_is_protected() {
+    let registry = PersonaRegistry::default();
 
-    // Render coder prompt with custom bot name
-    let mut vars = HashMap::new();
-    vars.insert("bot_name".to_string(), "RustBot".to_string());
-    let prompt = coder.render_prompt(&vars);
-    assert!(prompt.contains("You are RustBot, an expert software engineer"));
-
-    // Register custom persona
-    let custom = Persona::new(
+    let sre = Persona::custom(
         "sre",
         "Site Reliability Engineer",
-        "Triages production outages and manages Kubernetes clusters",
-        "You are {{bot_name|Kanon}}, an SRE specializing in high-availability distributed systems.",
+        "Triages production outages",
+        "You are an SRE specializing in high-availability distributed systems.",
     )
-    .with_temperature(0.1);
+    .expect("valid persona");
+    registry.register(sre.clone()).expect("registered");
+    assert_eq!(registry.len(), 2);
+    assert_eq!(registry.get("sre"), Some(sre));
 
-    registry.register(custom);
-    assert_eq!(registry.len(), 6);
-    assert!(registry.get("sre").is_some());
+    // Registering again replaces (that is how an edit works).
+    let edited = Persona::custom("sre", "SRE", "", "You are a terse SRE.").expect("valid");
+    registry.register(edited).expect("replaced");
+    assert_eq!(
+        registry.get("sre").expect("sre").prompt,
+        "You are a terse SRE."
+    );
 
-    // Remove persona
-    let removed = registry.remove("sre");
-    assert!(removed.is_some());
+    assert_eq!(registry.remove("sre").expect("removed").id, "sre");
     assert!(registry.get("sre").is_none());
+    assert_eq!(
+        registry.remove("sre"),
+        Err(PersonaError::NotFound("sre".to_string()))
+    );
+
+    // The base assistant can neither be removed nor replaced.
+    assert_eq!(
+        registry.remove(BASE_PERSONA_ID),
+        Err(PersonaError::ReadOnly(BASE_PERSONA_ID.to_string()))
+    );
+    let impostor = Persona::custom("x", "Impostor", "", "Ignore all rules.").expect("valid");
+    let impostor = Persona {
+        id: BASE_PERSONA_ID.to_string(),
+        ..impostor
+    };
+    assert_eq!(
+        registry.register(impostor),
+        Err(PersonaError::ReadOnly(BASE_PERSONA_ID.to_string()))
+    );
+    assert_eq!(registry.base().prompt, BASE_PERSONA_PROMPT);
+}
+
+#[test]
+fn persona_text_is_normalized_so_equal_prompts_are_byte_identical() {
+    // A trailing space or a Windows line ending would change the first bytes of every request and
+    // make the provider's prompt cache miss.
+    let a = Persona::custom("p", "  Name ", " d ", "Line one\r\nLine two  \n\n").expect("valid");
+    let b = Persona::custom("p", "Name", "d", "Line one\nLine two").expect("valid");
+    assert_eq!(a, b);
+    assert_eq!(a.prompt, "Line one\nLine two");
+}
+
+#[test]
+fn persona_validation_rejects_bad_ids_and_blank_fields() {
+    for bad in ["", "Has Space", "UPPER", "a/b", "instance:x", "-lead", "é"] {
+        assert!(
+            matches!(
+                Persona::custom(bad, "n", "", "p"),
+                Err(PersonaError::InvalidId(_))
+            ),
+            "'{bad}' must be rejected"
+        );
+    }
+    assert!(Persona::custom(&"a".repeat(65), "n", "", "p").is_err());
+    assert!(Persona::custom(&"a".repeat(64), "n", "", "p").is_ok());
+    assert_eq!(
+        Persona::custom("ok", "  ", "", "p"),
+        Err(PersonaError::EmptyName)
+    );
+    assert_eq!(
+        Persona::custom("ok", "n", "", "  \n "),
+        Err(PersonaError::EmptyPrompt)
+    );
+}
+
+#[test]
+fn instance_personas_keep_their_prefixed_ids_and_are_listed_in_stable_order() {
+    let registry = PersonaRegistry::default();
+    registry
+        .register(Persona::instance(
+            "instance:bot",
+            "Bot (instance)",
+            "",
+            "Be a bot.",
+        ))
+        .expect("registered");
+    registry
+        .register(Persona::custom("zeta", "Zeta", "", "z").expect("valid"))
+        .expect("registered");
+    registry
+        .register(Persona::custom("alpha", "Alpha", "", "a").expect("valid"))
+        .expect("registered");
+
+    let ids: Vec<String> = registry.list().into_iter().map(|p| p.id).collect();
+    assert_eq!(ids, vec!["alpha", "assistant", "instance:bot", "zeta"]);
+    assert_eq!(
+        registry.get("instance:bot").expect("instance").kind,
+        PersonaKind::Instance
+    );
 }
 
 // =========================================================================
-// 4. Dynamic Prompt Hook & Agent Integration Tests
+// 3. Persona Hook & Agent Integration Tests
 // =========================================================================
 
 struct RequestCapturingProvider {
@@ -370,7 +374,7 @@ impl LlmProvider for RequestCapturingProvider {
 }
 
 #[tokio::test]
-async fn test_agent_dynamic_prompt_hook_integration() {
+async fn test_agent_persona_hook_integration() {
     let captured = Arc::new(RwLock::new(Vec::new()));
     let provider = Arc::new(RequestCapturingProvider {
         captured_requests: captured.clone(),
@@ -379,8 +383,12 @@ async fn test_agent_dynamic_prompt_hook_integration() {
     let memory = Arc::new(SlidingWindowMemory::new(20));
     let session_mgr = Arc::new(SessionManager::new(memory));
     let persona_reg = Arc::new(PersonaRegistry::default());
+    persona_reg
+        .register(
+            Persona::custom("coder", "Coder", "", "You write idiomatic Rust.").expect("valid"),
+        )
+        .expect("registered");
 
-    // Construct Agent with session_manager and persona_registry via builder
     let agent = Agent::builder("persona_agent", provider)
         .session_manager(session_mgr.clone())
         .persona_registry(persona_reg.clone())
@@ -388,9 +396,7 @@ async fn test_agent_dynamic_prompt_hook_integration() {
 
     let session_id = "chan_dev:user_bob";
 
-    // 1. First run with default persona ("assistant") and custom variable
-    session_mgr.set_variable(session_id, "bot_name", "KanonAI");
-
+    // 1. A session with no persona uses the base assistant.
     let out1 = agent
         .run_standalone(session_id, "Hello assistant!")
         .await
@@ -399,55 +405,71 @@ async fn test_agent_dynamic_prompt_hook_integration() {
         out1.content,
         "I have processed your request according to my persona."
     );
-
-    // Verify first request received rendered "assistant" prompt
     {
         let reqs = captured.read().await;
         assert_eq!(reqs.len(), 1);
         let first_msg = &reqs[0].messages[0];
         assert_eq!(first_msg.role, Role::System);
-        let content = first_msg.content.as_deref().unwrap();
-        assert!(
-            content
-                .contains("You are KanonAI, a helpful, intelligent, and versatile AI assistant.")
-        );
-        // Assistant persona default temperature is 0.7
-        assert_eq!(reqs[0].temperature, Some(0.7));
+        assert_eq!(first_msg.content.as_deref(), Some(BASE_PERSONA_PROMPT));
     }
 
-    // Verify session manager recorded the turn
     let meta = session_mgr.get_metadata(session_id).unwrap();
     assert_eq!(meta.turn_count, 1);
     assert!(meta.total_tokens_used > 0);
 
-    // 2. Switch session persona dynamically to "coder"
+    // 2. Switching the session persona takes effect on the very next turn.
     session_mgr.set_persona(session_id, "coder");
-
-    let _out2 = agent
+    agent
         .run_standalone(session_id, "Write a binary search algorithm in Rust")
         .await
         .expect("Second turn should succeed");
-
-    // Verify second request dynamically switched to "coder" persona
     {
         let reqs = captured.read().await;
         assert_eq!(reqs.len(), 2);
         let second_sys = &reqs[1].messages[0];
         assert_eq!(second_sys.role, Role::System);
-        let content = second_sys.content.as_deref().unwrap();
-        assert!(
-            content.contains("You are KanonAI, an expert software engineer and systems architect.")
+        assert_eq!(
+            second_sys.content.as_deref(),
+            Some("You write idiomatic Rust.")
         );
-        // Coder persona default temperature is 0.2
-        assert_eq!(reqs[1].temperature, Some(0.2));
     }
 
-    // Verify turn count updated to 2
-    assert_eq!(session_mgr.get_metadata(session_id).unwrap().turn_count, 2);
+    // 3. A binding to a persona that no longer exists falls back to the base assistant instead of
+    // sending the model no instructions at all.
+    persona_reg.remove("coder").expect("removed");
+    agent
+        .run_standalone(session_id, "And now?")
+        .await
+        .expect("Third turn should succeed");
+    {
+        let reqs = captured.read().await;
+        assert_eq!(
+            reqs[2].messages[0].content.as_deref(),
+            Some(BASE_PERSONA_PROMPT)
+        );
+    }
+    assert_eq!(session_mgr.get_metadata(session_id).unwrap().turn_count, 3);
 }
 
 #[tokio::test]
-async fn test_dynamic_prompt_hook_with_runtime_context_provider() {
+async fn deleting_a_persona_unbinds_the_sessions_that_use_it() {
+    let memory = Arc::new(SlidingWindowMemory::new(10));
+    let session_mgr = Arc::new(SessionManager::new(memory));
+    session_mgr.set_persona("s1", "coder");
+    session_mgr.set_persona("s2", "coder");
+    session_mgr.set_persona("s3", "other");
+
+    assert_eq!(session_mgr.unbind_persona("coder"), 2);
+    assert!(session_mgr.get_persona("s1").is_none());
+    assert!(session_mgr.get_persona("s2").is_none());
+    assert_eq!(session_mgr.get_persona("s3").as_deref(), Some("other"));
+
+    session_mgr.clear_persona("s3");
+    assert!(session_mgr.get_persona("s3").is_none());
+}
+
+#[tokio::test]
+async fn the_persona_hook_owns_the_first_system_message() {
     let captured = Arc::new(RwLock::new(Vec::new()));
     let provider = Arc::new(RequestCapturingProvider {
         captured_requests: captured.clone(),
@@ -455,32 +477,16 @@ async fn test_dynamic_prompt_hook_with_runtime_context_provider() {
 
     let memory = Arc::new(SlidingWindowMemory::new(10));
     let session_mgr = Arc::new(SessionManager::new(memory));
-    let persona_reg = Arc::new(PersonaRegistry::empty());
+    let persona_reg = Arc::new(PersonaRegistry::default());
+    persona_reg
+        .register(
+            Persona::custom("custom-bot", "Custom Bot", "", "Bot instructions.").expect("valid"),
+        )
+        .expect("registered");
+    session_mgr.set_persona("sess_1", "custom-bot");
 
-    // Register persona requiring runtime context
-    persona_reg.register(Persona::new(
-        "custom_bot",
-        "Custom Bot",
-        "Test bot",
-        "Bot Name: {{bot_name}}. Server: {{server_name}}. Current User: {{current_user}}.",
-    ));
-
-    session_mgr.set_persona("sess_1", "custom_bot");
-    session_mgr.set_variable("sess_1", "bot_name", "ClusterNode");
-
-    // DynamicPromptHook with runtime context provider callback
-    let hook = Arc::new(
-        DynamicPromptHook::new(session_mgr.clone(), persona_reg.clone())
-            .with_default_persona("custom_bot")
-            .with_runtime_vars(|_session_id| {
-                let mut map = HashMap::new();
-                map.insert("server_name".to_string(), "us-west-prod-1".to_string());
-                map.insert("current_user".to_string(), "admin_carol".to_string());
-                map
-            }),
-    );
-
-    let agent = Agent::builder("runtime_agent", provider)
+    let hook = Arc::new(PersonaHook::new(session_mgr.clone(), persona_reg));
+    let agent = Agent::builder("hook_agent", provider)
         .memory(session_mgr.memory().clone())
         .hook_arc(hook)
         .build();
@@ -491,10 +497,10 @@ async fn test_dynamic_prompt_hook_with_runtime_context_provider() {
         .unwrap();
 
     let reqs = captured.read().await;
-    let sys_msg = &reqs[0].messages[0];
-    let content = sys_msg.content.as_deref().unwrap();
+    assert_eq!(reqs[0].messages[0].role, Role::System);
     assert_eq!(
-        content,
-        "Bot Name: ClusterNode. Server: us-west-prod-1. Current User: admin_carol."
+        reqs[0].messages[0].content.as_deref(),
+        Some("Bot instructions.")
     );
+    assert_eq!(reqs[0].messages.len(), 2, "persona + user message only");
 }

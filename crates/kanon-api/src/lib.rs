@@ -19,7 +19,9 @@
 //! - `GET  /api/v1/sessions` — paginated session metadata;
 //! - `POST /api/v1/sessions/:id/reset` — clear history, keep persona and variables;
 //! - `POST /api/v1/sessions/:id/persona` — hot-swap the session persona;
-//! - `GET  /api/v1/personas` — persona catalog;
+//! - `GET  /api/v1/personas` — persona catalog (built-in, operator-defined and instance personas);
+//! - `POST /api/v1/personas` — create an operator-defined persona;
+//! - `PUT  /api/v1/personas/:id` — edit one; `DELETE` removes it (refused while an instance uses it);
 //! - `GET  /api/v1/providers` — named provider endpoints plus protocol presets;
 //! - `POST /api/v1/providers` — create or replace one named provider endpoint;
 //! - `POST /api/v1/providers/delete` — remove one named provider (and the default model it served);
@@ -54,6 +56,7 @@ pub mod llm_config;
 pub mod metrics;
 pub mod model_discovery;
 pub mod observability;
+pub mod persona_store;
 pub mod plugin_config;
 pub mod routes;
 pub mod server;
@@ -70,6 +73,7 @@ pub use metrics::{MetricsRegistry, RuntimeGauges};
 pub use observability::{
     LogLevel, LogRecord, Observability, TraceEvent, TraceEventBus, TraceRecord,
 };
+pub use persona_store::PersonaStore;
 pub use plugin_config::PluginConfigStore;
 pub use server::{ApiServer, app};
 pub use state::{ApiState, ApiStateBuilder, default_agent_config};

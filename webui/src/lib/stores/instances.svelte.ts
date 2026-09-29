@@ -192,7 +192,11 @@ class InstancesStore {
         ]);
       this.catalog = catalog;
       this.adapters = adapters.adapters;
-      this.personas = personas.personas;
+      // Instance personas are generated from an instance's own prompt; only the base assistant
+      // and the operator's library are offered as a choice.
+      this.personas = personas.personas.filter(
+        (persona) => persona.kind !== 'instance',
+      );
       this.pluginItems = plugins.plugins.map((plugin) => ({
         id: plugin.id,
         name: plugin.name || plugin.id,

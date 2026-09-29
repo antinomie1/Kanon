@@ -668,8 +668,11 @@ sequenceDiagram
 | `GET` | `/api/v1/tools` | 列出模型当前可调用的**全部工具**及其提供方（内置 / 插件 / MCP），名称与分发规则和模型实际收到的完全一致 |
 | `GET` | `/api/v1/sessions` | 分页查询会话元数据（Turn 计数、Token 消耗、活跃时间、Persona、作用域） |
 | `POST` | `/api/v1/sessions/{id}/reset` | 安全重置会话历史，保留配置变量与人设 |
-| `POST` | `/api/v1/sessions/{id}/persona` | 动态热切换指定会话的生效人设 |
-| `GET` | `/api/v1/personas` | 查询系统预设及动态注册人设列表 |
+| `POST` | `/api/v1/sessions/{id}/persona` | 动态热切换指定会话的生效人设；`persona_id` 为空/`null` 即解除绑定（使用基础助手） |
+| `GET` | `/api/v1/personas` | 查询人设库：内置基础助手（`builtin`，只读）、运营者自建人设（`custom`）与实例自带提示词生成的人设（`instance`），并标注被哪些实例引用 |
+| `POST` | `/api/v1/personas` | 新建人设（`name` + `prompt` + 可选 `description`；`id` 缺省时由名称派生并保证唯一）：校验 → 持久化至 `data/personas.json` → 热应用 |
+| `PUT` | `/api/v1/personas/{id}` | 编辑自建人设（`id` 不变，引用不受影响）；内置与实例人设返回 `409` |
+| `DELETE` | `/api/v1/personas/{id}` | 删除自建人设；仍被实例选用时返回 `409` 并列出实例，绑定该人设的会话自动解绑（回到基础助手） |
 | `GET` | `/api/v1/providers` | 查询已配置的提供商端点（不含密钥）、可用协议与预设；提供商只是端点，没有“默认/当前生效”之分 |
 | `POST` | `/api/v1/providers` | 新增或替换一个命名提供商端点（校验 → 持久化至 `data/system.json` → 热应用）；省略密钥即保留已存密钥 |
 | `POST` | `/api/v1/providers/delete` | 删除提供商及其模型目录；若它正是全局默认模型的提供商，则同时清空默认模型 |

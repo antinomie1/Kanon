@@ -8,7 +8,8 @@ export const dictionaries = {
     'nav.chat': 'Chat',
     'nav.pipeline': 'Pipeline & Logs',
     'nav.plugins': 'Plugins & Adapters',
-    'nav.sessions': 'Sessions & Personas',
+    'nav.sessions': 'Sessions',
+    'nav.personas': 'Personas',
     'nav.playground': 'Chat',
     'nav.providers': 'Model Providers',
     'nav.models': 'Model Catalog',
@@ -27,9 +28,11 @@ export const dictionaries = {
     'title.plugins': 'Plugins & Platform Adapters',
     'subtitle.plugins':
       'Out-of-process gRPC plugin hosts, dynamic JSON schemas, and platform adapters',
-    'title.sessions': 'Sessions & Persona Catalogs',
+    'title.sessions': 'Conversation Sessions',
     'subtitle.sessions':
-      'Conversation context memory, token consumption counters, and persona prompts',
+      'Tracked conversations, token usage and per-session persona binding',
+    'title.personas': 'Personas',
+    'subtitle.personas': 'Manage the persona presets your bot can use',
     'title.playground': 'Interactive Chat',
     'subtitle.playground':
       'Interactive streaming chat with multi-turn reasoning and tool calling inspection',
@@ -318,8 +321,40 @@ export const dictionaries = {
     'sessions.tokens': 'Tokens Used',
     'sessions.persona': 'Active Persona',
     'sessions.reset': 'Reset History',
-    'sessions.persona_catalog': 'Persona Catalog',
-    'sessions.system_prompt': 'System Prompt',
+    'sessions.reset_confirm': "Reset conversation history for session '{id}'?",
+    'sessions.reset_failed': 'Reset failed',
+    'sessions.binding': 'Switching persona...',
+    'sessions.bind_failed': 'Switch failed',
+    'sessions.bind_title': 'Persona for this session',
+    'sessions.bind_select': 'Persona',
+    'sessions.bind_none': 'None — use the base assistant',
+    'sessions.bind_hint':
+      'Takes effect on the next message. Conversations of a bot instance follow that instance’s persona.',
+    'sessions.bind_apply': 'Apply',
+
+    // Personas
+    'personas.heading': 'Persona presets',
+    'personas.intro':
+      'A persona is the fixed instruction text placed at the very top of every request. Add the ones you want and pick them per instance or per session. Only the base assistant ships with the node.',
+    'personas.add': 'New persona',
+    'personas.edit': 'Edit',
+    'personas.edit_title': 'Edit persona',
+    'personas.delete': 'Delete persona',
+    'personas.delete_confirm': 'Delete the persona “{name}”?',
+    'personas.in_use': 'Used by instance: {instances}',
+    'personas.builtin': 'built in',
+    'personas.builtin_hint':
+      'Used whenever nothing else is chosen. It cannot be edited or removed.',
+    'personas.empty':
+      'You have not added a persona yet. Only the base assistant is available.',
+    'personas.name': 'Name',
+    'personas.name_placeholder': 'e.g. Code reviewer',
+    'personas.description': 'Description',
+    'personas.prompt': 'Prompt',
+    'personas.prompt_placeholder': 'You are …',
+    'personas.prompt_hint':
+      'Sent as-is at the top of every request, which keeps the provider’s prompt cache warm. Keep it fixed: things that change while the bot runs (time, who is speaking) are added after it automatically and do not belong here.',
+    'personas.save': 'Save',
     'sessions.no_sessions': 'No conversation sessions recorded yet.',
 
     // Playground
@@ -576,7 +611,8 @@ export const dictionaries = {
     'nav.chat': '对话',
     'nav.pipeline': '流水线与日志',
     'nav.plugins': '插件与适配器',
-    'nav.sessions': '会话与人设',
+    'nav.sessions': '会话',
+    'nav.personas': '人设',
     'nav.playground': '对话',
     'instances.gate_label': '当前在线的机器人实例:',
     'instances.gate_none': '没有实例开启 —— 消息会被丢弃',
@@ -657,8 +693,10 @@ export const dictionaries = {
     'title.plugins': '插件宿主与平台适配器',
     'subtitle.plugins':
       '物理隔离的跨进程 gRPC 插件宿主、动态 JSON Schema 配置与平台适配器',
-    'title.sessions': '会话上下文与人设库',
-    'subtitle.sessions': '对话上下文滑动窗口记忆、Token 消耗统计与人设提示词库',
+    'title.sessions': '会话',
+    'subtitle.sessions': '追踪中的对话、Token 消耗统计与会话人设绑定',
+    'title.personas': '人设',
+    'subtitle.personas': '管理机器人可以使用的人设预设（添加与删除）',
     'title.playground': '对话',
     'subtitle.playground': '与大模型进行交互对话，支持多轮推理与插件工具调用',
     'title.providers': '模型提供商',
@@ -933,8 +971,38 @@ export const dictionaries = {
     'sessions.tokens': 'Token 消耗总量',
     'sessions.persona': '当前人设',
     'sessions.reset': '清空历史记忆',
-    'sessions.persona_catalog': '人设预设库',
-    'sessions.system_prompt': '系统提示词 (System Prompt)',
+    'sessions.reset_confirm': '确定要清空会话「{id}」的历史记忆吗？',
+    'sessions.reset_failed': '重置失败',
+    'sessions.binding': '正在切换人设...',
+    'sessions.bind_failed': '切换失败',
+    'sessions.bind_title': '本会话使用的人设',
+    'sessions.bind_select': '人设',
+    'sessions.bind_none': '不指定 —— 使用基础助手',
+    'sessions.bind_hint':
+      '下一条消息起生效。机器人实例下的会话会跟随该实例设置的人设。',
+    'sessions.bind_apply': '应用',
+
+    // 人设
+    'personas.heading': '人设预设',
+    'personas.intro':
+      '人设是放在每次请求最前面的固定指令文本。添加你需要的人设，再按实例或按会话选用。节点只自带一个基础助手。',
+    'personas.add': '新建人设',
+    'personas.edit': '编辑',
+    'personas.edit_title': '编辑人设',
+    'personas.delete': '删除人设',
+    'personas.delete_confirm': '确定要删除人设「{name}」吗？',
+    'personas.in_use': '正被实例使用：{instances}',
+    'personas.builtin': '内置',
+    'personas.builtin_hint': '未选择其他人设时使用，不可编辑或删除。',
+    'personas.empty': '你还没有添加人设，目前只有基础助手可用。',
+    'personas.name': '名称',
+    'personas.name_placeholder': '例如：代码审查员',
+    'personas.description': '简介',
+    'personas.prompt': '提示词',
+    'personas.prompt_placeholder': '你是……',
+    'personas.prompt_hint':
+      '会原样放在每次请求的最前面，这样能持续命中模型服务商的提示词缓存。请保持固定：时间、发言者这类运行时才会变化的信息会自动附加在它后面，不要写在这里。',
+    'personas.save': '保存',
     'sessions.no_sessions': '暂无会话记录。',
 
     // 沙箱

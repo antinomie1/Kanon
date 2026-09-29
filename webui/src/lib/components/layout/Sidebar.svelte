@@ -10,6 +10,7 @@ import {
   Moon,
   Radio,
   Settings,
+  Sparkles,
   Sun,
   Terminal,
   Users,
@@ -35,6 +36,7 @@ const navItems = [
   { id: 'pipeline', key: 'nav.pipeline', icon: Terminal },
   { id: 'plugins', key: 'nav.plugins', icon: Blocks },
   { id: 'sessions', key: 'nav.sessions', icon: Users },
+  { id: 'personas', key: 'nav.personas', icon: Sparkles },
   { id: 'providers', key: 'nav.providers', icon: Cpu },
   { id: 'system', key: 'nav.system', icon: Settings },
 ];

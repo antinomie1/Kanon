@@ -28,7 +28,10 @@
 //! | `GET` | `/api/v1/sessions` | Paginated session metadata |
 //! | `POST` | `/api/v1/sessions/:id/reset` | Clear history, keep persona and variables |
 //! | `POST` | `/api/v1/sessions/:id/persona` | Hot-swap the session persona |
-//! | `GET` | `/api/v1/personas` | Persona catalog |
+//! | `GET` | `/api/v1/personas` | Persona library: built-in, operator-defined and instance personas |
+//! | `POST` | `/api/v1/personas` | Create an operator-defined persona (persisted, live) |
+//! | `PUT` | `/api/v1/personas/{id}` | Edit an operator-defined persona |
+//! | `DELETE` | `/api/v1/personas/{id}` | Remove one (refused while an instance selects it) |
 //! | `GET` | `/api/v1/providers` | Named provider endpoints plus protocol presets |
 //! | `POST` | `/api/v1/providers` | Create or replace one named provider endpoint |
 //! | `POST` | `/api/v1/providers/delete` | Remove one named provider (and the default model it served) |

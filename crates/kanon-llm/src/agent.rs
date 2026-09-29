@@ -1235,7 +1235,7 @@ impl AgentBuilder {
             // would otherwise be silently discarded whenever the session had no system prompt yet.
             self.hooks.insert(
                 0,
-                Arc::new(crate::prompt::DynamicPromptHook::new(
+                Arc::new(crate::prompt::PersonaHook::new(
                     session_mgr.clone(),
                     persona_reg.clone(),
                 )),

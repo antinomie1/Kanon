@@ -295,6 +295,30 @@ impl SessionManager {
             .and_then(|m| m.persona_id.clone())
     }
 
+    /// Clears the persona binding of every session that uses `persona_id`, returning how many
+    /// sessions were unbound.
+    ///
+    /// Called when a persona is deleted: those sessions fall back to the base assistant instead of
+    /// pointing at a persona that no longer exists.
+    pub fn unbind_persona(&self, persona_id: &str) -> usize {
+        let mut unbound = 0;
+        for mut entry in self.metadata.iter_mut() {
+            if entry.persona_id.as_deref() == Some(persona_id) {
+                entry.persona_id = None;
+                unbound += 1;
+            }
+        }
+        unbound
+    }
+
+    /// Removes the persona binding of one session, which then uses the base assistant.
+    pub fn clear_persona(&self, session_key: &str) {
+        if let Some(mut meta) = self.metadata.get_mut(session_key) {
+            meta.persona_id = None;
+            meta.last_active_at = current_unix_timestamp();
+        }
+    }
+
     /// Sets a session-scoped state variable.
     pub fn set_variable(
         &self,

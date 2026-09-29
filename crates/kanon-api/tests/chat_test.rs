@@ -140,6 +140,13 @@ async fn chat_completion_validates_request() {
 async fn chat_completion_applies_persona_override() {
     let dir = tempfile::tempdir().expect("temp dir");
     let state = fixture_state(PathBuf::from(dir.path()), true).await;
+    state
+        .personas()
+        .register(
+            kanon_llm::Persona::custom("concise", "Concise", "", "Answer in one sentence.")
+                .expect("valid persona"),
+        )
+        .expect("registered");
     let app: Router = app(state.clone());
 
     let (status, body) = send_json(

@@ -5,11 +5,12 @@ import Sidebar from './lib/components/layout/Sidebar.svelte';
 
 import InstancesView from './lib/components/views/InstancesView.svelte';
 import OverviewView from './lib/components/views/OverviewView.svelte';
+import PersonasView from './lib/components/views/PersonasView.svelte';
 import PipelineLogsView from './lib/components/views/PipelineLogsView.svelte';
 import PlaygroundView from './lib/components/views/PlaygroundView.svelte';
 import PluginsAdaptersView from './lib/components/views/PluginsAdaptersView.svelte';
 import ProvidersView from './lib/components/views/ProvidersView.svelte';
-import SessionsPersonasView from './lib/components/views/SessionsPersonasView.svelte';
+import SessionsView from './lib/components/views/SessionsView.svelte';
 import SystemConfigView from './lib/components/views/SystemConfigView.svelte';
 
 import { t } from './lib/stores/i18n.svelte';
@@ -70,7 +71,9 @@ function handleKeydown(e: KeyboardEvent) {
       {:else if currentTab === 'plugins'}
         <PluginsAdaptersView />
       {:else if currentTab === 'sessions'}
-        <SessionsPersonasView />
+        <SessionsView />
+      {:else if currentTab === 'personas'}
+        <PersonasView />
       {:else if currentTab === 'providers'}
         <ProvidersView />
       {:else if currentTab === 'system'}

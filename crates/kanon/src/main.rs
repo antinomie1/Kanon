@@ -39,7 +39,8 @@ use std::sync::Arc;
 use kanon_adapter_milky::{MilkyAdapter, MilkyConfig};
 use kanon_adapter_onebot::{OneBotAdapter, OneBotConfig};
 use kanon_api::{
-    ApiServer, ApiState, LlmProviderConfig, NodeSettings, Observability, SystemConfigStore,
+    ApiServer, ApiState, LlmProviderConfig, NodeSettings, Observability, PersonaStore,
+    SystemConfigStore,
 };
 use kanon_core::ipc::{CoreApiService, CoreIpcServer, DEFAULT_INGEST_QUEUE_CAPACITY};
 use kanon_core::pipeline::PipelineEngine;
@@ -164,7 +165,26 @@ async fn main() -> StartupResult<()> {
     // by the builder itself, so a bootstrapped directory and a console-configured one are applied
     // through exactly the same path.
     let node_settings = bootstrap_node_settings()?;
+
+    // The persona library is the built-in base assistant plus the operator's saved personas. A
+    // malformed `data/personas.json` is a hard startup error rather than a silent fallback, for the
+    // same reason as the system document: starting without the operator's personas would change how
+    // the bot answers without anyone noticing.
+    let persona_store = Arc::new(PersonaStore::default());
+    let personas = Arc::new(persona_store.load_registry().map_err(|err| {
+        format!(
+            "Failed to load personas from {}: {err}",
+            persona_store.path().display()
+        )
+    })?);
+    tracing::info!(
+        count = personas.len().saturating_sub(1),
+        "Operator-defined personas loaded"
+    );
+
     let state = ApiState::builder(supervisor.clone())
+        .with_personas(personas)
+        .with_persona_store(persona_store)
         .with_milky_adapter(milky_adapter)
         .with_onebot_adapter(onebot_adapter)
         .with_observability(observability.clone())

@@ -170,34 +170,27 @@ async fn session_reset_unknown_session_returns_404() {
     assert_eq!(error_code(&body), "not_found");
 }
 
-/// The persona catalog exposes built-in personas with their template metadata.
+/// The persona catalog ships exactly one persona: the read-only base assistant.
 #[tokio::test]
-async fn persona_catalog_lists_builtin_personas() {
+async fn persona_catalog_ships_only_the_base_assistant() {
     let dir = tempfile::tempdir().expect("temp dir");
     let app: Router = app(empty_state(PathBuf::from(dir.path())).await);
 
     let (status, body) = send_json(&app, Method::GET, "/api/v1/personas", None).await;
 
     assert_eq!(status, 200);
-    assert!(body["total"].as_u64().unwrap_or(0) >= 5);
+    assert_eq!(body["total"], 1);
+    assert_eq!(body["base_persona_id"], "assistant");
 
-    let ids: Vec<&str> = body["personas"]
-        .as_array()
-        .expect("personas array")
-        .iter()
-        .filter_map(|persona| persona["id"].as_str())
-        .collect();
-    assert!(ids.contains(&"assistant"), "ids: {ids:?}");
-    assert!(ids.contains(&"coder"), "ids: {ids:?}");
-
-    let assistant = body["personas"]
-        .as_array()
-        .expect("personas array")
-        .iter()
-        .find(|persona| persona["id"] == "assistant")
-        .expect("assistant persona");
-    assert_eq!(assistant["variables"][0], "bot_name");
-    assert!(assistant["template"].as_str().is_some());
+    let personas = body["personas"].as_array().expect("personas array");
+    assert_eq!(personas.len(), 1);
+    assert_eq!(personas[0]["id"], "assistant");
+    assert_eq!(personas[0]["kind"], "builtin");
+    assert_eq!(personas[0]["prompt"], "You are a helpful assistant.");
+    assert!(
+        personas[0].get("template").is_none() && personas[0].get("variables").is_none(),
+        "personas are plain static text: {body}"
+    );
 }
 
 /// Persona switching binds the persona to the session and is visible to the agent hook.
@@ -205,6 +198,13 @@ async fn persona_catalog_lists_builtin_personas() {
 async fn session_persona_switch_binds_persona() {
     let dir = tempfile::tempdir().expect("temp dir");
     let state = empty_state(PathBuf::from(dir.path())).await;
+    state
+        .personas()
+        .register(
+            kanon_llm::Persona::custom("coder", "Code Architect", "", "You write Rust.")
+                .expect("valid persona"),
+        )
+        .expect("registered");
     let app: Router = app(state.clone());
 
     let (status, body) = send_json(
@@ -225,9 +225,25 @@ async fn session_persona_switch_binds_persona() {
 
     // Switching persona registers the session so consoles can pre-configure it.
     assert!(state.sessions().get_metadata("webui:debug").is_some());
+
+    // A blank or null identifier removes the binding: the session uses the base assistant again.
+    for cleared in [json!({ "persona_id": null }), json!({ "persona_id": "  " })] {
+        state.sessions().set_persona("webui:debug", "coder");
+        let (status, body) = send_json(
+            &app,
+            Method::POST,
+            "/api/v1/sessions/webui:debug/persona",
+            Some(cleared),
+        )
+        .await;
+        assert_eq!(status, 200, "unexpected body: {body}");
+        assert_eq!(body["persona_id"], serde_json::Value::Null);
+        assert_eq!(body["persona_name"], "Assistant");
+        assert!(state.sessions().get_persona("webui:debug").is_none());
+    }
 }
 
-/// Unknown personas and empty identifiers are rejected.
+/// Unknown personas are rejected.
 #[tokio::test]
 async fn session_persona_switch_validates_persona() {
     let dir = tempfile::tempdir().expect("temp dir");
@@ -242,13 +258,4 @@ async fn session_persona_switch_validates_persona() {
     .await;
     assert_eq!(status, 404);
     assert_eq!(error_code(&body), "not_found");
-
-    let (status, _) = send_json(
-        &app,
-        Method::POST,
-        "/api/v1/sessions/webui:debug/persona",
-        Some(json!({ "persona_id": "   " })),
-    )
-    .await;
-    assert_eq!(status, 400);
 }

@@ -21,7 +21,7 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
-use kanon_llm::prompt::{Persona, PersonaRegistry};
+use kanon_llm::prompt::{Persona, PersonaKind, PersonaRegistry};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use tokio::sync::RwLock;
@@ -291,19 +291,21 @@ pub fn sync_instance_personas(instances: &[BotInstance], personas: &PersonaRegis
     }
 
     for (id, (name, prompt)) in &desired {
-        personas.register(Persona::new(
+        if let Err(err) = personas.register(Persona::instance(
             id.clone(),
             format!("{name} (instance)"),
             format!("Persona prompt configured on bot instance '{name}'"),
             *prompt,
-        ));
+        )) {
+            tracing::error!(persona_id = %id, error = %err, "Failed to publish an instance persona");
+        }
     }
 
     // A prompt that was cleared must not linger as a selectable persona.
     for persona in personas.list() {
-        if persona.id.starts_with(INSTANCE_PERSONA_PREFIX)
+        if persona.kind == PersonaKind::Instance
             && !desired.contains_key(&persona.id)
-            && let Some(stale) = personas.remove(&persona.id)
+            && let Ok(stale) = personas.remove(&persona.id)
         {
             tracing::debug!(persona_id = %stale.id, "Removed generated instance persona");
         }

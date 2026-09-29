@@ -1,19 +1,11 @@
 <script lang="ts">
-import {
-  Check,
-  Key,
-  MessageSquare,
-  RefreshCw,
-  Sparkles,
-  Trash2,
-  Users,
-} from 'lucide-svelte';
+import { RefreshCw, Trash2 } from 'lucide-svelte';
 import { api } from '../../api/client';
 import { t } from '../../stores/i18n.svelte';
-import type { PersonaItem, SessionSummary } from '../../types';
+import { personasStore } from '../../stores/personas.svelte';
+import type { SessionSummary } from '../../types';
 
 let sessions = $state<SessionSummary[]>([]);
-let personas = $state<PersonaItem[]>([]);
 let loading = $state(true);
 let error = $state<string | null>(null);
 
@@ -26,9 +18,9 @@ async function loadData() {
   loading = true;
   error = null;
   try {
-    const [sessRes, persRes] = await Promise.all([
+    const [sessRes] = await Promise.all([
       api.getSessions(),
-      api.getPersonas(),
+      personasStore.load(),
     ]);
     const rawSessions = sessRes.items ?? sessRes.sessions ?? [];
     sessions = rawSessions.map((s) => ({
@@ -36,7 +28,6 @@ async function loadData() {
       session_id: s.session_id ?? s.session_key ?? '',
       active_persona: s.active_persona ?? s.persona_id ?? undefined,
     }));
-    personas = persRes.personas ?? [];
   } catch (e) {
     error = e instanceof Error ? e.message : String(e);
   } finally {
@@ -45,26 +36,31 @@ async function loadData() {
 }
 
 async function handleResetSession(sessionId: string) {
-  if (!confirm(`Reset conversation history for session '${sessionId}'?`))
-    return;
+  if (!confirm(t('sessions.reset_confirm', { id: sessionId }))) return;
   try {
     await api.resetSession(sessionId);
     await loadData();
   } catch (e) {
-    alert(`Reset failed: ${e instanceof Error ? e.message : String(e)}`);
+    alert(
+      `${t('sessions.reset_failed')}: ${e instanceof Error ? e.message : String(e)}`,
+    );
   }
 }
 
 async function applyPersonaSwitch() {
-  if (!bindingSession || !selectedPersona) return;
-  bindingStatus = 'Switching persona...';
+  if (!bindingSession) return;
+  bindingStatus = t('sessions.binding');
   try {
-    await api.setSessionPersona(bindingSession.session_id, selectedPersona);
+    // An empty choice removes the binding: the session then uses the base assistant.
+    await api.setSessionPersona(
+      bindingSession.session_id,
+      selectedPersona || null,
+    );
     bindingStatus = null;
     bindingSession = null;
     await loadData();
   } catch (e) {
-    bindingStatus = `Switch failed: ${e instanceof Error ? e.message : String(e)}`;
+    bindingStatus = `${t('sessions.bind_failed')}: ${e instanceof Error ? e.message : String(e)}`;
   }
 }
 
@@ -96,9 +92,7 @@ $effect(() => {
       {error}
     </div>
   {:else}
-    <div class="grid grid-cols-1 lg:grid-cols-3 gap-6">
-      <!-- Left 2 Cols: Sessions List -->
-      <div class="lg:col-span-2 space-y-3">
+    <div class="space-y-3">
         <h4 class="text-xs sm:text-sm font-semibold text-zinc-700 dark:text-zinc-300 uppercase tracking-wider font-mono">
           {t('sessions.active_sessions')} ({sessions?.length ?? 0})
         </h4>
@@ -150,28 +144,6 @@ $effect(() => {
             {/each}
           </div>
         {/if}
-      </div>
-
-      <!-- Right 1 Col: Personas Catalog -->
-      <div class="space-y-3">
-        <h4 class="text-xs sm:text-sm font-semibold text-zinc-700 dark:text-zinc-300 uppercase tracking-wider font-mono">
-          {t('sessions.persona_catalog')} ({personas.length})
-        </h4>
-
-        <div class="space-y-2.5">
-          {#each personas as persona}
-            <div class="p-3.5 rounded-xl border border-zinc-200 dark:border-zinc-800 bg-white dark:bg-zinc-900 shadow-2xs space-y-2">
-              <div class="flex items-center gap-2 text-sm sm:text-base font-semibold text-zinc-900 dark:text-zinc-100">
-                <Sparkles class="w-4 h-4 text-indigo-500" />
-                <span>{persona.name}</span>
-              </div>
-              <p class="text-xs sm:text-[13px] text-zinc-500 dark:text-zinc-400 line-clamp-3 leading-relaxed font-mono">
-                {persona.description}
-              </p>
-            </div>
-          {/each}
-        </div>
-      </div>
     </div>
   {/if}
 </div>
@@ -194,28 +166,29 @@ $effect(() => {
     >
       <div class="flex items-center justify-between border-b border-zinc-200 dark:border-zinc-800 pb-3">
         <h3 class="text-base font-semibold text-zinc-900 dark:text-zinc-100">
-          Switch Persona for Session
+          {t('sessions.bind_title')}
         </h3>
         <button
           onclick={() => (bindingSession = null)}
           class="text-zinc-400 hover:text-zinc-600 dark:hover:text-zinc-200 text-xs sm:text-sm font-mono cursor-pointer"
         >
-          Cancel
+          {t('common.cancel')}
         </button>
       </div>
 
       <div class="space-y-2">
-        <!-- svelte-ignore a11y_label_has_associated_control -->
-        <label class="block text-xs sm:text-sm font-medium text-zinc-600 dark:text-zinc-400">Select Persona</label>
+        <label for="session-persona-select" class="block text-xs sm:text-sm font-medium text-zinc-600 dark:text-zinc-400">{t('sessions.bind_select')}</label>
         <select
+          id="session-persona-select"
           bind:value={selectedPersona}
           class="w-full p-2.5 bg-zinc-50 dark:bg-zinc-950 border border-zinc-200 dark:border-zinc-800 rounded-lg text-sm font-mono text-zinc-900 dark:text-zinc-100"
         >
-          <option value="">(None - Default System Persona)</option>
-          {#each personas as p}
-            <option value={p.name}>{p.name}</option>
+          <option value="">{t('sessions.bind_none')}</option>
+          {#each personasStore.library as p (p.id)}
+            <option value={p.id}>{p.name}</option>
           {/each}
         </select>
+        <p class="text-[11px] text-zinc-400">{t('sessions.bind_hint')}</p>
       </div>
 
       {#if bindingStatus}
@@ -227,13 +200,13 @@ $effect(() => {
           onclick={() => (bindingSession = null)}
           class="px-3.5 py-2 text-xs sm:text-sm text-zinc-600 dark:text-zinc-400 hover:bg-zinc-100 dark:hover:bg-zinc-800 rounded-lg transition cursor-pointer"
         >
-          Cancel
+          {t('common.cancel')}
         </button>
         <button
           onclick={applyPersonaSwitch}
           class="px-4 py-2 text-xs sm:text-sm bg-indigo-600 hover:bg-indigo-500 text-white rounded-lg font-medium transition cursor-pointer"
         >
-          Bind Persona
+          {t('sessions.bind_apply')}
         </button>
       </div>
     </div>
