@@ -139,6 +139,18 @@ export const dictionaries = {
 
     // Tool catalog
     'tools.title': 'Tool Catalog',
+    'bash.title': 'Who may ask the AI to run Bash',
+    'bash.hint':
+      'Only the current sender grants access. High-risk commands remain blocked for everyone.',
+    'bash.mode': 'Access mode',
+    'bash.allowlist_mode': 'Allowlist: listed users only',
+    'bash.denylist_mode': 'Denylist: everyone except listed users',
+    'bash.allowlist': 'Allowed users',
+    'bash.denylist': 'Denied users (always take priority)',
+    'bash.identity_hint':
+      'One platform:user ID per line. The default empty allowlist denies everyone. Console chat has no verified sender and cannot run Bash.',
+    'bash.invalid_identity': 'Use one platform:user ID per line.',
+    'bash.saved': 'Bash permissions saved.',
     'tools.subtitle':
       'Every tool the model can call right now, and who provides it',
     'tools.total': 'Total tools',
@@ -800,6 +812,17 @@ export const dictionaries = {
 
     // Tool catalog
     'tools.title': '工具列表',
+    'bash.title': '谁可以让 AI 执行 Bash',
+    'bash.hint': '只按本轮发送者判断权限；所有用户的高风险指令都会被拦截。',
+    'bash.mode': '权限模式',
+    'bash.allowlist_mode': '白名单：仅指定用户可用',
+    'bash.denylist_mode': '黑名单：除指定用户外都可用',
+    'bash.allowlist': '允许的用户',
+    'bash.denylist': '禁止的用户（始终优先）',
+    'bash.identity_hint':
+      '每行一个 平台:用户ID，如 onebot:123456。默认空白名单禁止所有人；控制台聊天没有已验证的发送者，不能执行 Bash。',
+    'bash.invalid_identity': '请每行填写一个 平台:用户ID。',
+    'bash.saved': 'Bash 权限已保存。',
     'tools.subtitle': '模型当前可以调用的全部工具及其提供方',
     'tools.total': '工具总数',
     'tools.source_builtin': '内置',

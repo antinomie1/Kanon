@@ -10,6 +10,7 @@
 //! `crates/kanon`.
 
 pub mod adapter;
+pub mod bash;
 pub mod conversation;
 pub mod instance;
 pub mod ipc;
@@ -25,6 +26,10 @@ pub mod toggle;
 pub use adapter::{
     AdapterDescriptor, AdapterError, AdapterKind, AdapterRegistry, EventIngress, IngestError,
     PlatformAdapter,
+};
+pub use bash::{
+    BashAccessMode, BashAvailabilityHook, BashPolicy, BashPolicyStore, BashPrincipal, BashTool,
+    with_bash_caller,
 };
 pub use conversation::{
     ContextPolicy, ContextPolicyStore, ConversationKind, META_BOT_MENTIONED,

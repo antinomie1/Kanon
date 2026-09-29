@@ -7,7 +7,7 @@ use axum::extract::State;
 use axum::routing::get;
 use serde::Serialize;
 
-use kanon_core::{ContextPolicy, ReplyPolicy};
+use kanon_core::{BashPolicy, ContextPolicy, ReplyPolicy};
 
 use crate::error::ApiError;
 use crate::state::ApiState;
@@ -17,6 +17,10 @@ pub fn routes() -> Router<ApiState> {
     Router::new()
         .route("/api/v1/system/config", get(system_config))
         .route(
+            "/api/v1/tools/bash/policy",
+            get(get_bash_policy).put(put_bash_policy),
+        )
+        .route(
             "/api/v1/system/reply-policy",
             get(get_reply_policy).put(put_reply_policy),
         )
@@ -24,6 +28,24 @@ pub fn routes() -> Router<ApiState> {
             "/api/v1/system/context-policy",
             get(get_context_policy).put(put_context_policy),
         )
+}
+
+/// Returns the Bash-only caller policy without altering the model's static tool catalog.
+async fn get_bash_policy(State(state): State<ApiState>) -> Json<BashPolicy> {
+    Json(state.bash_policy().get())
+}
+
+/// Persists permission changes before publishing them to the execution gate.
+async fn put_bash_policy(
+    State(state): State<ApiState>,
+    Json(policy): Json<BashPolicy>,
+) -> Result<Json<BashPolicy>, ApiError> {
+    let mut settings = state.node_settings();
+    settings.bash_policy = policy;
+    state
+        .apply_node_settings(settings)
+        .map_err(ApiError::BadRequest)?;
+    Ok(get_bash_policy(State(state)).await)
 }
 
 /// Comprehensive node and system configuration payload.

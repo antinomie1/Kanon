@@ -984,6 +984,11 @@ impl PipelineEngine {
 
     /// Processes a single inbound event through the PreFilter chain and command dispatcher.
     pub async fn process_event(&self, event: PipelineEventRequest) -> PipelineResult {
+        // Capture identity before plugin pre-filters can rewrite the model-visible event.
+        let bash_caller = crate::BashPrincipal {
+            platform: event.platform.clone(),
+            user_id: event.sender_id.clone(),
+        };
         let event_id = event.event_id.clone();
         let platform = event.platform.clone();
         let hosts = self.supervisor.get_all_hosts().await;
@@ -1326,9 +1331,11 @@ impl PipelineEngine {
                 Vec::new()
             };
 
-            match router
-                .execute_message(&session_id, user_message, &tool_hosts)
-                .await
+            match crate::with_bash_caller(
+                bash_caller,
+                router.execute_message(&session_id, user_message, &tool_hosts),
+            )
+            .await
             {
                 Ok(output) => {
                     // The model's reasoning channel arrives folded into the completion text as a

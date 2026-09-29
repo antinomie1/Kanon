@@ -824,3 +824,15 @@ export interface OneBotConfigRequest extends OneBotConfig {
   access_token?: string;
   clear_access_token?: boolean;
 }
+/** Sender identity supplied by an adapter, scoped to its platform. */
+export interface BashPrincipal {
+  platform: string;
+  user_id: string;
+}
+
+/** Permission to ask the AI to execute Bash; denial wins in either mode. */
+export interface BashPolicy {
+  mode: 'allowlist' | 'denylist';
+  allowlist: BashPrincipal[];
+  denylist: BashPrincipal[];
+}

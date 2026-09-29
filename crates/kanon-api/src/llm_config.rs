@@ -33,7 +33,7 @@ use std::path::{Path, PathBuf};
 
 use kanon_adapter_milky::MilkyConfig;
 use kanon_adapter_onebot::OneBotConfig;
-use kanon_core::{ContextPolicy, ReplyPolicy};
+use kanon_core::{BashPolicy, ContextPolicy, ReplyPolicy};
 use kanon_llm::{ModelRef, ModelSpec, ProviderEntry};
 use serde::{Deserialize, Serialize};
 
@@ -128,6 +128,8 @@ pub struct NodeSettings {
     pub reply_policy: ReplyPolicy,
     /// Node-wide context-extras policy inherited by instances without an override.
     pub context_policy: ContextPolicy,
+    /// Bash-only sender allowlist/denylist, independent of the static tool definition.
+    pub bash_policy: BashPolicy,
 }
 
 impl NodeSettings {
@@ -142,6 +144,7 @@ impl NodeSettings {
     /// the console describing a node that cannot answer.
     pub fn validate(&self) -> Result<(), String> {
         self.reply_policy.validate()?;
+        self.bash_policy.validate()?;
 
         let mut names = std::collections::HashSet::new();
         for provider in &self.providers {
@@ -250,6 +253,9 @@ struct SystemConfigDocument {
     /// Node-wide context-extras policy.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     context_policy: Option<ContextPolicy>,
+    /// Caller permission for the guarded native Bash tool.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    bash_policy: Option<BashPolicy>,
     /// Milky platform adapter configuration, when one was saved.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     milky: Option<MilkyConfig>,
@@ -423,6 +429,7 @@ impl SystemConfigStore {
         let mut settings = NodeSettings {
             reply_policy: document.reply_policy.unwrap_or_default(),
             context_policy: document.context_policy.unwrap_or_default(),
+            bash_policy: document.bash_policy.unwrap_or_default(),
             models: document.models.unwrap_or_default(),
             ..NodeSettings::default()
         };
@@ -457,6 +464,7 @@ impl SystemConfigStore {
             }
         }
 
+        settings.bash_policy.validate()?;
         Ok(settings)
     }
 
@@ -473,6 +481,7 @@ impl SystemConfigStore {
         document.models = Some(settings.models.clone());
         document.reply_policy = Some(settings.reply_policy);
         document.context_policy = Some(settings.context_policy);
+        document.bash_policy = Some(settings.bash_policy.clone());
 
         self.write_document(&document)
     }

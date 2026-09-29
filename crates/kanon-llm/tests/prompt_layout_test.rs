@@ -4,6 +4,7 @@
 //! but a cost property: from one turn to the next only the tail of the request may change.
 
 use std::net::SocketAddr;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
@@ -22,6 +23,54 @@ use kanon_llm::memory::InMemory;
 use kanon_llm::prompt::{BASE_PERSONA_PROMPT, PersonaRegistry};
 use kanon_llm::session::SessionManager;
 use kanon_llm::{canonical_json, canonical_tools, normalize_request};
+
+/// Host-owned runtime status goes after history, never into tools or the system block.
+struct Availability(Arc<AtomicBool>);
+
+#[async_trait]
+impl AgentHook for Availability {
+    async fn on_llm_request(
+        &self,
+        _session: &str,
+        request: &mut ChatRequest,
+    ) -> Result<(), kanon_llm::AgentError> {
+        request.messages.push(ChatMessage::user(format!(
+            "bash available: {}",
+            self.0.load(Ordering::SeqCst)
+        )));
+        Ok(())
+    }
+}
+
+#[tokio::test]
+async fn runtime_tool_permission_changes_only_the_request_tail() {
+    let recorder = Arc::new(Recorder::default());
+    let allowed = Arc::new(AtomicBool::new(true));
+    let agent = Agent::builder("permission-prefix", recorder.clone())
+        .model("test")
+        .system_prompt("Fixed persona")
+        .tool(tool("bash"))
+        .hook(Availability(allowed.clone()))
+        .build();
+    agent.run("same-message-a", "hello", &[]).await.unwrap();
+    allowed.store(false, Ordering::SeqCst);
+    agent.run("same-message-b", "hello", &[]).await.unwrap();
+    let requests = recorder.requests.lock().unwrap();
+    assert_eq!(
+        serde_json::to_string(&requests[0].tools).unwrap(),
+        serde_json::to_string(&requests[1].tools).unwrap()
+    );
+    let n = requests[0].messages.len();
+    assert_eq!(
+        serde_json::to_string(&requests[0].messages[..n - 1]).unwrap(),
+        serde_json::to_string(&requests[1].messages[..n - 1]).unwrap()
+    );
+    assert_ne!(
+        requests[0].messages.last().unwrap().content,
+        requests[1].messages.last().unwrap().content
+    );
+    assert!(requests[1].tools.iter().any(|tool| tool.name == "bash"));
+}
 
 /// Provider that records every request it receives.
 #[derive(Default)]

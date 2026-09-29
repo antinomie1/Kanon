@@ -1,5 +1,6 @@
 import type {
   AdaptersResponse,
+  BashPolicy,
   CallPluginToolResponse,
   ChatCompletionRequest,
   ChatCompletionResponse,
@@ -254,6 +255,12 @@ export const api = {
     ),
   // Tool catalog: every tool the model can call, grouped by provider.
   getTools: () => request<ToolCatalog>('/api/v1/tools'),
+  getBashPolicy: () => request<BashPolicy>('/api/v1/tools/bash/policy'),
+  setBashPolicy: (policy: BashPolicy) =>
+    request<BashPolicy>('/api/v1/tools/bash/policy', {
+      method: 'PUT',
+      body: JSON.stringify(policy),
+    }),
 
   // Skills: installed instruction bundles the model pulls in through `read_skill`.
   getSkills: () => request<SkillCatalog>('/api/v1/skills'),

@@ -100,6 +100,55 @@ OneBot v11 can also be configured under **Plugins & Adapters → OneBot v11** in
 Both forward and reverse universal WebSockets are supported. See [the OneBot setup guide](docs/ONEBOT.md)
 for connection examples, account binding, message support and the typed client covering 29 common APIs.
 
+## Guarded Bash tool
+
+The node registers `bash` as a native tool alongside `read_skill`. In **Tools**, configure who may
+ask the AI to execute it. Kanon has no node-wide administrator role, so this policy belongs only to
+Bash: `allowlist` permits listed senders; `denylist` permits every identified sender except those
+listed. Denial always wins. The default empty allowlist denies everyone.
+
+The policy is stored in `data/system.json` under `bash_policy` and can also be read or updated via
+`GET`/`PUT /api/v1/tools/bash/policy`:
+
+```json
+{
+  "bash_policy": {
+    "mode": "allowlist",
+    "allowlist": [{ "platform": "onebot", "user_id": "123456" }],
+    "denylist": []
+  }
+}
+```
+
+Identity comes from the current inbound event before plugin filtering. A session name, quoted
+message, model argument or claimed identity cannot grant access. Overlapping turns in a group have
+separate caller scopes. Console chat and plugin-originated LLM requests have no verified sender and
+are denied, even in denylist mode. The tool definition remains in the model's fixed tool list for
+every sender; the host appends its current availability **after history at the request tail**.
+Execution rechecks the live policy regardless of what the model requests.
+
+Commands use a conservative static subset of Bash: quoted literal arguments, pipelines, `&&`, `||`,
+semicolon-separated lists and newlines. The default executable allowlist is `echo`, `printf`, `pwd`,
+`ls`, `cat`, `head`, `tail`, `wc`, `grep`, `rg`, `cut`, `tr`, `du`, `df`, `uname`, `whoami`, `id`, `ps`,
+`uptime`, `sleep`, `seq`, `true`, `false`, and Git `status`/`diff`/`log`/`show`/`ls-files`/`rev-parse`.
+For example: `ls -la | head -n 20` or `git status --short`. Git pagers, fsmonitor, diff/signature helpers and
+ripgrep subprocess helpers are disabled. Programs are resolved only from trusted system directories.
+Git accepts an explicit set of common diagnostic flags; unknown options are also rejected.
+
+`rm`, `dd`, `sudo`, permission/ownership changes, disk formatting, arbitrary executables, scripts,
+interpreters, launchers, assignments, shell evaluation, expansions, redirection and background jobs
+are blocked before **any** command in the request starts. Quote glob/regex characters as literals;
+globbing is unavailable. There is no model-supplied safety override. `cwd` defaults to `.` and must
+resolve inside the node workspace, including through symlinks. Each call has a 15-second default
+timeout (1–120 seconds), a four-process concurrency limit, no stdin, a clean child environment, and
+at most 64 KiB retained per stdout/stderr stream. Timeout and cancellation kill the whole process
+group. Results report stdout, stderr, exit code, timeout and truncation; nonzero exits are tool
+failures. Bash execution currently requires a Unix host with Bash installed.
+
+This is a diagnostic command guard, not an OS sandbox: allowed commands retain the node account's
+read access, including paths outside `cwd`. Operators should use an appropriately restricted account
+or container when granting access to untrusted users.
+
 ## Build outputs
 
 A default build produces exactly two executables:

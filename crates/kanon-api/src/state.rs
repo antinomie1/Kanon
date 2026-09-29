@@ -15,8 +15,8 @@ use std::time::Instant;
 use kanon_adapter_milky::MilkyAdapter;
 use kanon_adapter_onebot::OneBotAdapter;
 use kanon_core::{
-    ContextPolicyStore, EventIngress, InstanceRegistry, McpConfigStore, McpPool, ReplyPolicyStore,
-    SkillStore, Supervisor, ToggleStore,
+    BashPolicyStore, ContextPolicyStore, EventIngress, InstanceRegistry, McpConfigStore, McpPool,
+    ReplyPolicyStore, SkillStore, Supervisor, ToggleStore,
 };
 use kanon_llm::{
     Agent, AgentConfig, AgentFactory, AgentSlot, InMemory, LlmProvider, Memory, PersonaRegistry,
@@ -74,6 +74,8 @@ struct ApiStateInner {
     reply_policy: Arc<ReplyPolicyStore>,
     /// Node-wide context-extras policy shared with the pipeline worker.
     context_policy: Arc<ContextPolicyStore>,
+    /// Live caller policy also held by the Bash tool and availability hook.
+    bash_policy: Arc<BashPolicyStore>,
     /// In-memory view of the persisted model-routing settings.
     ///
     /// Kept alongside the store so a read (listing providers, resolving a model) never touches the
@@ -231,6 +233,11 @@ impl ApiState {
         &self.inner.context_policy
     }
 
+    /// Current Bash permission policy, shared with the execution gate.
+    pub fn bash_policy(&self) -> &Arc<BashPolicyStore> {
+        &self.inner.bash_policy
+    }
+
     /// Snapshot of the persisted model-routing settings.
     pub fn node_settings(&self) -> NodeSettings {
         self.inner
@@ -260,6 +267,7 @@ impl ApiState {
         )?;
         self.inner.reply_policy.set(settings.reply_policy);
         self.inner.context_policy.set(settings.context_policy);
+        self.inner.bash_policy.set(settings.bash_policy.clone());
         *self
             .inner
             .node_settings
@@ -419,6 +427,7 @@ pub struct ApiStateBuilder {
     skills: Option<Arc<SkillStore>>,
     system_config: Option<Arc<SystemConfigStore>>,
     node_settings: Option<NodeSettings>,
+    bash_policy: Option<Arc<BashPolicyStore>>,
     milky: Option<Arc<MilkyAdapter>>,
     /// OneBot v11 adapter hosted by this node.
     onebot: Option<Arc<OneBotAdapter>>,
@@ -457,6 +466,7 @@ impl ApiStateBuilder {
             skills: None,
             system_config: None,
             node_settings: None,
+            bash_policy: None,
             milky: None,
             onebot: None,
             config_base_dir: None,
@@ -608,6 +618,12 @@ impl ApiStateBuilder {
         self
     }
 
+    /// Shares the policy store used by the native Bash tool and its availability hook.
+    pub fn with_bash_policy(mut self, policy: Arc<BashPolicyStore>) -> Self {
+        self.bash_policy = Some(policy);
+        self
+    }
+
     /// Shares the OneBot v11 adapter registered by the composition root.
     pub fn with_onebot_adapter(mut self, adapter: Arc<OneBotAdapter>) -> Self {
         self.onebot = Some(adapter);
@@ -718,6 +734,8 @@ impl ApiStateBuilder {
         }
         let reply_policy = Arc::new(ReplyPolicyStore::new(node_settings.reply_policy));
         let context_policy = Arc::new(ContextPolicyStore::new(node_settings.context_policy));
+        let bash_policy = self.bash_policy.unwrap_or_default();
+        bash_policy.set(node_settings.bash_policy.clone());
 
         let instances = self.instances.unwrap_or_default();
         let plugin_state = self.plugin_state.unwrap_or_default();
@@ -758,6 +776,7 @@ impl ApiStateBuilder {
                 system_config,
                 reply_policy,
                 context_policy,
+                bash_policy,
                 node_settings: Arc::new(RwLock::new(node_settings)),
                 milky: self.milky,
                 onebot: self.onebot,

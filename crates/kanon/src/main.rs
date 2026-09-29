@@ -47,10 +47,10 @@ use kanon_core::ipc::{CoreApiService, CoreIpcServer, DEFAULT_INGEST_QUEUE_CAPACI
 use kanon_core::pipeline::PipelineEngine;
 use kanon_core::supervisor::Supervisor;
 use kanon_core::{
-    DEFAULT_INSTANCE_CATALOG, DEFAULT_MCP_CONFIG, DEFAULT_SKILLS_DIR, DEFAULT_TOGGLE_STATE,
-    EventIngress, HOST_WATCHDOG_INTERVAL, InstanceRegistry, MCP_WATCHDOG_INTERVAL, McpConfigStore,
-    McpPool, PLUGIN_SECTION, ReadSkillTool, SkillCatalogHook, SkillStore, ToggleStore,
-    sync_instance_personas,
+    BashAvailabilityHook, BashPolicyStore, BashTool, DEFAULT_INSTANCE_CATALOG, DEFAULT_MCP_CONFIG,
+    DEFAULT_SKILLS_DIR, DEFAULT_TOGGLE_STATE, EventIngress, HOST_WATCHDOG_INTERVAL,
+    InstanceRegistry, MCP_WATCHDOG_INTERVAL, McpConfigStore, McpPool, PLUGIN_SECTION,
+    ReadSkillTool, SkillCatalogHook, SkillStore, ToggleStore, sync_instance_personas,
 };
 use tokio::sync::{mpsc, oneshot};
 use tracing_subscriber::EnvFilter;
@@ -165,6 +165,8 @@ async fn main() -> StartupResult<()> {
     // by the builder itself, so a bootstrapped directory and a console-configured one are applied
     // through exactly the same path.
     let node_settings = bootstrap_node_settings()?;
+    let bash_policy = Arc::new(BashPolicyStore::new(node_settings.bash_policy.clone()));
+    let bash_tool = Arc::new(BashTool::new(".", bash_policy.clone())?);
 
     // The persona library is the built-in base assistant plus the operator's saved personas. A
     // malformed `data/personas.json` is a hard startup error rather than a silent fallback, for the
@@ -201,16 +203,23 @@ async fn main() -> StartupResult<()> {
         .with_mcp_config(mcp_config.clone())
         .with_skill_store(skills.clone())
         .with_node_settings(node_settings)
-        .with_native_tools(vec![Arc::new(ReadSkillTool::new(
-            skills.clone(),
-            plugin_state.clone(),
-            instances.clone(),
-        ))])
-        .with_hooks(vec![Arc::new(SkillCatalogHook::new(
-            skills.clone(),
-            plugin_state.clone(),
-            instances.clone(),
-        ))])
+        .with_bash_policy(bash_policy.clone())
+        .with_native_tools(vec![
+            bash_tool,
+            Arc::new(ReadSkillTool::new(
+                skills.clone(),
+                plugin_state.clone(),
+                instances.clone(),
+            )),
+        ])
+        .with_hooks(vec![
+            Arc::new(BashAvailabilityHook(bash_policy)),
+            Arc::new(SkillCatalogHook::new(
+                skills.clone(),
+                plugin_state.clone(),
+                instances.clone(),
+            )),
+        ])
         .build();
 
     // Publish instance prompts as personas before the first message can arrive.
