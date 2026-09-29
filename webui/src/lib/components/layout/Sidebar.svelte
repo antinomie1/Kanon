@@ -115,18 +115,18 @@ const navItems = [
       <span class="text-xs text-zinc-500 font-mono">{t('common.appearance')}</span>
       <div class="flex items-center gap-1 bg-zinc-200/60 dark:bg-zinc-900 p-0.5 rounded-md border border-zinc-200 dark:border-zinc-800">
         <button
-          onclick={() => theme.setMode('light')}
-          class="p-1.5 rounded text-xs transition cursor-pointer {theme.currentMode === 'light' ? 'bg-white dark:bg-zinc-800 text-zinc-900 dark:text-zinc-100 shadow-2xs' : 'text-zinc-400 hover:text-zinc-600'}"
-          title="Light mode"
-        >
-          <Sun class="w-4 h-4" />
-        </button>
-        <button
           onclick={() => theme.setMode('system')}
           class="p-1.5 rounded text-xs transition cursor-pointer {theme.currentMode === 'system' ? 'bg-white dark:bg-zinc-800 text-zinc-900 dark:text-zinc-100 shadow-2xs' : 'text-zinc-400 hover:text-zinc-600'}"
           title="System sync"
         >
           <Laptop class="w-4 h-4" />
+        </button>
+        <button
+          onclick={() => theme.setMode('light')}
+          class="p-1.5 rounded text-xs transition cursor-pointer {theme.currentMode === 'light' ? 'bg-white dark:bg-zinc-800 text-zinc-900 dark:text-zinc-100 shadow-2xs' : 'text-zinc-400 hover:text-zinc-600'}"
+          title="Light mode"
+        >
+          <Sun class="w-4 h-4" />
         </button>
         <button
           onclick={() => theme.setMode('dark')}
