@@ -38,6 +38,9 @@ export const CAPABILITY_FLAGS: (keyof ModelCapabilities)[] = [
  * The catalog is keyed by the canonical `<provider>/<model>` reference rather than by the bare
  * model id, because the same weights reached through two endpoints can differ in context window
  * and modalities. Instances and the Playground pick their model from this single list.
+ *
+ * It also owns the node's one **global default model**: what answers when an instance names no
+ * model of its own. That is a model, not a provider, so choosing it is a single action here.
  */
 class ModelsStore {
   catalog = $state<ModelsResponse | null>(null);
@@ -45,6 +48,10 @@ class ModelsStore {
   saving = $state(false);
   error = $state<string | null>(null);
   notice = $state<string | null>(null);
+
+  constructor() {
+    this.load();
+  }
 
   get models(): ModelSpec[] {
     return this.catalog?.models ?? [];
@@ -58,6 +65,14 @@ class ModelsStore {
   /** Canonical reference the node answers with when an instance carries no override. */
   get defaultModel(): string | null {
     return this.catalog?.default_model ?? null;
+  }
+
+  /** The catalog entry of the global default model, when it is listed. */
+  get defaultSpec(): ModelSpec | undefined {
+    const reference = this.defaultModel;
+    return reference
+      ? this.models.find((spec) => this.referenceOf(spec) === reference)
+      : undefined;
   }
 
   /** Canonical `<provider>/<model-id>` reference of one entry. */
@@ -105,6 +120,26 @@ class ModelsStore {
     this.error = null;
     try {
       this.catalog = await api.upsertModel(spec);
+      return true;
+    } catch (e) {
+      this.error = e instanceof Error ? e.message : String(e);
+      return false;
+    } finally {
+      this.saving = false;
+    }
+  }
+
+  /**
+   * Sets (or, with `null`, clears) the global default model.
+   *
+   * The node validates that the reference names a configured provider, persists it and applies it
+   * to the running pipeline before answering, so the returned catalog is what is actually live.
+   */
+  async setDefault(reference: string | null): Promise<boolean> {
+    this.saving = true;
+    this.error = null;
+    try {
+      this.catalog = await api.setDefaultModel(reference);
       return true;
     } catch (e) {
       this.error = e instanceof Error ? e.message : String(e);

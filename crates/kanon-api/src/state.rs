@@ -237,22 +237,18 @@ impl ApiState {
 
     /// Validates, persists and applies model-routing settings, then publishes them.
     ///
-    /// Order is *validate → persist → apply → publish*: nothing reaches disk before the description
-    /// is known-good, and the in-memory snapshot is updated only after the running node accepted
+    /// Order is *validate → persist → apply → publish*: nothing reaches disk before the settings
+    /// are known-good, and the in-memory snapshot is updated only after the running node accepted
     /// the directory, so a failed apply cannot leave the console describing a node that does not
     /// exist.
     pub fn apply_node_settings(&self, settings: NodeSettings) -> Result<(), String> {
-        settings.reply_policy.validate()?;
-        for provider in &settings.providers {
-            provider.validate()?;
-        }
+        settings.validate()?;
 
         self.inner.system_config.save_node_settings(&settings)?;
         self.inner.factory.configure(
             "kanon-core",
             ProviderRuntime {
                 providers: settings.providers.clone(),
-                default_provider: settings.default_provider.clone(),
                 default_model: settings.default_model.clone(),
                 models: settings.models.clone(),
             },
@@ -265,20 +261,6 @@ impl ApiState {
             .write()
             .unwrap_or_else(|poisoned| poisoned.into_inner()) = settings;
         Ok(())
-    }
-
-    /// Removes every configured provider, disabling conversational routing.
-    ///
-    /// The reply policy is preserved: clearing the model endpoint must not silently reset an
-    /// unrelated operator preference.
-    pub fn clear_node_providers(&self) -> Result<(), String> {
-        let mut settings = self.node_settings();
-        settings.providers.clear();
-        settings.default_provider = None;
-        settings.default_model = None;
-        // The model catalog describes models of the endpoints being removed, so it goes with them.
-        settings.models.clear();
-        self.apply_node_settings(settings)
     }
 
     /// Populates the model catalog for every endpoint that has no entries yet.
@@ -702,7 +684,6 @@ impl ApiStateBuilder {
                 "kanon-core",
                 ProviderRuntime {
                     providers: node_settings.providers.clone(),
-                    default_provider: node_settings.default_provider.clone(),
                     default_model: node_settings.default_model.clone(),
                     models: node_settings.models.clone(),
                 },

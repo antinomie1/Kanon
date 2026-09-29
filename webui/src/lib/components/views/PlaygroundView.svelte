@@ -15,6 +15,7 @@ import {
 import { api } from '../../api/client';
 import { streamChatCompletion } from '../../api/sse';
 import { t } from '../../stores/i18n.svelte';
+import { modelsStore } from '../../stores/models.svelte';
 import { providersStore } from '../../stores/providers.svelte';
 import type { ExecutedTool } from '../../types';
 
@@ -72,14 +73,14 @@ async function sendMessage() {
   };
   messages = [...messages, assistantMsg];
 
-  // If no model or provider is configured and core has no active provider
-  if (!targetModel && !providersStore.catalog?.active?.configured) {
+  // Neither a chosen model nor a global default model: the node has nothing to answer with.
+  if (!targetModel && !modelsStore.defaultModel) {
     messages = messages.map((m) =>
       m.id === assistantId
         ? {
             ...m,
             content:
-              '未配置任何模型提供商。请先在「模型提供商」页面中添加提供商并选定模型。',
+              '尚未设置全局默认模型。请先在「模型提供商」页面添加提供商，并选定默认模型。',
           }
         : m,
     );
@@ -202,9 +203,11 @@ function clearChat() {
           onchange={(e) => providersStore.setActiveModel(e.currentTarget.value)}
           class="px-2.5 py-1 rounded-md font-mono text-xs sm:text-sm bg-zinc-100 dark:bg-zinc-800 border border-zinc-200 dark:border-zinc-700 text-zinc-800 dark:text-zinc-200 max-w-56 truncate cursor-pointer"
         >
-          {#if providersStore.allModelKeys.length === 0}
-            <option value="">未配置模型</option>
-          {/if}
+          <option value="">
+            {modelsStore.defaultModel
+              ? `默认 · ${modelsStore.defaultModel}`
+              : '未设置默认模型'}
+          </option>
           {#each providersStore.allModelKeys as key}
             <option value={key}>{key}</option>
           {/each}

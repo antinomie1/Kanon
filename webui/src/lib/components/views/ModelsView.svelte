@@ -389,6 +389,17 @@ function sourceLabel(source: ModelSpec['source']): string {
               </div>
 
               <div class="flex items-center gap-2 shrink-0">
+                {#if !isDefault}
+                  <button
+                    onclick={() => modelsStore.setDefault(reference)}
+                    disabled={modelsStore.saving}
+                    class="px-3 py-1.5 text-xs sm:text-sm font-mono bg-amber-50 dark:bg-amber-950/40 hover:bg-amber-100 dark:hover:bg-amber-900/40 text-amber-700 dark:text-amber-400 border border-amber-200 dark:border-amber-800/60 rounded-md transition cursor-pointer flex items-center gap-1.5 disabled:opacity-50"
+                    title={t('models.set_default_hint')}
+                  >
+                    <Star class="w-3.5 h-3.5" />
+                    <span>{t('models.set_default')}</span>
+                  </button>
+                {/if}
                 <button
                   onclick={() => startEdit(spec)}
                   class="px-3 py-1.5 text-xs sm:text-sm font-mono bg-zinc-100 dark:bg-zinc-800 hover:bg-zinc-200 dark:hover:bg-zinc-700 text-zinc-700 dark:text-zinc-300 rounded-md transition cursor-pointer flex items-center gap-1.5"

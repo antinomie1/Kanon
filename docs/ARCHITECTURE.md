@@ -670,9 +670,12 @@ sequenceDiagram
 | `POST` | `/api/v1/sessions/{id}/reset` | 安全重置会话历史，保留配置变量与人设 |
 | `POST` | `/api/v1/sessions/{id}/persona` | 动态热切换指定会话的生效人设 |
 | `GET` | `/api/v1/personas` | 查询系统预设及动态注册人设列表 |
-| `GET` | `/api/v1/providers` | 查询可用协议与预设，以及本节点**当前生效**的提供商（含来源标记 `source`） |
-| `PUT` | `/api/v1/providers/active` | 校验提供商描述 → 持久化至 `data/system.json` → 运行时热应用（流水线、`RequestLLM`、聊天接口下一请求即生效，无需重启） |
-| `DELETE` | `/api/v1/providers/active` | 清除节点提供商并即时停用对话能力（环境变量引导不会被重新回填） |
+| `GET` | `/api/v1/providers` | 查询已配置的提供商端点（不含密钥）、可用协议与预设；提供商只是端点，没有“默认/当前生效”之分 |
+| `POST` | `/api/v1/providers` | 新增或替换一个命名提供商端点（校验 → 持久化至 `data/system.json` → 热应用）；省略密钥即保留已存密钥 |
+| `POST` | `/api/v1/providers/delete` | 删除提供商及其模型目录；若它正是全局默认模型的提供商，则同时清空默认模型 |
+| `POST` | `/api/v1/providers/test` | 以提供商名称探测连通性：服务端使用已存密钥，浏览器永远拿不到密钥 |
+| `GET` | `/api/v1/models` | 查询按 `provider/model-id` 索引的模型目录，并返回**全局默认模型** |
+| `PUT` | `/api/v1/models/default` | 设置（或置空）唯一的全局默认模型：校验其提供商已配置 → 持久化 → 热应用（流水线、`RequestLLM`、聊天接口下一请求即生效，无需重启） |
 | `GET` | `/api/v1/metrics` | 导出 Prometheus 格式的系统与消息吞吐指标 |
 | `POST` | `/api/v1/chat/completions` | 在线沙盒对话调试，支持标准 JSON 与 `text/event-stream` 流式输出 |
 | `GET` | `/api/v1/adapters` | 查询已注册的平台适配器（内置 + 插件声明）及其连接存活状态与断路器状态 (`circuit_state`) |

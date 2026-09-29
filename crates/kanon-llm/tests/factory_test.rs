@@ -5,7 +5,7 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use kanon_llm::{
     AgentConfig, AgentFactory, AgentSlot, ChatRequest, ChatResponse, GatewayError, LlmProvider,
-    Memory, PersonaRegistry, SessionManager, SlidingWindowMemory,
+    Memory, PersonaRegistry, ProviderEntry, ProviderRuntime, SessionManager, SlidingWindowMemory,
 };
 
 /// Provider stub; identity matters more than behaviour in these tests.
@@ -157,4 +157,91 @@ fn build_with_keeps_the_node_runtime_parts() {
         agent.persona_registry().expect("persona registry"),
         &personas
     ));
+}
+
+/// A directory of two endpoints, neither of which is "the default": the default is a model.
+fn two_providers(default_model: Option<&str>) -> ProviderRuntime {
+    ProviderRuntime {
+        providers: vec![
+            ProviderEntry::new("alpha", "openai", "http://127.0.0.1:9/v1"),
+            ProviderEntry::new("beta", "openai", "http://127.0.0.1:10/v1"),
+        ],
+        default_model: default_model.map(str::to_string),
+        models: Vec::new(),
+    }
+}
+
+#[test]
+fn the_global_default_model_picks_the_node_agent_and_its_provider() {
+    let (factory, _provider, _memory, _sessions, _personas) = factory();
+    factory
+        .configure("node", two_providers(Some("beta/model-b")))
+        .expect("configured");
+
+    let node = factory.node_agent().expect("node agent");
+    assert_eq!(node.config().default_model, "model-b");
+    assert_eq!(node.config().provider.as_deref(), Some("beta"));
+    assert_eq!(node.config().model_ref(), "beta/model-b");
+
+    // A per-instance override may name any configured endpoint, not only the default's.
+    let other = factory
+        .agent_for_model(Some("alpha/model-a"))
+        .expect("override agent");
+    assert_eq!(other.config().provider.as_deref(), Some("alpha"));
+    assert_eq!(other.config().default_model, "model-a");
+}
+
+#[test]
+fn configuring_without_a_default_model_leaves_the_node_unable_to_answer() {
+    let (factory, _provider, _memory, _sessions, _personas) = factory();
+    factory
+        .configure("node", two_providers(Some("alpha/model-a")))
+        .expect("configured");
+    assert!(factory.node_agent().is_some());
+
+    factory
+        .configure("node", two_providers(None))
+        .expect("directory without a default is valid");
+    assert!(
+        factory.node_agent().is_none(),
+        "no default model means no conversational runtime, not a guessed one"
+    );
+    assert!(
+        factory.agent_for_model(Some("alpha/model-a")).is_none(),
+        "overrides need the node to be configured as well"
+    );
+}
+
+#[test]
+fn a_default_model_naming_an_unknown_provider_is_rejected_and_changes_nothing() {
+    let (factory, _provider, _memory, _sessions, _personas) = factory();
+    factory
+        .configure("node", two_providers(Some("alpha/model-a")))
+        .expect("configured");
+
+    let error = factory
+        .configure("node", two_providers(Some("gamma/model-g")))
+        .expect_err("unknown provider");
+    assert!(error.contains("gamma"), "unexpected error: {error}");
+
+    // The previous configuration keeps serving.
+    let node = factory.node_agent().expect("node agent survives");
+    assert_eq!(node.config().model_ref(), "alpha/model-a");
+    assert_eq!(factory.providers().names(), vec!["alpha", "beta"]);
+}
+
+#[test]
+fn a_reference_that_resolves_to_no_provider_yields_no_agent() {
+    let (factory, _provider, _memory, _sessions, _personas) = factory();
+    factory
+        .configure("node", two_providers(Some("alpha/model-a")))
+        .expect("configured");
+
+    assert!(factory.agent_for_model(Some("gamma/model-g")).is_none());
+    assert!(
+        factory
+            .agent_for_model(Some("model-without-prefix"))
+            .is_none(),
+        "a bare id is not guessed onto some endpoint"
+    );
 }

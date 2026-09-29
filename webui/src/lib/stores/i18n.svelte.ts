@@ -35,7 +35,7 @@ export const dictionaries = {
       'Interactive streaming chat with multi-turn reasoning and tool calling inspection',
     'title.providers': 'Model Providers',
     'subtitle.providers':
-      'LLM gateway backends, connectivity testing, and provider presets',
+      'Provider endpoints, connectivity testing, and the one global default model',
     'title.models': 'Model Catalog',
     'subtitle.models':
       'Per-model context window, modalities and sampling overrides, keyed by provider reference',
@@ -331,19 +331,16 @@ export const dictionaries = {
       'Type a prompt to test conversational reasoning or tool dispatch...',
     'playground.tools_executed': 'Executed Tools',
     'playground.empty_chat':
-      'Start a sandbox chat turn to test the active LLM provider and tool calling.',
+      'Start a sandbox chat turn to test the default model and tool calling.',
 
     // Providers & System
-    'providers.active_provider': 'Active Model Provider',
     'providers.protocol': 'Protocol',
-    'providers.model_name': 'Default Model',
     'providers.base_url': 'Base URL',
     'providers.api_key': 'API Key',
     'providers.api_key_set': 'Configured (Masked)',
     'providers.api_key_unset': 'Not Configured',
     'providers.temperature': 'Temperature',
     'providers.max_tokens': 'Max Tokens',
-    'providers.test_connectivity': 'Test Connectivity & Latency',
     'providers.testing': 'Testing connection...',
     'providers.test_prompt': 'Test Prompt',
     'providers.test_result': 'Test Result',
@@ -355,34 +352,33 @@ export const dictionaries = {
     'providers.ipc_socket': 'Core IPC Socket',
     'providers.run_dir': 'Run Directory',
     'providers.data_dir': 'Data Directory',
-    'providers.memory_window': 'Memory Sliding Window',
     'providers.signature_verify': 'HMAC Signature Verification',
     'providers.env_title': 'Runtime Environment',
     'providers.os_arch': 'OS & Architecture',
     'providers.rust_edition': 'Rust Edition',
 
+    // Global default model (one decision for the whole node)
+    'providers.default_model_title': 'Global default model',
+    'providers.default_model_desc':
+      'The model the bot answers with. Instances can still pick a different one for themselves; everything else uses this.',
+    'providers.default_model_unset': '— Not set —',
+    'providers.default_model_none':
+      'No default model is set — the bot will not answer plain messages until you pick one.',
+    'providers.default_model_no_models':
+      'No models yet. Use “Discover models” on a provider below (or add one by hand), then pick the default here.',
+    'providers.serves_default': 'Serves the global default model',
+    'providers.delete_confirm':
+      'Delete this provider? Its models are removed from the catalog with it.',
+    'providers.delete_default_warning':
+      'It serves the global default model, so the node will have no default model afterwards.',
+    'providers.test_title': 'Connectivity & models',
+    'providers.test_model_placeholder': 'model id, e.g. deepseek-chat',
+    'providers.test_key_hint':
+      'The stored key is used by the node itself and never sent to your browser. Values typed above (URL, protocol, key) are tested as-is, so you can check an edit before saving it.',
+
     // Named provider directory
-    'providers.node_effective': 'Effective provider on this node:',
-    'providers.node_none':
-      'Not configured — the bot will not answer plain messages',
-    'providers.source_console': 'Saved from console',
-    'providers.source_env': 'Environment bootstrap',
-    'providers.source_runtime': 'Injected at runtime',
-    'providers.source_none': 'Not configured',
-    'providers.node_hint':
-      "Applying writes to the node's data/system.json and takes effect immediately for the pipeline, RequestLLM and the chat API — no restart required.",
-    'providers.upstream_model': 'Upstream model',
     'providers.context_length': 'Context window',
     'providers.capabilities': 'Capabilities',
-    'providers.default_provider': 'Default provider',
-    'providers.default_model': 'Node default model',
-    'providers.default_model_none': 'No default model configured',
-    'providers.create_default': 'Create default provider',
-    'providers.apply_to_node': 'Apply to this node',
-    'providers.applying': 'Applying...',
-    'providers.clear_all': 'Clear all providers',
-    'providers.clear_confirm':
-      'Remove every configured provider? Chat is disabled until one is applied again.',
     'providers.directory_title': 'Provider directory',
     'providers.add_provider': 'Add provider',
     'providers.select_hint': 'Select a provider to edit it.',
@@ -405,19 +401,8 @@ export const dictionaries = {
     'providers.save': 'Save changes',
     'providers.saved': 'Saved',
     'providers.delete': 'Delete provider',
-    'providers.delete_confirm':
-      'Delete this provider? Its models are removed from the catalog with it.',
-    'providers.default_badge': 'default',
-    'providers.set_default': 'Set as default',
-    'providers.make_default': 'Make this the node default',
-    'providers.default_model_label': 'Default model reference',
-    'providers.default_model_placeholder': 'provider/model-id',
-    'providers.default_model_hint':
-      'Suggestions come from the model catalog. Discover the endpoint first if the list is empty.',
     'providers.models_in_catalog': '{count} models in catalog',
     'providers.test': 'Test connectivity',
-    'providers.test_key_hint':
-      'The stored credential is never returned to the browser: type one here to test an endpoint that is not the node default.',
     'providers.test_model_label': 'Model to probe',
     'providers.discover': 'Discover models',
     'providers.discovering': 'Discovering...',
@@ -430,9 +415,6 @@ export const dictionaries = {
       'Pick a common service template to prefill the protocol and base URL, then add the API key.',
     'providers.manual_add_title': 'Add model provider',
     'providers.create_provider': 'Create provider',
-    'providers.create_default_title': 'Create default provider',
-    'providers.create_default_hint':
-      'Registers one endpoint from these values and makes it the node default in a single step.',
     'providers.preset_applied':
       'Template applied: fill in the credential to finish.',
     'providers.no_providers': 'No provider endpoint configured.',
@@ -442,9 +424,11 @@ export const dictionaries = {
     'models.subtitle':
       'Context window, modalities and sampling overrides for every model the node may route to',
     'models.total': 'Catalog entries',
-    'models.default_model': 'Node default model',
+    'models.default_model': 'Global default model',
     'models.default_none': 'Not set',
-    'models.default_badge': 'default',
+    'models.default_badge': 'global default',
+    'models.set_default': 'Set as default',
+    'models.set_default_hint': 'Use this model as the global default',
     'models.filter_provider': 'Provider',
     'models.all_providers': 'All providers',
     'models.add': 'Add model',
@@ -678,7 +662,7 @@ export const dictionaries = {
     'title.playground': '对话',
     'subtitle.playground': '与大模型进行交互对话，支持多轮推理与插件工具调用',
     'title.providers': '模型提供商',
-    'subtitle.providers': '大语言模型提供商配置、连通性测速与主流服务商预设',
+    'subtitle.providers': '模型提供商端点、连通性测试，以及唯一的全局默认模型',
     'title.models': '模型目录',
     'subtitle.models':
       '按「提供商/模型」引用记录每个模型的上下文窗口、模态能力与采样参数',
@@ -960,20 +944,16 @@ export const dictionaries = {
     'playground.send': '发送测试',
     'playground.placeholder': '输入测试提示词，验证多轮对话推理或工具调度...',
     'playground.tools_executed': '实际执行的工具调用',
-    'playground.empty_chat':
-      '发起一轮对话测试当前配置的 LLM Provider 与工具调用。',
+    'playground.empty_chat': '发起一轮对话测试默认模型与工具调用。',
 
     // 模型与系统配置
-    'providers.active_provider': '当前启用的 LLM Provider',
     'providers.protocol': '协议格式',
-    'providers.model_name': '默认模型标识',
     'providers.base_url': '接口 Base URL',
     'providers.api_key': '凭证密钥',
     'providers.api_key_set': '已配置 (受保护隐藏)',
     'providers.api_key_unset': '未设置',
     'providers.temperature': '采样温度',
     'providers.max_tokens': '单次最大 Token 限制',
-    'providers.test_connectivity': '连通性与测速测试',
     'providers.testing': '正在连接测试...',
     'providers.test_prompt': '测试提示词',
     'providers.test_result': '测试结果',
@@ -985,33 +965,33 @@ export const dictionaries = {
     'providers.ipc_socket': 'Core IPC Socket 路径',
     'providers.run_dir': '运行时目录 (Run Dir)',
     'providers.data_dir': '持久化数据目录 (Data Dir)',
-    'providers.memory_window': '会话记忆滑动窗口大小',
     'providers.signature_verify': 'HMAC-SHA256 签名校验',
     'providers.env_title': '系统环境参数',
     'providers.os_arch': '操作系统与架构',
     'providers.rust_edition': 'Rust 版本规范',
 
+    // 全局默认模型（整个节点只有这一个决定）
+    'providers.default_model_title': '全局默认模型',
+    'providers.default_model_desc':
+      '机器人默认使用的模型。各实例仍可单独指定别的模型，其余情况一律使用这里选定的模型。',
+    'providers.default_model_unset': '— 未设置 —',
+    'providers.default_model_none':
+      '尚未设置默认模型 —— 选定之前，机器人不会回复普通消息。',
+    'providers.default_model_no_models':
+      '还没有模型。请在下方提供商中点击「发现模型」（或手动添加），然后在这里选择默认模型。',
+    'providers.serves_default': '该提供商提供全局默认模型',
+    'providers.delete_confirm':
+      '确定要删除该提供商吗？其目录中的模型也会一并移除。',
+    'providers.delete_default_warning':
+      '它提供的正是全局默认模型，删除后节点将没有默认模型。',
+    'providers.test_title': '连通性与模型',
+    'providers.test_model_placeholder': '模型 ID，例如 deepseek-chat',
+    'providers.test_key_hint':
+      '已保存的密钥由节点自己使用，不会发送到浏览器。上方填写的内容（地址、协议、密钥）会按原样测试，因此可以先验证修改再保存。',
+
     // 命名提供商目录
-    'providers.node_effective': '节点当前生效的提供商:',
-    'providers.node_none': '未配置 —— 机器人不会回复普通消息',
-    'providers.source_console': '控制台已保存',
-    'providers.source_env': '环境变量引导',
-    'providers.source_runtime': '运行时注入',
-    'providers.source_none': '未配置',
-    'providers.node_hint':
-      '应用后会写入节点的 data/system.json，并立即对流水线、RequestLLM 与聊天接口生效，无需重启。',
-    'providers.upstream_model': '上游模型',
     'providers.context_length': '上下文窗口',
     'providers.capabilities': '能力',
-    'providers.default_provider': '默认提供商',
-    'providers.default_model': '节点默认模型',
-    'providers.default_model_none': '尚未设置默认模型',
-    'providers.create_default': '创建默认提供商',
-    'providers.apply_to_node': '应用到此节点',
-    'providers.applying': '应用中...',
-    'providers.clear_all': '清除全部提供商',
-    'providers.clear_confirm':
-      '确定要移除全部提供商吗？在重新应用之前聊天将被停用。',
     'providers.directory_title': '提供商列表',
     'providers.add_provider': '添加提供商',
     'providers.select_hint': '请选择一个提供商进行编辑。',
@@ -1032,19 +1012,8 @@ export const dictionaries = {
     'providers.save': '保存修改',
     'providers.saved': '已保存',
     'providers.delete': '删除提供商',
-    'providers.delete_confirm':
-      '确定要删除该提供商吗？其目录中的模型也会一并移除。',
-    'providers.default_badge': '默认',
-    'providers.set_default': '设为默认',
-    'providers.make_default': '设为节点默认提供商',
-    'providers.default_model_label': '默认模型引用',
-    'providers.default_model_placeholder': '提供商/模型ID',
-    'providers.default_model_hint':
-      '候选来自模型目录；列表为空时请先点击「发现模型」。',
     'providers.models_in_catalog': '目录中 {count} 个模型',
     'providers.test': '测试连通性',
-    'providers.test_key_hint':
-      '已保存的密钥不会回传到浏览器：测试非默认提供商时请在此临时输入密钥。',
     'providers.test_model_label': '用于测试的模型',
     'providers.discover': '发现模型',
     'providers.discovering': '正在发现...',
@@ -1057,9 +1026,6 @@ export const dictionaries = {
       '选择常见服务商模板以自动填入协议与 Base URL，创建后填入 API 密钥即可使用。',
     'providers.manual_add_title': '手动添加模型提供商',
     'providers.create_provider': '创建提供商',
-    'providers.create_default_title': '创建默认提供商',
-    'providers.create_default_hint':
-      '用这里填写的值注册一个端点，并一步将其设为节点默认提供商。',
     'providers.preset_applied': '模板已填入，补充密钥后即可创建。',
     'providers.no_providers': '尚未配置任何提供商端点。',
 
@@ -1068,9 +1034,11 @@ export const dictionaries = {
     'models.subtitle':
       '记录节点可路由的每个模型的上下文窗口、模态能力与采样参数',
     'models.total': '目录条目数',
-    'models.default_model': '节点默认模型',
+    'models.default_model': '全局默认模型',
     'models.default_none': '未设置',
-    'models.default_badge': '默认',
+    'models.default_badge': '全局默认',
+    'models.set_default': '设为默认',
+    'models.set_default_hint': '将此模型设为全局默认模型',
     'models.filter_provider': '提供商',
     'models.all_providers': '全部提供商',
     'models.add': '添加模型',

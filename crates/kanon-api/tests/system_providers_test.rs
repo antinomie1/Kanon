@@ -25,16 +25,23 @@ async fn system_config_reports_runtime_parameters() {
     assert!(body["ipc_socket_path"].as_str().is_some());
     assert!(body["run_dir"].as_str().is_some());
     assert!(body["data_dir"].as_str().is_some());
-    assert_eq!(body["memory_window"], 40);
+    assert!(
+        body.get("memory_window").is_none(),
+        "the sliding memory window no longer exists: {body}"
+    );
 
     assert_eq!(body["llm"]["configured"], true);
     assert_eq!(body["llm"]["model"], "mock-model");
+    assert!(
+        body["llm"].get("source").is_none() && body["llm"].get("base_url").is_none(),
+        "the system view reports the model, not a provider's connection details: {body}"
+    );
     assert!(body["environment"]["os"].as_str().is_some());
 }
 
-/// Verifies that GET /api/v1/providers returns active provider details and protocol presets.
+/// Verifies that GET /api/v1/providers returns protocol presets and no notion of an active provider.
 #[tokio::test]
-async fn providers_catalog_reports_active_and_presets() {
+async fn providers_catalog_reports_presets() {
     let dir = tempfile::tempdir().expect("temp dir");
     let state = fixture_state(PathBuf::from(dir.path()), true).await;
     let app: Router = app(state);
@@ -42,8 +49,7 @@ async fn providers_catalog_reports_active_and_presets() {
     let (status, body) = send_json(&app, Method::GET, "/api/v1/providers", None).await;
 
     assert_eq!(status, 200);
-    assert_eq!(body["active"]["configured"], true);
-    assert_eq!(body["active"]["model"], "mock-model");
+    assert!(body.get("active").is_none(), "unexpected body: {body}");
 
     let protocols = body["available_protocols"]
         .as_array()
@@ -60,29 +66,9 @@ async fn providers_catalog_reports_active_and_presets() {
     }
 }
 
-/// Verifies that POST /api/v1/providers/test tests connectivity against the active provider.
+/// Verifies that POST /api/v1/providers/test refuses a request that names nothing to test.
 #[tokio::test]
-async fn providers_test_executes_against_active_provider() {
-    let dir = tempfile::tempdir().expect("temp dir");
-    let state = fixture_state(PathBuf::from(dir.path()), true).await;
-    let app: Router = app(state);
-
-    let payload = serde_json::json!({
-        "prompt": "hello test"
-    });
-    let (status, body) =
-        send_json(&app, Method::POST, "/api/v1/providers/test", Some(payload)).await;
-
-    assert_eq!(status, 200);
-    assert_eq!(body["status"], "ok");
-    assert_eq!(body["reply"], "fixture reply");
-    assert_eq!(body["model"], "mock-model");
-    assert!(body["error"].is_null());
-}
-
-/// Verifies that POST /api/v1/providers/test rejects requests when no provider is available and no params given.
-#[tokio::test]
-async fn providers_test_rejects_empty_without_active_provider() {
+async fn providers_test_rejects_a_request_naming_nothing() {
     let dir = tempfile::tempdir().expect("temp dir");
     let state = empty_state(PathBuf::from(dir.path())).await;
     let app: Router = app(state);

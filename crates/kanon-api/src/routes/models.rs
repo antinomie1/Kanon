@@ -6,6 +6,11 @@
 //! entry per canonical reference, and the pipeline consults it before attaching an image or
 //! sizing a conversation.
 //!
+//! # One global default model
+//! The node answers with exactly one default model, set here (`PUT /api/v1/models/default`). It is
+//! a model, not a provider: choosing "the default provider" would still leave the question of which
+//! of its models to use, so the two decisions were folded into this one.
+//!
 //! # Where defaults come from
 //! Entries discovered through [`super::super::model_discovery`] carry whatever the endpoint
 //! reported and are marked `upstream`; entries typed in the console are marked `manual` and are
@@ -14,7 +19,7 @@
 use axum::Json;
 use axum::Router;
 use axum::extract::State;
-use axum::routing::{get, post};
+use axum::routing::{get, post, put};
 use serde::{Deserialize, Serialize};
 
 use kanon_llm::{ModelRef, ModelSettingsSource, ModelSpec};
@@ -27,6 +32,7 @@ use crate::state::ApiState;
 pub fn routes() -> Router<ApiState> {
     Router::new()
         .route("/api/v1/models", get(list_models).put(upsert_model))
+        .route("/api/v1/models/default", put(set_default_model))
         .route("/api/v1/models/delete", post(delete_model))
         .route("/api/v1/models/discover", post(discover))
 }
@@ -42,6 +48,14 @@ pub struct ModelsResponse {
     pub default_model: Option<String>,
     /// Provider names a model reference may use.
     pub providers: Vec<String>,
+}
+
+/// Request body of `PUT /api/v1/models/default`.
+#[derive(Debug, Deserialize)]
+pub struct SetDefaultModelRequest {
+    /// Canonical `<provider>/<model-id>` to answer with by default; `null` or blank clears it.
+    #[serde(default)]
+    pub model: Option<String>,
 }
 
 /// Request body of `POST /api/v1/models/delete`.
@@ -88,6 +102,29 @@ async fn list_models(State(state): State<ApiState>) -> Json<ModelsResponse> {
             .map(|entry| entry.name.clone())
             .collect(),
     })
+}
+
+/// Handler for `PUT /api/v1/models/default`.
+///
+/// The model need not be in the catalog — an unknown model is how a brand-new endpoint is tried out
+/// — but its provider must be a configured one, which the settings validation enforces before
+/// anything is stored or applied.
+async fn set_default_model(
+    State(state): State<ApiState>,
+    Json(payload): Json<SetDefaultModelRequest>,
+) -> Result<Json<ModelsResponse>, ApiError> {
+    let mut settings = state.node_settings();
+    settings.default_model = payload
+        .model
+        .as_deref()
+        .map(str::trim)
+        .filter(|model| !model.is_empty())
+        .map(|model| ModelRef::parse(model).canonical());
+
+    state
+        .apply_node_settings(settings)
+        .map_err(ApiError::BadRequest)?;
+    Ok(list_models(State(state)).await)
 }
 
 /// Handler for `PUT /api/v1/models`.

@@ -39,8 +39,6 @@ pub struct SystemConfigResponse {
     pub run_dir: String,
     /// Persistent data directory.
     pub data_dir: String,
-    /// Session memory sliding window depth.
-    pub memory_window: usize,
     /// LLM provider and agent configuration.
     pub llm: LlmConfigSection,
     /// Node-wide reply policy inherited by instances without an override.
@@ -51,21 +49,17 @@ pub struct SystemConfigResponse {
     pub environment: EnvironmentSection,
 }
 
-/// LLM provider configuration details.
+/// The node's conversational model: the global default model and how the agent is tuned.
 #[derive(Debug, Serialize)]
 pub struct LlmConfigSection {
-    /// Whether an LLM provider is active.
+    /// Whether the node has a model to answer with.
     pub configured: bool,
-    /// Where the effective provider comes from: `console`, `env` or `none`.
-    pub source: &'static str,
-    /// Active protocol identifier.
-    pub protocol: String,
-    /// Default model tag.
+    /// Canonical `<provider>/<model-id>` the node answers with by default; empty when unset.
     pub model: String,
-    /// Base URL if configured.
-    pub base_url: Option<String>,
-    /// Whether an API key credential was supplied.
-    pub api_key_configured: bool,
+    /// Provider serving that model.
+    pub provider: Option<String>,
+    /// Context window of that model in tokens, when known.
+    pub context_length: Option<u32>,
     /// Maximum tool reasoning loop iterations.
     pub max_iterations: usize,
     /// Sampling temperature if configured.
@@ -86,35 +80,33 @@ pub struct EnvironmentSection {
 }
 
 /// Handler for `GET /api/v1/system/config`.
-async fn system_config(
-    State(state): State<ApiState>,
-) -> Result<Json<SystemConfigResponse>, crate::error::ApiError> {
-    // Report the *effective* provider (console selection first, environment bootstrap second)
-    // rather than merely echoing the environment, which may have been overridden at runtime.
-    // A failure to read the persisted document is surfaced rather than masked by a default.
-    let active = super::providers::active_provider_info(&state)?;
-
-    let (max_iterations, temperature, max_tokens) = match state.agent() {
+async fn system_config(State(state): State<ApiState>) -> Json<SystemConfigResponse> {
+    // The agent is the ground truth for whether the node can answer and how it is tuned.
+    let llm = match state.agent() {
         Some(agent) => {
             let cfg = agent.config();
-            (cfg.max_iterations, cfg.temperature, cfg.max_tokens)
+            LlmConfigSection {
+                configured: true,
+                model: cfg.model_ref(),
+                provider: cfg.provider.clone(),
+                context_length: cfg.context_length,
+                max_iterations: cfg.max_iterations,
+                temperature: cfg.temperature,
+                max_tokens: cfg.max_tokens,
+            }
         }
-        None => (5, active.temperature, active.max_tokens),
+        None => LlmConfigSection {
+            configured: false,
+            model: String::new(),
+            provider: None,
+            context_length: None,
+            max_iterations: kanon_llm::AgentConfig::default().max_iterations,
+            temperature: None,
+            max_tokens: None,
+        },
     };
 
-    let llm = LlmConfigSection {
-        configured: active.configured,
-        source: active.source,
-        protocol: active.protocol,
-        model: active.model,
-        base_url: active.base_url,
-        api_key_configured: active.api_key_configured,
-        max_iterations,
-        temperature,
-        max_tokens,
-    };
-
-    Ok(Json(SystemConfigResponse {
+    Json(SystemConfigResponse {
         version: state.version().to_string(),
         uptime_seconds: state.started_at().elapsed().as_secs(),
         ipc_socket_path: state
@@ -128,7 +120,6 @@ async fn system_config(
             .base_dir()
             .to_string_lossy()
             .to_string(),
-        memory_window: 40,
         llm,
         reply_policy: state.reply_policy().get(),
         context_policy: state.context_policy().get(),
@@ -137,7 +128,7 @@ async fn system_config(
             arch: std::env::consts::ARCH,
             rust_edition: "2024",
         },
-    }))
+    })
 }
 
 /// Response describing the node-wide reply policy.

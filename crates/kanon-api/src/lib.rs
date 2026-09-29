@@ -20,14 +20,13 @@
 //! - `POST /api/v1/sessions/:id/reset` — clear history, keep persona and variables;
 //! - `POST /api/v1/sessions/:id/persona` — hot-swap the session persona;
 //! - `GET  /api/v1/personas` — persona catalog;
-//! - `GET  /api/v1/providers` — named provider directory plus the node's effective provider;
+//! - `GET  /api/v1/providers` — named provider endpoints plus protocol presets;
 //! - `POST /api/v1/providers` — create or replace one named provider endpoint;
-//! - `PUT  /api/v1/providers/active` — configure a provider as the default (persisted, applied live);
-//! - `DELETE /api/v1/providers/active` — clear every provider;
-//! - `PUT  /api/v1/providers/default` — change the default provider and model;
-//! - `POST /api/v1/providers/delete` — remove one named provider;
+//! - `POST /api/v1/providers/delete` — remove one named provider (and the default model it served);
+//! - `POST /api/v1/providers/test` — probe a configured endpoint with its stored credential;
 //! - `GET  /api/v1/models` — per-model settings catalog (`provider/model-id`);
 //! - `PUT  /api/v1/models` — upsert one model catalog entry;
+//! - `PUT  /api/v1/models/default` — set (or clear) the one global default model;
 //! - `POST /api/v1/models/delete` — remove one model catalog entry;
 //! - `POST /api/v1/models/discover` — read a provider's own model listing;
 //! - `GET  /api/v1/system/reply-policy` — node-wide reply policy;

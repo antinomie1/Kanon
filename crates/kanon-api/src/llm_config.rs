@@ -15,18 +15,24 @@
 //! component's settings survive a downgrade.
 //!
 //! # Precedence
-//! A provider saved here is the node's own configuration and wins over the `KANON_LLM_*`
+//! Providers saved here are the node's own configuration and win over the `KANON_LLM_*`
 //! environment bootstrap. Environment variables remain the way to deploy a node with a provider
-//! out of the box (containers, CI); the console is the way to change it afterwards. Every
-//! response reports which of the two is in effect, so the source is never ambiguous. The Milky
+//! out of the box (containers, CI); the console is the way to change it afterwards. The Milky
 //! adapter's configuration follows the same precedence.
+//!
+//! # One default model, no default provider
+//! The node answers with exactly one *global default model* (`default_model`, a canonical
+//! `<provider>/<model-id>`). Providers are only endpoints: none of them is "the default", so there
+//! is no second setting that could disagree with the model. Documents written before this rule
+//! still carry `default_provider` and the single-endpoint `llm` section; both are read (the latter
+//! is migrated into a named provider) and never written back.
 
 use std::path::{Path, PathBuf};
 
 use kanon_adapter_milky::MilkyConfig;
 use kanon_adapter_onebot::OneBotConfig;
 use kanon_core::{ContextPolicy, ReplyPolicy};
-use kanon_llm::{AgentConfig, ModelRef, ModelSpec, ProviderEntry};
+use kanon_llm::{ModelRef, ModelSpec, ProviderEntry};
 use serde::{Deserialize, Serialize};
 
 /// Default location of the node's system configuration, relative to the node working directory.
@@ -103,31 +109,15 @@ pub fn provider_presets() -> Vec<ProviderPresetDef> {
     ]
 }
 
-/// Where the effective model-routing settings came from.
-///
-/// Reported to the console so an operator can tell a provider saved through the console apart from
-/// one supplied by the `KANON_LLM_*` environment bootstrap. Purely descriptive: it is never
-/// persisted, only derived at load time.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub enum SettingsSource {
-    /// Loaded from the node's own configuration document.
-    #[default]
-    Console,
-    /// Synthesized from the `KANON_LLM_*` environment bootstrap.
-    Environment,
-}
-
 /// Everything `data/system.json` says about model routing.
 ///
-/// One value is passed around instead of five loose fields because these settings are always read,
-/// written and applied together: a provider without its default model, or a model catalog without
+/// One value is passed around instead of loose fields because these settings are always read,
+/// written and applied together: a default model without its provider, or a model catalog without
 /// the endpoints it belongs to, would be an inconsistent node.
 #[derive(Debug, Clone, Default)]
 pub struct NodeSettings {
     /// Configured provider endpoints.
     pub providers: Vec<ProviderEntry>,
-    /// Endpoint used when a model reference carries no provider.
-    pub default_provider: Option<String>,
     /// Canonical `<provider>/<model-id>` the node answers with by default.
     pub default_model: Option<String>,
     /// Per-model settings.
@@ -136,8 +126,6 @@ pub struct NodeSettings {
     pub reply_policy: ReplyPolicy,
     /// Node-wide context-extras policy inherited by instances without an override.
     pub context_policy: ContextPolicy,
-    /// Where these settings came from.
-    pub source: SettingsSource,
 }
 
 impl NodeSettings {
@@ -145,12 +133,46 @@ impl NodeSettings {
     pub fn has_providers(&self) -> bool {
         !self.providers.is_empty()
     }
+
+    /// Checks the settings as a whole, before anything is persisted or applied.
+    ///
+    /// The default model must name a configured provider: a default pointing nowhere would leave
+    /// the console describing a node that cannot answer.
+    pub fn validate(&self) -> Result<(), String> {
+        self.reply_policy.validate()?;
+
+        let mut names = std::collections::HashSet::new();
+        for provider in &self.providers {
+            provider.validate()?;
+            if !names.insert(provider.name.as_str()) {
+                return Err(format!("provider '{}' is defined twice", provider.name));
+            }
+        }
+
+        if let Some(model) = self.default_model.as_deref() {
+            let reference = ModelRef::parse(model);
+            match reference.provider() {
+                Some(provider) if names.contains(provider) => {}
+                Some(provider) => {
+                    return Err(format!(
+                        "default model '{model}' names provider '{provider}', which is not configured"
+                    ));
+                }
+                None => {
+                    return Err(format!(
+                        "default model '{model}' must be written as <provider>/<model-id>"
+                    ));
+                }
+            }
+        }
+        Ok(())
+    }
 }
 
-/// Serializable description of one model provider.
+/// Serializable description of one model provider, as the `KANON_LLM_*` environment describes it.
 ///
-/// Field names mirror the `KANON_LLM_*` environment variables so operators can move a provider
-/// between the environment bootstrap and the persisted configuration without renaming anything.
+/// Field names mirror the environment variables. The same shape is what a document written before
+/// named providers existed stored under `llm`, so it doubles as the migration source.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct LlmProviderConfig {
     /// Wire protocol: `openai`, `openai_responses` or `anthropic`.
@@ -173,15 +195,16 @@ pub struct LlmProviderConfig {
 /// Root document persisted in `data/system.json`.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 struct SystemConfigDocument {
-    /// Model provider selected through the management console, when any.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    /// Legacy single-endpoint provider. Read for migration, never written back.
+    #[serde(default, skip_serializing)]
     llm: Option<LlmProviderConfig>,
+    /// Legacy default-provider name. Read and ignored, never written back: the default is a model.
+    #[serde(default, skip_serializing)]
+    #[allow(dead_code)]
+    default_provider: Option<String>,
     /// Named provider endpoints, keyed by model-reference prefix.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     providers: Option<Vec<ProviderEntry>>,
-    /// Name of the endpoint used when a model reference carries no provider.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    default_provider: Option<String>,
     /// Canonical `<provider>/<model-id>` the node answers with by default.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     default_model: Option<String>,
@@ -211,7 +234,7 @@ struct SystemConfigDocument {
 impl LlmProviderConfig {
     /// Reads a provider description from the `KANON_LLM_*` environment variables.
     ///
-    /// Returns `Ok(None)` when `KANON_LLM_BASE_URL` is unset or blank, which means "no provider
+    /// Returns `None` when `KANON_LLM_BASE_URL` is unset or blank, which means "no provider
     /// configured by the environment" rather than an error. The variable set matches
     /// [`kanon_llm::provider_from_env`], which serves the standalone core binary.
     pub fn from_env() -> Option<Self> {
@@ -233,59 +256,12 @@ impl LlmProviderConfig {
         })
     }
 
-    /// Validates this description and instantiates the matching wire client.
-    ///
-    /// Protocol support is decided by [`kanon_llm::build_provider`], the same switch the
-    /// environment bootstrap uses, so an accepted protocol cannot behave differently per source.
-    pub fn resolve(&self) -> Result<std::sync::Arc<dyn kanon_llm::LlmProvider>, String> {
-        if self.model.trim().is_empty() {
-            return Err("Model identifier must not be empty".to_string());
-        }
-        if !self.base_url.starts_with("http://") && !self.base_url.starts_with("https://") {
-            return Err(format!(
-                "Base URL '{}' must start with http:// or https://",
-                self.base_url
-            ));
-        }
-
-        kanon_llm::build_provider(
-            &self.protocol,
-            self.base_url.clone(),
-            self.api_key.clone(),
-            self.model.clone(),
-        )
-    }
-
-    /// Agent tuning derived from this provider description.
-    pub fn agent_config(&self) -> AgentConfig {
-        AgentConfig {
-            default_model: self.model.clone(),
-            temperature: self.temperature,
-            max_tokens: self.max_tokens,
-            ..AgentConfig::default()
-        }
-    }
-
-    /// Returns a copy with the credential removed, safe to report to a console.
-    pub fn without_secret(&self) -> Self {
-        Self {
-            api_key: None,
-            ..self.clone()
-        }
-    }
-
-    /// Returns whether a usable credential is present.
-    pub fn has_api_key(&self) -> bool {
-        self.api_key
-            .as_ref()
-            .is_some_and(|key| !key.trim().is_empty())
-    }
-
     /// Converts this single-endpoint description into the named directory form.
     ///
-    /// Used for the `KANON_LLM_*` environment bootstrap, which predates named providers: the
+    /// Used for the `KANON_LLM_*` environment bootstrap and for migrating a legacy document: the
     /// endpoint is registered under a name derived from its base URL so the resulting model
-    /// reference is exactly what the console would have produced.
+    /// reference is exactly what the console would have produced, and that model becomes the
+    /// node's global default.
     pub fn into_node_settings(&self) -> NodeSettings {
         let name = derive_provider_name(&self.base_url);
         let provider = ProviderEntry {
@@ -296,22 +272,13 @@ impl LlmProviderConfig {
             temperature: self.temperature,
             max_tokens: self.max_tokens,
         };
-        let model = self.model.trim();
-        let default_model = match ModelRef::parse(model).provider() {
-            // A model id that already carries a prefix (an aggregator's `vendor/model`) is kept
-            // verbatim; prefixing it again would produce an id no endpoint recognises.
-            Some(_) => model.to_string(),
-            None => format!("{name}/{model}"),
-        };
-
         NodeSettings {
             providers: vec![provider],
-            default_provider: Some(name),
-            default_model: Some(default_model),
-            models: Vec::new(),
-            reply_policy: ReplyPolicy::default(),
-            context_policy: ContextPolicy::default(),
-            source: SettingsSource::Environment,
+            // The model id is always addressed through the endpoint it was configured with:
+            // an aggregator id such as `anthropic/claude-3.5-sonnet` becomes
+            // `openrouter/anthropic/claude-3.5-sonnet`, where only the first segment routes.
+            default_model: Some(format!("{name}/{}", self.model.trim())),
+            ..NodeSettings::default()
         }
     }
 }
@@ -375,22 +342,6 @@ fn same_endpoint(left: &str, right: &str) -> bool {
         .eq_ignore_ascii_case(right.trim().trim_end_matches('/'))
 }
 
-/// Resolves the provider a node should start with.
-///
-/// A provider persisted through the management console wins over the `KANON_LLM_*` environment
-/// bootstrap: the environment seeds a node, the console is how an operator changes it afterwards.
-/// The label names the winning source so startup can log exactly where the provider came from.
-pub fn resolve_bootstrap(
-    persisted: Option<LlmProviderConfig>,
-    from_env: Option<LlmProviderConfig>,
-) -> Option<(LlmProviderConfig, &'static str)> {
-    match (persisted, from_env) {
-        (Some(config), _) => Some((config, "data/system.json")),
-        (None, Some(config)) => Some((config, "environment")),
-        (None, None) => None,
-    }
-}
-
 /// Persistence for the node's `data/system.json` document.
 #[derive(Debug, Clone)]
 pub struct SystemConfigStore {
@@ -413,36 +364,6 @@ impl SystemConfigStore {
     /// Path of the persisted document.
     pub fn path(&self) -> &Path {
         &self.path
-    }
-
-    /// Loads the persisted provider, if the file exists and carries one.
-    ///
-    /// A malformed document is reported as an error instead of being ignored: silently starting
-    /// without the operator's chosen provider is exactly the failure mode this store prevents.
-    pub fn load(&self) -> Result<Option<LlmProviderConfig>, String> {
-        Ok(self.read_document()?.and_then(|document| document.llm))
-    }
-
-    /// Persists the provider, creating the parent directory when needed.
-    ///
-    /// The write is atomic (temporary file plus rename) so a crash mid-write can never leave a
-    /// truncated document that would fail the next startup.
-    pub fn save(&self, config: &LlmProviderConfig) -> Result<(), String> {
-        // Read-modify-write so unrelated system settings are preserved as the document grows.
-        let mut document = self.read_document()?.unwrap_or_default();
-        document.llm = Some(config.clone());
-        self.write_document(&document)
-    }
-
-    /// Removes the persisted provider, leaving any other system settings untouched.
-    pub fn clear(&self) -> Result<(), String> {
-        let mut document = match self.read_document()? {
-            Some(document) => document,
-            // No document at all: there is nothing persisted to clear.
-            None => return Ok(()),
-        };
-        document.llm = None;
-        self.write_document(&document)
     }
 
     /// Loads the persisted OneBot v11 configuration.
@@ -490,25 +411,31 @@ impl SystemConfigStore {
         match document.providers {
             Some(providers) if !providers.is_empty() => {
                 settings.providers = providers;
-                // A default that names no configured endpoint would make every unprefixed model
-                // reference fail at call time; dropping it here reports the honest state instead.
-                settings.default_provider = document
-                    .default_provider
-                    .filter(|name| settings.providers.iter().any(|entry| &entry.name == name));
                 settings.default_model = document.default_model;
             }
             _ => {
                 if let Some(legacy) = document.llm.as_ref() {
                     let migrated = legacy.into_node_settings();
                     settings.providers = migrated.providers;
-                    settings.default_provider = migrated.default_provider;
                     settings.default_model = migrated.default_model;
                 }
             }
         }
 
-        if settings.default_provider.is_none() {
-            settings.default_provider = settings.providers.first().map(|entry| entry.name.clone());
+        // A default that names no configured endpoint would fail every conversation at call
+        // time; dropping it here reports the honest state ("no default model") instead.
+        if let Some(model) = settings.default_model.as_deref() {
+            let reference = ModelRef::parse(model);
+            let served = reference
+                .provider()
+                .is_some_and(|name| settings.providers.iter().any(|entry| entry.name == name));
+            if !served {
+                tracing::warn!(
+                    default_model = %model,
+                    "Persisted default model names no configured provider; starting without one"
+                );
+                settings.default_model = None;
+            }
         }
 
         Ok(settings)
@@ -516,43 +443,17 @@ impl SystemConfigStore {
 
     /// Persists the node's model-routing settings.
     ///
-    /// The default provider is mirrored into the legacy `llm` section so an older binary — and the
-    /// existing `load()` callers — still see the endpoint that is actually in effect.
+    /// The write is atomic (temporary file plus rename) so a crash mid-write can never leave a
+    /// truncated document that would fail the next startup. Legacy sections are dropped here:
+    /// after one save the document holds exactly the current shape.
     pub fn save_node_settings(&self, settings: &NodeSettings) -> Result<(), String> {
         let mut document = self.read_document()?.unwrap_or_default();
 
         document.providers = Some(settings.providers.clone());
-        document.default_provider = settings.default_provider.clone();
         document.default_model = settings.default_model.clone();
         document.models = Some(settings.models.clone());
         document.reply_policy = Some(settings.reply_policy);
         document.context_policy = Some(settings.context_policy);
-
-        let active_provider = settings
-            .default_model
-            .as_deref()
-            .map(|model| ModelRef::parse(model))
-            .and_then(|reference| reference.provider().map(str::to_string))
-            .or_else(|| settings.default_provider.clone());
-
-        document.llm = active_provider
-            .as_deref()
-            .and_then(|name| settings.providers.iter().find(|entry| entry.name == name))
-            .map(|entry| LlmProviderConfig {
-                protocol: entry.protocol.clone(),
-                base_url: entry.base_url.clone(),
-                model: settings
-                    .default_model
-                    .as_deref()
-                    .map(|model| ModelRef::parse(model).model().to_string())
-                    .unwrap_or_default(),
-                api_key: entry.api_key.clone(),
-                temperature: entry.temperature,
-                max_tokens: entry.max_tokens,
-            })
-            // No resolvable default provider: the legacy section must not claim an endpoint that
-            // is not in effect.
-            .filter(|legacy| !legacy.model.is_empty());
 
         self.write_document(&document)
     }

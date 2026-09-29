@@ -40,13 +40,13 @@ export interface NodeHealth {
 
 // System configuration types
 export interface LlmConfig {
+  /** Whether the node has a model to answer with. */
   configured: boolean;
-  /** Where the effective provider comes from: console selection, environment bootstrap, or none. */
-  source: 'console' | 'env' | 'runtime' | 'none';
-  protocol: string;
+  /** Canonical `<provider>/<model-id>` the node answers with by default; empty when unset. */
   model: string;
-  base_url: string | null;
-  api_key_configured: boolean;
+  /** Provider serving that model. */
+  provider: string | null;
+  context_length: number | null;
   max_iterations: number;
   temperature: number | null;
   max_tokens: number | null;
@@ -64,7 +64,6 @@ export interface SystemConfig {
   ipc_socket_path: string;
   run_dir: string;
   data_dir: string;
-  memory_window: number;
   llm: LlmConfig;
   /** Node-wide reply policy inherited by instances without an override. */
   reply_policy: ReplyPolicy;
@@ -244,25 +243,6 @@ export interface DiscoverModelsResponse {
   persisted: number;
 }
 
-export interface ActiveProviderInfo {
-  configured: boolean;
-  /** Where the effective provider comes from: console selection, environment bootstrap, or none. */
-  source: 'console' | 'env' | 'runtime' | 'none';
-  protocol: string;
-  /** Canonical `<provider>/<model-id>` reference in effect. */
-  model: string;
-  /** Model id actually sent upstream (the provider prefix stripped). */
-  upstream_model: string;
-  /** Provider endpoint serving the default model. */
-  provider: string | null;
-  base_url: string | null;
-  api_key_configured: boolean;
-  temperature: number | null;
-  max_tokens: number | null;
-  context_length: number | null;
-  capabilities: ModelCapabilities;
-}
-
 /** One configured named endpoint, credential excluded. */
 export interface ProviderInfo {
   name: string;
@@ -271,7 +251,6 @@ export interface ProviderInfo {
   api_key_configured: boolean;
   temperature: number | null;
   max_tokens: number | null;
-  is_default: boolean;
 }
 
 export interface ProtocolDescriptor {
@@ -288,13 +267,8 @@ export interface ProviderPreset {
 }
 
 export interface ProvidersCatalog {
-  active: ActiveProviderInfo;
-  /** Every configured provider endpoint. */
+  /** Every configured provider endpoint. Providers are endpoints only: none of them is "the default". */
   providers: ProviderInfo[];
-  /** Name of the endpoint used for unprefixed model references. */
-  default_provider: string | null;
-  /** Canonical model reference the node answers with by default. */
-  default_model: string | null;
   available_protocols: ProtocolDescriptor[];
   presets: ProviderPreset[];
 }
@@ -310,15 +284,11 @@ export interface UpsertProviderRequest {
   clear_api_key?: boolean;
   temperature?: number;
   max_tokens?: number;
-  make_default?: boolean;
-  /** Model reference to answer with; required when making a new default. */
-  model?: string;
 }
 
-/** Request body of `PUT /api/v1/providers/default`. */
-export interface SetDefaultProviderRequest {
-  provider: string;
-  model?: string;
+/** Request body of `PUT /api/v1/models/default`; `null` clears the global default model. */
+export interface SetDefaultModelRequest {
+  model: string | null;
 }
 
 /** Request body of `POST /api/v1/providers/delete`. */
@@ -326,28 +296,19 @@ export interface DeleteProviderRequest {
   name: string;
 }
 
-/** Payload for `PUT /api/v1/providers/active`; mirrors the `KANON_LLM_*` variables. */
-export interface ActivateProviderRequest {
-  protocol: string;
-  base_url: string;
-  model: string;
-  api_key?: string;
-  temperature?: number;
-  max_tokens?: number;
-  /** Optional endpoint name; the server derives one from the base URL when omitted. */
-  provider_name?: string;
-}
-
-export interface ActivateProviderResponse {
-  applied: boolean;
-  message: string;
-  active: ActiveProviderInfo;
-}
-
+/**
+ * Request body of `POST /api/v1/providers/test`.
+ *
+ * `provider` names a configured endpoint, whose stored credential the server uses; the other
+ * fields are optional overrides for a form that is edited but not saved yet. Without `provider`,
+ * `protocol` and `base_url` describe a throw-away endpoint.
+ */
 export interface TestProviderRequest {
+  provider?: string;
   protocol?: string;
   base_url?: string;
   api_key?: string;
+  /** Upstream model id exactly as the endpoint expects it (no provider prefix). */
   model?: string;
   prompt?: string;
 }

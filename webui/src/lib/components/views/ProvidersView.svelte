@@ -3,7 +3,6 @@ import {
   AlertCircle,
   Check,
   CheckCircle2,
-  Cpu,
   Eye,
   EyeOff,
   Gauge,
@@ -14,13 +13,13 @@ import {
   Sparkles,
   Star,
   Trash2,
-  Zap,
 } from 'lucide-svelte';
 import { untrack } from 'svelte';
 import { t } from '../../stores/i18n.svelte';
 import { CAPABILITY_FLAGS, modelsStore } from '../../stores/models.svelte';
 import { providersStore } from '../../stores/providers.svelte';
 import type {
+  ModelSpec,
   ProviderPreset,
   TestProviderRequest,
   UpsertProviderRequest,
@@ -47,18 +46,6 @@ let isAddProviderOpen = $state(false);
 let isQuickConfigOpen = $state(false);
 let createProviderError = $state<string | null>(null);
 
-/** Draft of the legacy "create default provider" flow (`PUT /providers/active`). */
-let defaultDraft = $state({
-  protocol: 'openai',
-  base_url: '',
-  model: '',
-  api_key: '',
-  temperature: '',
-  max_tokens: '',
-  provider_name: '',
-});
-let isCreateDefaultOpen = $state(false);
-
 // Editor state for the selected endpoint. The stored credential is never returned by the API, so
 // `editApiKey` always starts blank and omitting it keeps whatever the node already holds.
 let editProtocol = $state('openai');
@@ -68,10 +55,53 @@ let editTemperature = $state('');
 let editMaxTokens = $state('');
 let clearApiKey = $state(false);
 let showApiKey = $state(false);
-let editModelRef = $state('');
+/** Upstream model id used by the connectivity test (no provider prefix). */
 let editTestModel = $state('');
 let saveNotification = $state(false);
 let discoveryMessage = $state<string | null>(null);
+
+/** Models of one endpoint by their upstream id, which is what a connectivity probe sends. */
+function upstreamModelsFor(provider: string): string[] {
+  return modelsStore.models
+    .filter((spec) => spec.provider === provider)
+    .map((spec) => spec.model);
+}
+
+/**
+ * Catalog models grouped by provider for the default-model picker.
+ *
+ * The current default is always listed, even when the catalog no longer describes it, so the
+ * picker never shows an empty selection for a model the node is actually using.
+ */
+let modelGroups = $derived.by(() => {
+  const groups = new Map<string, string[]>();
+  for (const spec of modelsStore.models) {
+    groups.set(spec.provider, [
+      ...(groups.get(spec.provider) ?? []),
+      modelsStore.referenceOf(spec),
+    ]);
+  }
+  const current = modelsStore.defaultModel;
+  if (current && !modelsStore.defaultSpec) {
+    const provider = current.split('/')[0];
+    groups.set(provider, [...(groups.get(provider) ?? []), current]);
+  }
+  return [...groups.entries()].map(([provider, references]) => ({
+    provider,
+    references,
+  }));
+});
+
+/** Text after the provider prefix, which is the model as the endpoint knows it. */
+function modelLabel(reference: string): string {
+  const slash = reference.indexOf('/');
+  return slash === -1 ? reference : reference.slice(slash + 1);
+}
+
+/** Whether an endpoint serves the global default model (derived, not a setting of its own). */
+function servesDefault(provider: string): boolean {
+  return modelsStore.defaultModel?.startsWith(`${provider}/`) ?? false;
+}
 
 /**
  * Loads the editor from the selected endpoint.
@@ -91,8 +121,7 @@ $effect(() => {
     editTemperature = provider.temperature?.toString() ?? '';
     editMaxTokens = provider.max_tokens?.toString() ?? '';
     clearApiKey = false;
-    editModelRef = modelsStore.referencesFor(name)[0] ?? '';
-    editTestModel = modelsStore.referencesFor(name)[0] ?? '';
+    editTestModel = upstreamModelsFor(name)[0] ?? '';
     showApiKey = false;
     discoveryMessage = null;
   });
@@ -102,17 +131,6 @@ $effect(() => {
 function optionalNumber(raw: string): number | undefined {
   const value = Number(raw.trim());
   return raw.trim() !== '' && Number.isFinite(value) ? value : undefined;
-}
-
-/**
- * Strips the provider prefix from a reference.
- *
- * The test endpoint sends the model tag upstream, so a canonical `provider/model` reference must
- * lose its prefix; doing it here keeps the same rule for the reference and the probe.
- */
-function upstreamModel(reference: string): string {
-  const slash = reference.indexOf('/');
-  return slash === -1 ? reference : reference.slice(slash + 1);
 }
 
 function openAddProvider() {
@@ -162,7 +180,7 @@ async function handleCreateProvider() {
   if (ok) {
     isAddProviderOpen = false;
   } else {
-    createProviderError = providersStore.nodeError;
+    createProviderError = providersStore.actionError;
   }
 }
 
@@ -182,6 +200,8 @@ async function handleSaveProvider() {
 
   const ok = await providersStore.upsertProvider(req);
   if (ok) {
+    editApiKey = '';
+    clearApiKey = false;
     saveNotification = true;
     setTimeout(() => {
       saveNotification = false;
@@ -192,17 +212,11 @@ async function handleSaveProvider() {
 async function handleDeleteProvider() {
   const provider = providersStore.selectedProvider;
   if (!provider) return;
-  if (!confirm(t('providers.delete_confirm'))) return;
+  const message = servesDefault(provider.name)
+    ? `${t('providers.delete_confirm')}\n\n${t('providers.delete_default_warning')}`
+    : t('providers.delete_confirm');
+  if (!confirm(message)) return;
   await providersStore.deleteProvider(provider.name);
-}
-
-async function handleSetDefault() {
-  const provider = providersStore.selectedProvider;
-  if (!provider) return;
-  await providersStore.setDefaultProvider({
-    provider: provider.name,
-    model: editModelRef.trim() || undefined,
-  });
 }
 
 async function handleDiscover() {
@@ -215,188 +229,116 @@ async function handleDiscover() {
       count: res.discovered.length,
       persisted: res.persisted,
     });
+    if (!editTestModel)
+      editTestModel = upstreamModelsFor(provider.name)[0] ?? '';
   }
 }
 
 /**
  * Probes the selected endpoint.
  *
- * The endpoint the node already answers with is tested without coordinates so the server reuses
- * its own stored credential; every other endpoint is probed with what the form holds, because the
- * browser never receives the stored secret.
+ * The request names the provider, so the node supplies the stored credential itself. The form's
+ * protocol, URL and any typed key are sent as overrides, which lets an operator verify an edit
+ * before saving it.
  */
 async function handleTestProvider() {
   const provider = providersStore.selectedProvider;
   if (!provider) return;
 
-  const reference = editTestModel.trim() || editModelRef.trim();
-  const isEffective = providersStore.catalog?.active.provider === provider.name;
-  const req: TestProviderRequest = { prompt: 'ping' };
-  if (reference) req.model = upstreamModel(reference);
-
-  if (!(isEffective && !editApiKey.trim())) {
-    req.protocol = editProtocol;
-    req.base_url = editBaseUrl.trim() || undefined;
-    if (editApiKey.trim()) req.api_key = editApiKey.trim();
-  }
+  const req: TestProviderRequest = {
+    prompt: 'ping',
+    protocol: editProtocol,
+    base_url: editBaseUrl.trim() || undefined,
+  };
+  if (editApiKey.trim()) req.api_key = editApiKey.trim();
+  if (editTestModel.trim()) req.model = editTestModel.trim();
 
   await providersStore.testProvider(provider.name, req);
 }
 
-async function handleCreateDefault() {
-  if (!defaultDraft.model.trim() || !defaultDraft.base_url.trim()) return;
-  const res = await providersStore.activateOnNode({
-    protocol: defaultDraft.protocol,
-    base_url: defaultDraft.base_url.trim(),
-    model: defaultDraft.model.trim(),
-    api_key: defaultDraft.api_key.trim() || undefined,
-    temperature: optionalNumber(defaultDraft.temperature),
-    max_tokens: optionalNumber(defaultDraft.max_tokens),
-    provider_name: defaultDraft.provider_name.trim() || undefined,
-  });
-  if (res) isCreateDefaultOpen = false;
-}
-
-async function handleClearAll() {
-  if (!confirm(t('providers.clear_confirm'))) return;
-  await providersStore.clearOnNode();
+/** Applies the picker's choice as the one global default model; blank clears it. */
+async function handleDefaultChange(
+  event: Event & { currentTarget: HTMLSelectElement },
+) {
+  const select = event.currentTarget;
+  const ok = await modelsStore.setDefault(select.value || null);
+  // On refusal the node keeps its previous default: put the picker back on it.
+  if (!ok) select.value = modelsStore.defaultModel ?? '';
 }
 </script>
 
 <div class="p-6 space-y-6 max-w-7xl mx-auto font-sans">
-  <!-- Effective node provider: this is what actually decides whether the bot replies. -->
-  <div class="bg-white dark:bg-zinc-900 border border-zinc-200 dark:border-zinc-800 rounded-xl p-4 sm:p-5 shadow-xs space-y-4">
-    <div class="flex flex-wrap items-start justify-between gap-4">
-      <div class="flex items-start gap-3.5">
-        <div
-          class="p-2.5 rounded-xl {providersStore.nodeProvider?.configured
-            ? 'bg-emerald-500/10 text-emerald-600 dark:text-emerald-400'
-            : 'bg-amber-500/10 text-amber-600 dark:text-amber-400'}"
-        >
-          <Cpu class="w-6 h-6" />
+  <!-- The one global default model: what answers unless an instance picks its own. -->
+  {#if providersStore.providers.length > 0}
+    {@const defaultSpec = modelsStore.defaultSpec}
+    <div class="bg-white dark:bg-zinc-900 border border-zinc-200 dark:border-zinc-800 rounded-xl p-4 sm:p-5 shadow-xs space-y-4">
+      <div class="flex flex-wrap items-start justify-between gap-4">
+        <div class="flex items-start gap-3.5">
+          <div
+            class="p-2.5 rounded-xl {modelsStore.defaultModel
+              ? 'bg-emerald-500/10 text-emerald-600 dark:text-emerald-400'
+              : 'bg-amber-500/10 text-amber-600 dark:text-amber-400'}"
+          >
+            <Star class="w-6 h-6" />
+          </div>
+          <div class="min-w-0">
+            <h3 class="text-base font-semibold text-zinc-900 dark:text-zinc-100">{t('providers.default_model_title')}</h3>
+            <p class="text-xs text-zinc-500 mt-1 max-w-xl leading-relaxed">{t('providers.default_model_desc')}</p>
+          </div>
         </div>
-        <div>
-          <div class="flex items-center gap-2.5 flex-wrap">
-            <span class="text-sm text-zinc-500 font-medium">{t('providers.node_effective')}</span>
-            {#if providersStore.nodeProvider?.configured}
-              <code class="px-2.5 py-1 rounded-lg font-mono text-sm font-bold bg-emerald-50 dark:bg-emerald-950/80 text-emerald-600 dark:text-emerald-400 border border-emerald-200 dark:border-emerald-800/60">
-                {providersStore.nodeProvider.model}
-              </code>
-              <span class="px-2 py-0.5 rounded-md text-xs font-mono border border-zinc-200 dark:border-zinc-700 text-zinc-500">
-                {t(`providers.source_${providersStore.nodeProvider.source}`)}
-              </span>
-            {:else}
-              <span class="text-sm text-amber-600 dark:text-amber-400 font-medium">
-                {t('providers.node_none')}
+
+        <div class="w-full sm:w-96">
+          <label for="global-default-model" class="sr-only">{t('providers.default_model_title')}</label>
+          <select
+            id="global-default-model"
+            value={modelsStore.defaultModel ?? ''}
+            onchange={handleDefaultChange}
+            disabled={modelsStore.saving}
+            class="w-full px-3.5 py-2.5 text-sm font-mono bg-zinc-50 dark:bg-zinc-950 border rounded-lg text-zinc-900 dark:text-zinc-100 focus:outline-hidden cursor-pointer disabled:opacity-60
+              {modelsStore.defaultModel ? 'border-emerald-300 dark:border-emerald-800/70' : 'border-amber-300 dark:border-amber-700/70'}"
+          >
+            <option value="">{t('providers.default_model_unset')}</option>
+            {#each modelGroups as group (group.provider)}
+              <optgroup label={group.provider}>
+                {#each group.references as reference (reference)}
+                  <option value={reference}>{modelLabel(reference)}</option>
+                {/each}
+              </optgroup>
+            {/each}
+          </select>
+        </div>
+      </div>
+
+      {#if modelsStore.defaultModel}
+        <div class="flex flex-wrap items-center gap-2 text-xs font-mono text-zinc-500">
+          <code class="px-2.5 py-1 rounded-lg font-bold text-sm bg-emerald-50 dark:bg-emerald-950/80 text-emerald-600 dark:text-emerald-400 border border-emerald-200 dark:border-emerald-800/60">
+            {modelsStore.defaultModel}
+          </code>
+          {#if defaultSpec?.context_length}
+            <span>· {t('providers.context_length')}: {defaultSpec.context_length}</span>
+          {/if}
+          {#each CAPABILITY_FLAGS as flag (flag)}
+            {#if defaultSpec?.capabilities[flag]}
+              <span class="px-2 py-0.5 rounded-md text-[11px] border border-indigo-200 dark:border-indigo-800/60 text-indigo-600 dark:text-indigo-400 bg-indigo-50 dark:bg-indigo-950/40">
+                {t(`models.cap_${flag}`)}
               </span>
             {/if}
-          </div>
-          <p class="text-xs text-zinc-400 mt-1 font-mono break-all">
-            {providersStore.nodeProvider?.base_url ?? 'base_url: -'}
-            {providersStore.nodeProvider?.api_key_configured ? ' · key: ✓' : ' · key: -'}
-          </p>
-          {#if providersStore.nodeProvider?.configured}
-            <div class="flex flex-wrap items-center gap-2 mt-2 text-xs font-mono text-zinc-500">
-              {#if providersStore.nodeProvider.provider}
-                <span>{t('providers.default_provider')}: {providersStore.nodeProvider.provider}</span>
-              {/if}
-              <span>· {providersStore.nodeProvider.protocol}</span>
-              {#if providersStore.nodeProvider.upstream_model}
-                <span>· {t('providers.upstream_model')}: {providersStore.nodeProvider.upstream_model}</span>
-              {/if}
-              {#if providersStore.nodeProvider.context_length}
-                <span>· {t('providers.context_length')}: {providersStore.nodeProvider.context_length}</span>
-              {/if}
-            </div>
-            <div class="flex flex-wrap items-center gap-1.5 mt-2">
-              {#each CAPABILITY_FLAGS as flag (flag)}
-                {#if providersStore.nodeProvider.capabilities[flag]}
-                  <span class="px-2 py-0.5 rounded-md text-[11px] font-mono border border-indigo-200 dark:border-indigo-800/60 text-indigo-600 dark:text-indigo-400 bg-indigo-50 dark:bg-indigo-950/40">
-                    {t(`models.cap_${flag}`)}
-                  </span>
-                {/if}
-              {/each}
-            </div>
-          {/if}
+          {/each}
         </div>
-      </div>
+      {:else}
+        <p class="text-xs text-amber-600 dark:text-amber-400 flex items-center gap-1.5">
+          <AlertCircle class="w-3.5 h-3.5 shrink-0" />
+          {modelGroups.length === 0 ? t('providers.default_model_no_models') : t('providers.default_model_none')}
+        </p>
+      {/if}
 
-      <div class="flex items-center gap-2">
-        <button
-          onclick={() => {
-            defaultDraft = {
-              protocol: 'openai',
-              base_url: '',
-              model: '',
-              api_key: '',
-              temperature: '',
-              max_tokens: '',
-              provider_name: '',
-            };
-            isCreateDefaultOpen = true;
-          }}
-          class="px-3.5 py-2 bg-emerald-600 hover:bg-emerald-700 text-white rounded-lg text-sm font-medium flex items-center gap-2 transition cursor-pointer shadow-2xs"
-          title={t('providers.create_default_hint')}
-        >
-          <Zap class="w-4 h-4" />
-          <span>{t('providers.create_default')}</span>
-        </button>
-        {#if providersStore.providers.length > 0}
-          <button
-            onclick={handleClearAll}
-            disabled={providersStore.nodeActionPending}
-            class="px-3 py-2 bg-zinc-100 dark:bg-zinc-800 hover:bg-rose-50 dark:hover:bg-rose-950/30 text-zinc-600 dark:text-zinc-300 hover:text-rose-600 rounded-lg text-sm font-medium transition cursor-pointer disabled:opacity-50"
-            title={t('providers.clear_all')}
-          >
-            <Trash2 class="w-4 h-4" />
-          </button>
-        {/if}
-      </div>
+      {#if modelsStore.error}
+        <p class="text-xs text-rose-600 dark:text-rose-400 flex items-center gap-1.5">
+          <AlertCircle class="w-3.5 h-3.5 shrink-0" /> {modelsStore.error}
+        </p>
+      {/if}
     </div>
-
-    {#if providersStore.nodeMessage}
-      <p class="text-xs text-emerald-600 dark:text-emerald-400 flex items-center gap-1.5">
-        <CheckCircle2 class="w-3.5 h-3.5" /> {providersStore.nodeMessage}
-      </p>
-    {/if}
-    {#if providersStore.nodeError}
-      <p class="text-xs text-rose-600 dark:text-rose-400 flex items-center gap-1.5">
-        <AlertCircle class="w-3.5 h-3.5" /> {providersStore.nodeError}
-      </p>
-    {/if}
-    <p class="text-xs text-zinc-400">{t('providers.node_hint')}</p>
-  </div>
-
-  <!-- Persisted default: what an unprefixed model reference resolves to. -->
-  <div class="bg-white dark:bg-zinc-900 border border-zinc-200 dark:border-zinc-800 rounded-xl p-4 sm:p-5 shadow-xs flex flex-wrap items-center justify-between gap-4">
-    <div class="flex items-center gap-3.5">
-      <div class="p-2.5 rounded-xl bg-indigo-500/10 text-indigo-600 dark:text-indigo-400">
-        <Star class="w-6 h-6" />
-      </div>
-      <div>
-        <div class="flex items-center gap-2.5 flex-wrap">
-          <span class="text-sm text-zinc-500 font-medium">{t('providers.default_provider')}:</span>
-          {#if providersStore.defaultProvider}
-            <code class="px-2.5 py-1 rounded-lg font-mono text-sm font-bold bg-indigo-50 dark:bg-indigo-950/80 text-indigo-600 dark:text-indigo-400 border border-indigo-200 dark:border-indigo-800/60">
-              {providersStore.defaultProvider}
-            </code>
-          {:else}
-            <span class="text-sm text-zinc-400 font-mono">{t('providers.no_providers')}</span>
-          {/if}
-        </div>
-        <div class="flex items-center gap-2.5 mt-1.5 flex-wrap">
-          <span class="text-xs text-zinc-500">{t('providers.default_model')}:</span>
-          {#if providersStore.defaultModel}
-            <code class="font-mono text-xs font-semibold text-zinc-700 dark:text-zinc-300">
-              {providersStore.defaultModel}
-            </code>
-          {:else}
-            <span class="text-xs text-zinc-400 font-mono">{t('providers.default_model_none')}</span>
-          {/if}
-        </div>
-      </div>
-    </div>
-  </div>
+  {/if}
 
   {#if providersStore.catalog === null && providersStore.loading}
     <p class="text-sm text-zinc-400">{t('common.loading')}</p>
@@ -475,10 +417,9 @@ async function handleClearAll() {
                   <span class="text-xs font-mono px-2 py-0.5 rounded bg-zinc-200/70 dark:bg-zinc-800 text-zinc-600 dark:text-zinc-400">
                     {prov.protocol}
                   </span>
-                  {#if prov.is_default}
-                    <span class="inline-flex items-center gap-1 px-2 py-0.5 rounded text-xs font-medium font-mono bg-emerald-500/10 text-emerald-600 dark:text-emerald-400 border border-emerald-500/20">
-                      <Star class="w-3 h-3 fill-emerald-500" />
-                      {t('providers.default_badge')}
+                  {#if servesDefault(prov.name)}
+                    <span title={t('providers.serves_default')} class="inline-flex text-emerald-500">
+                      <Star class="w-3.5 h-3.5 fill-emerald-500" />
                     </span>
                   {/if}
                 </div>
@@ -523,14 +464,14 @@ async function handleClearAll() {
                 {/if}
                 <button
                   onclick={handleSaveProvider}
-                  disabled={providersStore.nodeActionPending}
+                  disabled={providersStore.pending}
                   class="px-3.5 py-2 bg-zinc-900 text-white dark:bg-zinc-100 dark:text-zinc-900 hover:bg-zinc-800 dark:hover:bg-zinc-200 rounded-lg text-sm font-medium transition cursor-pointer disabled:opacity-50"
                 >
                   {t('providers.save')}
                 </button>
                 <button
                   onclick={handleDeleteProvider}
-                  disabled={providersStore.nodeActionPending}
+                  disabled={providersStore.pending}
                   class="p-2 text-zinc-400 hover:text-rose-500 transition cursor-pointer disabled:opacity-50"
                   title={t('providers.delete')}
                 >
@@ -632,60 +573,35 @@ async function handleClearAll() {
             </div>
           </div>
 
-          <!-- Default model + discovery + connectivity -->
+          <!-- Connectivity + model discovery -->
           <div class="bg-white dark:bg-zinc-900 border border-zinc-200 dark:border-zinc-800 rounded-xl p-5 shadow-xs space-y-4">
             <div class="flex items-center gap-2 pb-3 border-b border-zinc-100 dark:border-zinc-800">
-              <Star class="w-4.5 h-4.5 text-amber-500" />
-              <h3 class="text-base font-semibold text-zinc-900 dark:text-zinc-100">{t('providers.default_model')}</h3>
-              {#if prov.is_default}
-                <span class="px-2 py-0.5 rounded text-xs font-mono bg-emerald-500/10 text-emerald-600 dark:text-emerald-400 border border-emerald-500/20">
-                  {t('providers.default_badge')}
-                </span>
-              {/if}
+              <Gauge class="w-4.5 h-4.5 text-indigo-500" />
+              <h3 class="text-base font-semibold text-zinc-900 dark:text-zinc-100">{t('providers.test_title')}</h3>
             </div>
 
             <div class="grid grid-cols-1 sm:grid-cols-2 gap-4">
-              <div>
-                <label for="prov-default-model-input" class="block text-xs sm:text-sm font-medium text-zinc-500 mb-1.5">{t('providers.default_model_label')}:</label>
-                <input
-                  id="prov-default-model-input"
-                  type="text"
-                  list="prov-default-model-options"
-                  bind:value={editModelRef}
-                  placeholder={t('providers.default_model_placeholder')}
-                  class="w-full px-3.5 py-2 text-sm font-mono bg-zinc-50 dark:bg-zinc-950 border border-zinc-200 dark:border-zinc-800 rounded-lg text-zinc-900 dark:text-zinc-100 focus:outline-hidden"
-                />
-                <datalist id="prov-default-model-options">
-                  {#each providersStore.referencesFor(prov.name) as reference (reference)}
-                    <option value={reference}></option>
-                  {/each}
-                </datalist>
-                <span class="text-xs text-zinc-400 mt-1 block">{t('providers.default_model_hint')}</span>
-                <div class="flex items-center gap-2 mt-3">
-                  <button
-                    onclick={handleSetDefault}
-                    disabled={providersStore.nodeActionPending}
-                    class="px-3.5 py-2 bg-indigo-600 hover:bg-indigo-700 text-white rounded-lg text-sm font-medium flex items-center gap-2 transition cursor-pointer disabled:opacity-50"
-                  >
-                    <Star class="w-4 h-4" />
-                    <span>{t('providers.set_default')}</span>
-                  </button>
-                </div>
-              </div>
-
               <div class="space-y-3">
                 <div>
                   <label for="prov-test-model-input" class="block text-xs sm:text-sm font-medium text-zinc-500 mb-1.5">{t('providers.test_model_label')}:</label>
                   <input
                     id="prov-test-model-input"
                     type="text"
-                    list="prov-default-model-options"
+                    list="prov-test-model-options"
                     bind:value={editTestModel}
-                    placeholder={t('providers.default_model_placeholder')}
+                    placeholder={t('providers.test_model_placeholder')}
                     class="w-full px-3.5 py-2 text-sm font-mono bg-zinc-50 dark:bg-zinc-950 border border-zinc-200 dark:border-zinc-800 rounded-lg text-zinc-900 dark:text-zinc-100 focus:outline-hidden"
                   />
+                  <datalist id="prov-test-model-options">
+                    {#each upstreamModelsFor(prov.name) as model (model)}
+                      <option value={model}></option>
+                    {/each}
+                  </datalist>
                 </div>
                 <p class="text-xs text-zinc-400 leading-relaxed">{t('providers.test_key_hint')}</p>
+              </div>
+
+              <div class="space-y-3">
                 <div class="flex flex-wrap items-center gap-2">
                   <button
                     onclick={handleTestProvider}
@@ -733,9 +649,6 @@ async function handleClearAll() {
                     <CheckCircle2 class="w-3.5 h-3.5" />
                     <span>{discoveryMessage}</span>
                   </p>
-                {/if}
-                {#if modelsStore.error}
-                  <p class="text-xs font-mono text-rose-600 dark:text-rose-400">{modelsStore.error}</p>
                 {/if}
               </div>
             </div>
@@ -925,146 +838,10 @@ async function handleClearAll() {
         </button>
         <button
           onclick={handleCreateProvider}
-          disabled={!providerDraft.name.trim() || providersStore.nodeActionPending}
+          disabled={!providerDraft.name.trim() || providersStore.pending}
           class="px-4 py-2 bg-zinc-900 text-white dark:bg-zinc-100 dark:text-zinc-900 hover:bg-zinc-800 dark:hover:bg-zinc-200 rounded-lg text-sm font-medium cursor-pointer disabled:opacity-50"
         >
           {t('providers.create_provider')}
-        </button>
-      </div>
-    </div>
-  </div>
-{/if}
-
-<!-- Modal: legacy activation, surfaced as "create default provider" -->
-{#if isCreateDefaultOpen}
-  <!-- svelte-ignore a11y_click_events_have_key_events -->
-  <div
-    class="fixed inset-0 bg-black/40 backdrop-blur-xs z-50 flex items-center justify-center p-4"
-    onclick={() => (isCreateDefaultOpen = false)}
-    role="button"
-    tabindex="-1"
-  >
-    <div
-      class="w-full max-w-md bg-white dark:bg-zinc-900 border border-zinc-200 dark:border-zinc-800 rounded-xl shadow-2xl p-6 space-y-4"
-      onclick={(e) => e.stopPropagation()}
-      role="dialog"
-      tabindex="-1"
-    >
-      <div class="flex items-center justify-between pb-3 border-b border-zinc-100 dark:border-zinc-800">
-        <h3 class="text-base font-semibold text-zinc-900 dark:text-zinc-100 flex items-center gap-2">
-          <Zap class="w-4.5 h-4.5 text-emerald-500" />
-          <span>{t('providers.create_default_title')}</span>
-        </h3>
-        <button
-          onclick={() => (isCreateDefaultOpen = false)}
-          class="text-zinc-400 hover:text-zinc-600 dark:hover:text-zinc-200 text-sm cursor-pointer"
-        >
-          ✕
-        </button>
-      </div>
-
-      <p class="text-xs text-zinc-500 leading-relaxed">{t('providers.create_default_hint')}</p>
-
-      <div class="space-y-3.5 text-sm font-mono">
-        <div>
-          <label for="default-prov-protocol" class="block text-xs font-sans text-zinc-500 mb-1">{t('providers.protocol')}:</label>
-          <select
-            id="default-prov-protocol"
-            bind:value={defaultDraft.protocol}
-            class="w-full px-3.5 py-2 text-sm bg-zinc-50 dark:bg-zinc-950 border border-zinc-200 dark:border-zinc-800 rounded-lg text-zinc-900 dark:text-zinc-100 focus:outline-hidden cursor-pointer"
-          >
-            {#each providersStore.catalog?.available_protocols ?? [] as proto (proto.id)}
-              <option value={proto.id}>{proto.name}</option>
-            {/each}
-          </select>
-        </div>
-
-        <div>
-          <label for="default-prov-name" class="block text-xs font-sans text-zinc-500 mb-1">{t('providers.name')}:</label>
-          <input
-            id="default-prov-name"
-            type="text"
-            bind:value={defaultDraft.provider_name}
-            placeholder="deepseek"
-            class="w-full px-3.5 py-2 text-sm bg-zinc-50 dark:bg-zinc-950 border border-zinc-200 dark:border-zinc-800 rounded-lg text-zinc-900 dark:text-zinc-100 focus:outline-hidden"
-          />
-          <p class="text-xs font-sans text-zinc-400 mt-1">{t('providers.name_hint')}</p>
-        </div>
-
-        <div>
-          <label for="default-prov-base-url" class="block text-xs font-sans text-zinc-500 mb-1">{t('providers.base_url')}:</label>
-          <input
-            id="default-prov-base-url"
-            type="text"
-            bind:value={defaultDraft.base_url}
-            placeholder={protocolDefaults[defaultDraft.protocol] ?? ''}
-            class="w-full px-3.5 py-2 text-sm bg-zinc-50 dark:bg-zinc-950 border border-zinc-200 dark:border-zinc-800 rounded-lg text-zinc-900 dark:text-zinc-100 focus:outline-hidden"
-          />
-        </div>
-
-        <div>
-          <label for="default-prov-model" class="block text-xs font-sans text-zinc-500 mb-1">{t('providers.default_model_label')}:</label>
-          <input
-            id="default-prov-model"
-            type="text"
-            bind:value={defaultDraft.model}
-            placeholder={t('providers.default_model_placeholder')}
-            class="w-full px-3.5 py-2 text-sm bg-zinc-50 dark:bg-zinc-950 border border-zinc-200 dark:border-zinc-800 rounded-lg text-zinc-900 dark:text-zinc-100 focus:outline-hidden"
-          />
-          <p class="text-xs font-sans text-zinc-400 mt-1">{t('providers.default_model_hint')}</p>
-        </div>
-
-        <div>
-          <label for="default-prov-api-key" class="block text-xs font-sans text-zinc-500 mb-1">{t('providers.api_key')}:</label>
-          <input
-            id="default-prov-api-key"
-            type="password"
-            bind:value={defaultDraft.api_key}
-            placeholder="sk-..."
-            class="w-full px-3.5 py-2 text-sm bg-zinc-50 dark:bg-zinc-950 border border-zinc-200 dark:border-zinc-800 rounded-lg text-zinc-900 dark:text-zinc-100 focus:outline-hidden"
-          />
-        </div>
-
-        <div class="grid grid-cols-2 gap-3">
-          <div>
-            <label for="default-prov-temperature" class="block text-xs font-sans text-zinc-500 mb-1">{t('providers.temperature')}:</label>
-            <input
-              id="default-prov-temperature"
-              type="number"
-              min="0"
-              max="2"
-              step="0.1"
-              bind:value={defaultDraft.temperature}
-              class="w-full px-3.5 py-2 text-sm bg-zinc-50 dark:bg-zinc-950 border border-zinc-200 dark:border-zinc-800 rounded-lg text-zinc-900 dark:text-zinc-100 focus:outline-hidden"
-            />
-          </div>
-          <div>
-            <label for="default-prov-max-tokens" class="block text-xs font-sans text-zinc-500 mb-1">{t('providers.max_tokens')}:</label>
-            <input
-              id="default-prov-max-tokens"
-              type="number"
-              min="1"
-              step="1"
-              bind:value={defaultDraft.max_tokens}
-              class="w-full px-3.5 py-2 text-sm bg-zinc-50 dark:bg-zinc-950 border border-zinc-200 dark:border-zinc-800 rounded-lg text-zinc-900 dark:text-zinc-100 focus:outline-hidden"
-            />
-          </div>
-        </div>
-      </div>
-
-      <div class="pt-3 border-t border-zinc-100 dark:border-zinc-800 flex items-center justify-end gap-2">
-        <button
-          onclick={() => (isCreateDefaultOpen = false)}
-          class="px-3.5 py-2 bg-zinc-100 dark:bg-zinc-800 hover:bg-zinc-200 dark:hover:bg-zinc-700 text-zinc-700 dark:text-zinc-300 rounded-lg text-sm font-medium cursor-pointer"
-        >
-          {t('common.cancel')}
-        </button>
-        <button
-          onclick={handleCreateDefault}
-          disabled={!defaultDraft.model.trim() || !defaultDraft.base_url.trim() || providersStore.nodeActionPending}
-          class="px-4 py-2 bg-emerald-600 hover:bg-emerald-700 text-white rounded-lg text-sm font-medium cursor-pointer disabled:opacity-50"
-        >
-          {t('providers.apply_to_node')}
         </button>
       </div>
     </div>

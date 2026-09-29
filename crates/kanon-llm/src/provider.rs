@@ -8,13 +8,13 @@
 //! for the rule that decides which endpoint a model is sent to — the pipeline, the CLI command and
 //! the console all observe the same registry.
 //!
-//! # Why an unknown prefix falls back instead of failing
-//! Aggregators (OpenRouter and friends) publish model ids that already contain a vendor prefix
-//! (`anthropic/claude-3.5-sonnet`). When the prefix does not name a configured endpoint, the
-//! reference is passed through to the default endpoint *verbatim*, which is exactly the id such an
-//! aggregator expects. When the prefix does name an endpoint, it is stripped and the remainder is
-//! sent upstream, which is what a first-party endpoint expects. Both behaviours are explicit, and
-//! neither silently rewrites a model id an operator typed.
+//! # There is no default provider
+//! Which model answers by default is the *node's* decision (one global default model), not a
+//! property of an endpoint. The registry therefore never guesses: a reference must name a
+//! configured endpoint, and anything else is an explicit error. That includes aggregator ids
+//! (OpenRouter and friends publish ids that already contain a vendor prefix): they are addressed as
+//! `openrouter/anthropic/claude-3.5-sonnet`, where only the first segment is the provider and the
+//! remainder reaches the endpoint verbatim.
 
 use std::collections::BTreeMap;
 use std::sync::{Arc, RwLock};
@@ -62,6 +62,10 @@ impl ProviderEntry {
     }
 
     /// Validates the fields the registry and the HTTP client require.
+    ///
+    /// The protocol is checked by constructing the client through [`build_provider`], the single
+    /// owner of the protocol switch, so an endpoint accepted here can never be rejected later when
+    /// the registry builds its client.
     pub fn validate(&self) -> Result<(), String> {
         if self.name.trim().is_empty() {
             return Err("provider name must not be empty".to_string());
@@ -75,7 +79,14 @@ impl ProviderEntry {
                 self.name, self.base_url
             ));
         }
-        Ok(())
+        build_provider(
+            &self.protocol,
+            self.base_url.clone(),
+            self.api_key.clone(),
+            String::new(),
+        )
+        .map(|_| ())
+        .map_err(|err| format!("provider '{}': {err}", self.name))
     }
 
     /// Returns whether a usable credential is present.
@@ -120,8 +131,6 @@ impl std::fmt::Debug for ResolvedProvider {
 pub struct ProviderRegistry {
     /// Configured endpoints by name.
     entries: RwLock<BTreeMap<String, ProviderEntry>>,
-    /// Name of the endpoint used when a reference carries no provider.
-    default_provider: RwLock<Option<String>>,
     /// Built clients by provider name, invalidated whenever the directory is replaced.
     clients: RwLock<BTreeMap<String, Arc<dyn LlmProvider>>>,
 }
@@ -134,7 +143,6 @@ impl std::fmt::Debug for ProviderRegistry {
                 "providers",
                 &self.entries().keys().cloned().collect::<Vec<String>>(),
             )
-            .field("default_provider", &self.default_provider())
             .finish()
     }
 }
@@ -145,23 +153,18 @@ impl ProviderRegistry {
         Self::default()
     }
 
-    /// Creates a registry holding a single default provider.
+    /// Creates a registry holding a single endpoint.
     pub fn single(entry: ProviderEntry) -> Result<Self, String> {
         let registry = Self::new();
-        let name = entry.name.clone();
-        registry.replace(vec![entry], Some(name))?;
+        registry.replace(vec![entry])?;
         Ok(registry)
     }
 
     /// Replaces the whole directory and drops every cached client.
     ///
-    /// The default must name a configured endpoint: a default pointing nowhere would make every
-    /// unprefixed model reference fail at call time instead of at configuration time.
-    pub fn replace(
-        &self,
-        entries: Vec<ProviderEntry>,
-        default_provider: Option<String>,
-    ) -> Result<(), String> {
+    /// Validation happens before anything is swapped, so a rejected directory leaves the previous
+    /// one serving.
+    pub fn replace(&self, entries: Vec<ProviderEntry>) -> Result<(), String> {
         let mut map = BTreeMap::new();
         for entry in entries {
             entry.validate()?;
@@ -169,14 +172,6 @@ impl ProviderRegistry {
                 return Err(format!("provider '{}' is defined twice", entry.name));
             }
             map.insert(entry.name.clone(), entry);
-        }
-
-        if let Some(name) = default_provider.as_ref() {
-            if !map.contains_key(name) {
-                return Err(format!(
-                    "default provider '{name}' is not among the configured providers"
-                ));
-            }
         }
 
         self.clients
@@ -187,10 +182,6 @@ impl ProviderRegistry {
             .entries
             .write()
             .unwrap_or_else(|poisoned| poisoned.into_inner()) = map;
-        *self
-            .default_provider
-            .write()
-            .unwrap_or_else(|poisoned| poisoned.into_inner()) = default_provider;
         Ok(())
     }
 
@@ -209,53 +200,35 @@ impl ProviderRegistry {
         self.entries().get(name.trim()).cloned()
     }
 
-    /// Name of the default endpoint, when one is configured.
-    pub fn default_provider(&self) -> Option<String> {
-        self.default_provider
-            .read()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .clone()
-    }
-
     /// Whether the directory holds no endpoint.
     pub fn is_empty(&self) -> bool {
         self.entries().is_empty()
     }
 
     /// Resolves a model reference into an endpoint and the model id to send upstream.
+    ///
+    /// The reference must be `<provider>/<model-id>` with `<provider>` naming a configured
+    /// endpoint; the prefix is stripped and the remainder is sent upstream untouched.
     pub fn resolve(&self, reference: &ModelRef) -> Result<ResolvedProvider, String> {
-        let (provider_name, upstream_model) = match reference.provider() {
-            Some(name) if self.get(name).is_some() => {
-                (name.to_string(), reference.model().to_string())
-            }
-            // An unregistered prefix is an aggregator-style model id: keep the whole string and
-            // let the default endpoint parse it.
-            Some(_) => {
-                let default = self.default_provider().ok_or_else(|| {
-                    format!(
-                        "model '{}' names provider '{}', which is not configured, and the node has no default provider",
-                        reference.canonical(),
-                        reference.provider().unwrap_or_default()
-                    )
-                })?;
-                (default, reference.canonical())
-            }
-            None => {
-                let default = self.default_provider().ok_or_else(|| {
-                    format!(
-                        "model '{}' carries no provider and the node has no default provider",
-                        reference.canonical()
-                    )
-                })?;
-                (default, reference.model().to_string())
-            }
-        };
+        let provider_name = reference.provider().ok_or_else(|| {
+            format!(
+                "model '{}' names no provider; write it as <provider>/<model-id>",
+                reference.canonical()
+            )
+        })?;
 
-        let provider = self.client_for(&provider_name)?;
+        if self.get(provider_name).is_none() {
+            return Err(format!(
+                "model '{}' names provider '{provider_name}', which is not configured (configured: {})",
+                reference.canonical(),
+                self.names().join(", ")
+            ));
+        }
+
         Ok(ResolvedProvider {
-            provider_name,
-            provider,
-            model: upstream_model,
+            provider_name: provider_name.to_string(),
+            provider: self.client_for(provider_name)?,
+            model: reference.model().to_string(),
         })
     }
 

@@ -170,14 +170,6 @@ function copySocketPath(path: string) {
         </span>
       </div>
 
-      <!-- Memory Sliding Window -->
-      <div class="p-4 bg-zinc-50 dark:bg-zinc-950/50 rounded-xl border border-zinc-100 dark:border-zinc-800/80">
-        <span class="text-zinc-400 block mb-1.5">{t('providers.memory_window')}</span>
-        <span class="text-zinc-900 dark:text-zinc-100 font-medium text-sm">
-          {providersStore.systemConfig?.memory_window ?? 40} turns (Sliding Window FIFO)
-        </span>
-      </div>
-
       <!-- OS and Architecture -->
       <div class="p-4 bg-zinc-50 dark:bg-zinc-950/50 rounded-xl border border-zinc-100 dark:border-zinc-800/80">
         <span class="text-zinc-400 block mb-1.5">{t('providers.os_arch')}</span>

@@ -107,7 +107,6 @@ fn factory_harness(registry: Arc<InstanceRegistry>) -> Arc<PipelineEngine> {
                     "openai",
                     "http://127.0.0.1:9/v1",
                 )],
-                default_provider: Some("local".to_string()),
                 default_model: Some("local/test-model".to_string()),
                 models: vec![
                     ModelSpec::new("local", "test-model"),

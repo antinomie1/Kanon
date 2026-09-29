@@ -1,8 +1,8 @@
 //! Tests for model references, the per-model settings catalog and provider routing.
 //!
 //! These pin the two rules the rest of the node depends on: a model is addressed as
-//! `<provider>/<model-id>`, and an unregistered provider prefix is an aggregator model id rather
-//! than a routing instruction.
+//! `<provider>/<model-id>`, and the prefix must name a configured endpoint — there is no default
+//! provider to guess from, so anything else is an explicit error.
 
 use kanon_llm::{
     ModelCapabilities, ModelCatalog, ModelRef, ModelSettingsSource, ModelSpec, ProviderEntry,
@@ -38,10 +38,7 @@ fn model_references_split_once_at_the_first_slash() {
 fn a_registered_provider_prefix_is_stripped_from_the_upstream_model() {
     let registry = ProviderRegistry::new();
     registry
-        .replace(
-            vec![entry("xiaomi", "http://127.0.0.1:9/v1")],
-            Some("xiaomi".to_string()),
-        )
+        .replace(vec![entry("xiaomi", "http://127.0.0.1:9/v1")])
         .expect("directory accepted");
 
     let resolved = registry
@@ -52,22 +49,16 @@ fn a_registered_provider_prefix_is_stripped_from_the_upstream_model() {
 }
 
 #[test]
-fn an_unregistered_prefix_is_passed_through_to_the_default_provider() {
+fn an_aggregator_model_id_keeps_everything_after_the_provider_prefix() {
     let registry = ProviderRegistry::new();
     registry
-        .replace(
-            vec![entry("openrouter", "http://127.0.0.1:9/v1")],
-            Some("openrouter".to_string()),
-        )
+        .replace(vec![entry("openrouter", "http://127.0.0.1:9/v1")])
         .expect("directory accepted");
 
     let resolved = registry
-        .resolve(&ModelRef::parse("anthropic/claude-3.5-sonnet"))
+        .resolve(&ModelRef::parse("openrouter/anthropic/claude-3.5-sonnet"))
         .expect("resolved");
-    assert_eq!(
-        resolved.provider_name, "openrouter",
-        "the configured default serves the request"
-    );
+    assert_eq!(resolved.provider_name, "openrouter");
     assert_eq!(
         resolved.model, "anthropic/claude-3.5-sonnet",
         "an aggregator model id must reach the endpoint verbatim"
@@ -75,31 +66,74 @@ fn an_unregistered_prefix_is_passed_through_to_the_default_provider() {
 }
 
 #[test]
-fn resolving_without_a_default_provider_is_an_explicit_error() {
+fn an_unregistered_prefix_is_an_explicit_error_not_a_guess() {
     let registry = ProviderRegistry::new();
     registry
-        .replace(vec![entry("xiaomi", "http://127.0.0.1:9/v1")], None)
+        .replace(vec![entry("openrouter", "http://127.0.0.1:9/v1")])
+        .expect("directory accepted");
+
+    // Without a default provider there is nothing to forward `anthropic/...` to: the reference
+    // must say which endpoint serves it.
+    let error = registry
+        .resolve(&ModelRef::parse("anthropic/claude-3.5-sonnet"))
+        .expect_err("unconfigured provider");
+    assert!(
+        error.contains("'anthropic'") && error.contains("openrouter"),
+        "the error must name the unknown provider and list the configured ones: {error}"
+    );
+}
+
+#[test]
+fn a_reference_without_a_provider_is_an_explicit_error() {
+    let registry = ProviderRegistry::new();
+    registry
+        .replace(vec![entry("xiaomi", "http://127.0.0.1:9/v1")])
         .expect("directory accepted");
 
     let error = registry
         .resolve(&ModelRef::parse("mimo-v2.6-flash"))
-        .expect_err("no default provider");
+        .expect_err("a bare model id has no provider");
     assert!(
-        error.contains("default provider"),
+        error.contains("<provider>/<model-id>"),
         "unexpected error: {error}"
     );
 }
 
 #[test]
-fn a_default_pointing_at_an_unknown_provider_is_rejected() {
+fn a_duplicate_provider_name_is_rejected_and_keeps_the_previous_directory() {
+    let registry = ProviderRegistry::new();
+    registry
+        .replace(vec![entry("xiaomi", "http://127.0.0.1:9/v1")])
+        .expect("directory accepted");
+
+    let error = registry
+        .replace(vec![
+            entry("dup", "http://127.0.0.1:9/v1"),
+            entry("dup", "http://127.0.0.1:10/v1"),
+        ])
+        .expect_err("duplicate names must be rejected");
+    assert!(error.contains("dup"), "unexpected error: {error}");
+    assert_eq!(
+        registry.names(),
+        vec!["xiaomi".to_string()],
+        "a rejected directory must leave the previous one serving"
+    );
+}
+
+#[test]
+fn an_unsupported_protocol_is_rejected_when_the_directory_is_installed() {
     let registry = ProviderRegistry::new();
     let error = registry
-        .replace(
-            vec![entry("xiaomi", "http://127.0.0.1:9/v1")],
-            Some("nowhere".to_string()),
-        )
-        .expect_err("dangling default must be rejected");
-    assert!(error.contains("nowhere"), "unexpected error: {error}");
+        .replace(vec![ProviderEntry::new(
+            "odd",
+            "carrier-pigeon",
+            "http://127.0.0.1:9/v1",
+        )])
+        .expect_err("unsupported protocol");
+    assert!(
+        error.contains("Unsupported protocol"),
+        "unexpected error: {error}"
+    );
 }
 
 #[test]

@@ -44,36 +44,38 @@ fn offline_provider(name: &str) -> Value {
 }
 
 #[tokio::test]
-async fn a_named_provider_becomes_the_default_with_a_qualified_model_reference() {
+async fn the_global_default_model_is_a_canonical_provider_model_reference() {
     let dir = tempfile::tempdir().expect("config dir");
     let state = isolated_state(dir.path().to_path_buf());
     let app = kanon_api::app(state.clone());
 
-    let mut body = offline_provider("xiaomi");
-    body["make_default"] = json!(true);
-    body["model"] = json!("mimo-v2.6-flash");
-
-    let (status, payload) =
-        common::send_json(&app, Method::POST, "/api/v1/providers", Some(body)).await;
-
+    let (status, payload) = common::send_json(
+        &app,
+        Method::POST,
+        "/api/v1/providers",
+        Some(offline_provider("xiaomi")),
+    )
+    .await;
     assert_eq!(status, StatusCode::OK, "unexpected body: {payload}");
-    assert_eq!(payload["default_provider"], json!("xiaomi"));
-    assert_eq!(
-        payload["default_model"],
-        json!("xiaomi/mimo-v2.6-flash"),
-        "a bare model id is qualified with the provider that serves it"
-    );
-    assert_eq!(payload["active"]["model"], json!("xiaomi/mimo-v2.6-flash"));
-    assert_eq!(
-        payload["active"]["upstream_model"],
-        json!("mimo-v2.6-flash"),
-        "the wire request must carry the bare id"
-    );
     assert_eq!(payload["providers"][0]["name"], json!("xiaomi"));
-    assert_eq!(payload["providers"][0]["is_default"], json!(true));
     assert_eq!(payload["providers"][0]["api_key_configured"], json!(true));
+    assert!(
+        state.agent().is_none(),
+        "no default model has been chosen yet"
+    );
 
-    // The running node observes the new endpoint immediately.
+    // Whitespace around a reference is normalised, and the aggregator-style remainder is kept.
+    let (status, payload) = common::send_json(
+        &app,
+        Method::PUT,
+        "/api/v1/models/default",
+        Some(json!({ "model": "  xiaomi/mimo-v2.6-flash  " })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "unexpected body: {payload}");
+    assert_eq!(payload["default_model"], json!("xiaomi/mimo-v2.6-flash"));
+
+    // The running node observes it immediately, and the wire request carries the bare id.
     let agent = state.agent().expect("agent installed");
     assert_eq!(agent.config().default_model, "mimo-v2.6-flash");
     assert_eq!(agent.config().provider.as_deref(), Some("xiaomi"));

@@ -11,7 +11,7 @@
 //! it asks the [`ProviderRegistry`] which endpoint serves the provider, looks the model up in the
 //! [`ModelCatalog`] for its context window and modalities, and only then builds the agent. The
 //! node's default agent lives in an [`AgentSlot`] because it is replaced whenever the operator
-//! changes the default provider; per-model agents are cached under their canonical
+//! changes the global default model; per-model agents are cached under their canonical
 //! `<provider>/<model-id>` name and dropped wholesale whenever the directory changes, so an
 //! override can never outlive the credential it was built for.
 
@@ -30,14 +30,13 @@ use crate::slot::AgentSlot;
 /// Everything the node needs to route a model reference to an endpoint.
 ///
 /// This is the single description the management layer persists and applies: the endpoints'
-/// definitions, which one is the default, which model the default agent uses, and the per-model
-/// settings catalog.
+/// definitions, the one global default model the default agent uses, and the per-model settings
+/// catalog. Endpoints carry no "default" flag of their own — the default is a model, not a
+/// provider.
 #[derive(Debug, Clone, Default)]
 pub struct ProviderRuntime {
     /// Configured endpoints.
     pub providers: Vec<ProviderEntry>,
-    /// Name of the endpoint used when a model reference carries no provider.
-    pub default_provider: Option<String>,
     /// Canonical `<provider>/<model-id>` the node answers with by default.
     pub default_model: Option<String>,
     /// Per-model settings.
@@ -171,27 +170,34 @@ impl AgentFactory {
 
     /// Installs a provider directory and rebuilds the node's default agent.
     ///
-    /// Order is *validate → publish → build*: the registry rejects a malformed directory before any
-    /// state changes, so a failed configuration leaves the node serving its previous provider.
+    /// Order is *stage → publish → build*: the directory and the default model are validated
+    /// against a scratch registry first, so a configuration that cannot work (an unsupported
+    /// endpoint, a default model naming an unknown provider) fails before any live state changes
+    /// and the node keeps serving its previous provider.
     pub fn configure(
         &self,
         name: impl Into<String>,
         runtime: ProviderRuntime,
     ) -> Result<(), String> {
-        self.providers
-            .replace(runtime.providers, runtime.default_provider)?;
-        self.models.replace(runtime.models);
-        *self
-            .direct
-            .write()
-            .unwrap_or_else(|poisoned| poisoned.into_inner()) = None;
-
         let default_model = runtime
             .default_model
             .as_deref()
             .map(str::trim)
             .filter(|model| !model.is_empty())
             .map(str::to_string);
+
+        let staged = ProviderRegistry::new();
+        staged.replace(runtime.providers.clone())?;
+        if let Some(model) = default_model.as_deref() {
+            staged.resolve(&ModelRef::parse(model))?;
+        }
+
+        self.providers.replace(runtime.providers)?;
+        self.models.replace(runtime.models);
+        *self
+            .direct
+            .write()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = None;
         *self
             .default_model
             .write()
@@ -269,7 +275,7 @@ impl AgentFactory {
             .default_model
             .write()
             .unwrap_or_else(|poisoned| poisoned.into_inner()) = None;
-        let _ = self.providers.replace(Vec::new(), None);
+        let _ = self.providers.replace(Vec::new());
         self.models.replace(Vec::new());
         self.slot.set(None);
     }
@@ -312,11 +318,21 @@ impl AgentFactory {
             Err(registry_error) => {
                 // No directory entry matched: fall back to a directly installed provider, which is
                 // how an embedded node (and the tests) hand over one client.
-                let direct = self
+                let Some(direct) = self
                     .direct
                     .read()
                     .unwrap_or_else(|poisoned| poisoned.into_inner())
-                    .clone()?;
+                    .clone()
+                else {
+                    // Loud on purpose: an instance pinned to a reference that no longer resolves
+                    // (a deleted provider, a bare model id) would otherwise go silent.
+                    tracing::warn!(
+                        requested = %reference.canonical(),
+                        error = %registry_error,
+                        "Model reference does not resolve to a configured provider; no agent serves it"
+                    );
+                    return None;
+                };
                 let upstream = match reference.provider() {
                     // A prefix the direct provider does not own is part of an aggregator model id.
                     Some(prefix) if prefix != direct.name => reference.canonical(),

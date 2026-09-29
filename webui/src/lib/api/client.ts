@@ -1,6 +1,4 @@
 import type {
-  ActivateProviderRequest,
-  ActivateProviderResponse,
   AdaptersResponse,
   CallPluginToolResponse,
   ChatCompletionRequest,
@@ -40,7 +38,6 @@ import type {
   ReplyPolicy,
   ReplyPolicyResponse,
   SessionsResponse,
-  SetDefaultProviderRequest,
   SkillCatalog,
   SkillStateResponse,
   SystemConfig,
@@ -147,26 +144,10 @@ export const api = {
       method: 'POST',
       body: JSON.stringify(req),
     }),
-  setDefaultProvider: (req: SetDefaultProviderRequest) =>
-    request<ProvidersCatalog>('/api/v1/providers/default', {
-      method: 'PUT',
-      body: JSON.stringify(req),
-    }),
   deleteProvider: (req: DeleteProviderRequest) =>
     request<ProvidersCatalog>('/api/v1/providers/delete', {
       method: 'POST',
       body: JSON.stringify(req),
-    }),
-  // Provider selection is a node property, not a browser one: this persists it to
-  // data/system.json and applies it to the running node immediately.
-  activateProvider: (req: ActivateProviderRequest) =>
-    request<ActivateProviderResponse>('/api/v1/providers/active', {
-      method: 'PUT',
-      body: JSON.stringify(req),
-    }),
-  clearActiveProvider: () =>
-    request<ActivateProviderResponse>('/api/v1/providers/active', {
-      method: 'DELETE',
     }),
   testProvider: (req?: TestProviderRequest) =>
     request<TestProviderResponse>('/api/v1/providers/test', {
@@ -181,6 +162,13 @@ export const api = {
 
   // Model catalog: per-model context window, modalities and sampling overrides keyed by reference.
   getModels: () => request<ModelsResponse>('/api/v1/models'),
+  // The node answers with exactly one global default model; `null` clears it. Persisted to
+  // data/system.json and applied to the running node immediately.
+  setDefaultModel: (model: string | null) =>
+    request<ModelsResponse>('/api/v1/models/default', {
+      method: 'PUT',
+      body: JSON.stringify({ model }),
+    }),
   // The body is the whole entry; the server forces `source: "manual"` because an operator's value
   // is a decision, not a discovery result.
   upsertModel: (spec: ModelSpec) =>
