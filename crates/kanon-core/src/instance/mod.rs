@@ -429,8 +429,9 @@ impl InstanceRegistry {
         let candidate = build_instance(id, name, draft)?;
 
         Self::validate_claims(&instances, &candidate)?;
-        instances.insert(candidate.id.clone(), candidate.clone());
-        Self::persist(self.path.as_deref(), &instances)?;
+        let mut next = instances.clone();
+        next.insert(candidate.id.clone(), candidate.clone());
+        self.commit(&mut instances, next)?;
 
         Ok(candidate)
     }
@@ -456,8 +457,9 @@ impl InstanceRegistry {
             .unwrap_or_default();
 
         Self::validate_claims(&instances, &candidate)?;
-        instances.insert(candidate.id.clone(), candidate.clone());
-        Self::persist(self.path.as_deref(), &instances)?;
+        let mut next = instances.clone();
+        next.insert(candidate.id.clone(), candidate.clone());
+        self.commit(&mut instances, next)?;
 
         Ok(candidate)
     }
@@ -465,10 +467,11 @@ impl InstanceRegistry {
     /// Deletes an instance.
     pub async fn delete(&self, id: &str) -> Result<(), InstanceError> {
         let mut instances = self.instances.write().await;
-        if instances.remove(id).is_none() {
+        let mut next = instances.clone();
+        if next.remove(id).is_none() {
             return Err(InstanceError::NotFound(id.to_string()));
         }
-        Self::persist(self.path.as_deref(), &instances)
+        self.commit(&mut instances, next)
     }
 
     /// Resolves the enabled instance that serves `platform`.
@@ -508,16 +511,17 @@ impl InstanceRegistry {
         conversation: &str,
     ) -> Result<String, InstanceError> {
         let mut instances = self.instances.write().await;
-        let instance = instances
+        let mut next = instances.clone();
+        let instance = next
             .get_mut(id)
             .ok_or_else(|| InstanceError::NotFound(id.to_string()))?;
 
-        let next = instance.session_generation(conversation) + 1;
+        let generation = instance.session_generation(conversation) + 1;
         instance
             .session_generations
-            .insert(conversation.to_string(), next);
+            .insert(conversation.to_string(), generation);
         let session_id = instance.conversation_session_id(conversation);
-        Self::persist(self.path.as_deref(), &instances)?;
+        self.commit(&mut instances, next)?;
 
         Ok(session_id)
     }
@@ -532,7 +536,8 @@ impl InstanceRegistry {
         model: Option<String>,
     ) -> Result<BotInstance, InstanceError> {
         let mut instances = self.instances.write().await;
-        let instance = instances
+        let mut next = instances.clone();
+        let instance = next
             .get_mut(id)
             .ok_or_else(|| InstanceError::NotFound(id.to_string()))?;
 
@@ -540,9 +545,24 @@ impl InstanceRegistry {
             .map(|model| model.trim().to_string())
             .filter(|model| !model.is_empty());
         let updated = instance.clone();
-        Self::persist(self.path.as_deref(), &instances)?;
+        self.commit(&mut instances, next)?;
 
         Ok(updated)
+    }
+
+    /// Writes `next` to disk and only then makes it the live catalog.
+    ///
+    /// Every mutation stages its change on a copy: if the write fails, the running node keeps
+    /// serving exactly what the file says, instead of an unsaved change that a restart would
+    /// silently revert.
+    fn commit(
+        &self,
+        live: &mut HashMap<String, BotInstance>,
+        next: HashMap<String, BotInstance>,
+    ) -> Result<(), InstanceError> {
+        Self::persist(self.path.as_deref(), &next)?;
+        *live = next;
+        Ok(())
     }
 
     /// Validates that no two enabled instances claim the same platform.

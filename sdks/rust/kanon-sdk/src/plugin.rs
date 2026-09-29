@@ -27,6 +27,14 @@ pub trait Plugin: Send + Sync + 'static {
         Ok(())
     }
 
+    /// Invoked when the operator saves a new configuration for this plugin.
+    ///
+    /// The host acknowledges the reload only after this returns `Ok`; an error is reported back
+    /// to the console and the core does not persist the rejected configuration.
+    async fn on_config_reload(&mut self, _config: prost_types::Struct) -> PluginResult<()> {
+        Ok(())
+    }
+
     /// Invoked during graceful shutdown before the host process terminates.
     async fn on_unload(&mut self) -> PluginResult<()> {
         Ok(())

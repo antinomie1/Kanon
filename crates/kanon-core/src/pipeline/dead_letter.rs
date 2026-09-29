@@ -1,22 +1,34 @@
-//! Dead-letter queue (DLQ) persistent storage for undeliverable outbound messages.
+//! Dead-letter queue (DLQ) persistent storage for messages the node accepted but could not handle.
 //!
 //! When platform delivery encounters hard failures, queue saturation, or tripped circuit
-//! breakers, dropped messages are serialized to a cold-storage append-only file
-//! (`data/dead_letter/<platform>_<date>.jsonl`). This guarantees auditability, zero data loss,
-//! and post-incident manual or automated replay capability.
+//! breakers, dropped replies are serialized to a cold-storage append-only file
+//! (`data/dead_letter/<platform>_<date>.jsonl`). Inbound events the node acknowledged but never
+//! processed (because it shut down first) land in the same file, marked `"direction": "inbound"`.
+//! This guarantees auditability, zero data loss, and post-incident manual or automated replay.
 
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use kanon_proto::v1::message_segment::Segment;
-use kanon_proto::v1::{DeliverMessageRequest, MessageSegment};
+use kanon_proto::v1::{DeliverMessageRequest, MessageSegment, PipelineEventRequest};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 /// Default directory for storing dead letter records when not configured via environment.
 pub const DEFAULT_DEAD_LETTER_DIR: &str = "./data/dead_letter";
 
-/// Serialized payload representing an undeliverable outbound message written to cold storage.
+/// Which way a dead-lettered message was travelling.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DeadLetterDirection {
+    /// A reply that could not be delivered to its platform.
+    #[default]
+    Outbound,
+    /// An event the node acknowledged but never processed.
+    Inbound,
+}
+
+/// Serialized payload representing a dropped message written to cold storage.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DeadLetterRecord {
     /// Associated event identifier; assigned or deterministically generated.
@@ -25,12 +37,20 @@ pub struct DeadLetterRecord {
     pub timestamp_ms: u64,
     /// UTC human-readable timestamp (ISO 8601 representation).
     pub iso_time: String,
-    /// Target chat platform.
+    /// Whether this is an undelivered reply or an unprocessed event. Records written before the
+    /// field existed are all replies, hence the default.
+    #[serde(default)]
+    pub direction: DeadLetterDirection,
+    /// Chat platform the message belongs to.
     pub platform: String,
-    /// Target platform channel identifier.
+    /// Platform channel identifier.
     pub channel_id: String,
-    /// Target recipient identifier.
+    /// Recipient of an outbound reply; empty for an inbound event.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
     pub recipient_id: String,
+    /// Sender of an inbound event; empty for an outbound reply.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub sender_id: String,
     /// Explicit failure reason or circuit breaker state causing the message drop.
     pub reason: String,
     /// Serialized message segments.
@@ -91,18 +111,52 @@ impl DeadLetterWriter {
 
         let segments: Vec<Value> = request.segments.iter().map(segment_to_json).collect();
 
-        let record = DeadLetterRecord {
-            event_id: event_id.clone(),
-            timestamp_ms,
-            iso_time,
-            platform: request.platform.clone(),
-            channel_id: request.channel_id.clone(),
-            recipient_id: request.recipient_id.clone(),
-            reason: reason.to_string(),
-            segments,
-        };
+        self.append(
+            DeadLetterRecord {
+                event_id,
+                timestamp_ms,
+                iso_time,
+                direction: DeadLetterDirection::Outbound,
+                platform: request.platform.clone(),
+                channel_id: request.channel_id.clone(),
+                recipient_id: request.recipient_id.clone(),
+                sender_id: String::new(),
+                reason: reason.to_string(),
+                segments,
+            },
+            &date_str,
+        )
+        .await
+    }
 
-        let safe_platform = sanitize_filename(&request.platform);
+    /// Appends an inbound event the node acknowledged but never processed.
+    pub async fn write_inbound(
+        &self,
+        event: &PipelineEventRequest,
+        reason: &str,
+    ) -> std::io::Result<PathBuf> {
+        let (timestamp_ms, iso_time, date_str) = current_time_triplet();
+        self.append(
+            DeadLetterRecord {
+                event_id: event.event_id.clone(),
+                timestamp_ms,
+                iso_time,
+                direction: DeadLetterDirection::Inbound,
+                platform: event.platform.clone(),
+                channel_id: event.channel_id.clone(),
+                recipient_id: String::new(),
+                sender_id: event.sender_id.clone(),
+                reason: reason.to_string(),
+                segments: event.segments.iter().map(segment_to_json).collect(),
+            },
+            &date_str,
+        )
+        .await
+    }
+
+    /// Appends one record to the platform's file for `date_str`.
+    async fn append(&self, record: DeadLetterRecord, date_str: &str) -> std::io::Result<PathBuf> {
+        let safe_platform = sanitize_filename(&record.platform);
         let filename = format!("{safe_platform}_{date_str}.jsonl");
         let file_path = self.base_dir.join(filename);
 
@@ -133,9 +187,10 @@ impl DeadLetterWriter {
             platform = %record.platform,
             channel_id = %record.channel_id,
             event_id = %record.event_id,
+            direction = ?record.direction,
             path = %file_path.display(),
-            reason = %reason,
-            "Undeliverable message written to cold storage dead-letter log"
+            reason = %record.reason,
+            "Dropped message written to cold storage dead-letter log"
         );
 
         Ok(file_path)

@@ -6,7 +6,7 @@
   "types": "dist/src/sdk/index.d.ts",
   "scripts": {
     "build": "tsc",
-    "test": "tsc && node --test dist/tests"
+    "test": "tsc && node --test \"dist/tests/**/*.test.js\""
   },
   "dependencies": {
     "@grpc/grpc-js": "^1.10.0",

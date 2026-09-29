@@ -5,7 +5,7 @@
 //! and optionally registers itself with the Core microkernel.
 
 use std::future::Future;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tokio::sync::RwLock;
 use tonic::{Request, Response, Status};
@@ -95,7 +95,11 @@ impl<P: Plugin> KanonHost<P> {
 
         // 2. Initialize plugin lifecycle
         let data_dir = PathBuf::from(format!("./data/plugins/{plugin_id}"));
-        let mut ctx = PluginContext::new(data_dir, None);
+        // The core pushes configuration only when the operator changes it, so the last saved
+        // configuration must be read here or the plugin would start unconfigured after every
+        // restart.
+        let config = read_stored_config(&data_dir)?;
+        let mut ctx = PluginContext::new(data_dir, config);
         match core_handle {
             Some(handle) => ctx = ctx.with_core(handle),
             None => {
@@ -237,6 +241,53 @@ impl<P: Plugin> KanonHost<P> {
     }
 }
 
+/// Reads the configuration the core saved for this plugin (`<data_dir>/config.json`).
+///
+/// A missing file means the plugin was never configured. An unreadable or malformed one fails
+/// startup: running with an empty configuration would silently ignore what the operator saved.
+fn read_stored_config(
+    data_dir: &Path,
+) -> Result<Option<prost_types::Struct>, Box<dyn std::error::Error + Send + Sync>> {
+    let path = data_dir.join("config.json");
+    let raw = match std::fs::read_to_string(&path) {
+        Ok(raw) => raw,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(err) => return Err(format!("cannot read {}: {err}", path.display()).into()),
+    };
+    match serde_json::from_str::<serde_json::Value>(&raw)
+        .map_err(|err| format!("invalid {}: {err}", path.display()))?
+    {
+        serde_json::Value::Object(fields) => Ok(Some(json_struct(fields))),
+        _ => Err(format!("{} must contain a JSON object", path.display()).into()),
+    }
+}
+
+/// Converts a JSON object into the protobuf `Struct` the plugin API carries.
+fn json_struct(fields: serde_json::Map<String, serde_json::Value>) -> prost_types::Struct {
+    prost_types::Struct {
+        fields: fields
+            .into_iter()
+            .map(|(key, value)| (key, json_value(value)))
+            .collect(),
+    }
+}
+
+/// Converts one JSON value; protobuf numbers are doubles, as they are on the wire.
+fn json_value(value: serde_json::Value) -> prost_types::Value {
+    use prost_types::value::Kind;
+    let kind = match value {
+        serde_json::Value::Null => Kind::NullValue(0),
+        serde_json::Value::Bool(flag) => Kind::BoolValue(flag),
+        serde_json::Value::Number(number) => Kind::NumberValue(number.as_f64().unwrap_or_default()),
+        serde_json::Value::String(text) => Kind::StringValue(text),
+        serde_json::Value::Array(items) => Kind::ListValue(prost_types::ListValue {
+            values: items.into_iter().map(json_value).collect(),
+        }),
+        serde_json::Value::Object(fields) => Kind::StructValue(json_struct(fields)),
+    };
+    prost_types::Value { kind: Some(kind) }
+}
+
 /// Implementation of [`PluginHostService`] for managing host lifecycle and inspection.
 struct HostServiceImpl<P: Plugin> {
     plugin: Arc<RwLock<P>>,
@@ -278,6 +329,18 @@ impl<P: Plugin> PluginHostService for HostServiceImpl<P> {
                 ),
                 applied_version: current_ver,
             }));
+        }
+
+        // The version is recorded only after the plugin accepted the payload, so a rejected
+        // reload can be retried with the same version.
+        if let Some(config) = req.config {
+            if let Err(err) = self.plugin.write().await.on_config_reload(config).await {
+                return Ok(Response::new(ReloadPluginConfigResponse {
+                    success: false,
+                    error_message: format!("on_config_reload failed: {err}"),
+                    applied_version: current_ver,
+                }));
+            }
         }
 
         let applied = if req.version > 0 {

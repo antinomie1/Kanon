@@ -16,7 +16,9 @@ pub mod pre_filter;
 
 pub use command::{CommandRouter, MatchedCommand};
 pub use context::build_user_message;
-pub use dead_letter::{DEFAULT_DEAD_LETTER_DIR, DeadLetterRecord, DeadLetterWriter};
+pub use dead_letter::{
+    DEFAULT_DEAD_LETTER_DIR, DeadLetterDirection, DeadLetterRecord, DeadLetterWriter,
+};
 pub use engine::{
     DEFAULT_OUTBOUND_QUEUE_CAPACITY, DeliveryOutcome, HELP_COMMAND, INFO_COMMAND, MODEL_COMMAND,
     NEW_SESSION_COMMAND, PipelineEngine, PipelineResult,

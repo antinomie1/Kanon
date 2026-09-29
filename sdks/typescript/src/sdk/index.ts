@@ -613,6 +613,14 @@ export abstract class Plugin {
     this.context = ctx;
   }
 
+  /**
+   * Lifecycle hook invoked when the operator saves a new configuration.
+   *
+   * The host has already replaced `context.config`; throwing rejects the reload, which is
+   * reported back to the console and keeps the Core from persisting the configuration.
+   */
+  async onConfigReload(config: Record<string, any>): Promise<void> {}
+
   /** Lifecycle hook invoked prior to plugin unload and host process shutdown. */
   async onUnload(): Promise<void> {}
 

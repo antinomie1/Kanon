@@ -343,9 +343,13 @@ async fn main() -> StartupResult<()> {
     // start would serve each message twice.
     kanon_core::shutdown_signal().await;
 
-    let _ = core_shutdown_tx.send(());
+    // Order matters. The console stops first. The pipeline then drains: ingress closes, queued
+    // events go to the dead-letter log, and the event in progress and the queued replies get a
+    // bounded grace. Only after that do the IPC server, adapters and hosts stop, because the
+    // final deliveries (and plugin callbacks made while finishing the last event) still use them.
     let _ = api_shutdown_tx.send(());
-
+    engine.drain(pipeline_worker, outbound_dispatcher).await;
+    let _ = core_shutdown_tx.send(());
     if let Err(err) = core_task.await? {
         tracing::error!(error = %err, "Core IPC server terminated with an error");
     }
@@ -353,10 +357,6 @@ async fn main() -> StartupResult<()> {
         tracing::error!(error = %err, "Management gateway terminated with an error");
     }
 
-    pipeline_worker.abort();
-    if let Some(handle) = outbound_dispatcher {
-        handle.abort();
-    }
     for (platform, error) in supervisor.adapters().stop_all().await {
         tracing::warn!(platform = %platform, error = %error, "Adapter failed to stop cleanly");
     }

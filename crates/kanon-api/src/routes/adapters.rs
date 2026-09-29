@@ -24,6 +24,9 @@ use serde_json::{Map, Value};
 use crate::error::ApiError;
 use crate::state::ApiState;
 
+/// Plugin identifier of the bundled QQ Official adapter.
+const QQ_OFFICIAL_PLUGIN_ID: &str = "org.kanon.adapter.qqofficial";
+
 pub fn routes() -> Router<ApiState> {
     Router::new()
         .route("/api/v1/adapters", get(list_adapters))
@@ -291,18 +294,20 @@ async fn qqofficial_login_qr(
     State(state): State<ApiState>,
     Json(body): Json<QqQrRequest>,
 ) -> Result<Json<QqQrResponse>, ApiError> {
-    const QQ_PLUGIN_ID: &str = "org.kanon.adapter.qqofficial";
-
     // Step 1: Delegate to the running adapter host through the management-action channel.
     //
     // Credential binding is an operator action, not an LLM tool: the adapter plugin declares no
     // tools at all, so its binding operations can never be advertised to the model.
-    if let Some(host) = state.supervisor().find_host_for_plugin(QQ_PLUGIN_ID).await {
+    if let Some(host) = state
+        .supervisor()
+        .find_host_for_plugin(QQ_OFFICIAL_PLUGIN_ID)
+        .await
+    {
         let args = serde_json::json!({
             "bind_host": body.bind_host,
         });
         let req = kanon_proto::v1::PluginActionRequest {
-            plugin_id: QQ_PLUGIN_ID.to_string(),
+            plugin_id: QQ_OFFICIAL_PLUGIN_ID.to_string(),
             action: "qq_request_login_qr".to_string(),
             parameters: Some(
                 kanon_llm::tool_router::json_to_prost_struct(&args).unwrap_or_default(),
@@ -318,7 +323,7 @@ async fn qqofficial_login_qr(
                 }
             } else if !resp.error_message.is_empty() {
                 tracing::warn!(
-                    plugin_id = %QQ_PLUGIN_ID,
+                    plugin_id = %QQ_OFFICIAL_PLUGIN_ID,
                     error = %resp.error_message,
                     "QQ binding action failed; falling back to direct HTTP binding"
                 );
@@ -403,16 +408,18 @@ async fn qqofficial_login_poll(
     State(state): State<ApiState>,
     Json(body): Json<QqPollRequest>,
 ) -> Result<Json<QqPollResponse>, ApiError> {
-    const QQ_PLUGIN_ID: &str = "org.kanon.adapter.qqofficial";
-
     // Step 1: Delegate to the running adapter host through the management-action channel.
-    if let Some(host) = state.supervisor().find_host_for_plugin(QQ_PLUGIN_ID).await {
+    if let Some(host) = state
+        .supervisor()
+        .find_host_for_plugin(QQ_OFFICIAL_PLUGIN_ID)
+        .await
+    {
         let args = serde_json::json!({
             "task_id": body.task_id,
             "bind_key": body.bind_key,
         });
         let req = kanon_proto::v1::PluginActionRequest {
-            plugin_id: QQ_PLUGIN_ID.to_string(),
+            plugin_id: QQ_OFFICIAL_PLUGIN_ID.to_string(),
             action: "qq_poll_login_result".to_string(),
             parameters: Some(
                 kanon_llm::tool_router::json_to_prost_struct(&args).unwrap_or_default(),
@@ -427,8 +434,10 @@ async fn qqofficial_login_poll(
                             if let (Some(appid), Some(secret)) =
                                 (&poll_resp.appid, &poll_resp.secret)
                             {
-                                let _ = save_and_reload_qq_credentials(&state, appid, secret).await;
-                                poll_resp.saved = Some(true);
+                                let (saved, message) =
+                                    save_and_reload_qq_credentials(&state, appid, secret).await;
+                                poll_resp.saved = Some(saved);
+                                poll_resp.message = message;
                             }
                         }
                         return Ok(Json(poll_resp));
@@ -436,7 +445,7 @@ async fn qqofficial_login_poll(
                 }
             } else if !resp.error_message.is_empty() {
                 tracing::warn!(
-                    plugin_id = %QQ_PLUGIN_ID,
+                    plugin_id = %QQ_OFFICIAL_PLUGIN_ID,
                     error = %resp.error_message,
                     "QQ binding poll action failed; falling back to direct HTTP polling"
                 );
@@ -509,19 +518,18 @@ async fn qqofficial_login_poll(
 
             match decrypt_qq_secret(enc_secret, &body.bind_key) {
                 Ok(secret) => {
-                    let mut saved = false;
-                    if body.auto_save {
-                        saved = save_and_reload_qq_credentials(&state, &appid, &secret)
-                            .await
-                            .is_ok();
-                    }
+                    let (saved, message) = if body.auto_save {
+                        save_and_reload_qq_credentials(&state, &appid, &secret).await
+                    } else {
+                        (false, None)
+                    };
                     Ok(Json(QqPollResponse {
                         status: "created".to_string(),
                         qr_status: raw_status,
                         appid: Some(appid),
                         secret: Some(secret),
                         saved: Some(saved),
-                        message: None,
+                        message,
                     }))
                 }
                 Err(err) => Ok(Json(QqPollResponse {
@@ -590,52 +598,85 @@ fn decrypt_qq_secret(encrypted_b64: &str, bind_key_b64: &str) -> Result<String, 
     String::from_utf8(plaintext.to_vec()).map_err(|e| format!("UTF-8 decoding failed: {e}"))
 }
 
-/// Persists QQ Official Bot credentials to disk and triggers an in-process hot reload.
+/// Persists QQ Official Bot credentials, then makes the running adapter use them.
+///
+/// Returns whether the credentials reached disk and, when something went wrong, the message the
+/// console shows: "not saved" and "saved but not applied" are different outcomes for the operator.
 async fn save_and_reload_qq_credentials(
     state: &ApiState,
     appid: &str,
     secret: &str,
-) -> Result<(), ApiError> {
-    const QQ_PLUGIN_ID: &str = "org.kanon.adapter.qqofficial";
-    let store = state.config_store().clone();
-    let mut config = store
-        .load(QQ_PLUGIN_ID)
-        .unwrap_or_else(|_| serde_json::json!({}));
-    if !config.is_object() {
-        config = serde_json::json!({});
+) -> (bool, Option<String>) {
+    let config = match save_qq_credentials(state, appid, secret).await {
+        Ok(config) => config,
+        Err(err) => {
+            tracing::error!(error = %err, "Failed to save QQ Official credentials");
+            return (false, Some(format!("Credentials were not saved: {err}")));
+        }
+    };
+    match apply_qq_credentials(state, &config).await {
+        Ok(()) => (true, None),
+        Err(err) => {
+            tracing::error!(error = %err, "QQ Official credentials saved but not applied");
+            (
+                true,
+                Some(format!(
+                    "Credentials saved, but the QQ adapter did not pick them up: {err}"
+                )),
+            )
+        }
     }
+}
+
+/// Merges the credentials into the plugin's stored configuration and writes it.
+///
+/// The existing document must be readable: replacing an unreadable one with just the two
+/// credential keys would silently discard every other setting the operator made.
+async fn save_qq_credentials(
+    state: &ApiState,
+    appid: &str,
+    secret: &str,
+) -> Result<serde_json::Value, ApiError> {
+    let store = state.config_store().clone();
+    let mut config = store.load(QQ_OFFICIAL_PLUGIN_ID)?;
     config["appid"] = serde_json::Value::String(appid.to_string());
     config["secret"] = serde_json::Value::String(secret.to_string());
 
-    let plugin_id = QQ_PLUGIN_ID.to_string();
-    let cfg_clone = config.clone();
-    tokio::task::spawn_blocking(move || store.store(&plugin_id, &cfg_clone))
+    let saved = config.clone();
+    tokio::task::spawn_blocking(move || store.store(QQ_OFFICIAL_PLUGIN_ID, &saved))
         .await
         .map_err(|err| ApiError::Internal(format!("Persistence task failed: {err}")))??;
+    Ok(config)
+}
 
-    // Check if the host process is running. If running, hot-reload its config;
-    // if not running, spawn it from the plugin manifest so it connects to QQ immediately.
+/// Hot-reloads a running QQ adapter, restarting it if the reload fails, or starts it if absent.
+async fn apply_qq_credentials(state: &ApiState, config: &serde_json::Value) -> Result<(), String> {
     let supervisor = state.supervisor();
-    if supervisor
-        .find_host_for_plugin(QQ_PLUGIN_ID)
-        .await
-        .is_some()
-    {
-        if let Err(e) = supervisor.reload_plugin_config(QQ_PLUGIN_ID, &config).await {
-            tracing::warn!(error = %e, "Failed to hot-reload QQ Official plugin config; attempting host restart");
-            let host_id = format!("host_{}", QQ_PLUGIN_ID.replace('.', "_"));
-            let _ = supervisor.restart_host(&host_id).await;
+    match supervisor.find_host_for_plugin(QQ_OFFICIAL_PLUGIN_ID).await {
+        Some(host) => {
+            if let Err(reload) = supervisor
+                .reload_plugin_config(QQ_OFFICIAL_PLUGIN_ID, config)
+                .await
+            {
+                tracing::warn!(error = %reload, "QQ Official hot reload failed; restarting its host");
+                supervisor
+                    .restart_host(&host.host_id)
+                    .await
+                    .map_err(|restart| {
+                        format!("hot reload failed ({reload}) and restart failed ({restart})")
+                    })?;
+            }
         }
-    } else {
-        let manifest_path = std::path::Path::new("./plugins/qqofficial/plugin.toml");
-        if manifest_path.exists() {
-            if let Err(err) = supervisor.spawn_from_manifest(manifest_path, None).await {
-                tracing::error!(error = %err, "Failed to spawn QQ Official plugin host after QR bind");
-            } else {
-                tracing::info!("Spawned QQ Official plugin host successfully after QR bind");
+        None => {
+            let manifest_path = std::path::Path::new("./plugins/qqofficial/plugin.toml");
+            if manifest_path.exists() {
+                supervisor
+                    .spawn_from_manifest(manifest_path, None)
+                    .await
+                    .map_err(|err| format!("cannot start the QQ adapter: {err}"))?;
+                tracing::info!("Spawned QQ Official plugin host after QR bind");
             }
         }
     }
-
     Ok(())
 }

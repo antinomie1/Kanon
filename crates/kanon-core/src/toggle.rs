@@ -149,7 +149,10 @@ impl ToggleStore {
         enabled: bool,
     ) -> Result<bool, String> {
         let mut sections = self.sections.write().await;
-        let entries = sections.entry(section.to_string()).or_default();
+        // Staged on a copy and swapped in only after the write succeeds, so a failed write never
+        // leaves the node honouring a toggle the file does not record.
+        let mut next = sections.clone();
+        let entries = next.entry(section.to_string()).or_default();
         // Absence means enabled, so an enabled item is represented by *no* entry. Persisting an
         // explicit `true` would accumulate dead keys for every item ever toggled and make the file
         // claim state the operator never expressed.
@@ -162,7 +165,8 @@ impl ToggleStore {
         } else {
             entries.insert(id.to_string(), enabled);
         }
-        self.persist(&sections)?;
+        self.persist(&next)?;
+        *sections = next;
         Ok(true)
     }
 

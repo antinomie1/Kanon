@@ -210,16 +210,23 @@ impl McpConfigStore {
     pub async fn upsert(&self, config: McpServerConfig) -> Result<(), McpError> {
         validate_config(&config)?;
         let mut servers = self.servers.write().await;
-        servers.insert(config.id.clone(), config);
-        self.persist(&servers)
+        // Staged on a copy and swapped in only after the write succeeds, so a failed write never
+        // leaves the node running a server list the file does not record.
+        let mut next = servers.clone();
+        next.insert(config.id.clone(), config);
+        self.persist(&next)?;
+        *servers = next;
+        Ok(())
     }
 
     /// Removes a server configuration.
     pub async fn remove(&self, id: &str) -> Result<bool, McpError> {
         let mut servers = self.servers.write().await;
-        let removed = servers.remove(id).is_some();
+        let mut next = servers.clone();
+        let removed = next.remove(id).is_some();
         if removed {
-            self.persist(&servers)?;
+            self.persist(&next)?;
+            *servers = next;
         }
         Ok(removed)
     }

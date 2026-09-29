@@ -13,7 +13,7 @@
 
 use std::collections::HashMap;
 use std::sync::Arc;
-use tokio::sync::{Mutex, RwLock, mpsc, oneshot};
+use tokio::sync::{Mutex, RwLock, mpsc, oneshot, watch};
 use tokio::task::JoinHandle;
 
 use kanon_llm::tool_router::ToolRouter;
@@ -50,6 +50,55 @@ pub const DEFAULT_OUTBOUND_QUEUE_CAPACITY: usize = 1024;
 /// Preserves sequential FIFO delivery per platform while providing strict cross-platform
 /// concurrency isolation so one slow platform never starves others.
 pub const DEFAULT_PLATFORM_QUEUE_CAPACITY: usize = 64;
+
+/// How long the event being processed when shutdown starts may take to finish.
+///
+/// Container runtimes kill a process shortly after asking it to stop (Docker waits 10 s by
+/// default), so this grace and [`SHUTDOWN_DELIVERY_GRACE`] together stay below that budget.
+/// Events still queued are never started during shutdown: they go to the dead-letter log at once.
+pub const SHUTDOWN_EVENT_GRACE: std::time::Duration = std::time::Duration::from_secs(5);
+
+/// How long queued replies may take to reach their platforms once the pipeline has drained.
+pub const SHUTDOWN_DELIVERY_GRACE: std::time::Duration = std::time::Duration::from_secs(3);
+
+/// Shutdown progress of the pipeline, advanced only by [`PipelineEngine::drain`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ShutdownPhase {
+    /// Normal operation.
+    Running,
+    /// The ingest queue is closed; the worker records queued events and finishes the current one.
+    DrainingInbound,
+    /// The outbound queue is closed; replies are delivered until the deadline, then recorded.
+    DrainingOutbound(tokio::time::Instant),
+}
+
+/// Waits until the shutdown phase satisfies `reached` and returns it.
+///
+/// Never resolves if the engine (the only sender) is gone, which cannot happen while a loop that
+/// borrows the engine is still running.
+async fn wait_for_phase(
+    phase: &mut watch::Receiver<ShutdownPhase>,
+    reached: fn(ShutdownPhase) -> bool,
+) -> ShutdownPhase {
+    loop {
+        let current = *phase.borrow_and_update();
+        if reached(current) {
+            return current;
+        }
+        if phase.changed().await.is_err() {
+            return std::future::pending().await;
+        }
+    }
+}
+
+/// Resolves once shutdown has set a delivery deadline and that deadline has passed.
+async fn delivery_deadline_passed(phase: &mut watch::Receiver<ShutdownPhase>) {
+    if let ShutdownPhase::DrainingOutbound(deadline) =
+        wait_for_phase(phase, |p| matches!(p, ShutdownPhase::DrainingOutbound(_))).await
+    {
+        tokio::time::sleep_until(deadline).await;
+    }
+}
 
 /// One queued delivery, optionally carrying a single-use completion receipt.
 ///
@@ -338,6 +387,8 @@ pub struct PipelineEngine {
     outbound_receiver: Mutex<Option<mpsc::Receiver<OutboundMessage>>>,
     /// Adaptive circuit breakers maintaining health status per platform outbound queue.
     platform_circuit_breakers: Arc<RwLock<HashMap<String, Arc<CircuitBreaker>>>>,
+    /// Shutdown progress observed by the worker, the dispatcher and every platform worker.
+    shutdown: watch::Sender<ShutdownPhase>,
 }
 
 impl PipelineEngine {
@@ -361,6 +412,7 @@ impl PipelineEngine {
             outbound_sender,
             outbound_receiver: Mutex::new(Some(outbound_receiver)),
             platform_circuit_breakers: Arc::new(RwLock::new(HashMap::new())),
+            shutdown: watch::Sender::new(ShutdownPhase::Running),
         }
     }
 
@@ -690,11 +742,12 @@ impl PipelineEngine {
         self: &Arc<Self>,
         platform: String,
         mut rx: mpsc::Receiver<OutboundMessage>,
-    ) {
+    ) -> JoinHandle<()> {
         let engine = Arc::clone(self);
         tokio::spawn(async move {
             tracing::debug!(platform = %platform, "Platform outbound worker spawned");
             let breaker = engine.platform_circuit_breaker(&platform).await;
+            let mut phase = engine.shutdown.subscribe();
             loop {
                 // Workers retire after 30 seconds of inactivity to reclaim resources.
                 match tokio::time::timeout(std::time::Duration::from_secs(30), rx.recv()).await {
@@ -708,9 +761,22 @@ impl PipelineEngine {
                         {
                             continue;
                         }
-                        let response = engine
-                            .dispatch_outbound_request_with_breaker(message.request, &breaker)
-                            .await;
+                        // During shutdown a delivery may run only until the drain deadline. The
+                        // deadline branch is polled first so a reply is never started after it.
+                        let request = message.request;
+                        let response = tokio::select! {
+                            biased;
+                            () = delivery_deadline_passed(&mut phase) => {
+                                engine
+                                    .dead_letter_reply(
+                                        &request,
+                                        "node shut down before the reply was delivered; the platform may or may not have received it",
+                                    )
+                                    .await
+                            }
+                            response = engine
+                                .dispatch_outbound_request_with_breaker(request.clone(), &breaker) => response,
+                        };
                         if let Some(receipt) = message.receipt {
                             let _ = receipt.send(response);
                         }
@@ -726,7 +792,45 @@ impl PipelineEngine {
                     }
                 }
             }
+        })
+    }
+
+    /// Records a reply that will not be delivered and reports the failure to its caller.
+    async fn dead_letter_reply(
+        &self,
+        request: &DeliverMessageRequest,
+        reason: &str,
+    ) -> DeliverMessageResponse {
+        if let Err(err) = self.dead_letter.write_record(request, reason).await {
+            tracing::error!(
+                platform = %request.platform,
+                channel_id = %request.channel_id,
+                error = %err,
+                "Failed to persist dead letter record; the reply is lost"
+            );
+        }
+        self.observe(PipelineStage::OutboundFailed {
+            platform: request.platform.clone(),
+            channel_id: request.channel_id.clone(),
+            reason: reason.to_string(),
         });
+        DeliverMessageResponse {
+            success: false,
+            message_id: String::new(),
+            error_message: reason.to_string(),
+        }
+    }
+
+    /// Records an inbound event the node acknowledged but will never process.
+    async fn dead_letter_event(&self, event: &PipelineEventRequest, reason: &str) {
+        if let Err(err) = self.dead_letter.write_inbound(event, reason).await {
+            tracing::error!(
+                platform = %event.platform,
+                event_id = %event.event_id,
+                error = %err,
+                "Failed to persist dead letter record; the event is lost"
+            );
+        }
     }
 
     /// Reports an outbound drop when a specific platform's worker queue is saturated,
@@ -775,50 +879,83 @@ impl PipelineEngine {
     ///   outbound deliveries to platform `B`.
     /// - **Bounded queue protection**: If platform `A`'s queue reaches capacity, overflow messages
     ///   are dropped and emit [`PipelineStage::OutboundFailed`], without stalling the global dispatcher.
+    ///
+    /// # Shutdown
+    /// Once [`PipelineEngine::drain`] reaches the outbound phase, the queue is closed, the replies
+    /// still in it are handed to their platform workers, and the dispatcher waits for every worker
+    /// to finish. Workers deliver until [`SHUTDOWN_DELIVERY_GRACE`] runs out and record the rest.
     pub async fn run_outbound_loop(self: Arc<Self>, mut receiver: mpsc::Receiver<OutboundMessage>) {
         tracing::info!("Partitioned outbound adapter dispatcher started");
-        let mut workers: std::collections::HashMap<String, mpsc::Sender<OutboundMessage>> =
-            std::collections::HashMap::new();
+        let mut workers: HashMap<String, (mpsc::Sender<OutboundMessage>, JoinHandle<()>)> =
+            HashMap::new();
+        let mut phase = self.shutdown.subscribe();
 
-        while let Some(request) = receiver.recv().await {
-            let platform = request.request.platform.clone();
-
-            // Periodic cleanup of dead channels to avoid memory buildup when platforms are dynamic
-            if workers.len() > 128 {
-                workers.retain(|_, tx| !tx.is_closed());
-            }
-
-            let tx = match workers.get(&platform) {
-                Some(tx) if !tx.is_closed() => tx.clone(),
-                _ => {
-                    let (new_tx, rx) = mpsc::channel(DEFAULT_PLATFORM_QUEUE_CAPACITY);
-                    self.spawn_platform_worker(platform.clone(), rx);
-                    workers.insert(platform.clone(), new_tx.clone());
-                    new_tx
-                }
+        loop {
+            let request = tokio::select! {
+                biased;
+                _ = wait_for_phase(&mut phase, |p| matches!(p, ShutdownPhase::DrainingOutbound(_))) => break,
+                request = receiver.recv() => match request {
+                    Some(request) => request,
+                    None => break,
+                },
             };
+            self.route_outbound(request, &mut workers).await;
+        }
 
-            match tx.try_send(request) {
-                Ok(()) => {}
-                Err(mpsc::error::TrySendError::Closed(req)) => {
-                    // The worker timed out immediately before the send; respawn and retry once
-                    let (new_tx, rx) = mpsc::channel(DEFAULT_PLATFORM_QUEUE_CAPACITY);
-                    self.spawn_platform_worker(platform.clone(), rx);
-                    workers.insert(platform, new_tx.clone());
-                    if let Err(mpsc::error::TrySendError::Full(dropped)) = new_tx.try_send(req) {
-                        self.report_outbound_queue_full(dropped).await;
-                    }
-                }
-                Err(mpsc::error::TrySendError::Full(dropped)) => {
+        // Nothing new is accepted from here on; producers get an explicit `Closed` error.
+        receiver.close();
+        while let Some(request) = receiver.recv().await {
+            self.route_outbound(request, &mut workers).await;
+        }
+        // Dropping each sender lets its worker finish the queue and stop; the delivery deadline
+        // bounds how long that takes.
+        for (platform, (sender, worker)) in workers {
+            drop(sender);
+            if let Err(err) = worker.await {
+                tracing::error!(platform = %platform, error = %err, "Platform outbound worker failed during shutdown");
+            }
+        }
+        tracing::info!("Partitioned outbound adapter dispatcher terminated");
+    }
+
+    /// Hands one reply to its platform's sequential worker, starting the worker if needed.
+    async fn route_outbound(
+        self: &Arc<Self>,
+        request: OutboundMessage,
+        workers: &mut HashMap<String, (mpsc::Sender<OutboundMessage>, JoinHandle<()>)>,
+    ) {
+        let platform = request.request.platform.clone();
+
+        // Periodic cleanup of dead channels to avoid memory buildup when platforms are dynamic
+        if workers.len() > 128 {
+            workers.retain(|_, (tx, _)| !tx.is_closed());
+        }
+
+        let tx = match workers.get(&platform) {
+            Some((tx, _)) if !tx.is_closed() => tx.clone(),
+            _ => {
+                let (new_tx, rx) = mpsc::channel(DEFAULT_PLATFORM_QUEUE_CAPACITY);
+                let worker = self.spawn_platform_worker(platform.clone(), rx);
+                workers.insert(platform.clone(), (new_tx.clone(), worker));
+                new_tx
+            }
+        };
+
+        match tx.try_send(request) {
+            Ok(()) => {}
+            Err(mpsc::error::TrySendError::Closed(req)) => {
+                // The worker timed out immediately before the send; respawn and retry once
+                let (new_tx, rx) = mpsc::channel(DEFAULT_PLATFORM_QUEUE_CAPACITY);
+                let worker = self.spawn_platform_worker(platform.clone(), rx);
+                workers.insert(platform, (new_tx.clone(), worker));
+                if let Err(mpsc::error::TrySendError::Full(dropped)) = new_tx.try_send(req) {
                     self.report_outbound_queue_full(dropped).await;
                 }
             }
+            Err(mpsc::error::TrySendError::Full(dropped)) => {
+                self.report_outbound_queue_full(dropped).await;
+            }
         }
-
-        // Dropping `workers` closes all platform channel senders, allowing active workers to drain
-        // their remaining queues before terminating.
-        drop(workers);
-        tracing::info!("Partitioned outbound adapter dispatcher terminated");
     }
 
     /// Spawns the outbound dispatcher task.
@@ -1526,216 +1663,305 @@ impl PipelineEngine {
     ///
     /// For every ingested event, the worker runs the pipeline and routes any outbound
     /// replies to the registered outbound message sender channel.
+    ///
+    /// # Shutdown
+    /// When [`PipelineEngine::drain`] starts, the ingest queue is closed (producers get an
+    /// explicit `Closed` error), every event still queued is written to the dead-letter log
+    /// without being started, and the event in progress gets [`SHUTDOWN_EVENT_GRACE`] to finish
+    /// before it is recorded as well. Nothing the node acknowledged disappears silently.
     pub async fn run_worker_loop(&self, mut event_receiver: mpsc::Receiver<IngestEventRequest>) {
         tracing::info!("Pipeline worker loop started");
+        let mut phase = self.shutdown.subscribe();
+        let draining = |p| p != ShutdownPhase::Running;
 
-        while let Some(req) = event_receiver.recv().await {
-            let event = match req.event {
-                Some(evt) => evt,
-                None => {
-                    tracing::warn!("Received IngestEventRequest with empty inner event; skipping");
-                    continue;
-                }
+        loop {
+            let req = tokio::select! {
+                biased;
+                _ = wait_for_phase(&mut phase, draining) => break,
+                req = event_receiver.recv() => match req {
+                    Some(req) => req,
+                    None => break,
+                },
             };
 
-            let platform = if !event.platform.is_empty() {
-                event.platform.clone()
-            } else {
-                req.platform.clone()
-            };
-            let channel_id = event.channel_id.clone();
-            let recipient_id = event.sender_id.clone();
-            let event_id = event.event_id.clone();
-
-            self.observe(PipelineStage::Ingested {
-                event_id: event_id.clone(),
-                platform: platform.clone(),
-                channel_id: channel_id.clone(),
-                sender_id: recipient_id.clone(),
-            });
-
-            tracing::info!(
-                platform = %platform,
-                channel_id = %channel_id,
-                sender_id = %recipient_id,
-                event_id = %event_id,
-                "Pipeline received inbound event"
-            );
-
-            let result = self.process_event(event).await;
-
-            match &result {
-                PipelineResult::LlmReplied { content, .. } => {
-                    tracing::info!(
-                        platform = %platform,
-                        channel_id = %channel_id,
-                        content_len = content.len(),
-                        "Pipeline generated LLM reply"
-                    );
-                }
-                PipelineResult::CommandExecuted {
-                    command, success, ..
-                } => {
-                    tracing::info!(
-                        platform = %platform,
-                        channel_id = %channel_id,
-                        command = %command,
-                        success = %success,
-                        "Pipeline executed command"
-                    );
-                }
-                PipelineResult::Blocked { host_id, .. } => {
-                    tracing::info!(
-                        platform = %platform,
-                        channel_id = %channel_id,
-                        host_id = %host_id,
-                        "Pipeline event blocked by PreFilter"
-                    );
-                }
-                PipelineResult::CommandNotFound { command } => {
-                    tracing::info!(
-                        platform = %platform,
-                        channel_id = %channel_id,
-                        command = %command,
-                        "Pipeline slash command not found"
-                    );
-                }
-                PipelineResult::SessionRotated {
-                    instance_id,
-                    session_id,
-                    ..
-                } => {
-                    tracing::info!(
-                        platform = %platform,
-                        channel_id = %channel_id,
-                        instance_id = %instance_id,
-                        session_id = %session_id,
-                        "Pipeline rotated conversation session via built-in /new"
-                    );
-                }
-                PipelineResult::ModelSelected {
-                    instance_id, model, ..
-                } => {
-                    tracing::info!(
-                        platform = %platform,
-                        channel_id = %channel_id,
-                        instance_id = %instance_id,
-                        model = %model,
-                        "Pipeline switched the instance model via built-in /model"
-                    );
-                }
-                PipelineResult::ModelListed {
-                    instance_id, count, ..
-                } => {
-                    tracing::info!(
-                        platform = %platform,
-                        channel_id = %channel_id,
-                        instance_id = %instance_id,
-                        count = %count,
-                        "Pipeline listed models via built-in /model"
-                    );
-                }
-                PipelineResult::ReplySuppressed {
-                    instance_id,
-                    reason,
-                } => {
-                    tracing::info!(
-                        platform = %platform,
-                        channel_id = %channel_id,
-                        instance_id = %instance_id,
-                        reason = %reason,
-                        "Pipeline suppressed a reply by policy"
-                    );
-                }
-                PipelineResult::BuiltinReplied { command, .. } => {
-                    tracing::info!(
-                        platform = %platform,
-                        channel_id = %channel_id,
-                        command = %command,
-                        "Pipeline answered a built-in informational command"
-                    );
-                }
-                PipelineResult::NoInstance { .. } => {
-                    // Already logged with the platform in `process_event`; nothing was delivered.
-                }
-                PipelineResult::Passed(_) => {
-                    tracing::info!(
-                        platform = %platform,
-                        channel_id = %channel_id,
-                        "Pipeline event passed (no matching slash command or active LLM provider)"
-                    );
-                }
-            }
-
-            let replies = match &result {
-                PipelineResult::Blocked { replies, .. } => replies,
-                PipelineResult::CommandExecuted { replies, .. } => replies,
-                PipelineResult::LlmReplied { replies, .. } => replies,
-                PipelineResult::SessionRotated { replies, .. } => replies,
-                PipelineResult::ModelSelected { replies, .. } => replies,
-                PipelineResult::ModelListed { replies, .. } => replies,
-                PipelineResult::BuiltinReplied { replies, .. } => replies,
-                _ => &[][..],
-            };
-
-            if !replies.is_empty() {
-                let deliver_req = DeliverMessageRequest {
-                    platform,
-                    channel_id,
-                    recipient_id,
-                    segments: replies.to_vec(),
-                    event_id: event_id.clone(),
-                };
-
-                let platform = deliver_req.platform.clone();
-                let channel_id = deliver_req.channel_id.clone();
-                let segment_count = deliver_req.segments.len();
-
-                // Non-blocking hand-off: the pipeline worker must never await platform I/O.
-                match self.outbound_sender.try_send(deliver_req.into()) {
-                    Ok(()) => {
-                        self.observe(PipelineStage::OutboundQueued {
-                            event_id,
-                            platform,
-                            channel_id,
-                            segment_count,
-                        });
+            let in_flight = req.event.clone();
+            let handled = self.handle_ingested(req);
+            tokio::pin!(handled);
+            tokio::select! {
+                biased;
+                () = &mut handled => {}
+                _ = wait_for_phase(&mut phase, draining) => {
+                    // Queued events are recorded before waiting on the current one, so a slow
+                    // model cannot use up the time the process has left.
+                    self.spill_queued_events(&mut event_receiver).await;
+                    if tokio::time::timeout(SHUTDOWN_EVENT_GRACE, handled).await.is_err()
+                        && let Some(event) = in_flight
+                    {
+                        self.dead_letter_event(
+                            &event,
+                            "node shut down while the event was being processed; its reply may be missing",
+                        )
+                        .await;
                     }
-                    Err(mpsc::error::TrySendError::Full(dropped)) => {
-                        tracing::warn!(
-                            platform = %platform,
-                            channel_id = %channel_id,
-                            "Outbound queue is full; dropping reply to dead letter to protect pipeline latency"
-                        );
-                        let dead_letter = Arc::clone(&self.dead_letter);
-                        tokio::spawn(async move {
-                            let _ = dead_letter
-                                .write_record(&dropped.request, "outbound queue is full")
-                                .await;
-                        });
-                        self.observe(PipelineStage::OutboundFailed {
-                            platform,
-                            channel_id,
-                            reason: "outbound queue is full; reply dropped".to_string(),
-                        });
-                    }
-                    Err(mpsc::error::TrySendError::Closed(_)) => {
-                        tracing::warn!(
-                            platform = %platform,
-                            channel_id = %channel_id,
-                            "Outbound dispatcher is not running; dropping reply"
-                        );
-                        self.observe(PipelineStage::OutboundFailed {
-                            platform,
-                            channel_id,
-                            reason: "outbound dispatcher is not running; reply dropped".to_string(),
-                        });
-                    }
+                    tracing::info!("Pipeline worker loop terminated");
+                    return;
                 }
             }
         }
 
+        self.spill_queued_events(&mut event_receiver).await;
         tracing::info!("Pipeline worker loop terminated");
+    }
+
+    /// Closes the ingest queue and records every event still in it as a dead letter.
+    async fn spill_queued_events(&self, event_receiver: &mut mpsc::Receiver<IngestEventRequest>) {
+        event_receiver.close();
+        while let Some(req) = event_receiver.recv().await {
+            if let Some(event) = req.event {
+                self.dead_letter_event(&event, "node shut down before the event was processed")
+                    .await;
+            }
+        }
+    }
+
+    /// Runs one ingested event through the pipeline and queues its replies for delivery.
+    async fn handle_ingested(&self, req: IngestEventRequest) {
+        let event = match req.event {
+            Some(evt) => evt,
+            None => {
+                tracing::warn!("Received IngestEventRequest with empty inner event; skipping");
+                return;
+            }
+        };
+
+        let platform = if !event.platform.is_empty() {
+            event.platform.clone()
+        } else {
+            req.platform.clone()
+        };
+        let channel_id = event.channel_id.clone();
+        let recipient_id = event.sender_id.clone();
+        let event_id = event.event_id.clone();
+
+        self.observe(PipelineStage::Ingested {
+            event_id: event_id.clone(),
+            platform: platform.clone(),
+            channel_id: channel_id.clone(),
+            sender_id: recipient_id.clone(),
+        });
+
+        tracing::info!(
+            platform = %platform,
+            channel_id = %channel_id,
+            sender_id = %recipient_id,
+            event_id = %event_id,
+            "Pipeline received inbound event"
+        );
+
+        let result = self.process_event(event).await;
+
+        match &result {
+            PipelineResult::LlmReplied { content, .. } => {
+                tracing::info!(
+                    platform = %platform,
+                    channel_id = %channel_id,
+                    content_len = content.len(),
+                    "Pipeline generated LLM reply"
+                );
+            }
+            PipelineResult::CommandExecuted {
+                command, success, ..
+            } => {
+                tracing::info!(
+                    platform = %platform,
+                    channel_id = %channel_id,
+                    command = %command,
+                    success = %success,
+                    "Pipeline executed command"
+                );
+            }
+            PipelineResult::Blocked { host_id, .. } => {
+                tracing::info!(
+                    platform = %platform,
+                    channel_id = %channel_id,
+                    host_id = %host_id,
+                    "Pipeline event blocked by PreFilter"
+                );
+            }
+            PipelineResult::CommandNotFound { command } => {
+                tracing::info!(
+                    platform = %platform,
+                    channel_id = %channel_id,
+                    command = %command,
+                    "Pipeline slash command not found"
+                );
+            }
+            PipelineResult::SessionRotated {
+                instance_id,
+                session_id,
+                ..
+            } => {
+                tracing::info!(
+                    platform = %platform,
+                    channel_id = %channel_id,
+                    instance_id = %instance_id,
+                    session_id = %session_id,
+                    "Pipeline rotated conversation session via built-in /new"
+                );
+            }
+            PipelineResult::ModelSelected {
+                instance_id, model, ..
+            } => {
+                tracing::info!(
+                    platform = %platform,
+                    channel_id = %channel_id,
+                    instance_id = %instance_id,
+                    model = %model,
+                    "Pipeline switched the instance model via built-in /model"
+                );
+            }
+            PipelineResult::ModelListed {
+                instance_id, count, ..
+            } => {
+                tracing::info!(
+                    platform = %platform,
+                    channel_id = %channel_id,
+                    instance_id = %instance_id,
+                    count = %count,
+                    "Pipeline listed models via built-in /model"
+                );
+            }
+            PipelineResult::ReplySuppressed {
+                instance_id,
+                reason,
+            } => {
+                tracing::info!(
+                    platform = %platform,
+                    channel_id = %channel_id,
+                    instance_id = %instance_id,
+                    reason = %reason,
+                    "Pipeline suppressed a reply by policy"
+                );
+            }
+            PipelineResult::BuiltinReplied { command, .. } => {
+                tracing::info!(
+                    platform = %platform,
+                    channel_id = %channel_id,
+                    command = %command,
+                    "Pipeline answered a built-in informational command"
+                );
+            }
+            PipelineResult::NoInstance { .. } => {
+                // Already logged with the platform in `process_event`; nothing was delivered.
+            }
+            PipelineResult::Passed(_) => {
+                tracing::info!(
+                    platform = %platform,
+                    channel_id = %channel_id,
+                    "Pipeline event passed (no matching slash command or active LLM provider)"
+                );
+            }
+        }
+
+        let replies = match &result {
+            PipelineResult::Blocked { replies, .. } => replies,
+            PipelineResult::CommandExecuted { replies, .. } => replies,
+            PipelineResult::LlmReplied { replies, .. } => replies,
+            PipelineResult::SessionRotated { replies, .. } => replies,
+            PipelineResult::ModelSelected { replies, .. } => replies,
+            PipelineResult::ModelListed { replies, .. } => replies,
+            PipelineResult::BuiltinReplied { replies, .. } => replies,
+            _ => &[][..],
+        };
+
+        if !replies.is_empty() {
+            let deliver_req = DeliverMessageRequest {
+                platform,
+                channel_id,
+                recipient_id,
+                segments: replies.to_vec(),
+                event_id: event_id.clone(),
+            };
+
+            let platform = deliver_req.platform.clone();
+            let channel_id = deliver_req.channel_id.clone();
+            let segment_count = deliver_req.segments.len();
+
+            // Non-blocking hand-off: the pipeline worker must never await platform I/O.
+            match self.outbound_sender.try_send(deliver_req.into()) {
+                Ok(()) => {
+                    self.observe(PipelineStage::OutboundQueued {
+                        event_id,
+                        platform,
+                        channel_id,
+                        segment_count,
+                    });
+                }
+                Err(mpsc::error::TrySendError::Full(dropped)) => {
+                    tracing::warn!(
+                        platform = %platform,
+                        channel_id = %channel_id,
+                        "Outbound queue is full; dropping reply to dead letter to protect pipeline latency"
+                    );
+                    let dead_letter = Arc::clone(&self.dead_letter);
+                    tokio::spawn(async move {
+                        let _ = dead_letter
+                            .write_record(&dropped.request, "outbound queue is full")
+                            .await;
+                    });
+                    self.observe(PipelineStage::OutboundFailed {
+                        platform,
+                        channel_id,
+                        reason: "outbound queue is full; reply dropped".to_string(),
+                    });
+                }
+                Err(mpsc::error::TrySendError::Closed(dropped)) => {
+                    tracing::warn!(
+                        platform = %platform,
+                        channel_id = %channel_id,
+                        "Outbound dispatcher is not running; dropping reply to dead letter"
+                    );
+                    // Written off the worker, like the full-queue case, so the pipeline never
+                    // waits on disk I/O for a reply it cannot send anyway.
+                    let dead_letter = Arc::clone(&self.dead_letter);
+                    tokio::spawn(async move {
+                        if let Err(err) = dead_letter
+                            .write_record(&dropped.request, "outbound dispatcher is not running")
+                            .await
+                        {
+                            tracing::error!(error = %err, "Failed to persist dead letter record; the reply is lost");
+                        }
+                    });
+                    self.observe(PipelineStage::OutboundFailed {
+                        platform,
+                        channel_id,
+                        reason: "outbound dispatcher is not running; reply dropped".to_string(),
+                    });
+                }
+            }
+        }
+    }
+
+    /// Shuts the pipeline down without losing anything it already accepted.
+    ///
+    /// Inbound first: the worker closes the ingest queue, records queued events and gets
+    /// [`SHUTDOWN_EVENT_GRACE`] for the event in progress, whose replies still reach the outbound
+    /// queue. Then outbound: queued replies are delivered for up to [`SHUTDOWN_DELIVERY_GRACE`] and
+    /// the rest are recorded. Adapters and plugin hosts must stay up until this returns, because
+    /// the final deliveries go through them.
+    pub async fn drain(&self, worker: JoinHandle<()>, dispatcher: Option<JoinHandle<()>>) {
+        self.shutdown.send_replace(ShutdownPhase::DrainingInbound);
+        if let Err(err) = worker.await {
+            tracing::error!(error = %err, "Pipeline worker failed during shutdown");
+        }
+        self.shutdown.send_replace(ShutdownPhase::DrainingOutbound(
+            tokio::time::Instant::now() + SHUTDOWN_DELIVERY_GRACE,
+        ));
+        if let Some(dispatcher) = dispatcher
+            && let Err(err) = dispatcher.await
+        {
+            tracing::error!(error = %err, "Outbound dispatcher failed during shutdown");
+        }
     }
 
     /// Spawns the pipeline worker loop as a background Tokio task.

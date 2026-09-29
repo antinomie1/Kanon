@@ -12,6 +12,7 @@ import {
   CoreHandle,
   Plugin,
   PluginContext,
+  fromProtoStruct,
   loadKanonProto,
   startCoreWatchdog,
 } from "../sdk/index.js";
@@ -107,6 +108,24 @@ function resolvePluginEntrypoint(targetPath: string): string {
   return resolved;
 }
 
+/**
+ * Reads the configuration the Core saved for this plugin (`<dataDir>/config.json`).
+ *
+ * A missing file means the plugin was never configured. A malformed one fails startup:
+ * running with an empty configuration would silently ignore what the operator saved.
+ */
+function readStoredConfig(dataDir: string): Record<string, any> {
+  const file = path.join(dataDir, "config.json");
+  if (!fs.existsSync(file)) {
+    return {};
+  }
+  const parsed = JSON.parse(fs.readFileSync(file, "utf8"));
+  if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) {
+    throw new Error(`${file} must contain a JSON object`);
+  }
+  return parsed;
+}
+
 /** Loads and instantiates the Plugin instance. */
 async function loadPlugin(targetPath: string): Promise<Plugin> {
   const entrypoint = resolvePluginEntrypoint(targetPath);
@@ -194,7 +213,9 @@ async function main(): Promise<void> {
   const coreHandle = await connectCore(coreSockPath);
   const ctx: PluginContext = {
     dataDir,
-    config: {},
+    // The Core pushes configuration only when the operator changes it, so the last saved
+    // configuration must be read here or the plugin would start unconfigured after a restart.
+    config: readStoredConfig(dataDir),
     core: coreHandle,
   };
   await plugin.onLoad(ctx);
@@ -219,7 +240,7 @@ async function main(): Promise<void> {
     Ping: (call: any, callback: any) => {
       callback(null, { timestamp: call.request.timestamp });
     },
-    ReloadPluginConfig: (call: any, callback: any) => {
+    ReloadPluginConfig: async (call: any, callback: any) => {
       const version = Number(call.request.version || 0);
       const currentVersion = Number((plugin as any)._configVersion || 0);
       if (version > 0 && version <= currentVersion) {
@@ -229,6 +250,22 @@ async function main(): Promise<void> {
           applied_version: currentVersion,
         });
         return;
+      }
+      if (call.request.config) {
+        const previous = ctx.config;
+        ctx.config = fromProtoStruct(call.request.config);
+        try {
+          await plugin.onConfigReload(ctx.config);
+        } catch (err: any) {
+          // A rejected reload leaves the plugin on the configuration it accepted last.
+          ctx.config = previous;
+          callback(null, {
+            success: false,
+            error_message: `onConfigReload failed: ${err?.message || err}`,
+            applied_version: currentVersion,
+          });
+          return;
+        }
       }
       (plugin as any)._configVersion = version;
       callback(null, { success: true, error_message: "", applied_version: version });
