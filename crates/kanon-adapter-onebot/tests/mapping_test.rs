@@ -1,4 +1,4 @@
-use kanon_adapter_onebot::mapping::{delivery, map_event, message_id};
+use kanon_adapter_onebot::mapping::{attach_quote, delivery, map_event, message_id, reply_target};
 use kanon_proto::prost_types::value::Kind;
 use kanon_proto::v1::message_segment::Segment;
 use kanon_proto::v1::{
@@ -277,4 +277,33 @@ fn nonmessages_are_ignored_and_malformed_inputs_fail() {
         outbound.channel_id = channel.into();
         assert!(delivery(&outbound).is_err());
     }
+}
+
+#[test]
+fn quotes_carry_text_files_and_stickers_into_context() {
+    let mut mapped = map_event(
+        "onebot",
+        event(json!([
+            {"type": "reply", "data": {"id": "5"}},
+            {"type": "text", "data": {"text": "?"}}
+        ])),
+    )
+    .unwrap()
+    .unwrap();
+    assert_eq!(reply_target(&mapped), Some(5));
+    attach_quote(
+        &mut mapped,
+        &json!("see[CQ:file,file=report.pdf,file_id=x][CQ:mface,url=https://cdn.example/s.gif,summary=hi]"),
+    )
+    .unwrap();
+    assert!(
+        matches!(&mapped.segments[0].segment, Some(Segment::Reply(reply)) if reply.snippet == "see[file:report.pdf][mface]")
+    );
+    assert!(
+        matches!(&mapped.segments[1].segment, Some(Segment::Image(image)) if image.source == Some(image_segment::Source::Url("https://cdn.example/s.gif".into())))
+    );
+    assert!(matches!(
+        &mapped.segments[2].segment,
+        Some(Segment::Text(_))
+    ));
 }

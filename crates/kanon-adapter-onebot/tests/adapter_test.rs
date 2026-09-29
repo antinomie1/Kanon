@@ -235,6 +235,43 @@ async fn reverse_correlates_out_of_order_calls_and_reports_failure() {
 }
 
 #[tokio::test]
+async fn quoted_message_is_fetched_before_ingest() {
+    let (adapter, mut rx, url) = reverse().await;
+    let mut socket = connect_reverse(&url, "secret", "Universal").await.unwrap();
+    connected(&adapter).await;
+    let mut quoting = event(2);
+    quoting["message"] =
+        json!([{"type":"reply","data":{"id":"1"}},{"type":"text","data":{"text":"what is this?"}}]);
+    socket
+        .send(Message::Text(quoting.to_string()))
+        .await
+        .unwrap();
+    let lookup = receive(&mut socket).await;
+    assert_eq!(lookup["action"], "get_msg");
+    assert_eq!(lookup["params"]["message_id"], 1);
+    socket
+        .send(Message::Text(
+            json!({"echo":lookup["echo"],"status":"ok","retcode":0,"data":{"message":[
+                {"type":"text","data":{"text":"look"}},
+                {"type":"image","data":{"file":"a.image","url":"https://cdn.example/a.png"}}
+            ]}})
+            .to_string(),
+        ))
+        .await
+        .unwrap();
+    let ingested = timeout(Duration::from_secs(3), rx.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    let segments = ingested.event.unwrap().segments;
+    assert!(
+        matches!(&segments[0].segment, Some(Segment::Reply(reply)) if reply.snippet == "look[image]")
+    );
+    assert!(matches!(&segments[1].segment, Some(Segment::Image(_))));
+    adapter.stop().await.unwrap();
+}
+
+#[tokio::test]
 async fn saturated_ingress_does_not_block_api_or_ping_and_disconnect_fails_pending() {
     let (adapter, mut rx, url) = reverse().await;
     let mut socket = connect_reverse(&url, "secret", "Universal").await.unwrap();

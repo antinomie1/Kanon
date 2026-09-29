@@ -1,9 +1,9 @@
 //! Universal WebSocket transport. Each session exclusively owns its echo correlation map.
 
-use crate::{ConnectionState, OneBotConfig, OneBotError, State, mapping};
+use crate::{ConnectionState, OneBotClient, OneBotConfig, OneBotError, State, mapping};
 use futures_util::{SinkExt, StreamExt};
 use kanon_core::EventIngress;
-use kanon_proto::v1::IngestEventRequest;
+use kanon_proto::v1::{IngestEventRequest, PipelineEventRequest};
 use serde_json::{Value, json};
 use std::{
     collections::HashMap,
@@ -14,6 +14,7 @@ use tokio::{
     io::{AsyncRead, AsyncWrite, AsyncWriteExt},
     net::TcpListener,
     sync::{mpsc, oneshot},
+    task::JoinSet,
     time::{Instant, timeout, timeout_at},
 };
 use tokio_tungstenite::{
@@ -177,6 +178,10 @@ where
     S: AsyncRead + AsyncWrite + Unpin,
 {
     let (sender, mut commands) = mpsc::channel::<Command>(64);
+    // Quote lookups call `get_msg` through this same session, so they run beside the loop that
+    // answers them. The set is owned by the session: a disconnect drops every pending lookup.
+    let api = sender.clone();
+    let mut quotes = JoinSet::new();
     {
         let mut state = state.write().expect("OneBot state poisoned");
         state.sender = Some(sender);
@@ -216,11 +221,16 @@ where
                         state.write().expect("OneBot state poisoned").status.self_id = Some(id);
                     }
                     match mapping::map_event(&config.platform, value) {
-                        Ok(Some(event)) => {
-                            if let Err(err) = ingress.try_ingest(IngestEventRequest { platform: config.platform.clone(), event: Some(event) }) {
-                                record_error(state, format!("OneBot message rejected by core: {err}"));
+                        Ok(Some(event)) => match mapping::reply_target(&event) {
+                            Some(message_id) => {
+                                let api = api.clone();
+                                quotes.spawn(async move {
+                                    let quoted = OneBotClient::call_on::<_, Value>(api, "get_msg", &json!({"message_id": message_id})).await;
+                                    (event, quoted)
+                                });
                             }
-                        }
+                            None => ingest(state, config, ingress, event),
+                        },
                         Ok(None) => {},
                         Err(err) => record_error(state, format!("OneBot message mapping failed: {err}")),
                     }
@@ -230,6 +240,14 @@ where
                         let _ = command.reply.send(Ok(value));
                     }
                 }
+            }
+            Some(joined) = quotes.join_next() => {
+                let (mut event, quoted) = joined.map_err(|_| "OneBot quote lookup task failed")?;
+                // A recalled or expired quote must not drop the message that quoted it.
+                if let Err(err) = quoted.map_err(|e| e.to_string()).and_then(|data| mapping::attach_quote(&mut event, &data["message"])) {
+                    tracing::warn!(error = %err, "OneBot quoted message unavailable");
+                }
+                ingest(state, config, ingress, event);
             }
             command = commands.recv() => {
                 let Some(command) = command else { return Ok(()); };
@@ -287,6 +305,21 @@ fn set_state(state: &Arc<RwLock<State>>, connection_state: ConnectionState, erro
     state.status.connection_state = connection_state;
     if error.is_some() {
         state.status.last_error = error;
+    }
+}
+
+/// Pushes an event without waiting for core capacity.
+fn ingest(
+    state: &Arc<RwLock<State>>,
+    config: &OneBotConfig,
+    ingress: &EventIngress,
+    event: PipelineEventRequest,
+) {
+    if let Err(err) = ingress.try_ingest(IngestEventRequest {
+        platform: config.platform.clone(),
+        event: Some(event),
+    }) {
+        record_error(state, format!("OneBot message rejected by core: {err}"));
     }
 }
 

@@ -27,42 +27,8 @@ pub fn map_event(platform: &str, value: Value) -> Result<Option<PipelineEventReq
         other => return Err(format!("unsupported OneBot message_type '{other}'")),
     };
     let channel_id = format!("{scene}:{peer_id}");
-    let wire = match &value["message"] {
-        Value::Array(segments) => segments.clone(),
-        Value::String(cq) => parse_cq(cq)?,
-        _ => return Err("OneBot message must be an array or CQ string".into()),
-    };
-    let mut segments = Vec::with_capacity(wire.len());
-    let mut raw_text = String::new();
-    for segment in &wire {
-        let mapped = incoming(segment)?;
-        match mapped.segment.as_ref() {
-            Some(Segment::Text(text)) => raw_text.push_str(&text.content),
-            Some(Segment::Mention(mention)) => {
-                raw_text.push('@');
-                raw_text.push_str(if mention.is_all {
-                    "all"
-                } else {
-                    &mention.target_user_id
-                });
-            }
-            Some(Segment::Image(_)) => raw_text.push_str("[image]"),
-            Some(Segment::Audio(_)) => raw_text.push_str("[voice]"),
-            Some(Segment::Custom(custom)) => {
-                raw_text.push('[');
-                raw_text.push_str(
-                    custom
-                        .type_name
-                        .strip_prefix("onebot.")
-                        .unwrap_or(&custom.type_name),
-                );
-                raw_text.push(']');
-            }
-            // The reply target belongs to the structured context, not the current utterance.
-            Some(Segment::Reply(_)) | None => {}
-        }
-        segments.push(mapped);
-    }
+    let segments = parse_message(&value["message"])?;
+    let raw_text = render(&segments);
     let mentioned = segments.iter().any(|segment| {
         matches!(
             &segment.segment, Some(Segment::Mention(mention))
@@ -105,6 +71,118 @@ pub fn map_event(platform: &str, value: Value) -> Result<Option<PipelineEventReq
         segments,
         metadata: Some(to_struct(&metadata)?),
     }))
+}
+
+/// The OneBot message ID an inbound event quotes, if any.
+///
+/// OneBot v11 reply segments carry only the target ID, so the quoted content must be fetched
+/// with `get_msg` before the event is ingested.
+pub fn reply_target(event: &PipelineEventRequest) -> Option<i64> {
+    event
+        .segments
+        .iter()
+        .find_map(|segment| match &segment.segment {
+            Some(Segment::Reply(reply)) => parse_id(&reply.target_message_id).ok(),
+            _ => None,
+        })
+}
+
+/// Fills the reply segment with the quoted message, as Milky delivers it natively.
+///
+/// The quote's text becomes the reply snippet; quoted images, stickers and voice follow the reply
+/// segment as their own segments so the model can see them, not just a placeholder.
+pub fn attach_quote(event: &mut PipelineEventRequest, message: &Value) -> Result<(), String> {
+    let quoted = parse_message(message)?;
+    let index = event
+        .segments
+        .iter()
+        .position(|segment| matches!(segment.segment, Some(Segment::Reply(_))))
+        .ok_or("event has no reply segment")?;
+    if let Some(Segment::Reply(reply)) = &mut event.segments[index].segment {
+        reply.snippet = render(&quoted);
+    }
+    let media = quoted
+        .into_iter()
+        .filter_map(|segment| match segment.segment {
+            Some(Segment::Image(_) | Segment::Audio(_)) => Some(segment),
+            Some(Segment::Custom(custom)) => sticker(&custom),
+            _ => None,
+        });
+    event
+        .segments
+        .splice(index + 1..index + 1, media.collect::<Vec<_>>());
+    Ok(())
+}
+
+/// A market sticker (`mface`) with a rendered image URL, surfaced as an image.
+fn sticker(custom: &RawCustomSegment) -> Option<MessageSegment> {
+    if custom.type_name != "onebot.mface" {
+        return None;
+    }
+    let url = payload_str(custom, "url").filter(|url| !url.is_empty())?;
+    Some(MessageSegment {
+        segment: Some(Segment::Image(ImageSegment {
+            source: Some(image_segment::Source::Url(url.into())),
+            mime_type: None,
+            filename: None,
+        })),
+    })
+}
+
+fn payload_str<'a>(custom: &'a RawCustomSegment, key: &str) -> Option<&'a str> {
+    match custom.payload.as_ref()?.fields.get(key)?.kind.as_ref()? {
+        Kind::StringValue(text) => Some(text),
+        _ => None,
+    }
+}
+
+/// Parses a OneBot message in array or CQ string form into Kanon segments.
+fn parse_message(message: &Value) -> Result<Vec<MessageSegment>, String> {
+    let wire = match message {
+        Value::Array(segments) => segments.clone(),
+        Value::String(cq) => parse_cq(cq)?,
+        _ => return Err("OneBot message must be an array or CQ string".into()),
+    };
+    wire.iter().map(incoming).collect()
+}
+
+/// Renders the human-readable text of a message; media becomes a short placeholder.
+fn render(segments: &[MessageSegment]) -> String {
+    let mut text = String::new();
+    for segment in segments {
+        match segment.segment.as_ref() {
+            Some(Segment::Text(segment)) => text.push_str(&segment.content),
+            Some(Segment::Mention(mention)) => {
+                text.push('@');
+                text.push_str(if mention.is_all {
+                    "all"
+                } else {
+                    &mention.target_user_id
+                });
+            }
+            Some(Segment::Image(_)) => text.push_str("[image]"),
+            Some(Segment::Audio(_)) => text.push_str("[voice]"),
+            Some(Segment::Custom(custom)) => {
+                let kind = custom
+                    .type_name
+                    .strip_prefix("onebot.")
+                    .unwrap_or(&custom.type_name);
+                text.push('[');
+                text.push_str(kind);
+                // A file is only useful to the model with its name.
+                if kind == "file"
+                    && let Some(name) = payload_str(custom, "name").or(payload_str(custom, "file"))
+                {
+                    text.push(':');
+                    text.push_str(name);
+                }
+                text.push(']');
+            }
+            // The reply target belongs to the structured context, not the current utterance.
+            Some(Segment::Reply(_)) | None => {}
+        }
+    }
+    text
 }
 
 /// Builds the OneBot action and params for a complete outbound message.
