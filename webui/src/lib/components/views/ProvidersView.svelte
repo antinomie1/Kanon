@@ -447,7 +447,7 @@ async function handleDefaultChange(
             <div class="flex flex-wrap items-center justify-between gap-3 pb-3.5 border-b border-zinc-100 dark:border-zinc-800">
               <div>
                 <h3 class="text-base font-semibold text-zinc-900 dark:text-zinc-100 flex items-center gap-2">
-                  <span>{t('providers.directory_title')}:</span>
+                  <span>{t('providers.edit_title')}:</span>
                   <code class="font-mono text-indigo-600 dark:text-indigo-400 font-bold text-base">{prov.name}</code>
                 </h3>
                 <p class="text-xs sm:text-sm text-zinc-500 font-mono mt-1">
