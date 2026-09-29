@@ -91,7 +91,7 @@ impl CoreApiService {
     /// rewires the slot keeps the previous static behaviour.
     pub fn with_gateway(mut self, gateway: Arc<LlmGateway>) -> Self {
         // The gateway carries no session memory of its own: `RequestLLM` is a stateless
-        // pass-through, so a private sliding-window memory is sufficient and never shared.
+        // pass-through, so a private in-memory store is sufficient and never shared.
         let agent = kanon_llm::Agent::builder("core-gateway", gateway.provider().clone())
             .model(gateway.default_model())
             .build();

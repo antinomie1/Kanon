@@ -70,6 +70,10 @@ pub enum AgentError {
     /// Memory backend failure.
     #[error("Agent memory failure: {0}")]
     Memory(String),
+
+    /// The model did not produce a usable summary when asked to compact a conversation.
+    #[error("Conversation compaction failed: {0}")]
+    Compaction(String),
 }
 
 impl From<tonic::Status> for AgentError {

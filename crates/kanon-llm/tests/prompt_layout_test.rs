@@ -18,7 +18,7 @@ use kanon_llm::gateway::providers::{
     AnthropicMessagesProvider, OpenAiChatProvider, OpenAiResponsesProvider,
 };
 use kanon_llm::gateway::types::{ChatMessage, ChatRequest, ChatResponse, Role, ToolDefinition};
-use kanon_llm::memory::SlidingWindowMemory;
+use kanon_llm::memory::InMemory;
 use kanon_llm::prompt::{BASE_PERSONA_PROMPT, PersonaRegistry};
 use kanon_llm::session::SessionManager;
 use kanon_llm::{canonical_json, canonical_tools, normalize_request};
@@ -61,7 +61,7 @@ fn tool(name: &str) -> NativeTool {
 
 /// Builds an agent over a recorder with tools registered in the given order.
 fn agent_with_tools(recorder: Arc<Recorder>, order: &[&str]) -> Agent {
-    let memory = Arc::new(SlidingWindowMemory::new(50));
+    let memory = Arc::new(InMemory::new());
     let sessions = Arc::new(SessionManager::new(memory.clone()));
     let mut builder = Agent::builder("layout", recorder)
         .memory(memory)
@@ -213,7 +213,7 @@ impl AgentHook for SloppyHooks {
 #[tokio::test]
 async fn the_static_block_is_one_trimmed_message_however_many_hooks_contribute() {
     let recorder = Arc::new(Recorder::default());
-    let memory = Arc::new(SlidingWindowMemory::new(10));
+    let memory = Arc::new(InMemory::new());
     let sessions = Arc::new(SessionManager::new(memory.clone()));
     let agent = Agent::builder("layout", recorder.clone())
         .memory(memory)

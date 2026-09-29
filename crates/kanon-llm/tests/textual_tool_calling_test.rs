@@ -10,7 +10,7 @@ use std::sync::{Arc, Mutex};
 use async_trait::async_trait;
 use kanon_llm::agent::{Agent, NativeTool};
 use kanon_llm::{
-    ChatMessage, ChatRequest, ChatResponse, GatewayError, LlmProvider, Memory, SlidingWindowMemory,
+    ChatMessage, ChatRequest, ChatResponse, GatewayError, InMemory, LlmProvider, Memory,
     ToolDefinition,
 };
 
@@ -81,7 +81,7 @@ async fn markup_tool_calls_are_executed_and_the_turn_continues() {
         },
     ]);
 
-    let memory: Arc<dyn Memory> = Arc::new(SlidingWindowMemory::new(10));
+    let memory: Arc<dyn Memory> = Arc::new(InMemory::new());
     let agent = Agent::builder("test", Arc::new(provider))
         .memory(memory)
         .max_iterations(3)
@@ -139,7 +139,7 @@ async fn plain_text_without_markup_is_returned_unchanged() {
         usage: None,
     }]);
 
-    let memory: Arc<dyn Memory> = Arc::new(SlidingWindowMemory::new(10));
+    let memory: Arc<dyn Memory> = Arc::new(InMemory::new());
     let agent = Agent::builder("test", Arc::new(provider))
         .memory(memory)
         .build();

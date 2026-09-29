@@ -18,17 +18,19 @@ use std::sync::Arc;
 
 use kanon_proto::v1::{ToolCallRequest, tool_call_request, tool_call_response};
 
+use crate::compaction::{COMPACTION_INSTRUCTION, CompactionPolicy, ends_cleanly, summary_block};
 use crate::error::AgentError;
 use crate::gateway::types::{
-    ChatMessage, ChatRequest, ChatResponse, Role, ToolCall, ToolDefinition,
+    ChatMessage, ChatRequest, ChatResponse, Role, TokenUsage, ToolCall, ToolDefinition,
 };
 use crate::gateway::{ChatChunk, ChatChunkStream, LlmProvider};
 use crate::layout::{canonical_tools, normalize_request};
-use crate::memory::{Memory, SlidingWindowMemory};
+use crate::memory::{InMemory, Memory, MemorySnapshot};
 use crate::tool_router::{
     ExecutedToolCall, ToolAttachment, ToolHost, aggregate_tools, json_to_prost_struct,
     prost_struct_to_json,
 };
+use dashmap::{DashMap, DashSet};
 use tokio_stream::StreamExt;
 
 /// Configuration parameters for agent reasoning and execution.
@@ -55,6 +57,11 @@ pub struct AgentConfig {
     pub max_tokens: Option<u32>,
     /// Whether to halt immediately if a tool call returns an error.
     pub stop_on_tool_failure: bool,
+    /// When a long conversation is compacted into a summary; `None` never compacts.
+    ///
+    /// On by default: history is append-only (see [`crate::memory`]), so without compaction a long
+    /// conversation would eventually outgrow the model's context window.
+    pub compaction: Option<CompactionPolicy>,
 }
 
 impl AgentConfig {
@@ -77,6 +84,7 @@ impl Default for AgentConfig {
             temperature: None,
             max_tokens: None,
             stop_on_tool_failure: false,
+            compaction: Some(CompactionPolicy::default()),
         }
     }
 }
@@ -227,10 +235,14 @@ impl ToolHost for NoopHost {
 /// General-purpose Kanon Agent.
 ///
 /// Encapsulates model backend, memory store, native tools, lifecycle hooks, and reasoning policies.
+///
+/// Cloning is cheap (every heavy part is behind an `Arc`) and is how a conversation compaction
+/// outlives the turn that scheduled it: the clone shares the memory, provider and hooks.
+#[derive(Clone)]
 pub struct Agent {
     /// Identifier or role name of this agent.
     name: String,
-    /// Static or base system prompt setting the agent's persona and instructions.
+    /// Static instructions placed at the top of the system block, before the persona.
     system_prompt: Option<String>,
     /// Provider backend for LLM completions.
     provider: Arc<dyn LlmProvider>,
@@ -246,6 +258,10 @@ pub struct Agent {
     hooks: Vec<Arc<dyn AgentHook>>,
     /// Operational configuration.
     config: AgentConfig,
+    /// Serializes compactions of one session, so an automatic one and a manual one never overlap.
+    compaction_locks: Arc<DashMap<String, Arc<tokio::sync::Mutex<()>>>>,
+    /// Sessions with a compaction in flight, so a burst of turns schedules one, not many.
+    compacting: Arc<DashSet<String>>,
 }
 
 impl Agent {
@@ -307,16 +323,31 @@ impl Agent {
 
     /// Builds the request for one model call, laid out static-first.
     ///
-    /// The messages start as the session history (append-only), hooks then add the static block —
-    /// the persona and skill catalog — and [`normalize_request`] merges it into one system message.
-    /// The result is `[tools] [system] [history…] [current turn]`: only the tail changes from one
-    /// call to the next, so the provider serves everything before it from its prompt cache.
+    /// The messages start as the session history (append-only). The agent's own instructions go
+    /// first, hooks then add the persona and skill catalog, the conversation summary (when there is
+    /// one) follows them, and [`normalize_request`] merges that whole static block into one system
+    /// message. The result is `[tools] [system] [history…] [current turn]`: only the tail changes
+    /// from one call to the next, so the provider serves everything before it from its prompt cache.
     async fn build_request(
         &self,
         session_id: &str,
         tools: &[ToolDefinition],
     ) -> Result<ChatRequest, AgentError> {
-        let messages = self.memory.get_messages(session_id).await?;
+        let snapshot = self.memory.snapshot(session_id).await?;
+        self.request_from(session_id, snapshot, tools).await
+    }
+
+    /// Builds a request from an already-read memory snapshot.
+    ///
+    /// Compaction reads the snapshot once and builds from it, so the messages it later folds away
+    /// are exactly the ones its summary was written from.
+    async fn request_from(
+        &self,
+        session_id: &str,
+        snapshot: MemorySnapshot,
+        tools: &[ToolDefinition],
+    ) -> Result<ChatRequest, AgentError> {
+        let MemorySnapshot { summary, messages } = snapshot;
 
         let mut request = ChatRequest {
             model: self.config.default_model.clone(),
@@ -326,12 +357,173 @@ impl Agent {
             max_tokens: self.config.max_tokens,
         };
 
+        if let Some(prompt) = &self.system_prompt {
+            request
+                .messages
+                .insert(0, ChatMessage::system(prompt.clone()));
+        }
+
         // Lifecycle Hook: before LLM request (persona, skill catalog, RAG, tracing, ...)
         for hook in &self.hooks {
             hook.on_llm_request(session_id, &mut request).await?;
         }
+
+        // The summary changes only when the history is compacted, so it sits *after* the persona
+        // and skill catalog (which change less often still) and just before the history it stands in
+        // for.
+        if let Some(summary) = summary {
+            let position = request
+                .messages
+                .iter()
+                .take_while(|message| message.role == Role::System)
+                .count();
+            request
+                .messages
+                .insert(position, ChatMessage::system(summary_block(&summary)));
+        }
+
         normalize_request(&mut request);
         Ok(request)
+    }
+
+    /// Returns a copy of this agent whose reasoning loop stops after `max` iterations.
+    pub fn with_max_iterations(&self, max: usize) -> Agent {
+        let mut agent = self.clone();
+        agent.config.max_iterations = max;
+        agent
+    }
+
+    /// Compacts a session's history into a summary now, whatever its size.
+    ///
+    /// Returns `Ok(true)` when the history was replaced by a summary, and `Ok(false)` when there was
+    /// nothing to compact (too short, or not at a clean stopping point — see [`ends_cleanly`]). The
+    /// tools of `hosts` are part of the summarization request so its prefix matches the
+    /// conversation's own requests and the provider's cache is reused.
+    pub async fn compact_session(
+        &self,
+        session_id: &str,
+        hosts: &[Arc<dyn ToolHost>],
+    ) -> Result<bool, AgentError> {
+        let tools = self.collect_tools(hosts);
+        self.compact(session_id, &tools).await
+    }
+
+    /// Summarizes and folds away a session's history.
+    ///
+    /// See [`crate::compaction`] for why the summarization request is the conversation's own request
+    /// plus one appended instruction.
+    async fn compact(
+        &self,
+        session_id: &str,
+        tools: &[ToolDefinition],
+    ) -> Result<bool, AgentError> {
+        let lock = self
+            .compaction_locks
+            .entry(session_id.to_string())
+            .or_default()
+            .clone();
+        let _guard = lock.lock().await;
+
+        let snapshot = self.memory.snapshot(session_id).await?;
+        let min_messages = self
+            .config
+            .compaction
+            .unwrap_or_default()
+            .min_messages
+            .max(1);
+        if snapshot.messages.len() < min_messages || !ends_cleanly(&snapshot.messages) {
+            return Ok(false);
+        }
+        let covered = snapshot.messages.len();
+
+        let mut request = self.request_from(session_id, snapshot, tools).await?;
+        request
+            .messages
+            .push(ChatMessage::user(COMPACTION_INSTRUCTION));
+
+        let mut response = self.provider.chat(&request).await?;
+        for hook in &self.hooks {
+            hook.on_llm_response(session_id, &mut response).await?;
+        }
+
+        // A model that ignores the instruction and asks for a tool, or answers with nothing, has
+        // not produced a summary. Folding the history away on that would lose the conversation.
+        let summary = response
+            .content
+            .as_deref()
+            .map(crate::gateway::strip_reasoning_tags)
+            .map(str::trim)
+            .filter(|text| !text.is_empty());
+        let Some(summary) = summary.filter(|_| response.tool_calls.is_empty()) else {
+            return Err(AgentError::Compaction(
+                "the model returned no summary (empty answer or a tool call)".to_string(),
+            ));
+        };
+
+        self.memory
+            .compact_history(session_id, covered, summary.to_string())
+            .await?;
+
+        tracing::info!(
+            session_id = %session_id,
+            compacted_messages = covered,
+            summary_chars = summary.chars().count(),
+            "Conversation compacted into a summary"
+        );
+        Ok(true)
+    }
+
+    /// Schedules a background compaction when a finished turn left the context large enough.
+    ///
+    /// Runs right after a reply is produced because that is when the provider's cache holds exactly
+    /// the prefix the summarization request will re-send, and in the background so the user never
+    /// waits for it. The size comes from the provider's own token count when it reports one (it
+    /// includes the system block and tools) and from an estimate otherwise; the reply is added
+    /// because it becomes part of the next request.
+    fn schedule_compaction(
+        &self,
+        session_id: &str,
+        tools: &[ToolDefinition],
+        request: &ChatRequest,
+        usage: Option<&TokenUsage>,
+        reply: &str,
+    ) {
+        let Some(policy) = self.config.compaction else {
+            return;
+        };
+
+        let prompt_tokens = usage
+            .map(|usage| usage.prompt_tokens as usize)
+            .filter(|tokens| *tokens > 0)
+            .unwrap_or_else(|| crate::token::estimate_request_tokens(request));
+        let reply_tokens = usage
+            .map(|usage| usage.completion_tokens as usize)
+            .filter(|tokens| *tokens > 0)
+            .unwrap_or_else(|| crate::token::estimate_text_tokens(reply));
+
+        if !policy.is_exceeded(prompt_tokens + reply_tokens, self.config.context_length) {
+            return;
+        }
+
+        // One compaction per session at a time; a second scheduled meanwhile would only summarize
+        // what the first is already summarizing.
+        if !self.compacting.insert(session_id.to_string()) {
+            return;
+        }
+
+        let agent = self.clone();
+        let session_id = session_id.to_string();
+        let tools = tools.to_vec();
+        tokio::spawn(async move {
+            if let Err(err) = agent.compact(&session_id, &tools).await {
+                tracing::warn!(
+                    session_id = %session_id,
+                    error = %err,
+                    "Conversation compaction failed; the history is left as it was"
+                );
+            }
+            agent.compacting.remove(&session_id);
+        });
     }
 
     /// Executes the agent reasoning loop for an inbound message in standalone mode,
@@ -377,26 +569,17 @@ impl Agent {
     ) -> Result<AgentOutput, AgentError> {
         let user_input = message.content.clone().unwrap_or_default();
 
-        // 1. Ensure system prompt is established for this session if configured
-        if let Some(ref prompt) = self.system_prompt
-            && self.memory.get_system_prompt(session_id).await?.is_none()
-        {
-            self.memory
-                .set_system_prompt(session_id, prompt.clone())
-                .await?;
-        }
-
-        // 2. Push user message to memory
+        // 1. Push user message to memory
         self.memory.push_message(session_id, message).await?;
 
-        // 3. Dynamically aggregate tools from both native tools and active plugin hosts
+        // 2. Dynamically aggregate tools from both native tools and active plugin hosts
         let tools = self.collect_tools(hosts);
 
         let mut executed_tools = Vec::new();
         let mut attachments: Vec<ToolAttachment> = Vec::new();
         let mut iterations = 0;
 
-        // 4. Reasoning and tool execution loop
+        // 3. Reasoning and tool execution loop
         loop {
             let request = self.build_request(session_id, &tools).await?;
 
@@ -432,6 +615,14 @@ impl Agent {
                     sm.record_turn(session_id, tokens_used);
                 }
 
+                self.schedule_compaction(
+                    session_id,
+                    &tools,
+                    &request,
+                    response.usage.as_ref(),
+                    &final_content,
+                );
+
                 return Ok(AgentOutput {
                     content: final_content,
                     executed_tools,
@@ -461,6 +652,8 @@ impl Agent {
                         + crate::token::estimate_text_tokens(&fallback);
                     sm.record_turn(session_id, tokens_used);
                 }
+
+                self.schedule_compaction(session_id, &tools, &request, None, &fallback);
 
                 return Ok(AgentOutput {
                     content: fallback,
@@ -717,21 +910,12 @@ impl Agent {
         user_input: &str,
         hosts: &[Arc<dyn ToolHost>],
     ) -> Result<ChatChunkStream, AgentError> {
-        // 1. Ensure system prompt is established
-        if let Some(ref prompt) = self.system_prompt
-            && self.memory.get_system_prompt(session_id).await?.is_none()
-        {
-            self.memory
-                .set_system_prompt(session_id, prompt.clone())
-                .await?;
-        }
-
-        // 2. Push user message to memory
+        // 1. Push user message to memory
         self.memory
             .push_message(session_id, ChatMessage::user(user_input))
             .await?;
 
-        // 3. Dynamically aggregate tools
+        // 2. Dynamically aggregate tools
         let tools = self.collect_tools(hosts);
 
         let mut iterations = 0;
@@ -1104,7 +1288,6 @@ pub struct AgentBuilder {
     tools: Vec<Arc<dyn AgentTool>>,
     hooks: Vec<Arc<dyn AgentHook>>,
     config: AgentConfig,
-    summary_config: Option<crate::summary::SummaryConfig>,
 }
 
 impl AgentBuilder {
@@ -1120,7 +1303,6 @@ impl AgentBuilder {
             tools: Vec::new(),
             hooks: Vec::new(),
             config: AgentConfig::default(),
-            summary_config: None,
         }
     }
 
@@ -1214,9 +1396,9 @@ impl AgentBuilder {
         self
     }
 
-    /// Configures automatic long-context summary compression for this agent.
-    pub fn summary_config(mut self, config: crate::summary::SummaryConfig) -> Self {
-        self.summary_config = Some(config);
+    /// Sets when long conversations are compacted into a summary; `None` never compacts.
+    pub fn compaction(mut self, policy: Option<CompactionPolicy>) -> Self {
+        self.config.compaction = policy;
         self
     }
 
@@ -1225,15 +1407,14 @@ impl AgentBuilder {
         let memory = self
             .memory
             .or_else(|| self.session_manager.as_ref().map(|sm| sm.memory().clone()))
-            .unwrap_or_else(|| Arc::new(SlidingWindowMemory::default()));
+            .unwrap_or_else(|| Arc::new(InMemory::new()));
 
         if let Some(ref session_mgr) = self.session_manager
             && let Some(ref persona_reg) = self.persona_registry
         {
-            // The persona hook *owns* the base system message: it overwrites the first system
-            // message in place. Registered first, it can therefore never clobber a system message
-            // another hook injected — a hook that appends context (the skill catalog, RAG, ...)
-            // would otherwise be silently discarded whenever the session had no system prompt yet.
+            // The persona hook puts the persona at the very top of the system block. Registered
+            // first, it runs before every other hook, so hooks that append context (the skill
+            // catalog, RAG, ...) always land after it.
             self.hooks.insert(
                 0,
                 Arc::new(crate::prompt::PersonaHook::new(
@@ -1241,18 +1422,6 @@ impl AgentBuilder {
                     persona_reg.clone(),
                 )),
             );
-        }
-
-        if let Some(summary_cfg) = self.summary_config
-            && summary_cfg.enabled
-        {
-            let summarizer = Arc::new(crate::summary::ContextSummarizer::new(
-                summary_cfg,
-                self.provider.clone(),
-                memory.clone(),
-            ));
-            self.hooks
-                .push(Arc::new(crate::summary::SummaryHook::new(summarizer)));
         }
 
         Agent {
@@ -1265,6 +1434,8 @@ impl AgentBuilder {
             tools: self.tools,
             hooks: self.hooks,
             config: self.config,
+            compaction_locks: Arc::new(DashMap::new()),
+            compacting: Arc::new(DashSet::new()),
         }
     }
 }

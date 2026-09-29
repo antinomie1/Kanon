@@ -7,7 +7,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use kanon_llm::GatewayError;
 use kanon_llm::gateway::LlmProvider;
 use kanon_llm::gateway::types::{ChatRequest, ChatResponse, ToolCall};
-use kanon_llm::memory::ConversationManager;
+use kanon_llm::memory::InMemory;
 use kanon_llm::tool_router::{ToolHost, ToolRouter, json_to_prost_struct, prost_struct_to_json};
 use kanon_proto::v1::{
     PluginMeta, ToolAttachment, ToolCallRequest, ToolCallResponse, ToolMeta, tool_call_request,
@@ -161,7 +161,7 @@ async fn test_tool_router_direct_text_no_tools() {
         usage: None,
     }]));
 
-    let memory = Arc::new(ConversationManager::new(10));
+    let memory = Arc::new(InMemory::new());
     let router = ToolRouter::new(mock_provider, memory.clone(), "test-model");
 
     let hosts: Vec<Arc<dyn ToolHost>> = vec![];
@@ -206,7 +206,7 @@ async fn test_tool_router_successful_tool_loop() {
     };
 
     let mock_provider = Arc::new(MockLlmProvider::new(vec![turn1, turn2]));
-    let memory = Arc::new(ConversationManager::new(10));
+    let memory = Arc::new(InMemory::new());
     let router = ToolRouter::new(mock_provider, memory.clone(), "test-model");
 
     let tool_meta = ToolMeta {
@@ -280,7 +280,7 @@ async fn test_tool_router_surfaces_tool_attachments() {
         },
     ]));
 
-    let memory = Arc::new(ConversationManager::new(10));
+    let memory = Arc::new(InMemory::new());
     let router = ToolRouter::new(provider, memory, "test-model");
     let hosts: Vec<Arc<dyn ToolHost>> = vec![host];
 
@@ -320,7 +320,7 @@ async fn test_tool_router_max_recursion_limit() {
         infinite_turn.clone(),
     ]));
 
-    let memory = Arc::new(ConversationManager::new(10));
+    let memory = Arc::new(InMemory::new());
     // Set max iterations = 2
     let router = ToolRouter::new(mock_provider, memory, "test-model").with_max_iterations(2);
 
@@ -450,7 +450,7 @@ async fn test_tool_router_namespaced_duplicate_dispatch() {
         },
     ]));
 
-    let memory = Arc::new(ConversationManager::new(10));
+    let memory = Arc::new(InMemory::new());
     let router = ToolRouter::new(mock_provider, memory, "test-model");
 
     let tool_a = ToolMeta {

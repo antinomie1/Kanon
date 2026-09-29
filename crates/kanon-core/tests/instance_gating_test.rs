@@ -12,7 +12,7 @@ use kanon_core::pipeline::{PipelineEngine, PipelineObserver, PipelineResult, Pip
 use kanon_core::supervisor::{ManagedHost, Supervisor};
 use kanon_core::toggle::{PLUGIN_SECTION, ToggleStore};
 use kanon_llm::gateway::types::{ChatRequest, ChatResponse};
-use kanon_llm::memory::{Memory, SlidingWindowMemory};
+use kanon_llm::memory::{InMemory, Memory};
 use kanon_llm::tool_router::ToolRouter;
 use kanon_llm::{Agent, GatewayError, LlmProvider};
 use kanon_proto::v1::{PipelineEventRequest, PluginMeta};
@@ -44,7 +44,7 @@ async fn harness(
     std::mem::forget(temp);
 
     let calls = Arc::new(AtomicUsize::new(0));
-    let memory: Arc<dyn Memory> = Arc::new(SlidingWindowMemory::new(20));
+    let memory: Arc<dyn Memory> = Arc::new(InMemory::new());
     let agent = Arc::new(
         Agent::builder(
             "gating-test",
@@ -305,7 +305,7 @@ async fn a_plugin_disabled_for_an_instance_is_removed_before_pre_filter() {
     register_plugin_host(&supervisor, PLUGIN_ID).await;
 
     let calls = Arc::new(AtomicUsize::new(0));
-    let memory: Arc<dyn Memory> = Arc::new(SlidingWindowMemory::new(20));
+    let memory: Arc<dyn Memory> = Arc::new(InMemory::new());
     let agent = Arc::new(
         Agent::builder(
             "policy-test",
@@ -363,7 +363,7 @@ async fn an_unspecified_plugin_policy_keeps_the_host_in_the_pipeline() {
                 calls: calls.clone(),
             }),
         )
-        .memory(Arc::new(SlidingWindowMemory::new(20)))
+        .memory(Arc::new(InMemory::new()))
         .model("test-model")
         .build(),
     );

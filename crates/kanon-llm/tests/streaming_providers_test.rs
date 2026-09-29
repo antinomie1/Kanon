@@ -186,7 +186,7 @@ async fn test_agent_run_standalone_stream() {
     use kanon_llm::error::GatewayError;
     use kanon_llm::gateway::ChatChunkStream;
     use kanon_llm::gateway::types::{ChatChunk, ChatResponse};
-    use kanon_llm::memory::SlidingWindowMemory;
+    use kanon_llm::memory::InMemory;
     use std::sync::Arc;
 
     struct MockAgentStreamProvider;
@@ -217,7 +217,7 @@ async fn test_agent_run_standalone_stream() {
         }
     }
 
-    let memory: Arc<dyn kanon_llm::memory::Memory> = Arc::new(SlidingWindowMemory::new(10));
+    let memory: Arc<dyn kanon_llm::memory::Memory> = Arc::new(InMemory::new());
     let provider = Arc::new(MockAgentStreamProvider);
     let agent = Agent::builder("stream_bot", provider)
         .system_prompt("You are a streaming bot.")
@@ -247,13 +247,12 @@ async fn test_agent_run_standalone_stream() {
 
     // Verify that memory automatically committed the assistant's response upon stream finish
     let messages = memory.get_messages(session_id).await.unwrap();
-    assert_eq!(messages.len(), 3); // 1 System + 1 User + 1 Assistant
-    assert_eq!(messages[0].role, kanon_llm::gateway::types::Role::System);
-    assert_eq!(messages[1].role, kanon_llm::gateway::types::Role::User);
-    assert_eq!(messages[1].content.as_deref(), Some("Tell me something"));
-    assert_eq!(messages[2].role, kanon_llm::gateway::types::Role::Assistant);
+    assert_eq!(messages.len(), 2); // 1 User + 1 Assistant: instructions are never stored
+    assert_eq!(messages[0].role, kanon_llm::gateway::types::Role::User);
+    assert_eq!(messages[0].content.as_deref(), Some("Tell me something"));
+    assert_eq!(messages[1].role, kanon_llm::gateway::types::Role::Assistant);
     assert_eq!(
-        messages[2].content.as_deref(),
+        messages[1].content.as_deref(),
         Some("Token 1, Token 2, Token 3")
     );
 }

@@ -4,8 +4,8 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use kanon_llm::{
-    AgentConfig, AgentFactory, AgentSlot, ChatRequest, ChatResponse, GatewayError, LlmProvider,
-    Memory, PersonaRegistry, ProviderEntry, ProviderRuntime, SessionManager, SlidingWindowMemory,
+    AgentConfig, AgentFactory, AgentSlot, ChatRequest, ChatResponse, GatewayError, InMemory,
+    LlmProvider, Memory, PersonaRegistry, ProviderEntry, ProviderRuntime, SessionManager,
 };
 
 /// Provider stub; identity matters more than behaviour in these tests.
@@ -33,7 +33,7 @@ fn factory() -> (
 ) {
     let slot = Arc::new(AgentSlot::new());
     let provider: Arc<dyn LlmProvider> = Arc::new(StubProvider);
-    let memory: Arc<dyn Memory> = Arc::new(SlidingWindowMemory::new(10));
+    let memory: Arc<dyn Memory> = Arc::new(InMemory::new());
     let sessions = Arc::new(SessionManager::new(memory.clone()));
     let personas = Arc::new(PersonaRegistry::default());
 

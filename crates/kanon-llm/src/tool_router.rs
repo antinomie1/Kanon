@@ -253,32 +253,7 @@ impl ToolRouter {
 
     /// Overrides the maximum tool execution loop iterations.
     pub fn with_max_iterations(mut self, max: usize) -> Self {
-        let mut builder = Agent::builder(self.agent.name(), self.agent.provider().clone())
-            .memory(self.agent.memory().clone())
-            .model(&self.agent.config().default_model)
-            .max_iterations(max)
-            .stop_on_tool_failure(self.agent.config().stop_on_tool_failure);
-
-        if let Some(sm) = self.agent.session_manager() {
-            builder = builder.session_manager(sm.clone());
-        }
-        if let Some(pr) = self.agent.persona_registry() {
-            builder = builder.persona_registry(pr.clone());
-        }
-        if let Some(temp) = self.agent.config().temperature {
-            builder = builder.temperature(temp);
-        }
-        if let Some(tokens) = self.agent.config().max_tokens {
-            builder = builder.max_tokens(tokens);
-        }
-        for hook in self.agent.hooks() {
-            builder = builder.hook_arc(hook.clone());
-        }
-        for tool in self.agent.tools() {
-            builder = builder.tool_arc(tool.clone());
-        }
-
-        self.agent = Arc::new(builder.build());
+        self.agent = Arc::new(self.agent.with_max_iterations(max));
         self
     }
 
@@ -334,9 +309,9 @@ impl ToolRouter {
             Err(AgentError::Gateway(e)) => Err(ToolRouterError::Gateway(e)),
             Err(AgentError::Rpc(s)) => Err(ToolRouterError::Rpc(s)),
             Err(AgentError::ToolNotFound(name)) => Err(ToolRouterError::ToolNotFound(name)),
-            Err(AgentError::Memory(m)) => Err(ToolRouterError::Gateway(
-                crate::error::GatewayError::InvalidResponse(m),
-            )),
+            Err(AgentError::Memory(m)) | Err(AgentError::Compaction(m)) => Err(
+                ToolRouterError::Gateway(crate::error::GatewayError::InvalidResponse(m)),
+            ),
         }
     }
 }

@@ -122,7 +122,7 @@ kanon/
 │   ├── kanon-transport/            # 跨平台 IPC 传输层抽象 (UDS / 认证 Loopback TCP)
 │   ├── kanon-core/                 # 核心事件循环、消息流水线、Supervisor 进程监管 (库)
 │   ├── kanon-storage/              # 嵌入式持久化支持与插件安全目录隔离管理器 (库)
-│   ├── kanon-llm/                  # LLM 多端点路由、Token 滑动窗口与 Tool Calling 状态机 (库)
+│   ├── kanon-llm/                  # LLM 多端点路由、静态优先提示词分层、仅追加会话记忆与缓存友好的上下文压缩、Tool Calling 状态机 (库)
 │   ├── kanon-api/                  # Axum RESTful API 与实时 WebSocket 驱动 (库，供独立前端连接)
 │   └── kanon-dev/                  # 官方专用 CLI：项目管理、模板脚手架、开发热重载与沙盒测试
 ├── sdks/
@@ -586,7 +586,7 @@ Rust 核心全权主导 LLM 的生命周期与推理编排，确保高并发下�
 - **统一模型网关**：内置支持 OpenAI-compatible、DeepSeek、Claude、Ollama 等多端点协议，支持动态权重与故障自动重试。
 - **全局会话上下文管理 (Session Memory)**：
   - 基于 `channel_id:sender_id` 分配会话上下文。
-  - 支持 Token 预算感知滑动窗口：自动估算历史 Token，超出限制时自动进行首尾修剪或调用轻量模型生成摘要压缩。
+  - 会话记忆**仅追加**、不做滑动窗口：上下文增长到模型窗口的一定比例时，才做一次缓存友好的摘要压缩（见 8.7）。
   - 支持 System Persona（人设提示词）动态装配。
 
 ### 8.2 模型推理通道的可见性边界 (Reasoning Visibility)
@@ -662,6 +662,20 @@ sequenceDiagram
 **服务商适配**：OpenAI Chat / Responses 与 DeepSeek 等按前缀自动缓存，稳定前缀即可命中；Anthropic 需要显式断点，`AnthropicMessagesProvider` 在工具列表末尾、system 块、对话最后一个内容块各打一个 `cache_control: ephemeral` 断点（流式与非流式共用同一请求构造器，保证两者布局一致）。
 
 **可观测性**：各服务商返回的缓存命中 token 统一进入 `TokenUsage.cached_tokens`（OpenAI `prompt_tokens_details.cached_tokens`、DeepSeek `prompt_cache_hit_tokens`、Responses `input_tokens_details.cached_tokens`、Anthropic `cache_read_input_tokens`；Anthropic 的 `prompt_tokens` 为 `input + cache_read + cache_creation` 之和）。`/api/v1/metrics` 导出 `kanon_llm_prompt_tokens_total` 与 `kanon_llm_cached_prompt_tokens_total`，二者之比即缓存命中率；`llm_response` 追踪事件同时携带 `prompt_tokens` / `cached_tokens`。
+
+### 8.7 会话记忆：仅追加与缓存友好的压缩 (Append-only Memory & Cache-safe Compaction)
+
+**为什么不用滑动窗口**：每轮丢弃最旧一条消息会让其后所有内容的绝对偏移和前缀全部改变，服务商缓存整段历史全部失效、每轮按首次读取计费。因此记忆层（`Memory` trait，默认 `InMemory`，可插拔 `SqliteMemory`）**只追加**：除 `compact_history` 与 `clear` 外，任何操作都不得删除或重排消息。会话历史里只有用户 / 助手 / 工具消息；人设与技能目录每次请求时组装进系统块，不按会话存储（避免系统提示词出现第二个数据源）。摘要与历史并列保存（`MemorySnapshot { summary, messages }` 一次性读取，读者不会看到某次压缩的摘要配上另一次的历史）。
+
+**何时压缩**：一轮回复完成后，若上下文 token（优先取服务商返回的 `prompt_tokens + completion_tokens`，缺失时用估算）达到模型上下文窗口的 70%（窗口取自模型目录，未知时按 32,768 估计；`CompactionPolicy` 可调），则压缩一次；历史少于 4 条、或未停在完整的助手回复上（等待回答的用户消息、工具循环中途）时不压缩。压缩在后台执行，用户不会因此等待。
+
+**怎么压缩（两步都吃缓存）**：
+1. **同前缀摘要**：摘要请求就是该会话自己的请求——工具、系统块、历史逐字节相同——只在**最末尾**追加一条“请压缩上述对话”的用户消息。服务商从刚写入的缓存里读取前面全部内容，摘要只需为自己的输出付费；选择在回复刚结束时执行，正是因为此时缓存最热。摘要必须是纯文本：模型返回空内容或请求调用工具都视为失败，历史保持原样，绝不在没有摘要的情况下丢弃对话。
+2. **在新前缀里挂载摘要**：被覆盖的前 N 条消息替换为摘要，摘要进入静态系统块（人设 → 技能目录 → 摘要）。前缀只在这一刻变化一次（一次缓存未命中），此后重新稳定追加，直到下一次压缩。
+
+**并发语义**：压缩读取快照后要花数秒等待模型，期间会话照常进行，所以 `compact_history(covered, summary)` **只移除快照覆盖的前 `covered` 条**，之后追加的消息原样保留；同一会话同一时间只有一个压缩任务（同会话再次触发直接跳过）。SQLite 后端在一个事务内删除前缀并写入摘要，失败不丢历史；旧库（含 `system_prompt` 列）自动补 `summary` 列后继续使用。
+
+**边界**：默认节点使用进程内 `InMemory`（重启后会话历史与摘要清空）；`SqliteMemory` 是已就绪的持久化后端，尚未由 `kanon` 组合根默认装配。流式聊天（沙盒 `text/event-stream`）不触发自动压缩，`Agent::compact_session` 可手动触发。
 
 ---
 
@@ -847,7 +861,7 @@ sequenceDiagram
 - **无内置全局集中式 KV 存储**：微内核已彻底移除原存根性质的内存 KV 模块（`crates/kanon-storage/src/kv.rs` 已删除）。`BotApiService.SetStorage` 与 `GetStorage` 端点当前显式返回 `Status::unimplemented`。
 - **本地专属存储第一原则**：所有业务持久化（用户状态、业务缓存等）必须在插件所属的 `./data/plugins/<plugin_id>/` 独立目录中本地持久化（推荐 SQLite、DuckDB 或文件系统）。核心不代理业务读写，亦不提供跨插件共享的分布式数据库抽象。
 - **会话元数据运行时与持久化边界 (Session Metadata vs History Boundary)**：
-  - **对话历史消息与窗口持久化**：用户与模型的多轮对话历史、系统提示词及滑动窗口截断状态均通过 `SqliteMemory`（`crates/kanon-llm/src/sqlite_memory.rs`）以 SQLite WAL 模式强持久化，在单会话内具备串行写入一致性与跨进程重启持久性。
+  - **对话历史与摘要持久化**：`SqliteMemory`（`crates/kanon-llm/src/sqlite_memory.rs`）以 SQLite WAL 模式持久化仅追加的对话历史与压缩摘要，压缩在单个事务内完成，单会话内具备串行写入一致性与跨进程重启持久性；默认节点当前装配的是进程内 `InMemory`（见 8.7）。
   - **会话运行时状态瞬态性 (`RuntimeSessionMetadata`)**：`SessionMetadata`（即 `RuntimeSessionMetadata`，包含动态局部变量 `variables`、活跃轮次计数 `turn_count`、空闲超时探测状态）由 `SessionManager` 在内存（DashMap）中维护，为运行期瞬态数据。微内核重启时运行时活跃会话计数与内存变量将平滑重置，而底层对话消息历史完整保留。
 
 ### 12.2 宿主环境与语言运行时依赖 (Language Host Runtime Dependencies)

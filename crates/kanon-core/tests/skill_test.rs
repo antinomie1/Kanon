@@ -14,7 +14,7 @@ use kanon_core::skill::{MAX_SKILL_BYTES, ReadSkillTool, SkillCatalogHook, SkillE
 use kanon_core::toggle::{SKILL_SECTION, ToggleStore};
 use kanon_llm::agent::{Agent, AgentHook, AgentTool};
 use kanon_llm::gateway::types::{ChatMessage, ChatRequest, ChatResponse, Role};
-use kanon_llm::memory::SlidingWindowMemory;
+use kanon_llm::memory::InMemory;
 use kanon_llm::{GatewayError, LlmProvider, PersonaRegistry, SessionManager};
 
 /// Writes one installable skill and returns the store root.
@@ -254,7 +254,7 @@ async fn the_skill_catalog_reaches_the_model_alongside_the_persona() {
     let registry = Arc::new(InstanceRegistry::default());
 
     let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
-    let memory = Arc::new(SlidingWindowMemory::new(20));
+    let memory = Arc::new(InMemory::new());
     let sessions = Arc::new(SessionManager::new(memory.clone()));
     let personas = Arc::new(PersonaRegistry::default());
     sessions.set_persona("instance:ai:group:1:user:1#0", "assistant");

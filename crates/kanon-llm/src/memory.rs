@@ -1,23 +1,47 @@
-//! Modular conversation memory subsystem.
+//! Conversation memory: an append-only log per session.
 //!
-//! Exposes the [`Memory`] trait for pluggable conversational memory implementations,
-//! allowing plugins or developers to swap in SQLite, Redis, vector, or remote memories.
+//! # Why history is never trimmed one message at a time
+//! Providers cache a prompt by its prefix, so a conversation is cheap exactly as long as each
+//! request *extends* the previous one. A sliding window breaks that: dropping the oldest message on
+//! every turn shifts everything after it, so the whole history is re-read at full price on every
+//! request. Memory therefore only ever **appends**.
 //!
-//! Ships with [`SlidingWindowMemory`] (also aliased as [`ConversationManager`]) as the
-//! default high-performance in-memory implementation backed by a lock-free sharded [`DashMap`].
+//! The one way history gets shorter is [`Memory::compact_history`]: the leading part of the log is
+//! folded into a summary, once, when the context has grown large (see [`crate::compaction`]). The
+//! prefix changes at that moment — one cache miss — and is then stable again until the next
+//! compaction, instead of shifting on every turn.
+//!
+//! The summary lives beside the log, not inside it: history holds only what was said (user,
+//! assistant, tool), and the summary is placed in the request's static system block where it
+//! belongs.
+//!
+//! [`InMemory`] is the default backend, backed by a lock-sharded [`DashMap`]; the [`Memory`] trait
+//! lets plugins swap in SQLite ([`crate::SqliteMemory`]), Redis, vector or remote stores.
 
 use async_trait::async_trait;
 use dashmap::DashMap;
-use std::collections::VecDeque;
 use std::sync::Arc;
 
 use crate::error::MemoryError;
-use crate::gateway::types::{ChatMessage, Role};
+use crate::gateway::types::ChatMessage;
+
+/// A consistent view of one session's memory.
+///
+/// Read as one value so a reader can never see the summary of one compaction next to the history of
+/// another.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct MemorySnapshot {
+    /// Summary of everything compacted away so far, if any compaction happened.
+    pub summary: Option<String>,
+    /// Messages since the last compaction, oldest first. Only user, assistant and tool messages.
+    pub messages: Vec<ChatMessage>,
+}
 
 /// Pluggable interface for conversational memory backends.
 ///
-/// Implementations may store history in memory, relational databases, distributed caches,
-/// or external memory microservices.
+/// Implementations may store history in memory, relational databases, distributed caches, or
+/// external memory microservices. The contract is *append-only* history: nothing but
+/// [`Memory::compact_history`] and [`Memory::clear`] may remove or reorder messages.
 #[async_trait]
 pub trait Memory: Send + Sync {
     /// Appends a message to the specified session history.
@@ -39,220 +63,121 @@ pub trait Memory: Send + Sync {
         Ok(())
     }
 
-    /// Sets or updates the system persona prompt for a session.
-    async fn set_system_prompt(&self, session_key: &str, prompt: String)
-    -> Result<(), MemoryError>;
+    /// Reads the summary and the history of a session as one consistent value.
+    async fn snapshot(&self, session_key: &str) -> Result<MemorySnapshot, MemoryError>;
 
-    /// Returns the active system prompt for a session if configured.
-    async fn get_system_prompt(&self, session_key: &str) -> Result<Option<String>, MemoryError>;
+    /// Retrieves the history of a session (without the summary).
+    async fn get_messages(&self, session_key: &str) -> Result<Vec<ChatMessage>, MemoryError> {
+        Ok(self.snapshot(session_key).await?.messages)
+    }
 
-    /// Retrieves a complete snapshot of conversation messages for a session (including system prompt).
-    async fn get_messages(&self, session_key: &str) -> Result<Vec<ChatMessage>, MemoryError>;
+    /// Folds the first `covered` messages of the history into `summary`.
+    ///
+    /// `summary` replaces any earlier summary — it was written from a prompt that already contained
+    /// it. Messages appended after the caller took its snapshot are **kept**: only the covered
+    /// prefix is removed, which is what lets a compaction run while the conversation continues.
+    ///
+    /// The operation is atomic: readers see either the old summary and history or the new ones, and
+    /// a backend with transactions must not lose the previous state if it fails. Asking to cover
+    /// more messages than exist is an error, not a clamp.
+    async fn compact_history(
+        &self,
+        session_key: &str,
+        covered: usize,
+        summary: String,
+    ) -> Result<(), MemoryError>;
 
-    /// Clears conversation history for the specified session.
+    /// Clears history and summary for the specified session.
     async fn clear(&self, session_key: &str) -> Result<(), MemoryError>;
 
     /// Returns the count of active sessions tracked by this backend.
     async fn session_count(&self) -> Result<usize, MemoryError>;
-
-    /// Atomically replaces the conversation history for a session.
-    ///
-    /// Implementations backed by relational or transactional storage (such as [`SqliteMemory`])
-    /// must execute this within a single transactional boundary, ensuring that previous history
-    /// is preserved intact if any failure occurs during replacement.
-    async fn replace_history(
-        &self,
-        session_key: &str,
-        system_prompt: Option<String>,
-        messages: Vec<ChatMessage>,
-    ) -> Result<(), MemoryError> {
-        self.clear(session_key).await?;
-        if let Some(prompt) = system_prompt {
-            self.set_system_prompt(session_key, prompt).await?;
-        }
-        self.extend_messages(session_key, messages).await?;
-        Ok(())
-    }
 }
 
-/// In-memory conversational state for an individual conversation session.
-#[derive(Debug, Clone)]
+/// In-memory state of one session.
+#[derive(Debug, Clone, Default)]
 pub struct SessionMemory {
-    /// Optional dynamic system persona prompt configuring the model's behavior.
-    system_prompt: Option<String>,
-    /// Sliding window queue of conversational messages (User, Assistant, Tool).
-    messages: VecDeque<ChatMessage>,
-    /// Maximum count of messages retained before sliding window pruning kicks in.
-    max_messages: usize,
-    /// Optional maximum cumulative token budget before pruning older messages.
-    max_tokens_budget: Option<usize>,
+    summary: Option<String>,
+    messages: Vec<ChatMessage>,
 }
 
 impl SessionMemory {
-    /// Creates a new `SessionMemory` with the specified sliding window capacity.
-    pub fn new(max_messages: usize) -> Self {
-        Self::with_budget(max_messages, None)
+    /// Creates an empty session.
+    pub fn new() -> Self {
+        Self::default()
     }
 
-    /// Creates a new `SessionMemory` with message limit and token budget.
-    pub fn with_budget(max_messages: usize, max_tokens_budget: Option<usize>) -> Self {
-        Self {
-            system_prompt: None,
-            messages: VecDeque::with_capacity(max_messages.min(64)),
-            max_messages,
-            max_tokens_budget,
-        }
+    /// Restores a session from persisted parts.
+    pub fn from_parts(summary: Option<String>, messages: Vec<ChatMessage>) -> Self {
+        Self { summary, messages }
     }
 
-    /// Sets or updates the token budget for this session.
-    pub fn set_token_budget(&mut self, budget: Option<usize>) {
-        self.max_tokens_budget = budget;
-        self.prune();
-    }
-
-    /// Returns the active token budget if set.
-    pub fn token_budget(&self) -> Option<usize> {
-        self.max_tokens_budget
-    }
-
-    /// Computes the current estimated token utilization of this session.
-    pub fn estimated_tokens(&self) -> usize {
-        crate::token::estimate_conversation_tokens(&self.get_messages())
-    }
-
-    /// Sets or updates the system persona prompt for this session.
-    pub fn set_system_prompt(&mut self, prompt: impl Into<String>) {
-        self.system_prompt = Some(prompt.into());
-    }
-
-    /// Returns the active system prompt, if any.
-    pub fn system_prompt(&self) -> Option<&str> {
-        self.system_prompt.as_deref()
-    }
-
-    /// Appends a new message to the session history, automatically applying
-    /// sliding window pruning if the message threshold is exceeded.
+    /// Appends a message.
     pub fn push_message(&mut self, message: ChatMessage) {
-        self.messages.push_back(message);
-        self.prune();
+        self.messages.push(message);
     }
 
-    /// Appends multiple messages in sequence.
+    /// Appends several messages in order.
     pub fn extend_messages(&mut self, messages: impl IntoIterator<Item = ChatMessage>) {
-        for msg in messages {
-            self.messages.push_back(msg);
-        }
-        self.prune();
+        self.messages.extend(messages);
     }
 
-    /// Returns a full snapshot of the conversation messages, prepending
-    /// the dynamic system persona prompt before historical messages.
-    pub fn get_messages(&self) -> Vec<ChatMessage> {
-        let mut result = Vec::with_capacity(self.messages.len() + 1);
-        if let Some(ref prompt) = self.system_prompt {
-            result.push(ChatMessage::system(prompt.clone()));
-        }
-        result.extend(self.messages.iter().cloned());
-        result
+    /// The summary, if a compaction happened.
+    pub fn summary(&self) -> Option<&str> {
+        self.summary.as_deref()
     }
 
-    /// Current number of historical messages stored (excluding the system prompt).
+    /// The history, oldest first.
+    pub fn messages(&self) -> &[ChatMessage] {
+        &self.messages
+    }
+
+    /// Number of messages in the history.
     pub fn len(&self) -> usize {
         self.messages.len()
     }
 
-    /// Checks if the history is empty.
+    /// Whether the history is empty.
     pub fn is_empty(&self) -> bool {
         self.messages.is_empty()
     }
 
-    /// Clears historical messages while keeping the system prompt intact.
-    pub fn clear_messages(&mut self) {
-        self.messages.clear();
+    /// A consistent copy of summary and history.
+    pub fn snapshot(&self) -> MemorySnapshot {
+        MemorySnapshot {
+            summary: self.summary.clone(),
+            messages: self.messages.clone(),
+        }
     }
 
-    /// Prunes messages from the front to maintain the sliding window limit and token budget.
-    ///
-    /// Design rationale: In multi-turn tool calling, pruning must not leave an orphaned
-    /// `Role::Tool` message at the beginning of the context, as standard LLM APIs
-    /// require every Tool message to follow an Assistant message with matching `tool_calls`.
-    /// When popping beyond `max_messages` or `max_tokens_budget`, we continue popping until
-    /// the conversation starts cleanly on a User message boundary.
-    fn prune(&mut self) {
-        while self.messages.len() > self.max_messages {
-            self.messages.pop_front();
+    /// Folds the first `covered` messages into `summary`, keeping the rest.
+    pub fn compact(&mut self, covered: usize, summary: String) -> Result<(), MemoryError> {
+        if covered > self.messages.len() {
+            return Err(MemoryError::Backend(format!(
+                "cannot compact {covered} messages: the history only holds {}",
+                self.messages.len()
+            )));
         }
-
-        if let Some(budget) = self.max_tokens_budget {
-            while !self.messages.is_empty() {
-                let current_tokens =
-                    crate::token::estimate_conversation_tokens(&self.get_messages());
-                if current_tokens <= budget {
-                    break;
-                }
-                self.messages.pop_front();
-            }
-        }
-
-        // Drop any orphaned tool responses that lost their preceding assistant call.
-        while let Some(front) = self.messages.front() {
-            if front.role == Role::Tool {
-                self.messages.pop_front();
-            } else {
-                break;
-            }
-        }
+        self.messages.drain(..covered);
+        self.summary = Some(summary);
+        Ok(())
     }
 }
 
-/// Default high-performance sliding window conversation memory manager.
+/// Default in-memory conversation memory.
 ///
-/// Uses `channel_id:sender_id` composite keys stored in a concurrent lock-sharded
-/// [`DashMap`]. Sessions can be queried and updated independently without
-/// coarse-grained global lock contention.
-pub struct SlidingWindowMemory {
-    /// Sharded concurrent map storing per-session histories.
+/// Sessions are keyed by an opaque string (`channel_id:sender_id` by convention) in a concurrent
+/// lock-sharded [`DashMap`], so sessions are read and updated independently without a global lock.
+#[derive(Default)]
+pub struct InMemory {
+    /// Sharded concurrent map storing per-session state.
     sessions: DashMap<String, SessionMemory>,
-    /// Default maximum message window size configured per session.
-    default_max_messages: usize,
-    /// Default maximum token budget per session.
-    default_max_tokens: Option<usize>,
 }
 
-/// Backward-compatible alias for [`SlidingWindowMemory`].
-pub type ConversationManager = SlidingWindowMemory;
-
-impl Default for SlidingWindowMemory {
-    fn default() -> Self {
-        Self::new(Self::DEFAULT_MAX_MESSAGES)
-    }
-}
-
-impl SlidingWindowMemory {
-    /// Default maximum count of historical messages kept per conversation window (~10 turns).
-    pub const DEFAULT_MAX_MESSAGES: usize = 20;
-
-    /// Creates a new `SlidingWindowMemory` with the specified default sliding window size.
-    pub fn new(default_max_messages: usize) -> Self {
-        Self {
-            sessions: DashMap::new(),
-            default_max_messages,
-            default_max_tokens: None,
-        }
-    }
-
-    /// Sets default token budget for sessions managed by this memory store.
-    pub fn with_token_budget(mut self, budget: usize) -> Self {
-        self.default_max_tokens = Some(budget);
-        self
-    }
-
-    /// Returns estimated token count for a given session.
-    pub fn estimated_tokens(&self, session_key: &str) -> usize {
-        self.sessions
-            .get(session_key)
-            .map(|s| s.estimated_tokens())
-            .unwrap_or(0)
+impl InMemory {
+    /// Creates an empty memory.
+    pub fn new() -> Self {
+        Self::default()
     }
 
     /// Formats a standard Kanon composite session key from channel and sender IDs.
@@ -260,128 +185,76 @@ impl SlidingWindowMemory {
         format!("{channel_id}:{sender_id}")
     }
 
-    /// Synchronous method to append a message to the specified session history.
-    pub fn push_message_sync(&self, session_key: &str, message: ChatMessage) {
+    /// Synchronous shortcut appending a message to a session (embedded use and tests).
+    pub fn push_message(&self, session_key: &str, message: ChatMessage) {
         self.sessions
             .entry(session_key.to_string())
-            .or_insert_with(|| {
-                SessionMemory::with_budget(self.default_max_messages, self.default_max_tokens)
-            })
+            .or_default()
             .push_message(message);
     }
 
-    /// Synchronous method to retrieve messages for a session.
-    pub fn get_messages_sync(&self, session_key: &str) -> Vec<ChatMessage> {
+    /// Synchronous shortcut reading a session's history.
+    pub fn get_messages(&self, session_key: &str) -> Vec<ChatMessage> {
         self.sessions
             .get(session_key)
-            .map(|s| s.get_messages())
+            .map(|session| session.messages().to_vec())
             .unwrap_or_default()
     }
 
-    /// Synchronous method to set system persona prompt for a given session.
-    pub fn set_system_prompt_sync(&self, session_key: &str, prompt: impl Into<String>) {
-        self.sessions
-            .entry(session_key.to_string())
-            .or_insert_with(|| {
-                SessionMemory::with_budget(self.default_max_messages, self.default_max_tokens)
-            })
-            .set_system_prompt(prompt);
-    }
-
-    /// Synchronous method to clear session history.
-    pub fn clear_sync(&self, session_key: &str) {
+    /// Synchronous shortcut clearing a session.
+    pub fn clear(&self, session_key: &str) {
         self.sessions.remove(session_key);
     }
 
-    /// Synchronous method to get session count.
-    pub fn session_count_sync(&self) -> usize {
-        self.sessions.len()
-    }
-
-    /// Appends a message to the specified session history.
-    pub fn push_message(&self, session_key: &str, message: ChatMessage) {
-        self.push_message_sync(session_key, message);
-    }
-
-    /// Retrieves messages for a session (including system prompt).
-    pub fn get_messages(&self, session_key: &str) -> Vec<ChatMessage> {
-        self.get_messages_sync(session_key)
-    }
-
-    /// Sets system persona prompt for a given session.
-    pub fn set_system_prompt(&self, session_key: &str, prompt: impl Into<String>) {
-        self.set_system_prompt_sync(session_key, prompt);
-    }
-
-    /// Clears session history.
-    pub fn clear(&self, session_key: &str) {
-        self.clear_sync(session_key);
-    }
-
-    /// Returns active session count.
+    /// Synchronous shortcut returning the number of sessions.
     pub fn session_count(&self) -> usize {
-        self.session_count_sync()
+        self.sessions.len()
     }
 }
 
 #[async_trait]
-impl Memory for SlidingWindowMemory {
+impl Memory for InMemory {
     async fn push_message(
         &self,
         session_key: &str,
         message: ChatMessage,
     ) -> Result<(), MemoryError> {
-        self.push_message_sync(session_key, message);
+        InMemory::push_message(self, session_key, message);
         Ok(())
     }
 
-    async fn set_system_prompt(
-        &self,
-        session_key: &str,
-        prompt: String,
-    ) -> Result<(), MemoryError> {
-        self.set_system_prompt_sync(session_key, prompt);
-        Ok(())
-    }
-
-    async fn get_system_prompt(&self, session_key: &str) -> Result<Option<String>, MemoryError> {
+    async fn snapshot(&self, session_key: &str) -> Result<MemorySnapshot, MemoryError> {
         Ok(self
             .sessions
             .get(session_key)
-            .and_then(|s| s.system_prompt().map(|p| p.to_string())))
+            .map(|session| session.snapshot())
+            .unwrap_or_default())
     }
 
-    async fn get_messages(&self, session_key: &str) -> Result<Vec<ChatMessage>, MemoryError> {
-        Ok(self.get_messages_sync(session_key))
+    async fn compact_history(
+        &self,
+        session_key: &str,
+        covered: usize,
+        summary: String,
+    ) -> Result<(), MemoryError> {
+        // The shard lock is held for the whole fold, so no reader observes a half-compacted state
+        // and a concurrent push lands either before it (and is covered or kept) or after it.
+        match self.sessions.get_mut(session_key) {
+            Some(mut session) => session.compact(covered, summary),
+            None if covered == 0 => Ok(()),
+            None => Err(MemoryError::Backend(format!(
+                "cannot compact {covered} messages of unknown session '{session_key}'"
+            ))),
+        }
     }
 
     async fn clear(&self, session_key: &str) -> Result<(), MemoryError> {
-        self.clear_sync(session_key);
+        InMemory::clear(self, session_key);
         Ok(())
     }
 
     async fn session_count(&self) -> Result<usize, MemoryError> {
-        Ok(self.session_count_sync())
-    }
-
-    async fn replace_history(
-        &self,
-        session_key: &str,
-        system_prompt: Option<String>,
-        messages: Vec<ChatMessage>,
-    ) -> Result<(), MemoryError> {
-        let mut session = self
-            .sessions
-            .entry(session_key.to_string())
-            .or_insert_with(|| {
-                SessionMemory::with_budget(self.default_max_messages, self.default_max_tokens)
-            });
-        session.clear_messages();
-        if let Some(prompt) = system_prompt {
-            session.set_system_prompt(prompt);
-        }
-        session.extend_messages(messages);
-        Ok(())
+        Ok(InMemory::session_count(self))
     }
 }
 
@@ -403,20 +276,23 @@ impl Memory for Arc<dyn Memory> {
         (**self).extend_messages(session_key, messages).await
     }
 
-    async fn set_system_prompt(
-        &self,
-        session_key: &str,
-        prompt: String,
-    ) -> Result<(), MemoryError> {
-        (**self).set_system_prompt(session_key, prompt).await
-    }
-
-    async fn get_system_prompt(&self, session_key: &str) -> Result<Option<String>, MemoryError> {
-        (**self).get_system_prompt(session_key).await
+    async fn snapshot(&self, session_key: &str) -> Result<MemorySnapshot, MemoryError> {
+        (**self).snapshot(session_key).await
     }
 
     async fn get_messages(&self, session_key: &str) -> Result<Vec<ChatMessage>, MemoryError> {
         (**self).get_messages(session_key).await
+    }
+
+    async fn compact_history(
+        &self,
+        session_key: &str,
+        covered: usize,
+        summary: String,
+    ) -> Result<(), MemoryError> {
+        (**self)
+            .compact_history(session_key, covered, summary)
+            .await
     }
 
     async fn clear(&self, session_key: &str) -> Result<(), MemoryError> {
@@ -425,16 +301,5 @@ impl Memory for Arc<dyn Memory> {
 
     async fn session_count(&self) -> Result<usize, MemoryError> {
         (**self).session_count().await
-    }
-
-    async fn replace_history(
-        &self,
-        session_key: &str,
-        system_prompt: Option<String>,
-        messages: Vec<ChatMessage>,
-    ) -> Result<(), MemoryError> {
-        (**self)
-            .replace_history(session_key, system_prompt, messages)
-            .await
     }
 }

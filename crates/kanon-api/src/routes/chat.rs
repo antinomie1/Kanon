@@ -262,6 +262,9 @@ fn map_agent_error(err: AgentError) -> ApiError {
         AgentError::Memory(message) => {
             ApiError::Internal(format!("Conversation memory failure: {message}"))
         }
+        AgentError::Compaction(message) => {
+            ApiError::Internal(format!("Conversation compaction failure: {message}"))
+        }
         AgentError::ToolNotFound(tool) => ApiError::BadRequest(format!(
             "Tool '{tool}' is not registered by any plugin or native tool"
         )),

@@ -447,7 +447,8 @@ impl AgentFactory {
             .provider(config.provider.clone())
             .context_length(config.context_length)
             .max_iterations(config.max_iterations)
-            .stop_on_tool_failure(config.stop_on_tool_failure);
+            .stop_on_tool_failure(config.stop_on_tool_failure)
+            .compaction(config.compaction);
 
         for hook in &self.hooks {
             builder = builder.hook_arc(hook.clone());

@@ -1,16 +1,18 @@
 //! Embedded SQLite-backed Conversation Memory.
 //!
-//! Provides durable, multi-session isolated persistence for chat histories,
-//! system prompts, tool call arguments, and tool outputs.
+//! Provides durable, multi-session isolated persistence for chat histories, conversation
+//! summaries, tool call arguments, and tool outputs.
 //!
 //! Features:
 //! - Multi-session isolation via unique `session_key` indexing;
+//! - **Append-only history**: messages are only ever inserted, so a session's prompt prefix is
+//!   stable across turns (see [`crate::memory`] for why that matters);
+//! - Atomic compaction: the covered prefix is deleted and the summary written in one transaction,
+//!   so a failure never loses the previous history;
 //! - High-concurrency in-memory read cache (sub-5µs lookups via lock-free [`DashMap`]);
 //! - Bounded LRU cache eviction preventing memory leak under millions of sessions;
 //! - Transactional commit points and WAL (Write-Ahead Logging) checkpoints;
 //! - Strict error semantics: write errors fail fast and prevent silent cache-DB divergence;
-//! - Atomic history replacement eliminating destructive clear-and-insert vulnerability windows;
-//! - Token-budget and sliding-window pruning synchronized between memory and SQLite;
 //! - Batch inserts within transactional boundaries;
 //! - Filesystem directory integration (compatible with `kanon-storage`).
 
@@ -25,7 +27,7 @@ use tokio::sync::Mutex;
 
 use crate::error::MemoryError;
 use crate::gateway::types::{ChatMessage, Role, ToolCall};
-use crate::memory::{Memory, SessionMemory};
+use crate::memory::{Memory, MemorySnapshot, SessionMemory};
 
 /// Backward-compatible type alias for [`SqliteMemory`].
 pub type PersistentMemory = SqliteMemory;
@@ -43,10 +45,6 @@ pub struct SqliteMemory {
     session_locks: Arc<DashMap<String, Arc<Mutex<()>>>>,
     /// Maximum count of active sessions kept in the in-memory cache.
     max_cached_sessions: usize,
-    /// Default sliding window message limit per session.
-    default_max_messages: usize,
-    /// Optional default token budget per session.
-    default_max_tokens: Option<usize>,
 }
 
 impl SqliteMemory {
@@ -54,36 +52,26 @@ impl SqliteMemory {
     pub const DEFAULT_CACHE_CAPACITY: usize = 10_000;
 
     /// Opens or creates an SQLite-backed memory store at the specified filesystem path.
-    pub fn open(path: impl AsRef<Path>, default_max_messages: usize) -> Result<Self, MemoryError> {
+    pub fn open(path: impl AsRef<Path>) -> Result<Self, MemoryError> {
         let conn = Connection::open(path)?;
-        Self::init_connection(conn, default_max_messages)
+        Self::init_connection(conn)
     }
 
     /// Opens or creates an SQLite-backed memory store inside a specific directory.
     ///
     /// Automatically ensures that the parent directory exists before creating the database file.
     /// Ideal for integration with isolated plugin storage directories (`./data/plugins/<id>/`).
-    pub fn open_in_dir(
-        dir: impl AsRef<Path>,
-        filename: &str,
-        default_max_messages: usize,
-    ) -> Result<Self, MemoryError> {
+    pub fn open_in_dir(dir: impl AsRef<Path>, filename: &str) -> Result<Self, MemoryError> {
         let dir = dir.as_ref();
         let _ = std::fs::create_dir_all(dir);
         let path = dir.join(filename);
-        Self::open(path, default_max_messages)
+        Self::open(path)
     }
 
     /// Opens an in-memory SQLite database, primarily used for testing or transient isolation.
-    pub fn open_in_memory(default_max_messages: usize) -> Result<Self, MemoryError> {
+    pub fn open_in_memory() -> Result<Self, MemoryError> {
         let conn = Connection::open_in_memory()?;
-        Self::init_connection(conn, default_max_messages)
-    }
-
-    /// Configures the default token budget for sessions in this memory store.
-    pub fn with_token_budget(mut self, budget: usize) -> Self {
-        self.default_max_tokens = Some(budget);
-        self
+        Self::init_connection(conn)
     }
 
     /// Configures the maximum number of sessions retained in the in-memory read LRU cache.
@@ -95,20 +83,6 @@ impl SqliteMemory {
     /// Returns the active in-memory cache capacity.
     pub fn cache_capacity(&self) -> usize {
         self.max_cached_sessions
-    }
-
-    /// Returns estimated token utilization for a session.
-    pub async fn estimated_tokens(&self, session_key: &str) -> usize {
-        let lock = self.session_lock(session_key);
-        let _guard = lock.lock().await;
-
-        if self.ensure_session_cached(session_key).await.is_err() {
-            return 0;
-        }
-        self.cache
-            .get(session_key)
-            .map(|s| s.estimated_tokens())
-            .unwrap_or(0)
     }
 
     /// Explicitly flushes dirty data and executes a WAL checkpoint.
@@ -141,17 +115,17 @@ impl SqliteMemory {
     }
 
     /// Initializes connection pragmas and establishes the relational schema.
-    fn init_connection(conn: Connection, default_max_messages: usize) -> Result<Self, MemoryError> {
+    fn init_connection(conn: Connection) -> Result<Self, MemoryError> {
         // High-performance concurrency pragmas:
         // WAL mode enables concurrent readers while writers append to the log.
         conn.execute_batch(
             "PRAGMA journal_mode = WAL;
              PRAGMA synchronous = NORMAL;
              PRAGMA foreign_keys = ON;
-             
+
              CREATE TABLE IF NOT EXISTS sessions (
                  session_key TEXT PRIMARY KEY,
-                 system_prompt TEXT,
+                 summary TEXT,
                  updated_at INTEGER NOT NULL
              );
 
@@ -170,25 +144,15 @@ impl SqliteMemory {
              CREATE INDEX IF NOT EXISTS idx_messages_session ON messages(session_key, id);",
         )?;
 
-        // A database created before multimodal messages existed has no `parts` column. Adding it
-        // explicitly (instead of failing the query) keeps an operator's history usable across the
-        // upgrade; SQLite cannot express `ADD COLUMN IF NOT EXISTS`, so the schema is inspected.
-        let has_parts: bool = {
-            let mut stmt = conn.prepare("SELECT name FROM pragma_table_info('messages')")?;
-            let mut rows = stmt.query([])?;
-            let mut found = false;
-            while let Some(row) = rows.next()? {
-                let name: String = row.get(0)?;
-                if name == "parts" {
-                    found = true;
-                    break;
-                }
-            }
-            found
-        };
-        if !has_parts {
-            conn.execute_batch("ALTER TABLE messages ADD COLUMN parts TEXT;")?;
-        }
+        // Databases created by earlier versions lack columns added since. SQLite cannot express
+        // `ADD COLUMN IF NOT EXISTS`, so the schema is inspected and missing columns are added
+        // explicitly instead of failing the query, which keeps an operator's history usable across
+        // the upgrade:
+        // - `messages.parts` (multimodal messages);
+        // - `sessions.summary` (compaction). The former `sessions.system_prompt` column is left
+        //   in place and ignored: the persona is composed per request, never stored per session.
+        Self::ensure_column(&conn, "messages", "parts")?;
+        Self::ensure_column(&conn, "sessions", "summary")?;
 
         Ok(Self {
             conn: Arc::new(Mutex::new(conn)),
@@ -196,9 +160,23 @@ impl SqliteMemory {
             lru_order: Arc::new(Mutex::new(VecDeque::new())),
             session_locks: Arc::new(DashMap::new()),
             max_cached_sessions: Self::DEFAULT_CACHE_CAPACITY,
-            default_max_messages,
-            default_max_tokens: None,
         })
+    }
+
+    /// Adds a nullable `TEXT` column to a table when it is not there yet.
+    fn ensure_column(conn: &Connection, table: &str, column: &str) -> Result<(), MemoryError> {
+        let mut stmt = conn.prepare("SELECT name FROM pragma_table_info(?1)")?;
+        let mut rows = stmt.query(params![table])?;
+        while let Some(row) = rows.next()? {
+            let name: String = row.get(0)?;
+            if name == column {
+                return Ok(());
+            }
+        }
+        drop(rows);
+        drop(stmt);
+        conn.execute_batch(&format!("ALTER TABLE {table} ADD COLUMN {column} TEXT;"))?;
+        Ok(())
     }
 
     /// Retrieves or allocates the serialization lock for a session key.
@@ -245,14 +223,14 @@ impl SqliteMemory {
             return Ok(());
         }
 
-        let (system_prompt, loaded_messages) = {
+        let (summary, loaded_messages) = {
             let conn = self.conn.lock().await;
 
-            // Query session system prompt
+            // Query the summary of earlier compactions
             let mut session_stmt =
-                conn.prepare("SELECT system_prompt FROM sessions WHERE session_key = ?1")?;
+                conn.prepare("SELECT summary FROM sessions WHERE session_key = ?1")?;
             let mut session_rows = session_stmt.query(params![session_key])?;
-            let system_prompt: Option<String> = if let Some(row) = session_rows.next()? {
+            let summary: Option<String> = if let Some(row) = session_rows.next()? {
                 row.get(0)?
             } else {
                 None
@@ -260,9 +238,9 @@ impl SqliteMemory {
 
             // Query historical messages ordered chronologically
             let mut msg_stmt = conn.prepare(
-                "SELECT role, content, parts, tool_calls, tool_call_id, name 
-                 FROM messages 
-                 WHERE session_key = ?1 
+                "SELECT role, content, parts, tool_calls, tool_call_id, name
+                 FROM messages
+                 WHERE session_key = ?1
                  ORDER BY id ASC",
             )?;
             let mut msg_rows = msg_stmt.query(params![session_key])?;
@@ -306,36 +284,14 @@ impl SqliteMemory {
                 });
             }
 
-            (system_prompt, loaded_messages)
+            (summary, loaded_messages)
         };
 
-        let mut session_mem =
-            SessionMemory::with_budget(self.default_max_messages, self.default_max_tokens);
-        if let Some(prompt) = system_prompt {
-            session_mem.set_system_prompt(prompt);
-        }
-        session_mem.extend_messages(loaded_messages);
-
-        self.cache.insert(session_key.to_string(), session_mem);
+        self.cache.insert(
+            session_key.to_string(),
+            SessionMemory::from_parts(summary, loaded_messages),
+        );
         self.touch_lru(session_key).await;
-        Ok(())
-    }
-
-    /// Internal helper pruning physical SQLite messages when in-memory window evicts old items.
-    async fn sync_prune_sqlite(
-        &self,
-        session_key: &str,
-        retain_limit: usize,
-    ) -> Result<(), MemoryError> {
-        let conn = self.conn.lock().await;
-        conn.execute(
-            "DELETE FROM messages 
-             WHERE session_key = ?1 
-             AND id NOT IN (
-                 SELECT id FROM messages WHERE session_key = ?1 ORDER BY id DESC LIMIT ?2
-             )",
-            params![session_key, retain_limit as i64],
-        )?;
         Ok(())
     }
 }
@@ -347,6 +303,49 @@ fn current_timestamp() -> i64 {
         .as_secs() as i64
 }
 
+/// Wire name of a role, as stored in the `messages` table.
+fn role_name(role: Role) -> &'static str {
+    match role {
+        Role::System => "system",
+        Role::User => "user",
+        Role::Assistant => "assistant",
+        Role::Tool => "tool",
+    }
+}
+
+/// Inserts one message row inside an open transaction.
+fn insert_message(
+    tx: &rusqlite::Transaction<'_>,
+    session_key: &str,
+    message: &ChatMessage,
+    now: i64,
+) -> Result<(), MemoryError> {
+    let tool_calls_json = message
+        .tool_calls
+        .as_ref()
+        .and_then(|calls| serde_json::to_string(calls).ok());
+    let parts_json = message
+        .parts
+        .as_ref()
+        .and_then(|parts| serde_json::to_string(parts).ok());
+
+    tx.execute(
+        "INSERT INTO messages (session_key, role, content, parts, tool_calls, tool_call_id, name, created_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+        params![
+            session_key,
+            role_name(message.role),
+            message.content,
+            parts_json,
+            tool_calls_json,
+            message.tool_call_id,
+            message.name,
+            now,
+        ],
+    )?;
+    Ok(())
+}
+
 #[async_trait]
 impl Memory for SqliteMemory {
     async fn push_message(
@@ -354,72 +353,7 @@ impl Memory for SqliteMemory {
         session_key: &str,
         message: ChatMessage,
     ) -> Result<(), MemoryError> {
-        let lock = self.session_lock(session_key);
-        let _guard = lock.lock().await;
-
-        self.ensure_session_cached(session_key).await?;
-
-        let role_str = match message.role {
-            Role::System => "system",
-            Role::User => "user",
-            Role::Assistant => "assistant",
-            Role::Tool => "tool",
-        };
-
-        let tool_calls_json = message
-            .tool_calls
-            .as_ref()
-            .and_then(|calls| serde_json::to_string(calls).ok());
-        let parts_json = message
-            .parts
-            .as_ref()
-            .and_then(|parts| serde_json::to_string(parts).ok());
-
-        let now = current_timestamp();
-
-        // 1. Transactionally write message to SQLite
-        // If write fails, return error immediately without modifying in-memory cache!
-        {
-            let mut conn = self.conn.lock().await;
-            let tx = conn.transaction()?;
-            tx.execute(
-                "INSERT OR IGNORE INTO sessions (session_key, system_prompt, updated_at) VALUES (?1, NULL, ?2)",
-                params![session_key, now],
-            )?;
-            tx.execute(
-                "INSERT INTO messages (session_key, role, content, parts, tool_calls, tool_call_id, name, created_at)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
-                params![
-                    session_key,
-                    role_str,
-                    message.content,
-                    parts_json,
-                    tool_calls_json,
-                    message.tool_call_id,
-                    message.name,
-                    now,
-                ],
-            )?;
-            tx.commit()?;
-        }
-
-        // 2. ONLY upon successful database commit, update in-memory read cache
-        let retained_len = {
-            let mut session = self
-                .cache
-                .entry(session_key.to_string())
-                .or_insert_with(|| {
-                    SessionMemory::with_budget(self.default_max_messages, self.default_max_tokens)
-                });
-            session.push_message(message);
-            session.len()
-        };
-
-        self.touch_lru(session_key).await;
-
-        // 3. Keep persistent storage in sync with sliding window
-        self.sync_prune_sqlite(session_key, retained_len).await?;
-        Ok(())
+        self.extend_messages(session_key, vec![message]).await
     }
 
     async fn extend_messages(
@@ -434,124 +368,100 @@ impl Memory for SqliteMemory {
 
         let now = current_timestamp();
 
-        // 1. Batch insert in a single SQLite transaction
-        // If write fails, the entire transaction rolls back and memory cache remains untouched!
+        // 1. Batch insert in a single SQLite transaction.
+        // If the write fails the whole transaction rolls back and the memory cache stays untouched,
+        // so the cache can never run ahead of the database.
         {
             let mut conn = self.conn.lock().await;
             let tx = conn.transaction()?;
             tx.execute(
-                "INSERT OR IGNORE INTO sessions (session_key, system_prompt, updated_at) VALUES (?1, NULL, ?2)",
+                "INSERT OR IGNORE INTO sessions (session_key, summary, updated_at) VALUES (?1, NULL, ?2)",
                 params![session_key, now],
             )?;
             for message in &messages {
-                let role_str = match message.role {
-                    Role::System => "system",
-                    Role::User => "user",
-                    Role::Assistant => "assistant",
-                    Role::Tool => "tool",
-                };
-                let tool_calls_json = message
-                    .tool_calls
-                    .as_ref()
-                    .and_then(|calls| serde_json::to_string(calls).ok());
-                let parts_json = message
-                    .parts
-                    .as_ref()
-                    .and_then(|parts| serde_json::to_string(parts).ok());
-
-                tx.execute(
-                    "INSERT INTO messages (session_key, role, content, parts, tool_calls, tool_call_id, name, created_at)
-                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
-                    params![
-                        session_key,
-                        role_str,
-                        message.content,
-                        parts_json,
-                        tool_calls_json,
-                        message.tool_call_id,
-                        message.name,
-                        now,
-                    ],
-                )?;
+                insert_message(&tx, session_key, message, now)?;
             }
             tx.commit()?;
         }
 
-        // 2. ONLY upon successful database commit, update in-memory read cache
-        let retained_len = {
-            let mut session = self
-                .cache
-                .entry(session_key.to_string())
-                .or_insert_with(|| {
-                    SessionMemory::with_budget(self.default_max_messages, self.default_max_tokens)
-                });
-            session.extend_messages(messages);
-            session.len()
-        };
+        // 2. ONLY upon successful database commit, update the in-memory read cache.
+        self.cache
+            .entry(session_key.to_string())
+            .or_default()
+            .extend_messages(messages);
 
         self.touch_lru(session_key).await;
-        self.sync_prune_sqlite(session_key, retained_len).await?;
         Ok(())
     }
 
-    async fn set_system_prompt(
+    async fn snapshot(&self, session_key: &str) -> Result<MemorySnapshot, MemoryError> {
+        let lock = self.session_lock(session_key);
+        let _guard = lock.lock().await;
+
+        self.ensure_session_cached(session_key).await?;
+        Ok(self
+            .cache
+            .get(session_key)
+            .map(|session| session.snapshot())
+            .unwrap_or_default())
+    }
+
+    async fn compact_history(
         &self,
         session_key: &str,
-        prompt: String,
+        covered: usize,
+        summary: String,
     ) -> Result<(), MemoryError> {
         let lock = self.session_lock(session_key);
         let _guard = lock.lock().await;
 
         self.ensure_session_cached(session_key).await?;
 
-        let now = current_timestamp();
-
-        // 1. Upsert into sessions table
-        {
-            let conn = self.conn.lock().await;
-            conn.execute(
-                "INSERT INTO sessions (session_key, system_prompt, updated_at)
-                 VALUES (?1, ?2, ?3)
-                 ON CONFLICT(session_key) DO UPDATE SET
-                     system_prompt = excluded.system_prompt,
-                     updated_at = excluded.updated_at",
-                params![session_key, prompt, now],
-            )?;
+        let held = self
+            .cache
+            .get(session_key)
+            .map(|session| session.len())
+            .unwrap_or(0);
+        if covered > held {
+            return Err(MemoryError::Backend(format!(
+                "cannot compact {covered} messages: the history only holds {held}"
+            )));
         }
 
-        // 2. Update in-memory read cache
-        self.cache
-            .entry(session_key.to_string())
-            .or_insert_with(|| {
-                SessionMemory::with_budget(self.default_max_messages, self.default_max_tokens)
-            })
-            .set_system_prompt(prompt);
+        let now = current_timestamp();
+
+        // 1. Delete the covered prefix and store the summary in one transaction. If anything fails
+        // (disk full, crash) the transaction aborts and the previous history is untouched.
+        {
+            let mut conn = self.conn.lock().await;
+            let tx = conn.transaction()?;
+
+            // Message ids grow with insertion order, so the covered prefix is the `covered`
+            // smallest ids of the session; anything appended since has a larger id and survives.
+            tx.execute(
+                "DELETE FROM messages
+                 WHERE session_key = ?1
+                 AND id IN (SELECT id FROM messages WHERE session_key = ?1 ORDER BY id ASC LIMIT ?2)",
+                params![session_key, covered as i64],
+            )?;
+            tx.execute(
+                "INSERT INTO sessions (session_key, summary, updated_at)
+                 VALUES (?1, ?2, ?3)
+                 ON CONFLICT(session_key) DO UPDATE SET
+                     summary = excluded.summary,
+                     updated_at = excluded.updated_at",
+                params![session_key, summary, now],
+            )?;
+            tx.commit()?;
+        }
+
+        // 2. ONLY upon successful commit, mirror the fold into the read cache.
+        if let Some(mut session) = self.cache.get_mut(session_key) {
+            session.compact(covered, summary)?;
+        }
 
         self.touch_lru(session_key).await;
         Ok(())
-    }
-
-    async fn get_system_prompt(&self, session_key: &str) -> Result<Option<String>, MemoryError> {
-        let lock = self.session_lock(session_key);
-        let _guard = lock.lock().await;
-
-        self.ensure_session_cached(session_key).await?;
-        Ok(self
-            .cache
-            .get(session_key)
-            .and_then(|s| s.system_prompt().map(|p| p.to_string())))
-    }
-
-    async fn get_messages(&self, session_key: &str) -> Result<Vec<ChatMessage>, MemoryError> {
-        let lock = self.session_lock(session_key);
-        let _guard = lock.lock().await;
-
-        self.ensure_session_cached(session_key).await?;
-        Ok(self
-            .cache
-            .get(session_key)
-            .map(|s| s.get_messages())
-            .unwrap_or_default())
     }
 
     async fn clear(&self, session_key: &str) -> Result<(), MemoryError> {
@@ -586,91 +496,5 @@ impl Memory for SqliteMemory {
             Ok(count)
         })?;
         Ok(count as usize)
-    }
-
-    async fn replace_history(
-        &self,
-        session_key: &str,
-        system_prompt: Option<String>,
-        messages: Vec<ChatMessage>,
-    ) -> Result<(), MemoryError> {
-        let lock = self.session_lock(session_key);
-        let _guard = lock.lock().await;
-
-        let now = current_timestamp();
-
-        // 1. Execute deletion, session upsert, and messages insertion within a single atomic transaction.
-        // If anything fails (e.g. disk failure, crash), the entire transaction aborts,
-        // and prior conversation history remains completely safe and uncorrupted!
-        {
-            let mut conn = self.conn.lock().await;
-            let tx = conn.transaction()?;
-
-            tx.execute(
-                "DELETE FROM messages WHERE session_key = ?1",
-                params![session_key],
-            )?;
-
-            tx.execute(
-                "INSERT INTO sessions (session_key, system_prompt, updated_at)
-                 VALUES (?1, ?2, ?3)
-                 ON CONFLICT(session_key) DO UPDATE SET
-                     system_prompt = excluded.system_prompt,
-                     updated_at = excluded.updated_at",
-                params![session_key, system_prompt, now],
-            )?;
-
-            for message in &messages {
-                let role_str = match message.role {
-                    Role::System => "system",
-                    Role::User => "user",
-                    Role::Assistant => "assistant",
-                    Role::Tool => "tool",
-                };
-                let tool_calls_json = message
-                    .tool_calls
-                    .as_ref()
-                    .and_then(|calls| serde_json::to_string(calls).ok());
-                let parts_json = message
-                    .parts
-                    .as_ref()
-                    .and_then(|parts| serde_json::to_string(parts).ok());
-
-                tx.execute(
-                    "INSERT INTO messages (session_key, role, content, parts, tool_calls, tool_call_id, name, created_at)
-                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
-                    params![
-                        session_key,
-                        role_str,
-                        message.content,
-                        parts_json,
-                        tool_calls_json,
-                        message.tool_call_id,
-                        message.name,
-                        now,
-                    ],
-                )?;
-            }
-
-            tx.commit()?;
-        }
-
-        // 2. ONLY upon successful database commit, update in-memory read cache
-        {
-            let mut session = self
-                .cache
-                .entry(session_key.to_string())
-                .or_insert_with(|| {
-                    SessionMemory::with_budget(self.default_max_messages, self.default_max_tokens)
-                });
-            session.clear_messages();
-            if let Some(prompt) = system_prompt {
-                session.set_system_prompt(prompt);
-            }
-            session.extend_messages(messages);
-        }
-
-        self.touch_lru(session_key).await;
-        Ok(())
     }
 }

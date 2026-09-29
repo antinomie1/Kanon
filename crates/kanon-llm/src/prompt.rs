@@ -21,7 +21,7 @@ use dashmap::DashMap;
 
 use crate::agent::AgentHook;
 use crate::error::AgentError;
-use crate::gateway::types::{ChatMessage, ChatRequest, Role};
+use crate::gateway::types::{ChatMessage, ChatRequest};
 use crate::session::SessionManager;
 
 /// Identifier of the base assistant persona.
@@ -251,9 +251,8 @@ impl PersonaRegistry {
 
 /// Lifecycle hook that puts the session's persona at the top of every request.
 ///
-/// The persona is the most stable part of a prompt, so it owns the *first* system message. The
-/// session's persona is resolved on every call, which is what makes a console switch effective on
-/// the very next turn.
+/// The persona is the most stable part of a prompt, so it goes first. The session's persona is
+/// resolved on every call, which is what makes a console switch effective on the very next turn.
 pub struct PersonaHook {
     session_manager: Arc<SessionManager>,
     persona_registry: Arc<PersonaRegistry>,
@@ -299,13 +298,10 @@ impl AgentHook for PersonaHook {
         session_id: &str,
         request: &mut ChatRequest,
     ) -> Result<(), AgentError> {
+        // The persona is the first part of the static system block, ahead of anything else placed
+        // there, because it is the part that changes least.
         let prompt = self.persona_for(session_id).prompt;
-
-        // Update or inject the System prompt at the very top of the messages.
-        match request.messages.first_mut() {
-            Some(first) if first.role == Role::System => first.content = Some(prompt),
-            _ => request.messages.insert(0, ChatMessage::system(prompt)),
-        }
+        request.messages.insert(0, ChatMessage::system(prompt));
         Ok(())
     }
 }

@@ -3,7 +3,7 @@
 //! Workflow under test:
 //! 1. Starts an out-of-process Rust plugin host (`demo-rust-plugin`) via `Supervisor`.
 //! 2. Spawns a lightweight Mock HTTP server mimicking an OpenAI-compatible endpoint (`/v1/chat/completions`).
-//! 3. Configures `kanon-llm` with `OpenAiProvider`, `ConversationManager`, and `ToolRouter`.
+//! 3. Configures `kanon-llm` with `OpenAiProvider`, `InMemory`, and `ToolRouter`.
 //! 4. Attaches the `ToolRouter` to `PipelineEngine` in `kanon-core`.
 //! 5. Dispatches an inbound conversational message requiring mathematical reasoning.
 //! 6. Traces the full state machine loop:
@@ -33,7 +33,7 @@ use kanon_core::ipc::{CoreApiService, CoreIpcServer, DEFAULT_INGEST_QUEUE_CAPACI
 use kanon_core::pipeline::PipelineEngine;
 use kanon_core::supervisor::Supervisor;
 use kanon_llm::gateway::providers::OpenAiProvider;
-use kanon_llm::memory::ConversationManager;
+use kanon_llm::memory::InMemory;
 use kanon_llm::tool_router::ToolRouter;
 use kanon_proto::v1::bot_api_service_client::BotApiServiceClient;
 use kanon_proto::v1::message_segment::Segment;
@@ -233,7 +233,7 @@ async fn test_llm_tool_calling_e2e_lifecycle() {
 
     // 5. Initialize kanon-llm gateway, memory, and ToolRouter
     let provider = Arc::new(OpenAiProvider::new(&mock_base_url, None, "mock-model"));
-    let memory = Arc::new(ConversationManager::new(20));
+    let memory = Arc::new(InMemory::new());
     let tool_router = Arc::new(ToolRouter::new(provider, memory.clone(), "mock-model"));
 
     // 6. Register a built-in adapter for the fixture platform and start the pipeline worker with
@@ -318,7 +318,7 @@ async fn test_llm_tool_calling_e2e_lifecycle() {
     assert_eq!(mock_state.request_counter.load(Ordering::SeqCst), 2);
 
     // Verify conversation memory contains the entire multi-turn trajectory
-    let session_key = ConversationManager::make_session_key("chan_chat", "alice");
+    let session_key = InMemory::make_session_key("chan_chat", "alice");
     let history = memory.get_messages(&session_key);
     assert_eq!(
         history.len(),

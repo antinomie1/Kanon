@@ -4,7 +4,7 @@
 //! or downloading large vocabulary files. Accurately accounts for English text,
 //! CJK (Chinese, Japanese, Korean) characters, message envelope framing, and tool calls.
 
-use crate::gateway::types::{ChatMessage, ToolCall};
+use crate::gateway::types::{ChatMessage, ChatRequest, ToolCall};
 
 /// Token cost attributed to one image part.
 ///
@@ -92,6 +92,17 @@ pub fn estimate_tool_call_tokens(call: &ToolCall) -> usize {
 /// Estimates the total token count of an entire conversation history.
 pub fn estimate_conversation_tokens(messages: &[ChatMessage]) -> usize {
     messages.iter().map(estimate_message_tokens).sum::<usize>() + 2 // Conversation priming tokens
+}
+
+/// Estimates the tokens of a whole request: its messages plus the tool definitions, which count
+/// against the context window just like the conversation does.
+pub fn estimate_request_tokens(request: &ChatRequest) -> usize {
+    let tools = if request.tools.is_empty() {
+        0
+    } else {
+        estimate_text_tokens(&serde_json::to_string(&request.tools).unwrap_or_default())
+    };
+    estimate_conversation_tokens(&request.messages) + tools
 }
 
 /// Helper identifying CJK, Hiragana, Katakana, and Hangul unicode ranges.

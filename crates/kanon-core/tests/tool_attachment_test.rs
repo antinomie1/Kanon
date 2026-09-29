@@ -12,7 +12,7 @@ use async_trait::async_trait;
 use kanon_core::pipeline::{PipelineEngine, PipelineResult};
 use kanon_core::supervisor::{ManagedHost, Supervisor};
 use kanon_llm::gateway::types::{ChatRequest, ChatResponse, ToolCall};
-use kanon_llm::memory::{Memory, SlidingWindowMemory};
+use kanon_llm::memory::{InMemory, Memory};
 use kanon_llm::tool_router::{ToolRouter, json_to_prost_struct};
 use kanon_llm::{Agent, GatewayError, LlmProvider};
 use kanon_proto::v1::message_pipeline_service_server::MessagePipelineServiceServer;
@@ -204,7 +204,7 @@ async fn a_tool_attachment_is_delivered_as_an_image_segment() {
     )
     .await;
 
-    let memory: Arc<dyn Memory> = Arc::new(SlidingWindowMemory::new(20));
+    let memory: Arc<dyn Memory> = Arc::new(InMemory::new());
     let agent = Arc::new(
         Agent::builder("attachment-test", Arc::new(DrawingProvider))
             .memory(memory)

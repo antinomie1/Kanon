@@ -291,7 +291,7 @@ async fn test_pipeline_engine_tool_router_fast_skips_open_host() {
     supervisor.register_managed_host(open_host).await;
 
     let provider = Arc::new(MockChatProvider);
-    let memory = Arc::new(kanon_llm::memory::ConversationManager::new(5));
+    let memory = Arc::new(kanon_llm::memory::InMemory::new());
     let tool_router = Arc::new(kanon_llm::tool_router::ToolRouter::new(
         provider,
         memory,

@@ -15,7 +15,7 @@ use kanon_core::{
     META_BOT_MENTIONED, META_CONVERSATION_KIND, ReplyMode, ReplyPolicy, ReplyPolicyStore,
 };
 use kanon_llm::gateway::types::{ChatRequest, ChatResponse};
-use kanon_llm::memory::{Memory, SlidingWindowMemory};
+use kanon_llm::memory::{InMemory, Memory};
 use kanon_llm::tool_router::ToolRouter;
 use kanon_llm::{
     Agent, AgentFactory, AgentSlot, GatewayError, LlmProvider, ModelSpec, PersonaRegistry,
@@ -52,7 +52,7 @@ async fn harness(
     std::mem::forget(temp);
 
     let calls = Arc::new(AtomicUsize::new(0));
-    let memory: Arc<dyn Memory> = Arc::new(SlidingWindowMemory::new(20));
+    let memory: Arc<dyn Memory> = Arc::new(InMemory::new());
     let agent = Arc::new(
         Agent::builder(
             "policy-test",
@@ -85,7 +85,7 @@ fn factory_harness(registry: Arc<InstanceRegistry>) -> Arc<PipelineEngine> {
     std::mem::forget(temp);
 
     let slot = Arc::new(AgentSlot::new());
-    let memory: Arc<dyn Memory> = Arc::new(SlidingWindowMemory::new(20));
+    let memory: Arc<dyn Memory> = Arc::new(InMemory::new());
     let sessions = Arc::new(SessionManager::new(memory.clone()));
     let personas = Arc::new(PersonaRegistry::default());
     let factory = Arc::new(AgentFactory::new(
@@ -504,7 +504,7 @@ fn context_harness(
     std::mem::forget(temp);
 
     let requests = Arc::new(std::sync::Mutex::new(Vec::new()));
-    let memory: Arc<dyn Memory> = Arc::new(SlidingWindowMemory::new(20));
+    let memory: Arc<dyn Memory> = Arc::new(InMemory::new());
     let agent = Arc::new(
         Agent::builder(
             "context-test",

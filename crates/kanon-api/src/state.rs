@@ -19,8 +19,8 @@ use kanon_core::{
     SkillStore, Supervisor, ToggleStore,
 };
 use kanon_llm::{
-    Agent, AgentConfig, AgentFactory, AgentSlot, LlmProvider, Memory, PersonaRegistry,
-    ProviderRuntime, SessionManager, SlidingWindowMemory,
+    Agent, AgentConfig, AgentFactory, AgentSlot, InMemory, LlmProvider, Memory, PersonaRegistry,
+    ProviderRuntime, SessionManager,
 };
 
 use crate::error::ApiError;
@@ -28,9 +28,6 @@ use crate::llm_config::{NodeSettings, SystemConfigStore};
 use crate::observability::Observability;
 use crate::persona_store::PersonaStore;
 use crate::plugin_config::PluginConfigStore;
-
-/// Default sliding-window depth applied when the builder must create a memory backend.
-const DEFAULT_MEMORY_WINDOW: usize = 40;
 
 /// Shared, cloneable state injected into every management route.
 #[derive(Clone)]
@@ -658,7 +655,7 @@ impl ApiStateBuilder {
         let memory = self
             .memory
             .or_else(|| self.sessions.as_ref().map(|sm| sm.memory().clone()))
-            .unwrap_or_else(|| Arc::new(SlidingWindowMemory::new(DEFAULT_MEMORY_WINDOW)));
+            .unwrap_or_else(|| Arc::new(InMemory::new()));
 
         let sessions = self
             .sessions

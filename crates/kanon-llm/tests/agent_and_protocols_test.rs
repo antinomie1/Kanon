@@ -13,7 +13,7 @@ use kanon_llm::gateway::providers::{
 use kanon_llm::gateway::types::{
     ChatMessage, ChatRequest, ChatResponse, Role, ToolCall, ToolDefinition,
 };
-use kanon_llm::memory::Memory;
+use kanon_llm::memory::{Memory, MemorySnapshot};
 use kanon_llm::tool_router::{ToolHost, json_to_prost_struct, prost_struct_to_json};
 use kanon_llm::{AgentError, GatewayError, MemoryError};
 use kanon_proto::v1::{
@@ -110,14 +110,14 @@ impl ToolHost for MockHost {
 /// Custom memory simulating an external plugin or database-backed store.
 struct CustomPluginMemory {
     stored_messages: Arc<RwLock<Vec<ChatMessage>>>,
-    system_prompt: Arc<RwLock<Option<String>>>,
+    summary: Arc<RwLock<Option<String>>>,
 }
 
 impl CustomPluginMemory {
     fn new() -> Self {
         Self {
             stored_messages: Arc::new(RwLock::new(Vec::new())),
-            system_prompt: Arc::new(RwLock::new(None)),
+            summary: Arc::new(RwLock::new(None)),
         }
     }
 }
@@ -133,30 +133,27 @@ impl Memory for CustomPluginMemory {
         Ok(())
     }
 
-    async fn set_system_prompt(
+    async fn snapshot(&self, _session_key: &str) -> Result<MemorySnapshot, MemoryError> {
+        Ok(MemorySnapshot {
+            summary: self.summary.read().await.clone(),
+            messages: self.stored_messages.read().await.clone(),
+        })
+    }
+
+    async fn compact_history(
         &self,
         _session_key: &str,
-        prompt: String,
+        covered: usize,
+        summary: String,
     ) -> Result<(), MemoryError> {
-        *self.system_prompt.write().await = Some(prompt);
+        self.stored_messages.write().await.drain(..covered);
+        *self.summary.write().await = Some(summary);
         Ok(())
-    }
-
-    async fn get_system_prompt(&self, _session_key: &str) -> Result<Option<String>, MemoryError> {
-        Ok(self.system_prompt.read().await.clone())
-    }
-
-    async fn get_messages(&self, _session_key: &str) -> Result<Vec<ChatMessage>, MemoryError> {
-        let mut list = Vec::new();
-        if let Some(ref sys) = *self.system_prompt.read().await {
-            list.push(ChatMessage::system(sys.clone()));
-        }
-        list.extend(self.stored_messages.read().await.clone());
-        Ok(list)
     }
 
     async fn clear(&self, _session_key: &str) -> Result<(), MemoryError> {
         self.stored_messages.write().await.clear();
+        *self.summary.write().await = None;
         Ok(())
     }
 
@@ -296,13 +293,14 @@ async fn test_agent_builder_and_execution_with_custom_memory() {
     assert!(output.executed_tools[0].success);
 
     // Verify custom memory received all messages correctly
+    // The history holds only what was said: the agent's instructions are composed into each
+    // request, never stored per session.
     let history = custom_memory.get_messages("sess_custom").await.unwrap();
-    assert_eq!(history.len(), 5);
-    assert_eq!(history[0].role, Role::System);
-    assert_eq!(history[1].role, Role::User);
-    assert_eq!(history[2].role, Role::Assistant);
-    assert_eq!(history[3].role, Role::Tool);
-    assert_eq!(history[4].role, Role::Assistant);
+    assert_eq!(history.len(), 4);
+    assert_eq!(history[0].role, Role::User);
+    assert_eq!(history[1].role, Role::Assistant);
+    assert_eq!(history[2].role, Role::Tool);
+    assert_eq!(history[3].role, Role::Assistant);
 }
 
 #[tokio::test]

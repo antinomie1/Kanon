@@ -10,7 +10,7 @@ use kanon_llm::agent::Agent;
 use kanon_llm::error::GatewayError;
 use kanon_llm::gateway::LlmProvider;
 use kanon_llm::gateway::types::{ChatMessage, ChatRequest, ChatResponse, Role};
-use kanon_llm::memory::SlidingWindowMemory;
+use kanon_llm::memory::InMemory;
 use kanon_llm::prompt::{
     BASE_PERSONA_ID, BASE_PERSONA_PROMPT, Persona, PersonaError, PersonaHook, PersonaKind,
     PersonaRegistry,
@@ -63,7 +63,7 @@ async fn injected_system_context_survives_the_persona_hook() {
     // catalog silently disappeared for sessions that had no system prompt yet. Persona and context
     // end up in one static system block, persona first.
     let seen = Arc::new(std::sync::Mutex::new(Vec::new()));
-    let memory = Arc::new(SlidingWindowMemory::new(20));
+    let memory = Arc::new(InMemory::new());
     let sessions = Arc::new(SessionManager::new(memory.clone()));
     let personas = Arc::new(PersonaRegistry::default());
     sessions.set_persona("session-1", "assistant");
@@ -126,7 +126,7 @@ fn test_session_key_scoping_and_display() {
 
 #[tokio::test]
 async fn test_session_manager_metadata_and_variable_lifecycle() {
-    let memory = Arc::new(SlidingWindowMemory::new(10));
+    let memory = Arc::new(InMemory::new());
     let sm = Arc::new(SessionManager::new(memory));
 
     let key = "channel:g1:user:u1";
@@ -194,7 +194,7 @@ async fn test_session_manager_metadata_and_variable_lifecycle() {
 
 #[tokio::test]
 async fn test_session_manager_idle_sweep() {
-    let memory = Arc::new(SlidingWindowMemory::new(10));
+    let memory = Arc::new(InMemory::new());
     let sm = Arc::new(SessionManager::new(memory));
 
     let active_key = "session:active";
@@ -377,7 +377,7 @@ async fn test_agent_persona_hook_integration() {
         captured_requests: captured.clone(),
     });
 
-    let memory = Arc::new(SlidingWindowMemory::new(20));
+    let memory = Arc::new(InMemory::new());
     let session_mgr = Arc::new(SessionManager::new(memory));
     let persona_reg = Arc::new(PersonaRegistry::default());
     persona_reg
@@ -450,7 +450,7 @@ async fn test_agent_persona_hook_integration() {
 
 #[tokio::test]
 async fn deleting_a_persona_unbinds_the_sessions_that_use_it() {
-    let memory = Arc::new(SlidingWindowMemory::new(10));
+    let memory = Arc::new(InMemory::new());
     let session_mgr = Arc::new(SessionManager::new(memory));
     session_mgr.set_persona("s1", "coder");
     session_mgr.set_persona("s2", "coder");
@@ -472,7 +472,7 @@ async fn the_persona_hook_owns_the_first_system_message() {
         captured_requests: captured.clone(),
     });
 
-    let memory = Arc::new(SlidingWindowMemory::new(10));
+    let memory = Arc::new(InMemory::new());
     let session_mgr = Arc::new(SessionManager::new(memory));
     let persona_reg = Arc::new(PersonaRegistry::default());
     persona_reg
