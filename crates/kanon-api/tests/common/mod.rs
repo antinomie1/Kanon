@@ -51,6 +51,7 @@ impl LlmProvider for MockProvider {
                 prompt_tokens: 7,
                 completion_tokens: 5,
                 total_tokens: 12,
+                ..TokenUsage::default()
             }),
         })
     }

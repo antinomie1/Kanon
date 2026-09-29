@@ -291,7 +291,7 @@ async fn the_skill_catalog_reaches_the_model_alongside_the_persona() {
     assert!(
         system_messages
             .iter()
-            .any(|content| *content == kanon_llm::BASE_PERSONA_PROMPT),
-        "the persona must still be the base system message: {system_messages:?}"
+            .any(|content| content.starts_with(kanon_llm::BASE_PERSONA_PROMPT)),
+        "the persona must still lead the static system block: {system_messages:?}"
     );
 }

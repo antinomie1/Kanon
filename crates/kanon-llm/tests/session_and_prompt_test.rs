@@ -60,7 +60,8 @@ impl LlmProvider for RecordingProvider {
 async fn injected_system_context_survives_the_persona_hook() {
     // The persona hook rewrites the first system message in place. If it ran *after* a hook that
     // appends context, the injected context would be overwritten — which is exactly how the skill
-    // catalog silently disappeared for sessions that had no system prompt yet.
+    // catalog silently disappeared for sessions that had no system prompt yet. Persona and context
+    // end up in one static system block, persona first.
     let seen = Arc::new(std::sync::Mutex::new(Vec::new()));
     let memory = Arc::new(SlidingWindowMemory::new(20));
     let sessions = Arc::new(SessionManager::new(memory.clone()));
@@ -83,20 +84,16 @@ async fn injected_system_context_survives_the_persona_hook() {
     let messages = seen.lock().expect("recording lock").clone();
     assert_eq!(
         messages.len(),
-        3,
-        "persona + injected context + user: {messages:?}"
+        2,
+        "one merged system block + user: {messages:?}"
     );
     assert_eq!(messages[0].role, Role::System);
-    assert!(
-        messages[0]
-            .content
-            .as_deref()
-            .is_some_and(|content| content == BASE_PERSONA_PROMPT),
-        "the persona must own the base system message: {messages:?}"
+    assert_eq!(
+        messages[0].content.as_deref(),
+        Some(format!("{BASE_PERSONA_PROMPT}\n\nINJECTED-CONTEXT").as_str()),
+        "the persona owns the top of the block and the injected context follows: {messages:?}"
     );
-    assert_eq!(messages[1].role, Role::System);
-    assert_eq!(messages[1].content.as_deref(), Some("INJECTED-CONTEXT"));
-    assert_eq!(messages[2].role, Role::User);
+    assert_eq!(messages[1].role, Role::User);
 }
 
 // =========================================================================

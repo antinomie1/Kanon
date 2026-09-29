@@ -132,6 +132,8 @@ pub struct ResolvedTool {
 
 /// Resolves every tool declared across the given hosts, keeping provider attribution.
 ///
+/// The result is sorted by tool name and every schema has sorted keys (see [`crate::layout`]).
+///
 /// Prevents name collision: if multiple plugins declare tools with identical names,
 /// they are automatically disambiguated with namespacing (`<plugin_id>__<tool_name>`).
 pub fn resolve_tools(hosts: &[Arc<dyn ToolHost>]) -> Vec<ResolvedTool> {
@@ -155,7 +157,7 @@ pub fn resolve_tools(hosts: &[Arc<dyn ToolHost>]) -> Vec<ResolvedTool> {
         for plugin in &metas {
             for tool in &plugin.tools {
                 let parameters = match &tool.parameters {
-                    Some(s) => prost_struct_to_json(s.clone()),
+                    Some(s) => crate::layout::canonical_json(prost_struct_to_json(s.clone())),
                     None => serde_json::json!({
                         "type": "object",
                         "properties": {}
@@ -191,6 +193,10 @@ pub fn resolve_tools(hosts: &[Arc<dyn ToolHost>]) -> Vec<ResolvedTool> {
             }
         }
     }
+
+    // One fixed order, whatever the order hosts registered in: the tool list is the very top of the
+    // prompt, so a reshuffle there invalidates the provider's cache for the whole request.
+    tools.sort_by(|a, b| a.definition.name.cmp(&b.definition.name));
     tools
 }
 

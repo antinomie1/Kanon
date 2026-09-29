@@ -134,6 +134,14 @@ mod wire {
         pub input_tokens: Option<u32>,
         pub output_tokens: Option<u32>,
         pub total_tokens: Option<u32>,
+        #[serde(default)]
+        pub input_tokens_details: Option<ResponsesInputTokensDetailsWire>,
+    }
+
+    #[derive(Debug, Deserialize)]
+    pub struct ResponsesInputTokensDetailsWire {
+        #[serde(default)]
+        pub cached_tokens: Option<u32>,
     }
 }
 
@@ -406,6 +414,10 @@ impl LlmProvider for OpenAiResponsesProvider {
 
         let usage = wire_resp.usage.map(|u| TokenUsage {
             prompt_tokens: u.input_tokens.unwrap_or(0),
+            cached_tokens: u
+                .input_tokens_details
+                .and_then(|details| details.cached_tokens)
+                .unwrap_or(0),
             completion_tokens: u.output_tokens.unwrap_or(0),
             total_tokens: u
                 .total_tokens

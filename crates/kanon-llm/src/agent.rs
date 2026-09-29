@@ -23,6 +23,7 @@ use crate::gateway::types::{
     ChatMessage, ChatRequest, ChatResponse, Role, ToolCall, ToolDefinition,
 };
 use crate::gateway::{ChatChunk, ChatChunkStream, LlmProvider};
+use crate::layout::{canonical_tools, normalize_request};
 use crate::memory::{Memory, SlidingWindowMemory};
 use crate::tool_router::{
     ExecutedToolCall, ToolAttachment, ToolHost, aggregate_tools, json_to_prost_struct,
@@ -293,6 +294,46 @@ impl Agent {
         &self.hooks
     }
 
+    /// Every tool offered to the model for one run, in the one canonical order.
+    ///
+    /// Native tools and plugin/MCP tools are merged and then sorted by name with sorted schema keys
+    /// (see [`crate::layout`]): the tool list is the very top of the prompt, so its bytes must not
+    /// depend on registration order, host start order or call frequency.
+    fn collect_tools(&self, hosts: &[Arc<dyn ToolHost>]) -> Vec<ToolDefinition> {
+        let mut tools: Vec<ToolDefinition> = self.tools.iter().map(|t| t.definition()).collect();
+        tools.extend(aggregate_tools(hosts));
+        canonical_tools(tools)
+    }
+
+    /// Builds the request for one model call, laid out static-first.
+    ///
+    /// The messages start as the session history (append-only), hooks then add the static block —
+    /// the persona and skill catalog — and [`normalize_request`] merges it into one system message.
+    /// The result is `[tools] [system] [history…] [current turn]`: only the tail changes from one
+    /// call to the next, so the provider serves everything before it from its prompt cache.
+    async fn build_request(
+        &self,
+        session_id: &str,
+        tools: &[ToolDefinition],
+    ) -> Result<ChatRequest, AgentError> {
+        let messages = self.memory.get_messages(session_id).await?;
+
+        let mut request = ChatRequest {
+            model: self.config.default_model.clone(),
+            messages,
+            tools: tools.to_vec(),
+            temperature: self.config.temperature,
+            max_tokens: self.config.max_tokens,
+        };
+
+        // Lifecycle Hook: before LLM request (persona, skill catalog, RAG, tracing, ...)
+        for hook in &self.hooks {
+            hook.on_llm_request(session_id, &mut request).await?;
+        }
+        normalize_request(&mut request);
+        Ok(request)
+    }
+
     /// Executes the agent reasoning loop for an inbound message in standalone mode,
     /// using only native registered tools (or pure conversation) without requiring gRPC hosts.
     pub async fn run_standalone(
@@ -349,11 +390,7 @@ impl Agent {
         self.memory.push_message(session_id, message).await?;
 
         // 3. Dynamically aggregate tools from both native tools and active plugin hosts
-        let mut tools = Vec::with_capacity(self.tools.len());
-        for t in &self.tools {
-            tools.push(t.definition());
-        }
-        tools.extend(aggregate_tools(hosts));
+        let tools = self.collect_tools(hosts);
 
         let mut executed_tools = Vec::new();
         let mut attachments: Vec<ToolAttachment> = Vec::new();
@@ -361,20 +398,7 @@ impl Agent {
 
         // 4. Reasoning and tool execution loop
         loop {
-            let messages = self.memory.get_messages(session_id).await?;
-
-            let mut request = ChatRequest {
-                model: self.config.default_model.clone(),
-                messages,
-                tools: tools.clone(),
-                temperature: self.config.temperature,
-                max_tokens: self.config.max_tokens,
-            };
-
-            // Lifecycle Hook: before LLM request (e.g. for RAG / context enrichment)
-            for hook in &self.hooks {
-                hook.on_llm_request(session_id, &mut request).await?;
-            }
+            let request = self.build_request(session_id, &tools).await?;
 
             let mut response = self.provider.chat(&request).await?;
 
@@ -708,28 +732,13 @@ impl Agent {
             .await?;
 
         // 3. Dynamically aggregate tools
-        let mut tools = Vec::with_capacity(self.tools.len());
-        for t in &self.tools {
-            tools.push(t.definition());
-        }
-        tools.extend(aggregate_tools(hosts));
+        let tools = self.collect_tools(hosts);
 
         let mut iterations = 0;
 
         // If tools are available, execute intermediate tool turns first
         while !tools.is_empty() && iterations < self.config.max_iterations {
-            let messages = self.memory.get_messages(session_id).await?;
-            let mut request = ChatRequest {
-                model: self.config.default_model.clone(),
-                messages,
-                tools: tools.clone(),
-                temperature: self.config.temperature,
-                max_tokens: self.config.max_tokens,
-            };
-
-            for hook in &self.hooks {
-                hook.on_llm_request(session_id, &mut request).await?;
-            }
+            let request = self.build_request(session_id, &tools).await?;
 
             let mut response = self.provider.chat(&request).await?;
 
@@ -885,19 +894,11 @@ impl Agent {
             }
         }
 
-        // Final streaming generation turn (pure assistant reply)
-        let messages = self.memory.get_messages(session_id).await?;
-        let mut request = ChatRequest {
-            model: self.config.default_model.clone(),
-            messages,
-            tools: Vec::new(),
-            temperature: self.config.temperature,
-            max_tokens: self.config.max_tokens,
-        };
-
-        for hook in &self.hooks {
-            hook.on_llm_request(session_id, &mut request).await?;
-        }
+        // Final streaming generation turn (pure assistant reply). It deliberately offers no tools:
+        // a stream cannot carry tool calls, so this turn must answer in text. That reshapes the
+        // top of the prompt, which is acceptable only because it is the exceptional path taken
+        // when no tools exist or the tool loop ran out of iterations.
+        let request = self.build_request(session_id, &[]).await?;
 
         let inner_stream = self.provider.chat_stream(&request).await?;
         let (tx, rx) = tokio::sync::mpsc::channel(32);

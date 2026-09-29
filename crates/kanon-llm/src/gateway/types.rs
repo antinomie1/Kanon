@@ -273,8 +273,14 @@ pub struct ChatRequest {
 /// Token utilization statistics returned by the provider.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TokenUsage {
-    /// Tokens consumed by input prompt and history.
+    /// Tokens consumed by the whole input prompt (system, tools and history), cached or not.
     pub prompt_tokens: u32,
+    /// Part of `prompt_tokens` the provider served from its prompt cache, when it reports one.
+    ///
+    /// This is the measure of whether the prompt layout works: a stable prefix shows up here as a
+    /// high share of `prompt_tokens`, a jittering one as zero.
+    #[serde(default)]
+    pub cached_tokens: u32,
     /// Tokens consumed by model generation.
     pub completion_tokens: u32,
     /// Total tokens billed or consumed.

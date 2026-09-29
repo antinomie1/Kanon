@@ -106,6 +106,18 @@ mod wire {
         pub prompt_tokens: u32,
         pub completion_tokens: u32,
         pub total_tokens: u32,
+        /// OpenAI reports cache hits under `prompt_tokens_details.cached_tokens`.
+        #[serde(default)]
+        pub prompt_tokens_details: Option<OpenAiPromptTokensDetailsWire>,
+        /// DeepSeek reports cache hits as a flat `prompt_cache_hit_tokens`.
+        #[serde(default)]
+        pub prompt_cache_hit_tokens: Option<u32>,
+    }
+
+    #[derive(Debug, Deserialize)]
+    pub struct OpenAiPromptTokensDetailsWire {
+        #[serde(default)]
+        pub cached_tokens: Option<u32>,
     }
 
     #[derive(Debug, Deserialize)]
@@ -363,6 +375,11 @@ impl LlmProvider for OpenAiChatProvider {
 
         let usage = wire_resp.usage.map(|u| TokenUsage {
             prompt_tokens: u.prompt_tokens,
+            cached_tokens: u
+                .prompt_tokens_details
+                .and_then(|details| details.cached_tokens)
+                .or(u.prompt_cache_hit_tokens)
+                .unwrap_or(0),
             completion_tokens: u.completion_tokens,
             total_tokens: u.total_tokens,
         });

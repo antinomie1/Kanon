@@ -524,8 +524,8 @@ async fn mcp_rejects_unknown_servers_and_bad_identifiers() {
 
 #[tokio::test]
 async fn a_chat_turn_carries_the_persona_and_the_skill_catalog() {
-    // Regression guard for the real request composition: the skill catalog is injected as its own
-    // system message, and the persona hook must not overwrite it. This test drives the HTTP route,
+    // Regression guard for the real request composition: the skill catalog is injected next to the
+    // persona in the static system block, and the persona hook must not overwrite it. This test drives the HTTP route,
     // so it also covers the wiring between the state builder, the factory and the agent.
     let dir = tempfile::tempdir().expect("temp dir");
     let (state, recorder) = extension_state_recording(dir.path()).await;
@@ -557,13 +557,18 @@ async fn a_chat_turn_carries_the_persona_and_the_skill_catalog() {
         .filter_map(|message| message.content.as_deref())
         .collect();
 
+    // Persona and skill catalog form one static system block, persona first.
     assert_eq!(
         systems.len(),
-        2,
-        "persona plus skill catalog, got {messages:?}"
+        1,
+        "one merged system block, got {messages:?}"
     );
     assert!(
-        systems.iter().any(|c| c.contains("PROBE-CATALOG-MARKER")),
+        systems[0].starts_with(kanon_llm::BASE_PERSONA_PROMPT),
+        "the persona leads the static block: {systems:?}"
+    );
+    assert!(
+        systems[0].contains("PROBE-CATALOG-MARKER"),
         "the catalog must be in the request: {systems:?}"
     );
 }

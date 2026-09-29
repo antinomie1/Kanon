@@ -8,6 +8,7 @@
 //! - [`error`]: Granular error types for gateway, agent, and tool routing.
 //! - [`gateway`]: Protocol-level LLM client implementations (OpenAI Chat, OpenAI Responses, Anthropic Messages).
 //! - [`prompt`]: Static personas and the hook that places them at the top of every request.
+//! - [`layout`]: The static-first request layout and the normalization that keeps prompt prefixes stable.
 //! - [`memory`]: Pluggable conversation memory subsystem with [`Memory`] trait and lock-free [`SlidingWindowMemory`].
 //! - [`model`]: Model identity (`provider/model-id`), capabilities and the per-model settings catalog.
 //! - [`provider`]: Named provider endpoints and the `provider/model` routing they enable.
@@ -19,6 +20,7 @@ pub mod agent;
 pub mod error;
 pub mod factory;
 pub mod gateway;
+pub mod layout;
 pub mod memory;
 pub mod model;
 pub mod prompt;
@@ -46,6 +48,7 @@ pub use gateway::{
     LlmProvider, ProviderSetup, Role, SUPPORTED_PROTOCOLS, TokenUsage, ToolCall, ToolDefinition,
     build_provider, provider_from_env, strip_reasoning_tags,
 };
+pub use layout::{canonical_json, canonical_tools, normalize_request};
 pub use memory::{ConversationManager, Memory, SessionMemory, SlidingWindowMemory};
 pub use model::{ModelCapabilities, ModelCatalog, ModelRef, ModelSettingsSource, ModelSpec};
 pub use prompt::{

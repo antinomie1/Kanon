@@ -49,6 +49,10 @@ pub enum TraceEvent {
         content_length: usize,
         /// Provider finish reason when reported.
         finish_reason: Option<String>,
+        /// Prompt tokens the provider reported for the request (0 when it reports none).
+        prompt_tokens: u32,
+        /// Part of `prompt_tokens` served from the provider's prompt cache (0 when unreported).
+        cached_tokens: u32,
     },
     /// A tool call passed the policy gate and is being dispatched.
     ToolCallStarted {
@@ -267,8 +271,15 @@ impl EventBus {
                     MetricsRegistry::incr(&self.metrics.tool_call_failures);
                 }
             }
-            TraceEvent::LlmResponse { .. }
-            | TraceEvent::ToolCallDenied { .. }
+            TraceEvent::LlmResponse {
+                prompt_tokens,
+                cached_tokens,
+                ..
+            } => {
+                MetricsRegistry::add(&self.metrics.llm_prompt_tokens, u64::from(*prompt_tokens));
+                MetricsRegistry::add(&self.metrics.llm_cached_tokens, u64::from(*cached_tokens));
+            }
+            TraceEvent::ToolCallDenied { .. }
             | TraceEvent::SessionReset { .. }
             | TraceEvent::PersonaSwitched { .. }
             | TraceEvent::PluginConfigUpdated { .. }
@@ -310,6 +321,14 @@ impl AgentHook for EventBus {
             requested_tools: !response.tool_calls.is_empty(),
             content_length: response.content.as_deref().map(str::len).unwrap_or(0),
             finish_reason: response.finish_reason.clone(),
+            prompt_tokens: response
+                .usage
+                .as_ref()
+                .map_or(0, |usage| usage.prompt_tokens),
+            cached_tokens: response
+                .usage
+                .as_ref()
+                .map_or(0, |usage| usage.cached_tokens),
         });
         Ok(())
     }

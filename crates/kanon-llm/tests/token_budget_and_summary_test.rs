@@ -366,29 +366,23 @@ async fn test_summary_hook_modifies_inflight_request_on_first_overbudget_turn() 
     );
 
     let inflight_messages = &recorded[0];
-    // Check that the in-flight request was compressed:
-    // It should have: 1 System prompt + 1 Summary block + 1 preserved assistant message + 1 latest user message = 4 messages
-    // (Instead of the uncompressed 1 System + 12 history turns + 1 latest user = 14 messages!)
-    assert_eq!(inflight_messages.len(), 4);
+    // Check that the in-flight request was compressed. The persona and the summary block form one
+    // static system message, followed by the preserved assistant message and the latest user
+    // message = 3 messages (instead of the uncompressed 1 System + 12 history + 1 user = 14).
+    assert_eq!(inflight_messages.len(), 3);
     assert_eq!(inflight_messages[0].role, Role::System);
-    assert_eq!(
-        inflight_messages[0].content.as_deref(),
-        Some("System persona")
-    );
+    let system_text = inflight_messages[0].content.as_deref().unwrap();
+    assert!(system_text.starts_with("System persona"));
+    assert!(system_text.contains("Context Summary of Previous Conversation"));
+    assert!(system_text.contains("Summary of items 1 to 6."));
 
-    // Second message in request must be the injected summary block
-    assert_eq!(inflight_messages[1].role, Role::System);
-    let summary_text = inflight_messages[1].content.as_deref().unwrap();
-    assert!(summary_text.contains("Context Summary of Previous Conversation"));
-    assert!(summary_text.contains("Summary of items 1 to 6."));
-
-    // Third message is preserved assistant turn 6
-    assert_eq!(inflight_messages[2].role, Role::Assistant);
+    // Second message is preserved assistant turn 6
+    assert_eq!(inflight_messages[1].role, Role::Assistant);
 
     // Last message in request must be the latest user input
-    assert_eq!(inflight_messages[3].role, Role::User);
+    assert_eq!(inflight_messages[2].role, Role::User);
     assert_eq!(
-        inflight_messages[3].content.as_deref(),
+        inflight_messages[2].content.as_deref(),
         Some("Latest inbound user message")
     );
 }

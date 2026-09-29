@@ -6,6 +6,14 @@
 //!
 //! Handles translation between Kanon domain types and Anthropic's structured content blocks
 //! (`text`, `tool_use`, `tool_result`), with top-level system prompt separation.
+//!
+//! # Prompt caching
+//! Anthropic caches only up to explicit `cache_control` breakpoints, so a stable prefix alone is
+//! not enough. Every request marks three: the last tool, the system block and the last content
+//! block of the conversation. The request is laid out static-first (tools, then system, then
+//! history), so each breakpoint covers a longer, less volatile prefix than the one before it — a
+//! new turn only pays for what came after the previous turn's breakpoint. Prompts shorter than the
+//! model's minimum cacheable length ignore the markers, so they are harmless there.
 
 use async_trait::async_trait;
 use std::time::Duration;
@@ -23,12 +31,28 @@ use crate::gateway::{ChatChunk, ChatChunkStream, LlmProvider};
 mod wire {
     use serde::{Deserialize, Serialize};
 
+    /// Marks the end of a cacheable prefix.
+    #[derive(Debug, Clone, Serialize, Deserialize)]
+    pub struct CacheControl {
+        #[serde(rename = "type")]
+        pub kind: String,
+    }
+
+    impl CacheControl {
+        /// The only breakpoint kind the API defines.
+        pub fn ephemeral() -> Self {
+            Self {
+                kind: "ephemeral".to_string(),
+            }
+        }
+    }
+
     #[derive(Debug, Serialize)]
     pub struct AnthropicMessagesRequest<'a> {
         pub model: &'a str,
         pub max_tokens: u32,
         #[serde(skip_serializing_if = "Option::is_none")]
-        pub system: Option<String>,
+        pub system: Option<Vec<AnthropicSystemBlock>>,
         pub messages: Vec<AnthropicMessageWire>,
         #[serde(skip_serializing_if = "Option::is_none")]
         pub tools: Option<Vec<AnthropicToolWire>>,
@@ -36,6 +60,16 @@ mod wire {
         pub temperature: Option<f32>,
         #[serde(skip_serializing_if = "std::ops::Not::not")]
         pub stream: bool,
+    }
+
+    /// One block of the top-level system prompt (the array form is what carries `cache_control`).
+    #[derive(Debug, Serialize)]
+    pub struct AnthropicSystemBlock {
+        #[serde(rename = "type")]
+        pub kind: &'static str,
+        pub text: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        pub cache_control: Option<CacheControl>,
     }
 
     #[derive(Debug, Serialize, Deserialize)]
@@ -48,16 +82,26 @@ mod wire {
     #[serde(tag = "type")]
     pub enum AnthropicContentBlock {
         #[serde(rename = "text")]
-        Text { text: String },
+        Text {
+            text: String,
+            #[serde(default, skip_serializing_if = "Option::is_none")]
+            cache_control: Option<CacheControl>,
+        },
 
         #[serde(rename = "image")]
-        Image { source: AnthropicImageSource },
+        Image {
+            source: AnthropicImageSource,
+            #[serde(default, skip_serializing_if = "Option::is_none")]
+            cache_control: Option<CacheControl>,
+        },
 
         #[serde(rename = "tool_use")]
         ToolUse {
             id: String,
             name: String,
             input: serde_json::Value,
+            #[serde(default, skip_serializing_if = "Option::is_none")]
+            cache_control: Option<CacheControl>,
         },
 
         #[serde(rename = "tool_result")]
@@ -66,7 +110,30 @@ mod wire {
             content: String,
             #[serde(skip_serializing_if = "Option::is_none")]
             is_error: Option<bool>,
+            #[serde(default, skip_serializing_if = "Option::is_none")]
+            cache_control: Option<CacheControl>,
         },
+    }
+
+    impl AnthropicContentBlock {
+        /// A plain text block.
+        pub fn text(text: impl Into<String>) -> Self {
+            Self::Text {
+                text: text.into(),
+                cache_control: None,
+            }
+        }
+
+        /// Places a cache breakpoint after this block.
+        pub fn mark_cacheable(&mut self) {
+            let slot = match self {
+                Self::Text { cache_control, .. }
+                | Self::Image { cache_control, .. }
+                | Self::ToolUse { cache_control, .. }
+                | Self::ToolResult { cache_control, .. } => cache_control,
+            };
+            *slot = Some(CacheControl::ephemeral());
+        }
     }
 
     #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -83,6 +150,8 @@ mod wire {
         pub name: String,
         pub description: String,
         pub input_schema: serde_json::Value,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pub cache_control: Option<CacheControl>,
     }
 
     #[derive(Debug, Deserialize)]
@@ -99,8 +168,15 @@ mod wire {
 
     #[derive(Debug, Deserialize)]
     pub struct AnthropicUsageWire {
+        /// Input tokens that were neither read from nor written to the cache.
         pub input_tokens: u32,
         pub output_tokens: u32,
+        /// Input tokens served from the prompt cache.
+        #[serde(default)]
+        pub cache_read_input_tokens: u32,
+        /// Input tokens written to the prompt cache by this request.
+        #[serde(default)]
+        pub cache_creation_input_tokens: u32,
     }
 }
 
@@ -179,12 +255,12 @@ impl AnthropicMessagesProvider {
     fn user_blocks(msg: &ChatMessage) -> Vec<wire::AnthropicContentBlock> {
         let mut blocks = Vec::new();
         if let Some(text) = msg.content.as_ref().filter(|text| !text.is_empty()) {
-            blocks.push(wire::AnthropicContentBlock::Text { text: text.clone() });
+            blocks.push(wire::AnthropicContentBlock::text(text.clone()));
         }
         for part in msg.parts.as_deref().unwrap_or_default() {
             match part {
                 ContentPart::Text { text } => {
-                    blocks.push(wire::AnthropicContentBlock::Text { text: text.clone() });
+                    blocks.push(wire::AnthropicContentBlock::text(text.clone()));
                 }
                 ContentPart::Image { .. } => {
                     let Some(block) = anthropic_image_block(part) else {
@@ -216,34 +292,43 @@ fn anthropic_image_block(part: &ContentPart) -> Option<wire::AnthropicContentBlo
         }
         None => wire::AnthropicImageSource::Url { url },
     };
-    Some(wire::AnthropicContentBlock::Image { source })
+    Some(wire::AnthropicContentBlock::Image {
+        source,
+        cache_control: None,
+    })
 }
 
-#[async_trait]
-impl LlmProvider for AnthropicMessagesProvider {
-    async fn chat(&self, request: &ChatRequest) -> Result<ChatResponse, GatewayError> {
+impl AnthropicMessagesProvider {
+    /// Translates a domain request into the wire request, with cache breakpoints placed.
+    ///
+    /// One owner for both the blocking and the streaming call, so the two can never disagree about
+    /// the prompt layout — which would make a streamed turn miss the cache its blocking twin wrote.
+    fn build_wire_request<'a>(
+        &'a self,
+        request: &'a ChatRequest,
+        stream: bool,
+    ) -> wire::AnthropicMessagesRequest<'a> {
         let model = if !request.model.is_empty() {
-            &request.model
+            request.model.as_str()
         } else {
-            &self.default_model
+            self.default_model.as_str()
         };
 
-        let max_tokens = request.max_tokens.unwrap_or(Self::DEFAULT_MAX_TOKENS);
-
-        // Anthropic requires system prompt to be in the top-level `system` field,
-        // rather than inside the `messages` array.
-        let mut system_prompt: Option<String> = None;
+        // Anthropic requires the system prompt in the top-level `system` field, rather than inside
+        // the `messages` array. The (already merged) system messages become one cached block.
+        let mut system_text: Option<String> = None;
         let mut messages: Vec<wire::AnthropicMessageWire> = Vec::new();
 
         for msg in &request.messages {
             match msg.role {
                 Role::System => {
                     if let Some(ref text) = msg.content {
-                        if let Some(existing) = &mut system_prompt {
-                            existing.push_str("\n\n");
-                            existing.push_str(text);
-                        } else {
-                            system_prompt = Some(text.clone());
+                        match &mut system_text {
+                            Some(existing) => {
+                                existing.push_str("\n\n");
+                                existing.push_str(text);
+                            }
+                            None => system_text = Some(text.clone()),
                         }
                     }
                 }
@@ -261,7 +346,7 @@ impl LlmProvider for AnthropicMessagesProvider {
                     if let Some(ref text) = msg.content
                         && !text.is_empty()
                     {
-                        blocks.push(wire::AnthropicContentBlock::Text { text: text.clone() });
+                        blocks.push(wire::AnthropicContentBlock::text(text.clone()));
                     }
                     if let Some(ref tool_calls) = msg.tool_calls {
                         for tc in tool_calls {
@@ -269,6 +354,7 @@ impl LlmProvider for AnthropicMessagesProvider {
                                 id: tc.id.clone(),
                                 name: tc.name.clone(),
                                 input: tc.arguments.clone(),
+                                cache_control: None,
                             });
                         }
                     }
@@ -282,22 +368,20 @@ impl LlmProvider for AnthropicMessagesProvider {
                 Role::Tool => {
                     // Anthropic specifies tool execution output is returned inside a "user" turn
                     // with type: "tool_result".
-                    let tool_use_id = msg.tool_call_id.clone().unwrap_or_default();
-                    let content = msg.content.clone().unwrap_or_default();
-                    let block = wire::AnthropicContentBlock::ToolResult {
-                        tool_use_id,
-                        content,
-                        is_error: None,
-                    };
                     messages.push(wire::AnthropicMessageWire {
                         role: "user".to_string(),
-                        content: vec![block],
+                        content: vec![wire::AnthropicContentBlock::ToolResult {
+                            tool_use_id: msg.tool_call_id.clone().unwrap_or_default(),
+                            content: msg.content.clone().unwrap_or_default(),
+                            is_error: None,
+                            cache_control: None,
+                        }],
                     });
                 }
             }
         }
 
-        let tools = if request.tools.is_empty() {
+        let mut tools: Option<Vec<wire::AnthropicToolWire>> = if request.tools.is_empty() {
             None
         } else {
             Some(
@@ -308,22 +392,52 @@ impl LlmProvider for AnthropicMessagesProvider {
                         name: t.name.clone(),
                         description: t.description.clone(),
                         input_schema: t.parameters.clone(),
+                        cache_control: None,
                     })
                     .collect(),
             )
         };
 
-        let wire_req = wire::AnthropicMessagesRequest {
+        // Breakpoint 1: the end of the tool list — the most static part of the prompt.
+        if let Some(last) = tools.as_mut().and_then(|tools| tools.last_mut()) {
+            last.cache_control = Some(wire::CacheControl::ephemeral());
+        }
+
+        // Breakpoint 2: the end of the system prompt (persona, skills, summary).
+        let system = system_text.map(|text| {
+            vec![wire::AnthropicSystemBlock {
+                kind: "text",
+                text,
+                cache_control: Some(wire::CacheControl::ephemeral()),
+            }]
+        });
+
+        // Breakpoint 3: the last block of the conversation, so the next turn — whose prompt starts
+        // with this one — reads everything up to here from the cache.
+        if let Some(last) = messages
+            .last_mut()
+            .and_then(|message| message.content.last_mut())
+        {
+            last.mark_cacheable();
+        }
+
+        wire::AnthropicMessagesRequest {
             model,
-            max_tokens,
-            system: system_prompt,
+            max_tokens: request.max_tokens.unwrap_or(Self::DEFAULT_MAX_TOKENS),
+            system,
             messages,
             tools,
             temperature: request.temperature,
-            stream: false,
-        };
+            stream,
+        }
+    }
 
-        let mut req_builder = self.client.post(&self.endpoint).json(&wire_req);
+    /// Sends a wire request with the endpoint's credentials and headers.
+    async fn send(
+        &self,
+        wire_req: &wire::AnthropicMessagesRequest<'_>,
+    ) -> Result<reqwest::Response, GatewayError> {
+        let mut req_builder = self.client.post(&self.endpoint).json(wire_req);
 
         if let Some(ref key) = self.api_key {
             req_builder = req_builder.header("x-api-key", key);
@@ -344,7 +458,15 @@ impl LlmProvider for AnthropicMessagesProvider {
                 message: err_body,
             });
         }
+        Ok(resp)
+    }
+}
 
+#[async_trait]
+impl LlmProvider for AnthropicMessagesProvider {
+    async fn chat(&self, request: &ChatRequest) -> Result<ChatResponse, GatewayError> {
+        let wire_req = self.build_wire_request(request, false);
+        let resp = self.send(&wire_req).await?;
         let wire_resp: wire::AnthropicMessagesResponse = resp.json().await?;
 
         let mut text_output = String::new();
@@ -352,10 +474,12 @@ impl LlmProvider for AnthropicMessagesProvider {
 
         for block in wire_resp.content {
             match block {
-                wire::AnthropicContentBlock::Text { text } => {
+                wire::AnthropicContentBlock::Text { text, .. } => {
                     text_output.push_str(&text);
                 }
-                wire::AnthropicContentBlock::ToolUse { id, name, input } => {
+                wire::AnthropicContentBlock::ToolUse {
+                    id, name, input, ..
+                } => {
                     tool_calls.push(ToolCall {
                         id,
                         name,
@@ -381,10 +505,17 @@ impl LlmProvider for AnthropicMessagesProvider {
             None => None,
         };
 
-        let usage = wire_resp.usage.map(|u| TokenUsage {
-            prompt_tokens: u.input_tokens,
-            completion_tokens: u.output_tokens,
-            total_tokens: u.input_tokens + u.output_tokens,
+        // `input_tokens` excludes everything the cache served or stored, so the prompt size the
+        // rest of the node reasons about is the sum of the three.
+        let usage = wire_resp.usage.map(|u| {
+            let prompt_tokens =
+                u.input_tokens + u.cache_read_input_tokens + u.cache_creation_input_tokens;
+            TokenUsage {
+                prompt_tokens,
+                cached_tokens: u.cache_read_input_tokens,
+                completion_tokens: u.output_tokens,
+                total_tokens: prompt_tokens + u.output_tokens,
+            }
         });
 
         Ok(ChatResponse {
@@ -396,124 +527,8 @@ impl LlmProvider for AnthropicMessagesProvider {
     }
 
     async fn chat_stream(&self, request: &ChatRequest) -> Result<ChatChunkStream, GatewayError> {
-        let model = if !request.model.is_empty() {
-            &request.model
-        } else {
-            &self.default_model
-        };
-
-        let max_tokens = request.max_tokens.unwrap_or(Self::DEFAULT_MAX_TOKENS);
-
-        let mut system_prompt: Option<String> = None;
-        let mut messages: Vec<wire::AnthropicMessageWire> = Vec::new();
-
-        for msg in &request.messages {
-            match msg.role {
-                Role::System => {
-                    if let Some(ref text) = msg.content {
-                        if let Some(existing) = &mut system_prompt {
-                            existing.push_str("\n\n");
-                            existing.push_str(text);
-                        } else {
-                            system_prompt = Some(text.clone());
-                        }
-                    }
-                }
-                Role::User => {
-                    let blocks = Self::user_blocks(msg);
-                    if !blocks.is_empty() {
-                        messages.push(wire::AnthropicMessageWire {
-                            role: "user".to_string(),
-                            content: blocks,
-                        });
-                    }
-                }
-                Role::Assistant => {
-                    let mut blocks = Vec::new();
-                    if let Some(ref text) = msg.content
-                        && !text.is_empty()
-                    {
-                        blocks.push(wire::AnthropicContentBlock::Text { text: text.clone() });
-                    }
-                    if let Some(ref tool_calls) = msg.tool_calls {
-                        for tc in tool_calls {
-                            blocks.push(wire::AnthropicContentBlock::ToolUse {
-                                id: tc.id.clone(),
-                                name: tc.name.clone(),
-                                input: tc.arguments.clone(),
-                            });
-                        }
-                    }
-                    if !blocks.is_empty() {
-                        messages.push(wire::AnthropicMessageWire {
-                            role: "assistant".to_string(),
-                            content: blocks,
-                        });
-                    }
-                }
-                Role::Tool => {
-                    let tool_use_id = msg.tool_call_id.clone().unwrap_or_default();
-                    let content = msg.content.clone().unwrap_or_default();
-                    let block = wire::AnthropicContentBlock::ToolResult {
-                        tool_use_id,
-                        content,
-                        is_error: None,
-                    };
-                    messages.push(wire::AnthropicMessageWire {
-                        role: "user".to_string(),
-                        content: vec![block],
-                    });
-                }
-            }
-        }
-
-        let tools = if request.tools.is_empty() {
-            None
-        } else {
-            Some(
-                request
-                    .tools
-                    .iter()
-                    .map(|t| wire::AnthropicToolWire {
-                        name: t.name.clone(),
-                        description: t.description.clone(),
-                        input_schema: t.parameters.clone(),
-                    })
-                    .collect(),
-            )
-        };
-
-        let wire_req = wire::AnthropicMessagesRequest {
-            model,
-            max_tokens,
-            system: system_prompt,
-            messages,
-            tools,
-            temperature: request.temperature,
-            stream: true,
-        };
-
-        let mut req_builder = self.client.post(&self.endpoint).json(&wire_req);
-
-        if let Some(ref key) = self.api_key {
-            req_builder = req_builder.header("x-api-key", key);
-        }
-        req_builder = req_builder.header("anthropic-version", &self.anthropic_version);
-
-        for (k, v) in &self.custom_headers {
-            req_builder = req_builder.header(k, v);
-        }
-
-        let resp = req_builder.send().await?;
-
-        let status = resp.status();
-        if !status.is_success() {
-            let err_body = resp.text().await.unwrap_or_default();
-            return Err(GatewayError::ApiStatus {
-                status: status.as_u16(),
-                message: err_body,
-            });
-        }
+        let wire_req = self.build_wire_request(request, true);
+        let resp = self.send(&wire_req).await?;
 
         let (tx, rx) = tokio::sync::mpsc::channel(32);
         let mut byte_stream = resp.bytes_stream();

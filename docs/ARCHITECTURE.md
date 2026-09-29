@@ -642,6 +642,27 @@ sequenceDiagram
     Core->>IM: 出站 DeliverMessage 分发至适配器并回复用户
 ```
 
+### 8.6 提示词静态→动态分层与前缀缓存 (Prompt Layout & Prefix Caching)
+
+模型服务商按**前缀**缓存提示词：与历史请求逐 token 相同的最长前缀直接命中缓存，从第一个不同的 token 起全部重算。因此每个请求都严格按“变化频率由低到高”分层，`kanon-llm` 的 `layout` 模块是这条规则的唯一实现：
+
+| 层 | 内容 | 何时变化 |
+| :--- | :--- | :--- |
+| 1. 工具 | 全部可调用工具，按名称排序，Schema 键名排序 | 插件 / MCP / 技能开关变化时 |
+| 2. 系统块 | 人设提示词 + 技能目录（+ 会话摘要，见 8.7），合并为**单条** system 消息 | 运营者编辑配置时 |
+| 3. 历史 | 此前各轮对话，**仅追加** | 每轮追加，不修改已有内容 |
+| 4. 当前轮 | 用户输入（含运营者启用的 `[时间]`/`[发送者]` 前缀） | 每次请求 |
+
+**避免前缀抖动 (Prefix Jitter)**：语义相同但字节不同同样会让缓存失效，因此：
+- 工具列表顺序固定（按名称排序），**禁止**随注册顺序、宿主启动顺序或调用频率重排；工具 JSON Schema 递归按键名排序（即使依赖树启用了 `serde_json` 的 `preserve_order`，或 Schema 来自 protobuf `Struct` 的哈希顺序，输出字节也不变）；
+- 字段结构不随轮次增减：某个配置下，字段要么始终存在、要么始终缺省，不会一轮传 `null`、一轮省略键；
+- 人设提示词是**纯静态文本**（保存时统一换行并去除首尾空白），不再支持 `{{变量}}` 模板；时间、发送者等运行时才知道的信息只出现在当前轮用户消息里；
+- system 文本逐段 trim 后以固定分隔符 `\n\n` 合并，钩子数量变化不会改变提示词形状；若有钩子在对话开始后再插入 system 消息（会切断缓存前缀），系统记录告警。
+
+**服务商适配**：OpenAI Chat / Responses 与 DeepSeek 等按前缀自动缓存，稳定前缀即可命中；Anthropic 需要显式断点，`AnthropicMessagesProvider` 在工具列表末尾、system 块、对话最后一个内容块各打一个 `cache_control: ephemeral` 断点（流式与非流式共用同一请求构造器，保证两者布局一致）。
+
+**可观测性**：各服务商返回的缓存命中 token 统一进入 `TokenUsage.cached_tokens`（OpenAI `prompt_tokens_details.cached_tokens`、DeepSeek `prompt_cache_hit_tokens`、Responses `input_tokens_details.cached_tokens`、Anthropic `cache_read_input_tokens`；Anthropic 的 `prompt_tokens` 为 `input + cache_read + cache_creation` 之和）。`/api/v1/metrics` 导出 `kanon_llm_prompt_tokens_total` 与 `kanon_llm_cached_prompt_tokens_total`，二者之比即缓存命中率；`llm_response` 追踪事件同时携带 `prompt_tokens` / `cached_tokens`。
+
 ---
 
 ## 9. 管理控制面与前后端分离 API 规范 (Management Gateway Spec)

@@ -32,6 +32,12 @@ pub struct MetricsRegistry {
     pub outbound_failed: AtomicU64,
     /// LLM requests issued by the agent runtime (including tool-calling rounds).
     pub llm_requests: AtomicU64,
+    /// Prompt tokens the providers reported across all LLM requests.
+    pub llm_prompt_tokens: AtomicU64,
+    /// Part of those prompt tokens served from the providers' prompt caches.
+    ///
+    /// `cached / prompt` is the cache hit rate the prompt layout is built to raise.
+    pub llm_cached_tokens: AtomicU64,
     /// Tool calls dispatched by the agent runtime.
     pub tool_calls: AtomicU64,
     /// Failed tool calls reported by native or plugin tools.
@@ -209,6 +215,18 @@ impl MetricsRegistry {
             "kanon_llm_requests_total",
             "LLM completion requests issued by the agent runtime.",
             Self::get(&self.llm_requests),
+        );
+        counter_metric(
+            &mut out,
+            "kanon_llm_prompt_tokens_total",
+            "Prompt tokens reported by model providers.",
+            Self::get(&self.llm_prompt_tokens),
+        );
+        counter_metric(
+            &mut out,
+            "kanon_llm_cached_prompt_tokens_total",
+            "Prompt tokens model providers served from their prompt cache.",
+            Self::get(&self.llm_cached_tokens),
         );
         counter_metric(
             &mut out,
