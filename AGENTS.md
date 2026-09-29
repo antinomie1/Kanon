@@ -68,9 +68,10 @@ Kanon 是基于 Rust 2024 构建的高性能多平台聊天机器人微内核，
 - **Windows 本地安全**：TCP Loopback 握手必须在首包 HTTP/2 HEADERS 中携带 32-Byte CSPRNG 随机 Token（`x-kanon-auth-token`），核心恒定时间校验。
 - **数据访问防放大**：只读配置 Host 内存缓存；复杂业务持久化直接在专属目录 `./data/plugins/<id>/` 本地读写 SQLite/DuckDB。
 - **程序入口唯一**：全工程仅 `crates/kanon` 提供节点可执行文件 `kanon`；其余 crate 一律为库，禁止新增 `src/main.rs` 或 `[[bin]]`（`crates/kanon-dev` 的 `kanon-dev` 开发者 CLI 为唯一例外）。
-- **构建产物收敛**：根 `default-members` 仅含 `crates/kanon` 与 `crates/kanon-dev`，一次默认构建（`cargo build` / `cargo test`）只产出 `kanon` 与 `kanon-dev` 两个可执行文件；全仓校验必须显式 `--workspace`（示例插件宿主属测试夹具，需先 `cargo build -p demo-weather -p demo-rust-plugin` 才能运行插件宿主用例）。
+- **构建产物收敛**：根 `default-members` 仅含 `crates/kanon` 与 `crates/kanon-dev`，一次默认构建（`cargo build` / `cargo test`）只产出 `kanon` 与 `kanon-dev` 两个可执行文件；全仓校验必须显式 `--workspace`（示例插件宿主属测试夹具，需先 `cargo build -p demo-weather -p demo-rust-plugin` 才能运行插件宿主用例；Python 宿主用例需先在 `sdks/python/plugins/demo_py_plugin` 下执行 `uv sync`）。
 - **Rust 标准**：统一 **Rust 2024 Edition**，异步基于 Tokio/Tonic/Axum。错误用 `thiserror`/`anyhow` 显式追踪。`cargo check --workspace` 必须保持 **0 错误、0 警告**。
 - **测试隔离规范**：所有测试代码必须从业务代码中独立剥离至 `tests/` 目录，禁止在 `src/` 中内联测试，确保逻辑代码零冗余。
+- **kanon-dev 不是包管理器**：禁止让 `kanon-dev`（以及节点 `kanon`）封装 uv/pip/npm/bun 的安装、解析或锁定功能。Python/TS 插件依赖只在插件目录的 `pyproject.toml` / `package.json`（附锁文件）中声明，由开发者或运维用原生工具在插件目录内自行安装（`<plugin>/.venv`、`<plugin>/node_modules`）；环境缺失时插件必须报告 `RuntimeUnavailable`，禁止回退到共享或系统解释器。
 - **测试只加有用的**：只为真实行为、失败路径与回归补充测试；禁止堆砌重复、琐碎或只为凑数量的测试。
 - **提示词静态优先**：模型请求固定为 `工具 → 单条系统块（人设 + 技能目录 + 摘要）→ 仅追加历史 → 当前轮`。时间、发送者等运行时才知道的信息只能进入当前轮用户消息；工具列表按名称排序、Schema 键名排序；钩子不得在对话开始后再插入 system 消息。任何会改变请求前缀的改动都必须有测试证明前缀仍稳定（`crates/kanon-llm/tests/prompt_layout_test.rs`）。
 - **记忆仅追加**：会话历史除 `Memory::compact_history` 与 `clear` 外禁止删除或重排消息，禁止再引入滑动窗口；压缩必须复用会话自己的请求前缀，且模型未给出摘要时绝不丢弃历史。

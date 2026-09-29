@@ -54,17 +54,6 @@ pub struct CommandDefinition {
     pub priority: Option<i32>,
 }
 
-/// Declared runtime dependencies under `[dependencies]` in `plugin.toml`.
-///
-/// Only meaningful for interpreted runtimes (Python / TypeScript); Rust plugins
-/// are distributed as pre-compiled artifacts with their dependencies already linked.
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
-pub struct PluginDependencies {
-    /// Locked package requirement strings (e.g. `httpx>=0.25.0`).
-    #[serde(default)]
-    pub packages: Vec<String>,
-}
-
 /// Static tool declaration under `[[tools]]` in `plugin.toml`.
 ///
 /// Mirrors the runtime `ToolMeta` reported over gRPC so that the management console
@@ -97,13 +86,15 @@ pub struct AdapterSection {
 }
 
 /// Complete representation of a parsed `plugin.toml` manifest.
+///
+/// Unknown sections are rejected rather than ignored. In particular, a Python or TypeScript
+/// plugin declares its packages in its own `pyproject.toml` / `package.json`; a stale
+/// `[dependencies]` section here must fail loudly instead of looking like it still does something.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct PluginManifest {
     /// Core plugin metadata.
     pub plugin: PluginSection,
-    /// Optional declared runtime dependency set.
-    #[serde(default)]
-    pub dependencies: Option<PluginDependencies>,
     /// JSON Schema of the user-facing configuration object (`[config_schema]`).
     ///
     /// Retained verbatim so the headless core can hand the schema to the WebUI

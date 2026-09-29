@@ -140,7 +140,8 @@ parameters = { type = "object" }
     )
     .await;
 
-    // Either succeeds with "running" (if python host runner exists) or "RuntimeUnavailable" (if not)
+    // The copied plugin has no `.venv` yet: Kanon never installs dependencies itself, so the
+    // plugin is installed but unavailable until the operator runs `uv sync` in its directory.
     assert_eq!(status, 200);
     assert_eq!(body["plugin_id"], "org.kanon.test.installed_py");
     assert_eq!(body["name"], "Installed Python Plugin");
@@ -148,8 +149,8 @@ parameters = { type = "object" }
     assert_eq!(body["runtime"], "python");
     assert_eq!(body["commands"][0]["name"], "pyhello");
     assert_eq!(body["tools"][0]["name"], "pycalc");
-    let status_str = body["status"].as_str().unwrap();
-    assert!(status_str == "running" || status_str == "RuntimeUnavailable");
+    assert_eq!(body["status"], "RuntimeUnavailable");
+    assert!(body["message"].as_str().unwrap().contains("uv sync"));
 }
 
 #[tokio::test]

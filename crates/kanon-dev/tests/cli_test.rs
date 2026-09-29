@@ -77,6 +77,31 @@ fn test_plugin_scaffold_python() {
     assert!(main_py.contains("@tool"));
 }
 
+/// Inside a Kanon checkout the scaffold points the SDK dependency at that checkout, relative to
+/// the plugin, because the SDKs are not published to a registry.
+#[test]
+fn test_plugin_scaffold_links_sdk_checkout() {
+    let tmp = tempdir().expect("tempdir");
+    std::fs::create_dir_all(tmp.path().join("sdks/python")).unwrap();
+    std::fs::create_dir_all(tmp.path().join("sdks/typescript")).unwrap();
+    std::fs::write(tmp.path().join("sdks/python/pyproject.toml"), "").unwrap();
+    std::fs::write(tmp.path().join("sdks/typescript/package.json"), "{}").unwrap();
+
+    let py_dir = tmp.path().join("plugins/linked_py");
+    create_plugin_project("linked_py", "python", Some(&py_dir)).unwrap();
+    let pyproject = std::fs::read_to_string(py_dir.join("pyproject.toml")).unwrap();
+    assert!(pyproject.contains(r#"dependencies = ["kanon-python-host"]"#));
+    assert!(
+        pyproject
+            .contains(r#"kanon-python-host = { path = "../../sdks/python", editable = true }"#)
+    );
+
+    let ts_dir = tmp.path().join("plugins/linked_ts");
+    create_plugin_project("linked_ts", "ts", Some(&ts_dir)).unwrap();
+    let package_json = std::fs::read_to_string(ts_dir.join("package.json")).unwrap();
+    assert!(package_json.contains(r#""@kanon/sdk-and-host": "file:../../sdks/typescript""#));
+}
+
 #[test]
 fn test_plugin_scaffold_typescript() {
     let tmp = tempdir().expect("tempdir");

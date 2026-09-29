@@ -98,6 +98,19 @@ pub fn create_plugin_project(
     Ok(target_dir)
 }
 
+/// Finds a Kanon SDK checkout above `dir` and returns its path relative to `dir`.
+///
+/// The SDKs are not published to a registry yet, so a plugin created inside a Kanon checkout
+/// points its SDK dependency at that checkout. Outside one there is nothing to point at: the
+/// dependency is left as a plain registry name and the package manager reports it explicitly.
+fn sdk_path(dir: &Path, sdk: &str, marker: &str) -> Option<String> {
+    let dir = dir.canonicalize().ok()?;
+    dir.ancestors()
+        .enumerate()
+        .find(|(_, ancestor)| ancestor.join(sdk).join(marker).is_file())
+        .map(|(depth, _)| format!("{}{sdk}", "../".repeat(depth)))
+}
+
 /// Generates a starter Rust plugin project with `Cargo.toml`, `plugin.toml`, and `src/main.rs`.
 fn scaffold_rust_plugin(name: &str, dir: &Path) -> Result<(), ScaffoldError> {
     let snake_name = to_snake_case(name);
@@ -261,20 +274,21 @@ parameters = {{ type = "object", properties = {{ expr = {{ type = "string", desc
 "#
     );
 
+    // No `[build-system]`: the host loads the plugin from its directory, so uv only has to
+    // install the dependencies into `.venv`, never build the plugin itself.
+    let sdk_source = sdk_path(dir, "sdks/python", "pyproject.toml")
+        .map(|path| {
+            format!("\n[tool.uv.sources]\nkanon-python-host = {{ path = \"{path}\", editable = true }}\n")
+        })
+        .unwrap_or_default();
     let pyproject_toml = format!(
         r#"[project]
 name = "{snake_name}"
 version = "0.1.0"
 description = "Kanon plugin in Python: {pascal_name}"
 requires-python = ">=3.10"
-dependencies = [
-    "kanon-sdk>=0.1.0",
-]
-
-[build-system]
-requires = ["hatchling"]
-build-backend = "hatchling.build"
-"#
+dependencies = ["kanon-python-host"]
+{sdk_source}"#
     );
 
     let main_py = format!(
@@ -369,6 +383,9 @@ parameters = {{ type = "object", properties = {{ expr = {{ type = "string", desc
 "#
     );
 
+    let sdk_version = sdk_path(dir, "sdks/typescript", "package.json")
+        .map(|path| format!("file:{path}"))
+        .unwrap_or_else(|| "^0.1.0".to_string());
     let package_json = format!(
         r#"{{
   "name": "{snake_name}",
@@ -380,7 +397,7 @@ parameters = {{ type = "object", properties = {{ expr = {{ type = "string", desc
     "build": "tsc"
   }},
   "dependencies": {{
-    "@kanon/sdk": "^0.1.0"
+    "@kanon/sdk-and-host": "{sdk_version}"
   }},
   "devDependencies": {{
     "typescript": "^5.0.0"
@@ -412,7 +429,7 @@ parameters = {{ type = "object", properties = {{ expr = {{ type = "string", desc
   Command,
   Tool,
   MessageSegment,
-}} from "@kanon/sdk";
+}} from "@kanon/sdk-and-host";
 
 export default class {pascal_name}Plugin extends Plugin {{
   id = "org.kanon.plugin.{snake_name}";

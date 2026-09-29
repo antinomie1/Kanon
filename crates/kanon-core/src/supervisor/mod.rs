@@ -938,8 +938,13 @@ impl Supervisor {
     }
 
     /// Spawns a plugin sub-process based on a `plugin.toml` manifest file,
-    /// dynamically resolving the runtime launcher (Rust native binary, Python venv/interpreter,
-    /// or Node/Bun runtime for TypeScript).
+    /// dynamically resolving the runtime launcher (Rust native binary, the plugin's own Python
+    /// virtual environment, or Node/Bun runtime for TypeScript).
+    ///
+    /// Kanon never installs plugin dependencies. A Python plugin must ship a `.venv` built by the
+    /// operator (`uv sync`), and a TypeScript plugin that declares dependencies must have its
+    /// `node_modules` installed; otherwise the plugin is reported as `RuntimeUnavailable` before
+    /// any process starts, instead of crashing on an import error inside a restart loop.
     pub async fn spawn_from_manifest(
         &self,
         manifest_path: impl AsRef<Path>,
@@ -961,111 +966,124 @@ impl Supervisor {
             priority,
         };
 
-        let result = if let Some(override_path) = executable_override {
-            self.launch_host(
-                &host_id,
-                override_path,
-                &[],
-                priority,
-                spec,
-                Some(manifest.clone()),
-            )
-            .await
-        } else {
-            match manifest.plugin.runtime.as_str() {
-                "rust" => {
-                    let exec_path = parent.join(&manifest.plugin.entrypoint);
-                    self.launch_host(
-                        &host_id,
-                        &exec_path,
-                        &[],
-                        priority,
-                        spec,
-                        Some(manifest.clone()),
-                    )
-                    .await
-                }
-                "python" => {
-                    let python_bin = std::env::var("KANON_PYTHON_BIN")
-                        .map(PathBuf::from)
-                        .ok()
-                        .or_else(|| find_file_upwards(parent, "sdks/python/.venv/bin/python"))
-                        .or_else(|| find_binary_in_path("python3"))
-                        .or_else(|| find_binary_in_path("python"))
-                        .ok_or_else(|| SupervisorError::RuntimeUnavailable {
-                            runtime: "python".to_string(),
-                            reason: "Neither python3 nor a virtual environment (.venv) was found in PATH"
-                                .to_string(),
+        // The resolution steps below return early with `?`. Running them inside this block keeps
+        // those early returns from skipping the unavailable-plugin bookkeeping that follows.
+        let result = async {
+            if let Some(override_path) = executable_override {
+                self.launch_host(
+                    &host_id,
+                    override_path,
+                    &[],
+                    priority,
+                    spec,
+                    Some(manifest.clone()),
+                )
+                .await
+            } else {
+                match manifest.plugin.runtime.as_str() {
+                    "rust" => {
+                        let exec_path = parent.join(&manifest.plugin.entrypoint);
+                        self.launch_host(
+                            &host_id,
+                            &exec_path,
+                            &[],
+                            priority,
+                            spec,
+                            Some(manifest.clone()),
+                        )
+                        .await
+                    }
+                    "python" => {
+                        // Each plugin runs in its own environment so two plugins can never
+                        // disagree about a package version. There is deliberately no fallback to a
+                        // shared or system interpreter: it would start without the plugin's packages.
+                        let python_bin = plugin_python(parent).ok_or_else(|| {
+                            SupervisorError::RuntimeUnavailable {
+                                runtime: "python".to_string(),
+                                reason: format!(
+                                    "Python environment '{}' not found; run `uv sync` in the plugin directory",
+                                    parent.join(".venv").display()
+                                ),
+                            }
                         })?;
 
-                    let host_script = std::env::var("KANON_PYTHON_HOST_PATH")
-                        .map(PathBuf::from)
-                        .ok()
-                        .or_else(|| find_file_upwards(parent, "sdks/python/kanon_host/main.py"))
-                        .or_else(|| find_file_upwards(parent, "kanon_host/main.py"))
-                        .ok_or_else(|| SupervisorError::RuntimeUnavailable {
-                            runtime: "python".to_string(),
-                            reason:
-                                "Could not locate Python host runner script (kanon_host/main.py)"
+                        let host_script = std::env::var("KANON_PYTHON_HOST_PATH")
+                            .map(PathBuf::from)
+                            .ok()
+                            .or_else(|| find_file_upwards(parent, "sdks/python/kanon_host/main.py"))
+                            .or_else(|| find_file_upwards(parent, "kanon_host/main.py"))
+                            .ok_or_else(|| SupervisorError::RuntimeUnavailable {
+                                runtime: "python".to_string(),
+                                reason:
+                                    "Could not locate Python host runner script (kanon_host/main.py)"
+                                        .to_string(),
+                            })?;
+
+                        let host_script_str = host_script.to_string_lossy();
+                        let manifest_str = manifest_path_ref.to_string_lossy();
+                        let args = [host_script_str.as_ref(), "--plugin", manifest_str.as_ref()];
+
+                        self.launch_host(
+                            &host_id,
+                            &python_bin,
+                            &args,
+                            priority,
+                            spec,
+                            Some(manifest.clone()),
+                        )
+                        .await
+                    }
+                    "typescript" | "ts" => {
+                        ensure_node_modules(parent).map_err(|reason| {
+                            SupervisorError::RuntimeUnavailable {
+                                runtime: "typescript".to_string(),
+                                reason,
+                            }
+                        })?;
+
+                        let node_bin = std::env::var("KANON_NODE_BIN")
+                            .map(PathBuf::from)
+                            .ok()
+                            .or_else(|| find_binary_in_path("bun"))
+                            .or_else(|| find_binary_in_path("node"))
+                            .ok_or_else(|| SupervisorError::RuntimeUnavailable {
+                                runtime: "typescript".to_string(),
+                                reason: "Neither bun nor node was found in PATH".to_string(),
+                            })?;
+
+                        let host_script = std::env::var("KANON_TS_HOST_PATH")
+                            .map(PathBuf::from)
+                            .ok()
+                            .or_else(|| find_file_upwards(parent, "sdks/typescript/dist/src/host/index.js"))
+                            .or_else(|| find_file_upwards(parent, "dist/src/host/index.js"))
+                            .ok_or_else(|| SupervisorError::RuntimeUnavailable {
+                                runtime: "typescript".to_string(),
+                                reason: "Could not locate TypeScript host runner script (dist/src/host/index.js)"
                                     .to_string(),
-                        })?;
+                            })?;
 
-                    let host_script_str = host_script.to_string_lossy();
-                    let manifest_str = manifest_path_ref.to_string_lossy();
-                    let args = [host_script_str.as_ref(), "--plugin", manifest_str.as_ref()];
+                        let host_script_str = host_script.to_string_lossy();
+                        let manifest_str = manifest_path_ref.to_string_lossy();
+                        let args = [host_script_str.as_ref(), "--plugin", manifest_str.as_ref()];
 
-                    self.launch_host(
-                        &host_id,
-                        &python_bin,
-                        &args,
-                        priority,
-                        spec,
-                        Some(manifest.clone()),
-                    )
-                    .await
+                        self.launch_host(
+                            &host_id,
+                            &node_bin,
+                            &args,
+                            priority,
+                            spec,
+                            Some(manifest.clone()),
+                        )
+                        .await
+                    }
+                    other => Err(SupervisorError::RuntimeUnavailable {
+                        runtime: other.to_string(),
+                        reason: format!("Unsupported plugin runtime '{other}' declared in manifest"),
+                    }),
                 }
-                "typescript" | "ts" => {
-                    let node_bin = std::env::var("KANON_NODE_BIN")
-                        .map(PathBuf::from)
-                        .ok()
-                        .or_else(|| find_binary_in_path("bun"))
-                        .or_else(|| find_binary_in_path("node"))
-                        .ok_or_else(|| SupervisorError::RuntimeUnavailable {
-                            runtime: "typescript".to_string(),
-                            reason: "Neither bun nor node was found in PATH".to_string(),
-                        })?;
-
-                    let host_script = std::env::var("KANON_TS_HOST_PATH")
-                        .map(PathBuf::from)
-                        .ok()
-                        .or_else(|| find_file_upwards(parent, "sdks/typescript/dist/src/host/index.js"))
-                        .or_else(|| find_file_upwards(parent, "dist/src/host/index.js"))
-                        .ok_or_else(|| SupervisorError::RuntimeUnavailable {
-                            runtime: "typescript".to_string(),
-                            reason: "Could not locate TypeScript host runner script (dist/src/host/index.js)"
-                                .to_string(),
-                        })?;
-
-                    let host_script_str = host_script.to_string_lossy();
-                    let manifest_str = manifest_path_ref.to_string_lossy();
-                    let args = [host_script_str.as_ref(), "--plugin", manifest_str.as_ref()];
-
-                    self.launch_host(
-                        &host_id,
-                        &node_bin,
-                        &args,
-                        priority,
-                        spec,
-                        Some(manifest.clone()),
-                    )
-                    .await
-                }
-                other => Err(SupervisorError::RuntimeUnavailable {
-                    runtime: other.to_string(),
-                    reason: format!("Unsupported plugin runtime '{other}' declared in manifest"),
-                }),
             }
-        };
+        }
+        .await;
 
         match result {
             Ok(host) => {
@@ -1558,6 +1576,45 @@ impl Drop for Supervisor {
             let _ = std::fs::remove_file(&self.core_sock_path);
         }
     }
+}
+
+/// Returns the interpreter of the plugin's own virtual environment (`<plugin>/.venv`).
+///
+/// `is_file` follows the venv's interpreter symlink, so an environment whose base Python was
+/// removed counts as missing rather than failing later with a confusing spawn error.
+fn plugin_python(plugin_dir: &Path) -> Option<PathBuf> {
+    let python = if cfg!(windows) {
+        plugin_dir.join(".venv").join("Scripts").join("python.exe")
+    } else {
+        plugin_dir.join(".venv").join("bin").join("python")
+    };
+    python.is_file().then_some(python)
+}
+
+/// Fails when the plugin's `package.json` declares dependencies that are not installed.
+///
+/// Node resolves a plugin's imports from `<plugin>/node_modules`, so that directory is the
+/// plugin's environment. A plugin without `package.json` or without dependencies needs none.
+fn ensure_node_modules(plugin_dir: &Path) -> Result<(), String> {
+    let manifest = plugin_dir.join("package.json");
+    let content = match std::fs::read_to_string(&manifest) {
+        Ok(content) => content,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(format!("cannot read '{}': {error}", manifest.display())),
+    };
+    let package: serde_json::Value = serde_json::from_str(&content)
+        .map_err(|error| format!("invalid '{}': {error}", manifest.display()))?;
+    let has_dependencies = package
+        .get("dependencies")
+        .and_then(serde_json::Value::as_object)
+        .is_some_and(|dependencies| !dependencies.is_empty());
+    if has_dependencies && !plugin_dir.join("node_modules").is_dir() {
+        return Err(format!(
+            "dependencies in '{}' are not installed; run `npm install` or `bun install` in the plugin directory",
+            manifest.display()
+        ));
+    }
+    Ok(())
 }
 
 /// Searches the system PATH environment variable for a given executable name.

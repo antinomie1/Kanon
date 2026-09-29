@@ -174,7 +174,7 @@ fn handle_create(name: &str, lang: &str, output: Option<&std::path::Path>) -> Ex
             if lang == "rust" {
                 println!("    cargo build");
             } else if lang == "python" || lang == "py" {
-                println!("    uv venv && uv pip install -e .");
+                println!("    uv sync");
             } else {
                 println!("    npm install");
             }

@@ -42,11 +42,6 @@ fn test_qqofficial_manifest_and_scanner() {
     assert_eq!(adapter.platform, "qqofficial");
     assert_eq!(adapter.display_name.as_deref(), Some("QQ 官方机器人"));
 
-    let deps = manifest
-        .dependencies
-        .expect("Dependencies section must be defined");
-    assert!(deps.packages.iter().any(|p| p.contains("qq-botpy")));
-
     // Verify discovery via PluginScanner
     let discovered =
         PluginScanner::scan(root.join("plugins")).expect("Scanner must scan plugins dir");

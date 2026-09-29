@@ -22,9 +22,9 @@ impl PipelineObserver for RecordingObserver {
     }
 }
 
-/// The documented `[config_schema]`, `[[tools]]` and `[dependencies]` sections are parsed.
+/// The documented `[config_schema]` and `[[tools]]` sections are parsed.
 #[test]
-fn manifest_parses_config_schema_tools_and_dependencies() {
+fn manifest_parses_config_schema_and_tools() {
     let toml = r#"
 [plugin]
 id = "org.kanon.plugin.weather"
@@ -34,9 +34,6 @@ author = "Kanon Dev"
 description = "Weather lookup"
 runtime = "python"
 entrypoint = "main.py"
-
-[dependencies]
-packages = ["httpx>=0.25.0", "pydantic>=2.0"]
 
 [config_schema]
 type = "object"
@@ -69,9 +66,6 @@ parameters = { type = "object", properties = { city = { type = "string" } }, req
             .and_then(|city| city.as_str()),
         Some("city")
     );
-
-    let dependencies = manifest.dependencies.expect("dependencies parsed");
-    assert_eq!(dependencies.packages.len(), 2);
 
     let schema = manifest.config_schema.expect("config schema parsed");
     assert_eq!(
@@ -106,8 +100,68 @@ entrypoint = "target/release/minimal"
     let manifest: PluginManifest = toml::from_str(toml).expect("manifest parses");
     assert!(manifest.commands.is_empty());
     assert!(manifest.tools.is_empty());
-    assert!(manifest.dependencies.is_none());
     assert!(manifest.config_schema.is_none());
+}
+
+/// Packages belong to `pyproject.toml` / `package.json`; a leftover `[dependencies]` section
+/// must be rejected instead of silently doing nothing.
+#[test]
+fn manifest_rejects_dependencies_section() {
+    let toml = r#"
+[plugin]
+id = "org.kanon.plugin.legacy"
+name = "Legacy"
+version = "0.1.0"
+runtime = "python"
+entrypoint = "main.py"
+
+[dependencies]
+packages = ["httpx>=0.25.0"]
+"#;
+
+    let error = toml::from_str::<PluginManifest>(toml).expect_err("stale section must fail");
+    assert!(error.to_string().contains("dependencies"), "{error}");
+}
+
+/// A plugin whose environment is not installed is reported unavailable before any process starts.
+#[tokio::test]
+async fn missing_plugin_environments_are_runtime_unavailable() {
+    let run_dir = tempdir().expect("temp dir");
+    let supervisor = Supervisor::new(Some(run_dir.path().to_path_buf()), None);
+
+    let cases = [
+        ("python", "main.py", None, "uv sync"),
+        (
+            "typescript",
+            "index.ts",
+            Some(r#"{"dependencies": {"left-pad": "^1.3.0"}}"#),
+            "npm install",
+        ),
+    ];
+    for (runtime, entrypoint, package_json, hint) in cases {
+        let plugin_dir = run_dir.path().join(runtime);
+        std::fs::create_dir_all(&plugin_dir).expect("plugin dir");
+        std::fs::write(
+            plugin_dir.join("plugin.toml"),
+            format!(
+                "[plugin]\nid = \"org.kanon.test.{runtime}\"\nname = \"Env\"\nversion = \"0.1.0\"\nruntime = \"{runtime}\"\nentrypoint = \"{entrypoint}\"\n"
+            ),
+        )
+        .expect("manifest");
+        if let Some(package_json) = package_json {
+            std::fs::write(plugin_dir.join("package.json"), package_json).expect("package.json");
+        }
+
+        let error = supervisor
+            .spawn_from_manifest(plugin_dir.join("plugin.toml"), None)
+            .await
+            .expect_err("a plugin without its environment must not start");
+        assert!(
+            matches!(&error, SupervisorError::RuntimeUnavailable { reason, .. } if reason.contains(hint)),
+            "{error}"
+        );
+    }
+    assert_eq!(supervisor.get_unavailable_plugins().await.len(), 2);
 }
 
 /// Externally registered hosts cannot be restarted and say so explicitly.

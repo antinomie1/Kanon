@@ -28,7 +28,7 @@
 | **生态兼容性** | **良好兼容**：pip / npm / Cargo 生态大部分功能开箱可用 | **良好但受限**：受制于 PyO3 与 Tokio 异步运行时的死锁风险 | **受限**：带底层 C/C++ 绑定的三方库难以编译为 WASI |
 | **开发体验** | **原生调试**：各自语言的原生调试器、热重载与工具链 | **中等**：跨语言 FFI 较复杂，宏报错较难排查 | **繁琐**：需要专用工具链将源码编译为 .wasm |
 | **进程间通信延迟**| **低延迟**：UDS 内部管道传输，基准耗时通常在微秒级（远低于网络 I/O）| **零开销**：直接内存共享访问 | **微秒级**：Wasm 内存拷贝 |
-| **交付难度** | **标准解耦**：Rust 主二进制独立，按需联动 `uv`/`node`/`cargo` 纳管环境 | **困难**：分发时通常需动态链接特定版本的运行时动态库 | **单文件**：单二进制内嵌运行时 |
+| **交付难度** | **标准解耦**：Rust 主二进制独立，插件依赖由 `uv`/`npm`/`bun` 在插件目录内自管 | **困难**：分发时通常需动态链接特定版本的运行时动态库 | **单文件**：单二进制内嵌运行时 |
 
 **结论**：选定 **方案 A（Out-of-Process Sidecar + gRPC over UDS）**，在保持 Rust 核心轻量精炼和高可靠的同时，为 Rust、Python 与 TypeScript 开发者提供统一的开发接入体验。
 
@@ -148,7 +148,7 @@ kanon/
    - 核心具备轻量空载基准（在基础调度下内存占用通常低于 20MB），分发时仅需单个独立二进制文件。
 2. **按需惰性激活 (On-Demand & Lazy Activation)**：
    - 核心启动时**不会盲目启动任何外部子进程**。
-   - 仅当扫描 `plugins/` 目录且**确实存在**声明为 `runtime = "python"` 的插件时，Supervisor 才会尝试探测 Python/uv 并拉起 `kanon-pyhost`。
+   - 仅当扫描 `plugins/` 目录且**确实存在**声明为 `runtime = "python"` 的插件时，Supervisor 才会使用该插件目录下的 `.venv` 拉起 Python 宿主。
    - 同理，仅当**确实存在**声明为 `runtime = "typescript"` 的插件时，才会尝试探测 Node/Bun 并拉起 `kanon-tshost`。
 3. **环境缺失优雅降级 (Graceful Degradation)**：
    - 若用户放入了 Python 或 TS 插件，但当前操作系统未安装对应运行环境：
@@ -156,8 +156,9 @@ kanon/
      - 仅对缺少运行时的插件输出清晰友好的告警日志，将其状态标记为 `RuntimeUnavailable`；
      - 机器人核心、IM 适配网络连接及所有 Rust 插件依然照常运行。
 4. **可选运行时的极简治理（仅在用户需要时生效）**：
-   - **Python**：仅在激活 Python 插件时，优先检测极速工具 `uv`，免配复杂的全局环境。
-   - **TypeScript**：仅在激活 TS 插件时，优先检测 `bun` 或 `node/tsx`。
+   - **Python**：每个插件使用自己目录下的 `.venv`（由开发者或运维执行 `uv sync` 创建）。`.venv` 不存在即标记 `RuntimeUnavailable`，绝不回退到共享或系统解释器。
+   - **TypeScript**：仅在激活 TS 插件时，优先检测 `bun` 或 `node/tsx`；若插件的 `package.json` 声明了 `dependencies`，则要求其 `node_modules` 已安装。
+   - **Kanon 不是包管理器**：`kanon` 与 `kanon-dev` 都不安装、解析或锁定插件依赖，这些完全交给各语言原生工具。
 
 ### 2.6 事件入站异步队列与防锁步机制 (Async Ingest Queue & Lockstep Prevention)
 
@@ -229,12 +230,6 @@ runtime = "rust" # "rust" | "python" | "typescript"
 entrypoint = "target/release/weather_plugin" # 或 "main.py" / "src/index.ts"
 isolated = false
 
-[dependencies]
-packages = [
-    "httpx>=0.25.0",
-    "pydantic>=2.0"
-]
-
 # WebUI 配置项 JSON Schema (核心可不启动子进程直接渲染前端配置表单)
 [config_schema]
 type = "object"
@@ -264,6 +259,8 @@ parameters = { type = "object", properties = { city = { type = "string", descrip
 platform = "weather_im"
 display_name = "Weather IM Adapter"
 ```
+
+`plugin.toml` 不声明第三方依赖，出现未知小节（包括旧的 `[dependencies]`）会直接解析失败。Python 插件的依赖写在插件目录的 `pyproject.toml`（附 `uv.lock`），TypeScript 插件写在 `package.json`（附锁文件），由各自的原生工具在插件目录内安装到 `.venv` / `node_modules`。
 
 ---
 
@@ -858,8 +855,8 @@ sequenceDiagram
    - 必须包含 `README.md` 与可选的 `LICENSE`。
 2. **多语言制品打包规范**：
    - **Rust 插件**：打包对应编译目标的预编译原生可执行文件（如 `bin/x86_64-unknown-linux-gnu/<plugin>` 或 `bin/x86_64-pc-windows-msvc/<plugin>.exe`），做到用户端零编译闪电加载；
-   - **Python 插件**：携带插件源码与锁定版本依赖文件（优先 `uv.lock`，或 `requirements.txt`），安装时由核心联动 `uv` 闪电复现虚拟环境；
-   - **TypeScript 插件**：携带转译后的 `dist/` 或源码及附带锁定文件的 `package.json`（支持由 `bun` 或 `node/tsx` 直接加载）。
+   - **Python 插件**：携带插件源码、`pyproject.toml` 与 `uv.lock`；安装后由运维在插件目录执行 `uv sync` 复现 `.venv`（Kanon 不代为安装）；
+   - **TypeScript 插件**：携带转译后的 `dist/` 或源码及附带锁定文件的 `package.json`，安装后在插件目录执行 `npm install` / `bun install`（支持由 `bun` 或 `node/tsx` 直接加载）。
 
 ---
 

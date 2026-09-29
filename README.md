@@ -33,8 +33,11 @@ an explicit development mode).
 ## Requirements
 
 - A Rust 2024 edition toolchain (stable).
-- Optional, and only for the plugins that need them: Python 3.10+ (with `uv` or `pip`) and Node.js
-  or Bun. Missing runtimes mark the affected plugin unavailable; they never block the node.
+- Optional, and only for the plugins that need them: Python 3.10+ (with `uv`) and Node.js or Bun.
+  Each Python/TypeScript plugin declares its packages in its own `pyproject.toml` / `package.json`
+  and is installed in its own directory (`uv sync`, `npm install` or `bun install`); Kanon never
+  installs packages. A missing runtime or environment marks the affected plugin unavailable; it
+  never blocks the node.
 
 ## Quick start
 

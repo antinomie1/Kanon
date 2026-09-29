@@ -1,0 +1,9 @@
+[project]
+name = "demo-py-plugin"
+version = "0.1.0"
+description = "Demonstration plugin written in Python"
+requires-python = ">=3.10"
+dependencies = ["kanon-python-host"]
+
+[tool.uv.sources]
+kanon-python-host = { path = "../..", editable = true }
