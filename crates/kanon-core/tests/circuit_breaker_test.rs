@@ -272,6 +272,7 @@ impl kanon_llm::gateway::LlmProvider for MockChatProvider {
         _req: &kanon_llm::gateway::types::ChatRequest,
     ) -> Result<kanon_llm::gateway::types::ChatResponse, kanon_llm::error::GatewayError> {
         Ok(kanon_llm::gateway::types::ChatResponse {
+            reasoning_content: None,
             content: Some("Conversational response without tools".to_string()),
             tool_calls: vec![],
             finish_reason: Some("stop".to_string()),

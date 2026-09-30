@@ -1628,20 +1628,16 @@ impl PipelineEngine {
             .await
             {
                 Ok(output) => {
-                    // The model's reasoning channel arrives folded into the completion text as a
-                    // `<think>` block (a console display convention). Chat platforms must never
-                    // receive it, so the delivered answer is stripped to the visible part only.
+                    // Defense in depth for custom agents and legacy wrapped completions.
                     let answer = strip_reasoning_tags(&output.content);
-                    if answer.is_empty() {
-                        tracing::debug!("LLM produced no user-visible answer; passing downstream");
-                        return PipelineResult::Passed(filtered_event);
+                    let mut replies = Vec::new();
+                    if !answer.trim().is_empty() {
+                        replies.push(MessageSegment {
+                            segment: Some(Segment::Text(kanon_proto::v1::TextSegment {
+                                content: answer.to_string(),
+                            })),
+                        });
                     }
-
-                    let mut replies = vec![MessageSegment {
-                        segment: Some(Segment::Text(kanon_proto::v1::TextSegment {
-                            content: answer.to_string(),
-                        })),
-                    }];
 
                     // Rich media produced by a tool (an MCP server drawing a B50 card, for example)
                     // travels as its own segment: the platform then shows the picture instead of a
@@ -1670,6 +1666,14 @@ impl PipelineEngine {
                                 filename: None,
                             })),
                         });
+                    }
+
+                    // Tool media is a complete reply even when the model produced only reasoning.
+                    if replies.is_empty() {
+                        tracing::debug!(
+                            "LLM produced no user-visible answer or attachment; passing downstream"
+                        );
+                        return PipelineResult::Passed(filtered_event);
                     }
 
                     // The bot's own words belong to the group's record too, and this session has

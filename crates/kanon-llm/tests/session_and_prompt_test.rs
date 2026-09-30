@@ -362,6 +362,7 @@ impl LlmProvider for RequestCapturingProvider {
     async fn chat(&self, request: &ChatRequest) -> Result<ChatResponse, GatewayError> {
         self.captured_requests.write().await.push(request.clone());
         Ok(ChatResponse {
+            reasoning_content: None,
             content: Some("I have processed your request according to my persona.".to_string()),
             tool_calls: vec![],
             finish_reason: Some("stop".to_string()),

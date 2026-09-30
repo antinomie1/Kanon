@@ -144,24 +144,7 @@ async function sendMessage() {
 }
 
 function parseMessageContent(msg: ChatMessage) {
-  let reasoning = msg.reasoning || '';
-  let content = msg.content || '';
-
-  if (content.includes('<think>')) {
-    const startIdx = content.indexOf('<think>');
-    const endIdx = content.indexOf('</think>');
-    if (endIdx !== -1) {
-      const thinkText = content.slice(startIdx + 7, endIdx).trim();
-      if (!reasoning) reasoning = thinkText;
-      content = (content.slice(0, startIdx) + content.slice(endIdx + 8)).trim();
-    } else {
-      const thinkText = content.slice(startIdx + 7).trim();
-      if (!reasoning) reasoning = thinkText;
-      content = content.slice(0, startIdx).trim();
-    }
-  }
-
-  return { reasoning, content };
+  return { reasoning: msg.reasoning || '', content: msg.content || '' };
 }
 
 function handleStop() {

@@ -52,6 +52,11 @@ pub fn estimate_message_tokens(msg: &ChatMessage) -> usize {
         total += estimate_text_tokens(content);
     }
 
+    // Tool-enabled requests replay reasoning too, so it counts against the context budget.
+    if let Some(reasoning) = &msg.reasoning_content {
+        total += estimate_text_tokens(reasoning);
+    }
+
     // Multimodal parts are additional payload: providers transmit both the textual projection in
     // `content` and the parts, so both are counted.
     if let Some(ref parts) = msg.parts {

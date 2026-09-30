@@ -4,6 +4,7 @@
 //! and protocol implementations in [`providers`].
 
 pub mod providers;
+pub mod reasoning;
 pub mod types;
 
 use async_trait::async_trait;
@@ -38,14 +39,15 @@ pub trait LlmProvider: Send + Sync {
     ///
     /// Default implementation wraps a non-streaming [`chat`] call into a two-chunk stream.
     async fn chat_stream(&self, request: &ChatRequest) -> Result<ChatChunkStream, GatewayError> {
-        let resp = self.chat(request).await?;
+        let mut resp = self.chat(request).await?;
+        resp.separate_reasoning();
         let (tx, rx) = tokio::sync::mpsc::channel(2);
         tokio::spawn(async move {
-            if let Some(text) = resp.content {
+            if resp.content.is_some() || resp.reasoning_content.is_some() {
                 let _ = tx
                     .send(Ok(ChatChunk {
-                        delta_text: text,
-                        reasoning_text: None,
+                        delta_text: resp.content.unwrap_or_default(),
+                        reasoning_text: resp.reasoning_content,
                         is_finished: false,
                         finish_reason: None,
                         tool_calls: resp.tool_calls.clone(),
@@ -107,7 +109,9 @@ impl LlmGateway {
         if req.model.is_empty() {
             req.model = self.default_model.clone();
         }
-        self.provider.chat(&req).await
+        let mut response = self.provider.chat(&req).await?;
+        response.separate_reasoning();
+        Ok(response)
     }
 
     /// Dispatches a streaming chat completion request to the active provider.
@@ -119,7 +123,9 @@ impl LlmGateway {
         if req.model.is_empty() {
             req.model = self.default_model.clone();
         }
-        self.provider.chat_stream(&req).await
+        Ok(reasoning::separate_stream(
+            self.provider.chat_stream(&req).await?,
+        ))
     }
 }
 
@@ -171,24 +177,8 @@ pub fn build_provider(
     Ok(provider)
 }
 
-/// Returns the part of a model response that may be shown to an end user.
-///
-/// OpenAI-compatible backends that expose a reasoning channel (DeepSeek `reasoning_content`,
-/// and compatible gateways) have that channel folded into the response text by
-/// [`providers::OpenAiChatProvider`] as a leading `<think>…</think>` block, so the management
-/// console can render reasoning separately from the answer. That encoding is a *display*
-/// convention: anything sent to a chat platform must be stripped first, otherwise users read
-/// the model's internal chain of thought. This function is the single decoder for that
-/// convention; text without a block is returned unchanged and borrows the input.
+/// Returns user-visible text, decoding only leading legacy reasoning envelopes.
+/// See [`reasoning::split_reasoning_tags`] for the compatibility contract.
 pub fn strip_reasoning_tags(text: &str) -> &str {
-    let trimmed = text.trim_start();
-    let Some(rest) = trimmed.strip_prefix("<think>") else {
-        return text;
-    };
-    // A truncated block (stream cut off before `</think>`) carries no user-visible answer at
-    // all, so it collapses to an empty reply rather than leaking the partial reasoning.
-    match rest.split_once("</think>") {
-        Some((_, answer)) => answer.trim_start(),
-        None => "",
-    }
+    reasoning::split_reasoning_tags(text).0
 }

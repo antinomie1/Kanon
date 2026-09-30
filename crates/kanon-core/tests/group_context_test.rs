@@ -32,6 +32,7 @@ impl LlmProvider for RecordingProvider {
     async fn chat(&self, request: &ChatRequest) -> Result<ChatResponse, GatewayError> {
         self.requests.lock().unwrap().push(request.messages.clone());
         Ok(ChatResponse {
+            reasoning_content: None,
             content: Some("好的".to_string()),
             tool_calls: Vec::new(),
             finish_reason: Some("stop".to_string()),

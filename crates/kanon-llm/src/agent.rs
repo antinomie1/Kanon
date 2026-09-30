@@ -393,6 +393,9 @@ impl Agent {
                 .insert(position, ChatMessage::system(summary_block(&summary)));
         }
 
+        for message in &mut request.messages {
+            message.separate_reasoning();
+        }
         normalize_request(&mut request);
         Ok(request)
     }
@@ -598,6 +601,7 @@ impl Agent {
             let request = self.build_request(session_id, &tools).await?;
 
             let mut response = self.provider.chat(&request).await?;
+            response.separate_reasoning();
 
             // Recover tool calls a model emitted as text markup instead of structured calls, so the
             // loop executes them instead of sending the markup to the chat platform as an answer.
@@ -608,14 +612,16 @@ impl Agent {
                 hook.on_llm_response(session_id, &mut response).await?;
             }
 
+            response.separate_reasoning();
+
             // Terminal state: Model completed generation without requesting tools
             if response.tool_calls.is_empty() {
-                let final_content = response.content.unwrap_or_default();
-                if !final_content.is_empty() {
+                if response.content.is_some() || response.reasoning_content.is_some() {
                     self.memory
-                        .push_message(session_id, ChatMessage::assistant(&final_content))
+                        .push_message(session_id, response.assistant_message())
                         .await?;
                 }
+                let final_content = response.content.clone().unwrap_or_default();
 
                 if let Some(ref sm) = self.session_manager {
                     let tokens_used = response
@@ -654,12 +660,12 @@ impl Agent {
                     iterations = iterations,
                     "Agent reasoning iteration ceiling reached; breaking loop"
                 );
-                let fallback = response.content.unwrap_or_else(|| {
+                let fallback = response.content.clone().unwrap_or_else(|| {
                     "Agent reasoning recursion limit reached; execution terminated.".to_string()
                 });
-                self.memory
-                    .push_message(session_id, ChatMessage::assistant(&fallback))
-                    .await?;
+                let mut message = ChatMessage::assistant(&fallback);
+                message.reasoning_content = response.reasoning_content;
+                self.memory.push_message(session_id, message).await?;
 
                 if let Some(ref sm) = self.session_manager {
                     let tokens_used = crate::token::estimate_text_tokens(&user_input)
@@ -682,17 +688,7 @@ impl Agent {
 
             // Record assistant tool calls turn into history
             self.memory
-                .push_message(
-                    session_id,
-                    ChatMessage {
-                        role: Role::Assistant,
-                        content: response.content.clone(),
-                        parts: None,
-                        tool_calls: Some(response.tool_calls.clone()),
-                        tool_call_id: None,
-                        name: None,
-                    },
-                )
+                .push_message(session_id, response.assistant_message())
                 .await?;
 
             // Execute each requested tool call
@@ -941,21 +937,30 @@ impl Agent {
             let request = self.build_request(session_id, &tools).await?;
 
             let mut response = self.provider.chat(&request).await?;
+            response.separate_reasoning();
 
             for hook in &self.hooks {
                 hook.on_llm_response(session_id, &mut response).await?;
             }
 
+            response.separate_reasoning();
+
             // If no tools were called, this is the final response
             if response.tool_calls.is_empty() {
-                let final_content = response.content.unwrap_or_default();
-                if !final_content.is_empty() {
+                if response.content.is_some() || response.reasoning_content.is_some() {
                     self.memory
-                        .push_message(session_id, ChatMessage::assistant(&final_content))
+                        .push_message(session_id, response.assistant_message())
                         .await?;
                 }
+                let final_content = response.content.clone().unwrap_or_default();
                 let (tx, rx) = tokio::sync::mpsc::channel(2);
-                let _ = tx.send(Ok(ChatChunk::delta(&final_content))).await;
+                let _ = tx
+                    .send(Ok(ChatChunk {
+                        delta_text: final_content,
+                        reasoning_text: response.reasoning_content,
+                        ..ChatChunk::default()
+                    }))
+                    .await;
                 let _ = tx.send(Ok(ChatChunk::done(response.finish_reason))).await;
                 return Ok(Box::pin(tokio_stream::wrappers::ReceiverStream::new(rx)));
             }
@@ -963,17 +968,7 @@ impl Agent {
             // Otherwise, execute tools
             iterations += 1;
             self.memory
-                .push_message(
-                    session_id,
-                    ChatMessage {
-                        role: Role::Assistant,
-                        content: response.content.clone(),
-                        parts: None,
-                        tool_calls: Some(response.tool_calls.clone()),
-                        tool_call_id: None,
-                        name: None,
-                    },
-                )
+                .push_message(session_id, response.assistant_message())
                 .await?;
 
             for call in response.tool_calls {
@@ -1100,7 +1095,8 @@ impl Agent {
         // when no tools exist or the tool loop ran out of iterations.
         let request = self.build_request(session_id, &[]).await?;
 
-        let inner_stream = self.provider.chat_stream(&request).await?;
+        let inner_stream =
+            crate::gateway::reasoning::separate_stream(self.provider.chat_stream(&request).await?);
         let (tx, rx) = tokio::sync::mpsc::channel(32);
         let memory = self.memory.clone();
         let sid = session_id.to_string();
@@ -1110,75 +1106,64 @@ impl Agent {
 
         tokio::spawn(async move {
             let mut inner = inner_stream;
-            let mut accumulated = String::new();
-
+            let mut response = ChatResponse::default();
             while let Some(chunk_res) = inner.next().await {
-                match chunk_res {
-                    Ok(chunk) => {
-                        accumulated.push_str(&chunk.delta_text);
-                        let is_fin = chunk.is_finished;
-                        let fin_reason = chunk.finish_reason.clone();
-                        let _ = tx.send(Ok(chunk)).await;
-                        if is_fin {
-                            if !accumulated.is_empty()
-                                && let Err(e) = memory
-                                    .push_message(&sid, ChatMessage::assistant(&accumulated))
-                                    .await
-                            {
-                                tracing::error!(session_id = %sid, error = %e, "Failed to persist streaming assistant response to memory");
-                            }
-                            if let Some(ref sm) = sm_opt {
-                                let tokens =
-                                    user_toks + crate::token::estimate_text_tokens(&accumulated);
-                                sm.record_turn(&sid, tokens);
-                            }
-                            let mut resp = crate::gateway::ChatResponse {
-                                content: if accumulated.is_empty() {
-                                    None
-                                } else {
-                                    Some(accumulated.clone())
-                                },
-                                tool_calls: Vec::new(),
-                                finish_reason: fin_reason,
-                                usage: None,
-                            };
-                            for hook in &hooks {
-                                let _ = hook.on_llm_response(&sid, &mut resp).await;
-                            }
-                            return;
-                        }
-                    }
-                    Err(e) => {
-                        let _ = tx.send(Err(e)).await;
+                let mut chunk = match chunk_res {
+                    Ok(chunk) => chunk,
+                    Err(error) => {
+                        // Unfinished legacy text remains private even on transport failure.
+                        let _ = tx.send(Err(error)).await;
                         return;
                     }
+                };
+                if let Some(reasoning) = &chunk.reasoning_text {
+                    response
+                        .reasoning_content
+                        .get_or_insert_default()
+                        .push_str(reasoning);
+                }
+                response
+                    .content
+                    .get_or_insert_default()
+                    .push_str(&chunk.delta_text);
+                let finished = chunk.is_finished;
+                if finished {
+                    response.finish_reason = chunk.finish_reason.take();
+                    chunk.is_finished = false;
+                }
+                if (!chunk.delta_text.is_empty() || chunk.reasoning_text.is_some())
+                    && tx.send(Ok(chunk)).await.is_err()
+                {
+                    return;
+                }
+                if finished {
+                    break;
                 }
             }
 
-            if !accumulated.is_empty()
-                && let Err(e) = memory
-                    .push_message(&sid, ChatMessage::assistant(&accumulated))
-                    .await
+            // Persist both channels before announcing completion, including reasoning-only turns.
+            if let Err(error) = memory
+                .push_message(&sid, response.assistant_message())
+                .await
             {
-                tracing::error!(session_id = %sid, error = %e, "Failed to persist streaming assistant response to memory");
+                let _ = tx
+                    .send(Err(crate::error::GatewayError::InvalidResponse(format!(
+                        "Failed to persist streaming assistant response: {error}"
+                    ))))
+                    .await;
+                return;
             }
             if let Some(ref sm) = sm_opt {
-                let tokens = user_toks + crate::token::estimate_text_tokens(&accumulated);
-                sm.record_turn(&sid, tokens);
+                sm.record_turn(
+                    &sid,
+                    user_toks
+                        + crate::token::estimate_message_tokens(&response.assistant_message()),
+                );
             }
-            let mut resp = crate::gateway::ChatResponse {
-                content: if accumulated.is_empty() {
-                    None
-                } else {
-                    Some(accumulated.clone())
-                },
-                tool_calls: Vec::new(),
-                finish_reason: None,
-                usage: None,
-            };
             for hook in &hooks {
-                let _ = hook.on_llm_response(&sid, &mut resp).await;
+                let _ = hook.on_llm_response(&sid, &mut response).await;
             }
+            let _ = tx.send(Ok(ChatChunk::done(response.finish_reason))).await;
         });
 
         Ok(Box::pin(tokio_stream::wrappers::ReceiverStream::new(rx)))

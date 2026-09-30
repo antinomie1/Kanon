@@ -249,6 +249,8 @@ impl LlmProvider for OpenAiResponsesProvider {
 
         // 1. Map messages into Responses API input items and extract system instructions
         for msg in &req.messages {
+            let mut msg = msg.clone();
+            msg.separate_reasoning();
             match msg.role {
                 Role::System => {
                     if let Some(ref text) = msg.content {
@@ -258,7 +260,7 @@ impl LlmProvider for OpenAiResponsesProvider {
                 Role::User => {
                     input.push(wire::ResponsesInputItem::Message {
                         role: "user".to_string(),
-                        content: user_content(msg),
+                        content: user_content(&msg),
                     });
                 }
                 Role::Assistant => {
@@ -424,7 +426,8 @@ impl LlmProvider for OpenAiResponsesProvider {
                 .unwrap_or_else(|| u.input_tokens.unwrap_or(0) + u.output_tokens.unwrap_or(0)),
         });
 
-        Ok(ChatResponse {
+        let mut response = ChatResponse {
+            reasoning_content: None,
             content: if final_content.is_empty() {
                 None
             } else {
@@ -433,7 +436,9 @@ impl LlmProvider for OpenAiResponsesProvider {
             tool_calls,
             usage,
             finish_reason,
-        })
+        };
+        response.separate_reasoning();
+        Ok(response)
     }
 
     async fn chat_stream(&self, req: &ChatRequest) -> Result<ChatChunkStream, GatewayError> {
@@ -441,6 +446,8 @@ impl LlmProvider for OpenAiResponsesProvider {
         let mut input = Vec::new();
 
         for msg in &req.messages {
+            let mut msg = msg.clone();
+            msg.separate_reasoning();
             match msg.role {
                 Role::System => {
                     if let Some(ref text) = msg.content {
@@ -450,7 +457,7 @@ impl LlmProvider for OpenAiResponsesProvider {
                 Role::User => {
                     input.push(wire::ResponsesInputItem::Message {
                         role: "user".to_string(),
-                        content: user_content(msg),
+                        content: user_content(&msg),
                     });
                 }
                 Role::Assistant => {
@@ -578,11 +585,16 @@ impl LlmProvider for OpenAiResponsesProvider {
                                 .send(Ok(ChatChunk::done(Some("completed".to_string()))))
                                 .await;
                             return;
-                        } else if let Some(delta) = val.get("delta").and_then(|d| d.as_str())
-                            && tx.send(Ok(ChatChunk::delta(delta))).await.is_err()
+                        } else if let Some(
+                            "response.reasoning_summary_text.delta"
+                            | "response.reasoning_text.delta",
+                        ) = event_type
+                            && let Some(delta) = val.get("delta").and_then(|d| d.as_str())
+                            && tx.send(Ok(ChatChunk::reasoning(delta))).await.is_err()
                         {
                             return;
                         }
+                        // Unknown delta events (arguments, signatures, metadata) are not answer text.
                     }
                 }
             }
@@ -590,6 +602,8 @@ impl LlmProvider for OpenAiResponsesProvider {
             let _ = tx.send(Ok(ChatChunk::done(None))).await;
         });
 
-        Ok(Box::pin(tokio_stream::wrappers::ReceiverStream::new(rx)))
+        Ok(crate::gateway::reasoning::separate_stream(Box::pin(
+            tokio_stream::wrappers::ReceiverStream::new(rx),
+        )))
     }
 }

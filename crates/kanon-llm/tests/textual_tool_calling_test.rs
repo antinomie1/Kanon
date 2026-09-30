@@ -63,6 +63,7 @@ fn tool_definition() -> ToolDefinition {
 async fn markup_tool_calls_are_executed_and_the_turn_continues() {
     let (provider, requests) = ScriptedProvider::new(vec![
         ChatResponse {
+            reasoning_content: None,
             // Exactly the shape reported from a QQ adapter: no structured call, only markup.
             content: Some(
                 "<tool_call><function=play_score><parameter=song_name>忙シー日</parameter>\
@@ -74,6 +75,7 @@ async fn markup_tool_calls_are_executed_and_the_turn_continues() {
             usage: None,
         },
         ChatResponse {
+            reasoning_content: None,
             content: Some("已完成。".to_string()),
             tool_calls: Vec::new(),
             finish_reason: Some("stop".to_string()),
@@ -133,6 +135,7 @@ async fn markup_tool_calls_are_executed_and_the_turn_continues() {
 #[tokio::test]
 async fn plain_text_without_markup_is_returned_unchanged() {
     let (provider, _requests) = ScriptedProvider::new(vec![ChatResponse {
+        reasoning_content: None,
         content: Some("hello there".to_string()),
         tool_calls: Vec::new(),
         finish_reason: Some("stop".to_string()),

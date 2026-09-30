@@ -44,6 +44,8 @@ mod wire {
         #[serde(skip_serializing_if = "Option::is_none")]
         pub content: Option<serde_json::Value>,
         #[serde(skip_serializing_if = "Option::is_none")]
+        pub reasoning_content: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
         pub tool_calls: Option<Vec<OpenAiToolCallWire>>,
         #[serde(skip_serializing_if = "Option::is_none")]
         pub tool_call_id: Option<String>,
@@ -219,6 +221,8 @@ impl OpenAiChatProvider {
 
     /// Converts an internal domain `ChatMessage` into the wire format `OpenAiMessageWire`.
     fn map_message_to_wire(msg: &ChatMessage) -> wire::OpenAiMessageWire {
+        let mut msg = msg.clone();
+        msg.separate_reasoning();
         let role = match msg.role {
             Role::System => "system",
             Role::User => "user",
@@ -243,7 +247,12 @@ impl OpenAiChatProvider {
 
         wire::OpenAiMessageWire {
             role,
-            content: message_content(msg),
+            content: message_content(&msg),
+            reasoning_content: if msg.role == Role::Assistant {
+                msg.reasoning_content
+            } else {
+                None
+            },
             tool_calls,
             tool_call_id: msg.tool_call_id.clone(),
         }
@@ -384,22 +393,15 @@ impl LlmProvider for OpenAiChatProvider {
             total_tokens: u.total_tokens,
         });
 
-        let content = match (
-            choice.message.content.filter(|c| !c.is_empty()),
-            choice.message.reasoning_content.filter(|r| !r.is_empty()),
-        ) {
-            (Some(c), Some(r)) => Some(format!("<think>\n{r}\n</think>\n\n{c}")),
-            (Some(c), None) => Some(c),
-            (None, Some(r)) => Some(format!("<think>\n{r}\n</think>")),
-            (None, None) => None,
-        };
-
-        Ok(ChatResponse {
-            content,
+        let mut response = ChatResponse {
+            content: choice.message.content,
+            reasoning_content: choice.message.reasoning_content,
             tool_calls,
             finish_reason: choice.finish_reason,
             usage,
-        })
+        };
+        response.separate_reasoning();
+        Ok(response)
     }
 
     async fn chat_stream(&self, request: &ChatRequest) -> Result<ChatChunkStream, GatewayError> {
@@ -558,6 +560,8 @@ impl LlmProvider for OpenAiChatProvider {
             }
         });
 
-        Ok(Box::pin(tokio_stream::wrappers::ReceiverStream::new(rx)))
+        Ok(crate::gateway::reasoning::separate_stream(Box::pin(
+            tokio_stream::wrappers::ReceiverStream::new(rx),
+        )))
     }
 }

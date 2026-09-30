@@ -44,6 +44,7 @@ impl MockProvider {
 impl LlmProvider for MockProvider {
     async fn chat(&self, _request: &ChatRequest) -> Result<ChatResponse, GatewayError> {
         Ok(ChatResponse {
+            reasoning_content: None,
             content: Some(self.content.clone()),
             tool_calls: Vec::new(),
             finish_reason: Some("stop".to_string()),

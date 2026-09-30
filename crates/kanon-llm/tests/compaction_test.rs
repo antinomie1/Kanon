@@ -327,6 +327,14 @@ async fn compaction_can_be_switched_off() {
 async fn a_summary_that_is_not_one_leaves_the_history_exactly_as_it_was() {
     for (mode, expected) in [
         (SummaryMode::Empty, "no summary"),
+        (
+            SummaryMode::Summary("<think>private-a</think><think>private-b</think>"),
+            "no summary",
+        ),
+        (
+            SummaryMode::Summary("<think>private-a</think><think>unfinished"),
+            "no summary",
+        ),
         (SummaryMode::ToolCall, "no summary"),
         (SummaryMode::Fail, "boom"),
     ] {

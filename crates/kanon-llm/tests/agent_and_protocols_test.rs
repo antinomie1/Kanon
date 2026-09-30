@@ -49,6 +49,7 @@ impl LlmProvider for ScriptedLlmProvider {
             Ok(self.responses[idx].clone())
         } else {
             Ok(ChatResponse {
+                reasoning_content: None,
                 content: Some("Default fallback".to_string()),
                 tool_calls: vec![],
                 finish_reason: Some("stop".to_string()),
@@ -226,6 +227,7 @@ impl AgentHook for TracingHook {
 #[tokio::test]
 async fn test_agent_builder_and_execution_with_custom_memory() {
     let turn1 = ChatResponse {
+        reasoning_content: None,
         content: None,
         tool_calls: vec![ToolCall {
             id: "call_rev_1".to_string(),
@@ -237,6 +239,7 @@ async fn test_agent_builder_and_execution_with_custom_memory() {
     };
 
     let turn2 = ChatResponse {
+        reasoning_content: None,
         content: Some("The reversed string is 'nonak'.".to_string()),
         tool_calls: vec![],
         finish_reason: Some("stop".to_string()),
@@ -306,6 +309,7 @@ async fn test_agent_builder_and_execution_with_custom_memory() {
 #[tokio::test]
 async fn test_agent_native_in_process_tool_and_standalone_run() {
     let turn1 = ChatResponse {
+        reasoning_content: None,
         content: None,
         tool_calls: vec![ToolCall {
             id: "call_calc_1".to_string(),
@@ -317,6 +321,7 @@ async fn test_agent_native_in_process_tool_and_standalone_run() {
     };
 
     let turn2 = ChatResponse {
+        reasoning_content: None,
         content: Some("Result is 42.".to_string()),
         tool_calls: vec![],
         finish_reason: Some("stop".to_string()),
@@ -378,6 +383,7 @@ async fn test_agent_lifecycle_hooks_and_veto() {
     };
 
     let turn1 = ChatResponse {
+        reasoning_content: None,
         content: None,
         tool_calls: vec![ToolCall {
             id: "call_dangerous".to_string(),
@@ -389,6 +395,7 @@ async fn test_agent_lifecycle_hooks_and_veto() {
     };
 
     let turn2 = ChatResponse {
+        reasoning_content: None,
         content: Some(
             "I was unable to perform the deletion because permission was denied.".to_string(),
         ),

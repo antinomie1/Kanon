@@ -18,6 +18,7 @@ struct MockStreamingProvider;
 impl LlmProvider for MockStreamingProvider {
     async fn chat(&self, _request: &ChatRequest) -> Result<ChatResponse, GatewayError> {
         Ok(ChatResponse {
+            reasoning_content: None,
             content: Some("Full content".to_string()),
             tool_calls: vec![],
             finish_reason: Some("stop".to_string()),
