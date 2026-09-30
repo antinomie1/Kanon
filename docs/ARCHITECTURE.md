@@ -843,6 +843,8 @@ sequenceDiagram
 
 **命令权限**：节点级 `command_policy`（`/api/v1/system/command-policy`）列出管理员（`<平台>:<用户 ID>`），可选把群主/群管理员（`kanon.sender_role`）视为管理员，并按命令名设定 `everyone` / `admins_in_groups` / `admins`；默认 `/new` 为「群聊仅管理员」、`/model` 为「仅管理员」，未列出的命令（含插件命令）所有人可用。被拒绝时回复发送者 ID，方便运维加入管理员列表。
 
+**Bash 工具**：`bash_policy.enabled` 打开后，仅 `command_policy.admins` 中按 ID 显式列出的管理员可用，群主/群管理员不算。调用者取自适配器的原始事件；通知、全群共享会话与旁听群的回合没有调用者，模型即使调用也会被拒绝。执行后端（持久化容器，或本机加可选 AI 审查）只由运维选择。
+
 **群聊上下文**（实例级）：`session_scope` 为 `user`（默认，群内每人一个会话）或 `group`（全群共享一个会话，每条消息以 `kanon.sender_name` 标注说话人）；`observe_group` 开启时，未被回复的群消息与机器人自己的回复进入有界缓冲（30 条 / 30 分钟），在该会话下次被回答时作为 `[群聊记录]` 放在当前轮开头，并按会话记录已读位置——每行只进入一次历史，请求前缀保持仅追加（`group_context_test` 验证）。旁听依赖 `group_messages` 能力。
 
 ---

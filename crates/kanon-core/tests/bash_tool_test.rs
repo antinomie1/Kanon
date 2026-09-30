@@ -8,7 +8,7 @@ use async_trait::async_trait;
 use kanon_core::Supervisor;
 use kanon_core::pipeline::PipelineEngine;
 use kanon_core::{
-    BashAccessMode, BashAvailabilityHook, BashPolicy, BashPolicyStore, BashPrincipal, BashTool,
+    BashAvailabilityHook, BashPolicy, BashPolicyStore, BashTool, CommandPolicy, CommandPolicyStore,
     with_bash_caller,
 };
 use kanon_llm::tool_router::ToolRouter;
@@ -19,18 +19,27 @@ use kanon_llm::{
 use kanon_proto::v1::PipelineEventRequest;
 use serde_json::{Value, json};
 
-fn caller(id: &str) -> BashPrincipal {
-    BashPrincipal {
-        platform: "onebot".into(),
-        user_id: id.into(),
-    }
+fn caller(id: &str) -> Option<String> {
+    Some(format!("onebot:{id}"))
 }
 
 fn permitted() -> Arc<BashPolicyStore> {
     Arc::new(BashPolicyStore::new(BashPolicy {
-        allowlist: vec![caller("alice")],
+        enabled: true,
         ..BashPolicy::default()
     }))
+}
+
+/// Alice is the node's only administrator.
+fn admins() -> Arc<CommandPolicyStore> {
+    Arc::new(CommandPolicyStore::new(CommandPolicy {
+        admins: vec!["onebot:alice".into()],
+        ..CommandPolicy::default()
+    }))
+}
+
+fn bash(root: &std::path::Path, policy: Arc<BashPolicyStore>) -> BashTool {
+    BashTool::new(root, policy, admins()).unwrap()
 }
 
 async fn run(tool: &BashTool, args: Value) -> Result<String, String> {
@@ -41,7 +50,7 @@ async fn run(tool: &BashTool, args: Value) -> Result<String, String> {
 #[ignore = "requires local Docker and the sandbox/bash runtime image"]
 async fn static_commands_quotes_pipelines_and_failures_are_executed() {
     let dir = tempfile::tempdir().unwrap();
-    let tool = BashTool::new(dir.path(), permitted()).unwrap();
+    let tool = bash(dir.path(), permitted());
     let output: Value = serde_json::from_str(
         &run(
             &tool,
@@ -81,7 +90,7 @@ async fn static_commands_quotes_pipelines_and_failures_are_executed() {
 #[ignore = "requires local Docker and the sandbox/bash runtime image"]
 async fn routine_workspace_cleanup_uses_normal_bash_semantics() {
     let dir = tempfile::tempdir().unwrap();
-    let tool = BashTool::new(dir.path(), permitted()).unwrap();
+    let tool = bash(dir.path(), permitted());
     let output = run(&tool, json!({"command": "mkdir -p build; echo temporary > build/result; rm -rf build; printf -v message '%s' cleaned; printf '%s' \"$message\""})).await.unwrap();
     let output: Value = serde_json::from_str(&output).unwrap();
     assert_eq!(output["stdout"], "cleaned");
@@ -96,7 +105,7 @@ async fn cwd_validation_and_argument_validation_fail_explicitly() {
     let outside = tempfile::tempdir().unwrap();
     std::fs::create_dir(dir.path().join("child")).unwrap();
     std::os::unix::fs::symlink(outside.path(), dir.path().join("escape")).unwrap();
-    let tool = BashTool::new(dir.path(), permitted()).unwrap();
+    let tool = bash(dir.path(), permitted());
     let output: Value = serde_json::from_str(
         &run(&tool, json!({"command":"pwd", "cwd":"child"}))
             .await
@@ -123,7 +132,7 @@ async fn cwd_validation_and_argument_validation_fail_explicitly() {
 #[ignore = "requires local Docker and the sandbox/bash runtime image"]
 async fn timeout_cleans_up_a_pipeline_and_large_output_is_bounded() {
     let dir = tempfile::tempdir().unwrap();
-    let tool = BashTool::new(dir.path(), permitted()).unwrap();
+    let tool = bash(dir.path(), permitted());
     let output = tokio::time::timeout(
         Duration::from_secs(4),
         run(
@@ -150,7 +159,7 @@ async fn timeout_cleans_up_a_pipeline_and_large_output_is_bounded() {
 #[ignore = "requires local Docker and the sandbox/bash runtime image"]
 async fn interpreters_scripts_and_normal_bash_syntax_are_allowed() {
     let dir = tempfile::tempdir().unwrap();
-    let tool = BashTool::new(dir.path(), permitted()).unwrap();
+    let tool = bash(dir.path(), permitted());
     std::fs::write(dir.path().join("script.py"), "from pathlib import Path\nPath('python-output').write_text('python')\nprint('python-ok')\n").unwrap();
     std::fs::write(
         dir.path().join("script.js"),
@@ -211,8 +220,7 @@ async fn interpreters_scripts_and_normal_bash_syntax_are_allowed() {
 #[ignore = "requires local Docker and the sandbox/bash runtime image"]
 async fn caller_permissions_cannot_be_forged_or_shared_between_group_turns() {
     let dir = tempfile::tempdir().unwrap();
-    let policy = permitted();
-    let tool = BashTool::new(dir.path(), policy.clone()).unwrap();
+    let tool = bash(dir.path(), permitted());
     assert!(
         tool.call(
             "alice",
@@ -220,7 +228,7 @@ async fn caller_permissions_cannot_be_forged_or_shared_between_group_turns() {
         )
         .await
         .unwrap_err()
-        .contains("no permission")
+        .contains("not an authorized administrator")
     );
     let (allowed, denied) = tokio::join!(
         with_bash_caller(
@@ -233,48 +241,23 @@ async fn caller_permissions_cannot_be_forged_or_shared_between_group_turns() {
         ),
     );
     assert!(allowed.is_ok());
-    assert!(denied.unwrap_err().contains("no permission"));
+    assert!(
+        denied
+            .unwrap_err()
+            .contains("not an authorized administrator")
+    );
     assert!(
         tool.call("group", json!({"command":"true"})).await.is_err(),
         "task scope must not leak"
     );
-    policy.set(BashPolicy {
-        mode: BashAccessMode::Denylist,
-        denylist: vec![caller("mallory")],
-        ..BashPolicy::default()
-    });
-    assert!(run(&tool, json!({"command":"true"})).await.is_ok());
     assert!(
         with_bash_caller(
-            BashPrincipal {
-                platform: "other".into(),
-                user_id: "mallory".into()
-            },
+            Some("other:alice".into()),
             tool.call("group", json!({"command":"true"}))
         )
         .await
-        .is_ok()
-    );
-    assert!(
-        with_bash_caller(
-            caller("mallory"),
-            tool.call("group", json!({"command":"true"}))
-        )
-        .await
-        .is_err()
-    );
-    assert!(
-        tool.call("group", json!({"command":"true"})).await.is_err(),
-        "console has no verified identity even in denylist mode"
-    );
-    policy.set(BashPolicy {
-        allowlist: vec![caller("alice")],
-        denylist: vec![caller("alice")],
-        ..BashPolicy::default()
-    });
-    assert!(
-        run(&tool, json!({"command":"true"})).await.is_err(),
-        "denial wins"
+        .is_err(),
+        "administrators are platform-scoped"
     );
     tool.reset_sandbox().await.unwrap();
 }
@@ -317,7 +300,7 @@ async fn pipeline_identity_enforces_permissions_even_when_the_model_calls_bash()
     let dir = tempfile::tempdir().unwrap();
     let policy = permitted();
     let model = Arc::new(InsistentModel::default());
-    let tool = Arc::new(BashTool::new(dir.path(), policy.clone()).unwrap());
+    let tool = Arc::new(bash(dir.path(), policy.clone()));
     let agent = Arc::new(
         Agent::builder("bash", model.clone())
             .model("test")
@@ -371,7 +354,7 @@ async fn pipeline_identity_enforces_permissions_even_when_the_model_calls_bash()
                 .content
                 .as_deref()
                 .unwrap_or("")
-                .contains("no permission")
+                .contains("not an authorized administrator")
     }));
     assert!(requests[3].messages.iter().any(|message| {
         message.role == Role::Tool
@@ -443,7 +426,7 @@ async fn availability_keeps_multimodal_history_and_compaction_prefix_intact() {
     let policy = permitted();
     let memory = Arc::new(InMemory::new());
     let model = Arc::new(LayoutModel::default());
-    let tool = Arc::new(BashTool::new(dir.path(), policy.clone()).unwrap());
+    let tool = Arc::new(bash(dir.path(), policy.clone()));
     let agent = Agent::builder("layout", model.clone())
         .model("test")
         .memory(memory.clone())
@@ -496,7 +479,7 @@ async fn availability_keeps_multimodal_history_and_compaction_prefix_intact() {
             .content
             .as_deref()
             .unwrap()
-            .contains("not authorized")
+            .contains("not a Kanon administrator")
     );
     assert!(agent.compact_session("group", &[]).await.unwrap());
     let requests = model.requests.lock().unwrap().clone();
@@ -525,7 +508,7 @@ async fn streaming_enriches_the_user_message_once_before_persistence() {
     let policy = permitted();
     let memory = Arc::new(InMemory::new());
     let model = Arc::new(LayoutModel::default());
-    let tool = Arc::new(BashTool::new(dir.path(), policy.clone()).unwrap());
+    let tool = Arc::new(bash(dir.path(), policy.clone()));
     let agent = Agent::builder("stream-layout", model.clone())
         .model("test")
         .memory(memory.clone())

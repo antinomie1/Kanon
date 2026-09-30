@@ -33,9 +33,9 @@ pub use adapter::{
     IngestError, PlatformAdapter,
 };
 pub use bash::{
-    BashAccessMode, BashAvailabilityHook, BashExecutionMode, BashLocalConfig, BashPolicy,
-    BashPolicyStore, BashPrincipal, BashReviewDecision, BashReviewRequest, BashReviewer,
-    BashSandboxConfig, BashTool, DEFAULT_BASH_WORKSPACE, ModelBashReviewer, with_bash_caller,
+    BashAvailabilityHook, BashExecutionMode, BashLocalConfig, BashPolicy, BashPolicyStore,
+    BashReviewDecision, BashReviewRequest, BashReviewer, BashSandboxConfig, BashTool,
+    DEFAULT_BASH_WORKSPACE, ModelBashReviewer, with_bash_caller,
 };
 pub use conversation::{
     ContextPolicy, ContextPolicyStore, ConversationKind, META_BOT_MENTIONED,

@@ -129,12 +129,12 @@ pub struct NodeSettings {
     pub reply_policy: ReplyPolicy,
     /// Node-wide context-extras policy inherited by instances without an override.
     pub context_policy: ContextPolicy,
-    /// Bash-only sender allowlist/denylist, independent of the static tool definition.
-    pub bash_policy: BashPolicy,
     /// Node-wide notice policy: which joins, pokes and recalls the bot reacts to.
     pub event_policy: EventPolicy,
     /// Node-wide command permissions and bot administrators.
     pub command_policy: CommandPolicy,
+    /// Bash tool switch and execution backend; who may use it comes from `command_policy.admins`.
+    pub bash_policy: BashPolicy,
 }
 
 impl NodeSettings {
@@ -259,15 +259,15 @@ struct SystemConfigDocument {
     /// Node-wide context-extras policy.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     context_policy: Option<ContextPolicy>,
-    /// Caller permission for the guarded native Bash tool.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    bash_policy: Option<BashPolicy>,
     /// Node-wide notice policy.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     event_policy: Option<EventPolicy>,
     /// Node-wide command permissions.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     command_policy: Option<CommandPolicy>,
+    /// Bash tool switch and execution backend.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    bash_policy: Option<BashPolicy>,
     /// Milky platform adapter configuration, when one was saved.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     milky: Option<MilkyConfig>,
@@ -458,9 +458,9 @@ impl SystemConfigStore {
         let mut settings = NodeSettings {
             reply_policy: document.reply_policy.unwrap_or_default(),
             context_policy: document.context_policy.unwrap_or_default(),
-            bash_policy: document.bash_policy.unwrap_or_default(),
             event_policy: document.event_policy.unwrap_or_default(),
             command_policy: document.command_policy.unwrap_or_default(),
+            bash_policy: document.bash_policy.unwrap_or_default(),
             models: document.models.unwrap_or_default(),
             ..NodeSettings::default()
         };
@@ -512,9 +512,9 @@ impl SystemConfigStore {
         document.models = Some(settings.models.clone());
         document.reply_policy = Some(settings.reply_policy);
         document.context_policy = Some(settings.context_policy);
-        document.bash_policy = Some(settings.bash_policy.clone());
         document.event_policy = Some(settings.event_policy);
         document.command_policy = Some(settings.command_policy.clone());
+        document.bash_policy = Some(settings.bash_policy.clone());
 
         self.write_document(&document)
     }

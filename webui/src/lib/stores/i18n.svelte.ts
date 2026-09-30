@@ -142,13 +142,13 @@ export const dictionaries = {
 
     // Tool catalog
     'tools.title': 'Tool Catalog',
-    'bash.title': 'Who may ask the AI to run Bash',
+    'bash.title': 'Bash tool',
     'bash.execution_mode': 'Execution mode',
     'bash.mode_sandbox': 'Persistent container',
     'bash.mode_local': 'Local host',
     'bash.local_workdir': 'Local working directory',
     'bash.local_hint':
-      'Commands run with the Kanon host account permissions. Sender permissions always apply.',
+      'Commands run with the Kanon host account permissions. Administrator permission always applies.',
     'bash.auto_review': 'AI review before local execution',
     'bash.review_model': 'Reviewer model (blank uses the default model)',
     'bash.review_hint':
@@ -164,15 +164,10 @@ export const dictionaries = {
     'bash.processes': 'process/thread limit',
     'bash.hint':
       'Access follows the current sender. Optional AI review helps catch accidental harm in local mode.',
-    'bash.mode': 'Access mode',
-    'bash.allowlist_mode': 'Allowlist: listed users only',
-    'bash.denylist_mode': 'Denylist: everyone except listed users',
-    'bash.allowlist': 'Allowed users',
-    'bash.denylist': 'Denied users (always take priority)',
+    'bash.enabled': 'Let administrators ask the AI to run Bash',
     'bash.identity_hint':
-      'One platform:user ID per line. The default empty allowlist denies everyone. Console chat has no verified sender and cannot run Bash.',
-    'bash.invalid_identity': 'Use one platform:user ID per line.',
-    'bash.saved': 'Bash permissions saved.',
+      'Only bot administrators listed by ID under System Settings → Command permissions may use it; group owners and admins do not count. It is never available to notices, group sessions shared by the whole group, groups the bot observes, or console chat.',
+    'bash.saved': 'Bash settings saved.',
     'tools.subtitle':
       'Every tool the model can call right now, and who provides it',
     'tools.total': 'Total tools',
@@ -930,13 +925,13 @@ export const dictionaries = {
 
     // Tool catalog
     'tools.title': '工具列表',
-    'bash.title': '谁可以让 AI 执行 Bash',
+    'bash.title': 'Bash 工具',
     'bash.execution_mode': '执行模式',
     'bash.mode_sandbox': '持久化容器',
     'bash.mode_local': '本机执行',
     'bash.local_workdir': '本机工作目录',
     'bash.local_hint':
-      '使用 Kanon 运行账号的本机权限执行，始终检查发送者权限。',
+      '使用 Kanon 运行账号的本机权限执行，始终检查管理员权限。',
     'bash.auto_review': '本机执行前进行 AI 自动审查',
     'bash.review_model': '审查模型（留空使用默认模型）',
     'bash.review_hint':
@@ -952,15 +947,10 @@ export const dictionaries = {
     'bash.processes': '进程/线程上限',
     'bash.hint':
       '只按本轮发送者判断权限；本机模式可开启 AI 审查，帮助发现误操作。',
-    'bash.mode': '权限模式',
-    'bash.allowlist_mode': '白名单：仅指定用户可用',
-    'bash.denylist_mode': '黑名单：除指定用户外都可用',
-    'bash.allowlist': '允许的用户',
-    'bash.denylist': '禁止的用户（始终优先）',
+    'bash.enabled': '允许管理员让 AI 执行 Bash',
     'bash.identity_hint':
-      '每行一个 平台:用户ID，如 onebot:123456。默认空白名单禁止所有人；控制台聊天没有已验证的发送者，不能执行 Bash。',
-    'bash.invalid_identity': '请每行填写一个 平台:用户ID。',
-    'bash.saved': 'Bash 权限已保存。',
+      '仅限在“系统配置 → 命令权限”中按 ID 列出的机器人管理员使用，群主和群管理员不算。平台通知、全群共享会话、开启旁听的群以及控制台聊天中始终不可用。',
+    'bash.saved': 'Bash 设置已保存。',
     'tools.subtitle': '模型当前可以调用的全部工具及其提供方',
     'tools.total': '工具总数',
     'tools.source_builtin': '内置',

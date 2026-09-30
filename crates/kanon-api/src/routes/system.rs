@@ -51,31 +51,22 @@ async fn reset_bash_sandbox(
     Ok(Json(serde_json::json!({"reset":true})))
 }
 
-/// Returns the Bash-only caller policy without altering the model's static tool catalog.
+/// Returns the Bash switch and execution backend without altering the static tool catalog.
 async fn get_bash_policy(State(state): State<ApiState>) -> Json<BashPolicy> {
     Json(state.bash_policy().get())
 }
 
-/// Persists permission changes before publishing them to the execution gate.
+/// Persists Bash settings before publishing them to the execution gate.
+///
+/// Who may run Bash is not part of this document: it is the explicit administrator list of the
+/// command policy, so there is exactly one place that grants elevated rights.
 async fn put_bash_policy(
     State(state): State<ApiState>,
-    Json(mut submitted): Json<serde_json::Value>,
+    Json(policy): Json<BashPolicy>,
 ) -> Result<Json<BashPolicy>, ApiError> {
-    // Older clients edit only the caller lists. Preserve runtime security settings unless the
-    // operator explicitly includes them, rather than silently re-enabling network access.
-    let object = submitted
-        .as_object_mut()
-        .ok_or_else(|| ApiError::BadRequest("Bash policy must be an object".into()))?;
-    let current = serde_json::to_value(state.bash_policy().get())
-        .map_err(|err| ApiError::BadRequest(err.to_string()))?;
-    for key in ["sandbox", "execution_mode", "local"] {
-        if !object.contains_key(key) {
-            object.insert(key.into(), current[key].clone());
-        }
-    }
-    let policy: BashPolicy =
-        serde_json::from_value(submitted).map_err(|err| ApiError::BadRequest(err.to_string()))?;
     policy.validate().map_err(ApiError::BadRequest)?;
+    // Held until the new settings are applied, so no command can start on the old Docker
+    // endpoint after the check that it owns no container there.
     let _runtime_guard = match state.bash_tool() {
         Some(tool) => tool
             .prepare_policy_update(&policy)

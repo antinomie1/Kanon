@@ -1,4 +1,5 @@
-//! Bash execution for authorized users, with optional local review and persistent containers.
+//! Bash execution for the node's administrators, with optional local review and persistent
+//! containers.
 
 mod access;
 mod local;
@@ -10,8 +11,7 @@ pub use review::{BashReviewDecision, BashReviewRequest, BashReviewer, ModelBashR
 pub use sandbox::{BashSandboxConfig, DEFAULT_BASH_WORKSPACE};
 
 pub use access::{
-    BashAccessMode, BashExecutionMode, BashLocalConfig, BashPolicy, BashPolicyStore, BashPrincipal,
-    with_bash_caller,
+    BashExecutionMode, BashLocalConfig, BashPolicy, BashPolicyStore, with_bash_caller,
 };
 
 use std::path::{Path, PathBuf};
@@ -21,13 +21,18 @@ use async_trait::async_trait;
 use kanon_llm::{AgentError, AgentHook, AgentTool, ChatMessage, ToolDefinition};
 use serde::Deserialize;
 
+use crate::access::CommandPolicyStore;
+
 /// Maximum retained bytes per output stream; excess output is drained rather than accumulated.
 pub const MAX_BASH_OUTPUT_BYTES: usize = 64 * 1024;
 
-/// Native Bash tool. The workspace and caller policy are operator-owned, never model-controlled.
+/// Native Bash tool. The workspace, backend and administrators are operator-owned, never
+/// model-controlled.
 pub struct BashTool {
     root: PathBuf,
     policy: Arc<BashPolicyStore>,
+    /// The command policy whose explicit administrator list decides who may run Bash.
+    commands: Arc<CommandPolicyStore>,
     slots: Arc<tokio::sync::Semaphore>,
     sandbox: sandbox::SandboxRuntime,
     reviewer: RwLock<Option<Arc<dyn BashReviewer>>>,
@@ -35,7 +40,11 @@ pub struct BashTool {
 
 impl BashTool {
     /// Creates or resolves a dedicated sandbox workspace; invalid paths stop assembly explicitly.
-    pub fn new(root: impl AsRef<Path>, policy: Arc<BashPolicyStore>) -> std::io::Result<Self> {
+    pub fn new(
+        root: impl AsRef<Path>,
+        policy: Arc<BashPolicyStore>,
+        commands: Arc<CommandPolicyStore>,
+    ) -> std::io::Result<Self> {
         let requested = root.as_ref();
         let created = !requested.exists();
         std::fs::create_dir_all(requested)?;
@@ -64,6 +73,7 @@ impl BashTool {
         Ok(Self {
             root,
             policy,
+            commands,
             slots: Arc::new(tokio::sync::Semaphore::new(4)),
             sandbox: sandbox::SandboxRuntime::default(),
             reviewer: RwLock::new(None),
@@ -80,6 +90,16 @@ impl BashTool {
     /// Shared operator policy used by both execution and management endpoints.
     pub fn policy(&self) -> &Arc<BashPolicyStore> {
         &self.policy
+    }
+
+    /// Command policy whose administrators may run Bash; the pipeline enforces the same store.
+    pub fn command_policy(&self) -> &Arc<CommandPolicyStore> {
+        &self.commands
+    }
+
+    /// Whether `caller` may run Bash under the current settings and administrator list.
+    fn allows(&self, caller: Option<&str>) -> bool {
+        self.policy.get().allows(caller, &self.commands.get())
     }
 
     /// Explicitly discards the persistent container while preserving workspace files.
@@ -110,10 +130,16 @@ impl BashTool {
 
     /// Returns the runtime status used only in the newly arriving user message.
     pub async fn availability(&self) -> String {
-        if !self.policy.allows_current_caller() {
-            return "unavailable: current sender is not authorized".into();
-        }
         let policy = self.policy.get();
+        if !policy.enabled {
+            return "unavailable: disabled by the operator".into();
+        }
+        let Some(caller) = access::current_caller() else {
+            return "unavailable in this conversation: it has no single verified sender".into();
+        };
+        if !policy.allows(Some(&caller), &self.commands.get()) {
+            return "unavailable: the current sender is not a Kanon administrator".into();
+        }
         match policy.execution_mode {
             BashExecutionMode::Sandbox => match sandbox::probe(&policy.sandbox).await {
                 Ok(_) => format!(
@@ -175,7 +201,7 @@ impl AgentTool for BashTool {
     fn definition(&self) -> ToolDefinition {
         ToolDefinition {
             name: "bash".into(),
-            description: "Runs Bash, Python, Node and scripts for authorized users using the operator-selected persistent container or local host backend. Local execution can require automatic review to catch accidental harm. Commands use normal Bash semantics without a command blacklist. Current availability and execution mode are included in the user message.".into(),
+            description: "Runs Bash, Python, Node and scripts for Kanon administrators using the operator-selected persistent container or local host backend. Local execution can require automatic review to catch accidental harm. Commands use normal Bash semantics without a command blacklist. Current availability and execution mode are included in the user message.".into(),
             parameters: serde_json::json!({
                 "type": "object", "additionalProperties": false,
                 "properties": {
@@ -193,9 +219,11 @@ impl AgentTool for BashTool {
         arguments: serde_json::Value,
     ) -> Result<String, String> {
         // Never infer authorization from a session name, message text or tool arguments.
-        if !self.policy.allows_current_caller() {
-            return Err("Bash execution denied: the current sender has no permission".into());
-        }
+        let caller = access::current_caller()
+            .filter(|caller| self.allows(Some(caller)))
+            .ok_or(
+                "Bash execution denied: Bash is disabled or the current sender is not an authorized administrator",
+            )?;
         let args: Arguments = serde_json::from_value(arguments)
             .map_err(|err| format!("Invalid Bash arguments: {err}"))?;
         if !(1..=120).contains(&args.timeout_seconds) {
@@ -232,11 +260,9 @@ impl AgentTool for BashTool {
             .await
             .map_err(|err| err.to_string())?;
         // Recheck after waiting: a policy edit may have revoked this sender's access in the queue.
-        if !self.policy.allows_current_caller() {
+        if !self.allows(Some(&caller)) {
             return Err("Bash execution denied: permission was revoked".into());
         }
-        let caller =
-            access::current_caller().ok_or("Bash execution denied: missing sender identity")?;
         if self.policy.get() != selected {
             return Err("Bash configuration changed; retry the command".into());
         }
@@ -250,6 +276,7 @@ impl AgentTool for BashTool {
                             command,
                             seconds: args.timeout_seconds,
                             policy: self.policy.clone(),
+                            commands: self.commands.clone(),
                             caller,
                             expected: selected,
                         },
@@ -289,7 +316,7 @@ impl AgentTool for BashTool {
                         ));
                     }
                 }
-                if !self.policy.allows_current_caller() || self.policy.get() != selected {
+                if !self.allows(Some(&caller)) || self.policy.get() != selected {
                     return Err(
                         "Local execution denied: permission or configuration changed during review"
                             .into(),

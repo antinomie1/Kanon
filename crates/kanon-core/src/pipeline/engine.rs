@@ -1069,11 +1069,6 @@ impl PipelineEngine {
 
     /// Processes a single inbound event through the PreFilter chain and command dispatcher.
     pub async fn process_event(&self, event: PipelineEventRequest) -> PipelineResult {
-        // Capture identity before plugin pre-filters can rewrite the model-visible event.
-        let bash_caller = crate::BashPrincipal {
-            platform: event.platform.clone(),
-            user_id: event.sender_id.clone(),
-        };
         let event_id = event.event_id.clone();
         let platform = event.platform.clone();
         let hosts = self.supervisor.get_all_hosts().await;
@@ -1114,6 +1109,11 @@ impl PipelineEngine {
         // bot reacts at all; a notice it reacts to then skips commands and the reply policy (the
         // operator explicitly asked for the reaction) and reaches the model as a one-line event.
         let notice = NoticeKind::from_metadata(event.metadata.as_ref());
+        // Bash identity is taken from the adapter's event before plugin pre-filters can rewrite
+        // it. A notice is not a message: its "sender" is a joining member or a poker, who never
+        // asked for anything, so a notice turn has no caller.
+        let bash_caller = (notice.is_none() && !event.sender_id.trim().is_empty())
+            .then(|| format!("{platform}:{}", event.sender_id));
         if let Some(kind) = notice {
             let policy = self
                 .event_policy
@@ -1606,6 +1606,10 @@ impl PipelineEngine {
                 Vec::new()
             };
 
+            // A shared or observed group session puts other members' words into this turn's
+            // context; they must not be able to steer an administrator's shell, so such a turn
+            // runs without a Bash caller.
+            let bash_caller = bash_caller.filter(|_| !shared && !observing);
             match crate::with_bash_caller(
                 bash_caller,
                 router.execute_message(&session_id, user_message, &tool_hosts),

@@ -114,11 +114,15 @@ The operator chooses the execution mode under **Plugins & Adapters → Tools**:
 - **Local host**: run native Bash with the Kanon account's host permissions. Docker is unnecessary.
   Optional **AI review before execution** is enabled by default for this mode.
 
-Both modes enforce the Bash-only sender allowlist/denylist. Kanon has no node-wide administrator
-role, so this permission belongs only to Bash. The default empty allowlist denies everyone; denial
-always wins. Identity comes from the original inbound event, never model arguments, message text
-or a session name. Console chat and plugin-originated LLM requests have no verified sender and
-cannot execute Bash. Permissions are rechecked after queueing and after review.
+Bash is off until the operator enables it, and then only the bot administrators listed by ID in
+the command policy (**System Settings → Command permissions**, `command_policy.admins` as
+`<platform>:<user id>`) may use it. Group owners and admins reported by a platform never qualify:
+a shell on the node is granted by the operator, not by a group. Identity comes from the original
+inbound event, never model arguments, message text or a session name. A turn has no Bash caller
+when it is a notice (a join or poke is not a request), when the instance shares one session with
+the whole group, or when it observes group chat — in those cases other members' words are in the
+turn's context and must not steer an administrator's shell. Console chat and plugin-originated LLM
+requests have no verified sender either. Permissions are rechecked after queueing and after review.
 
 The tool definition remains fixed for every sender. Availability and selected execution mode are
 appended once inside the originating user message, before persistence, preserving multimodal parts
@@ -129,13 +133,12 @@ and the existing history/compaction prefix.
 
 ```json
 {
+  "command_policy": { "admins": ["onebot:123456"] },
   "bash_policy": {
-    "mode": "allowlist",
-    "allowlist": [{ "platform": "onebot", "user_id": "123456" }],
-    "denylist": [],
+    "enabled": true,
     "execution_mode": "local",
     "local": {
-      "working_dir": ".",
+      "working_dir": "./data/bash/workspace",
       "auto_review": true,
       "review_model": null
     },
@@ -148,16 +151,17 @@ Local automatic review uses a separate request to the selected provider-qualifie
 or the node's default model when unset. It receives the exact command and canonical working directory,
 with no tools or conversation history. Only a strict, explicit JSON approval starts execution.
 Rejection, missing/invalid output, unavailable models or a 30-second review timeout deny the command.
-Turning review off skips that model request; sender authorization and execution limits still apply.
+Turning review off skips that model request; administrator checks and execution limits still apply.
 Review is risk screening, not a sandbox or a guarantee about opaque scripts and files they load.
-Local execution currently requires Unix Bash. The local starting directory defaults to the node's
-working directory and can be changed by the operator.
+Local execution currently requires Unix Bash. The local starting directory defaults to the Bash
+workspace `./data/bash/workspace`, away from `data/system.json` and the session database, and can
+be changed by the operator.
 
 The intended operating model is an authorized user working with a basically benign AI. Automatic
 review helps catch accidental broad damage; the implementation does not try to classify every shell
 syntax or defend against deliberately disguised commands. Normal Bash, Python, Node, scripts, package
 managers, file cleanup, pipes and redirection are passed to Bash unchanged. There is no command
-blacklist or custom shell parser. Basic input validation, sender permissions and runtime limits remain.
+blacklist or custom shell parser. Basic input validation, administrator checks and runtime limits remain.
 For local execution, enable automatic review when an extra mistake-prevention check is wanted.
 
 For container mode, prepare the trusted runtime image separately:
@@ -176,7 +180,8 @@ The persistent container exposes only `./data/bash/workspace` at `/workspace`. I
 `/workspace/.home`, so user-installed packages and caches survive container resets as well as node
 restarts. Container temporary files and background processes survive normal calls. Each call starts
 a new Bash process: shell-local variables and `cd` do not carry into the next call; use `cwd`, scripts
-or environment files for that state. Authorized senders share the workspace and its container.
+or environment files for that state. All administrators and sessions share the workspace and its
+container.
 
 A stable workspace identity locates the container after a node restart. Calls are serialized within
 that runtime. Image or isolation-setting changes require the explicit **Reset container** action
@@ -198,7 +203,7 @@ Custom images must preserve the trusted bootstrap/exec helpers and version-2 run
 The model cannot choose the backend, reviewer, image, mounts or resource limits. Existing workspace
 ownership is not silently changed; root-run nodes should prepare existing workspace ownership for
 UID/GID 65534. Container isolation relies on a trusted Docker daemon/image and shares its Linux kernel.
-Use one active node per workspace; the container is a shared environment for its authorized users.
+Use one active node per workspace; the container is a shared environment for its administrators.
 
 Run the real-container integration tests after building the image:
 

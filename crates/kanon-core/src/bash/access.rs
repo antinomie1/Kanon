@@ -1,39 +1,35 @@
-//! Bash-only caller policy. Identity comes from the inbound event, never model arguments.
+//! Who may run Bash, and the operator settings that choose how it runs.
+//!
+//! Bash is granted to the node's explicitly listed administrators — the same `<platform>:<user id>`
+//! entries of [`CommandPolicy::admins`] that unlock restricted commands. Group owners and admins as
+//! reported by a platform never qualify: they are chosen by the group, not by the operator, and a
+//! shell on the node is not something a group may hand out. The identity comes from the inbound
+//! event, never from model arguments, message text or a session name.
 
 use std::future::Future;
 use std::sync::RwLock;
 
 use serde::{Deserialize, Serialize};
 
-/// Platform-scoped user identity supplied by the adapter.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct BashPrincipal {
-    /// Adapter platform identifier (for example `onebot`).
-    pub platform: String,
-    /// Sender identifier on that platform.
-    pub user_id: String,
-}
+use crate::access::CommandPolicy;
 
 tokio::task_local! {
-    // Task scope prevents overlapping turns in the same group from borrowing each other's rights.
-    static CALLER: BashPrincipal;
+    // Task scope keeps overlapping turns in one group from borrowing each other's rights. `None`
+    // explicitly shadows any outer scope for turns that have no individual sender.
+    static CALLER: Option<String>;
 }
 
-/// Runs one inbound turn with its trusted caller, restoring the previous scope on cancellation.
-pub async fn with_bash_caller<F: Future>(caller: BashPrincipal, turn: F) -> F::Output {
+/// Runs one turn with its verified caller (`<platform>:<user id>`), or explicitly without one.
+///
+/// A turn without a caller can never run Bash; that is what a notice or a group session carrying
+/// other members' words gets.
+pub async fn with_bash_caller<F: Future>(caller: Option<String>, turn: F) -> F::Output {
     CALLER.scope(caller, turn).await
 }
 
-/// Bash-only access mode; Kanon has no node-wide administrator role.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum BashAccessMode {
-    /// Only explicitly listed senders may ask the AI to run Bash.
-    #[default]
-    Allowlist,
-    /// Every identified sender may ask, except explicitly denied senders.
-    Denylist,
+/// Returns the caller of the current turn, when it has one.
+pub(super) fn current_caller() -> Option<String> {
+    CALLER.try_with(Clone::clone).ok().flatten()
 }
 
 /// Operator-selected execution backend. Tool arguments cannot change it.
@@ -47,7 +43,7 @@ pub enum BashExecutionMode {
     Local,
 }
 
-/// Host execution settings; review is independent from sender authorization.
+/// Host execution settings; review is independent from caller authorization.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct BashLocalConfig {
@@ -62,33 +58,32 @@ pub struct BashLocalConfig {
 impl Default for BashLocalConfig {
     fn default() -> Self {
         Self {
-            working_dir: ".".into(),
+            // The dedicated workspace, not the node directory: a careless `rm -rf *` or a stray
+            // `cat` must not start next to `data/system.json` and the session database.
+            working_dir: super::DEFAULT_BASH_WORKSPACE.into(),
             auto_review: true,
             review_model: None,
         }
     }
 }
 
-/// Persisted caller policy, independent of the command safety policy.
+/// Persisted Bash settings: an off switch and the execution backend.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct BashPolicy {
+    /// Whether administrators may run Bash at all. Off by default, so naming an administrator for
+    /// commands never grants a shell by itself.
+    pub enabled: bool,
     /// Execution backend selected by the operator.
     pub execution_mode: BashExecutionMode,
     /// Local execution and automatic review settings.
     pub local: BashLocalConfig,
     /// Persistent Docker sandbox configuration, controlled only by the operator.
     pub sandbox: super::BashSandboxConfig,
-    /// Whether access is restricted to the allowlist or open except for the denylist.
-    pub mode: BashAccessMode,
-    /// Explicitly permitted platform-scoped senders.
-    pub allowlist: Vec<BashPrincipal>,
-    /// Explicitly denied senders; denial always wins.
-    pub denylist: Vec<BashPrincipal>,
 }
 
 impl BashPolicy {
-    /// Rejects empty identities rather than accepting a policy that cannot match real events.
+    /// Rejects settings that could not run, before they are persisted.
     pub fn validate(&self) -> Result<(), String> {
         self.sandbox.validate()?;
         if self.local.working_dir.trim().is_empty() || self.local.working_dir.contains('\0') {
@@ -100,40 +95,18 @@ impl BashPolicy {
         {
             return Err("Bash review model must use <provider>/<model-id>".into());
         }
-        for entry in self.allowlist.iter().chain(&self.denylist) {
-            if entry.platform.trim().is_empty()
-                || entry.user_id.trim().is_empty()
-                || entry.platform != entry.platform.trim()
-                || entry.user_id != entry.user_id.trim()
-            {
-                return Err(
-                    "Bash policy identities must be nonempty and have no surrounding whitespace"
-                        .into(),
-                );
-            }
-        }
         Ok(())
     }
 
-    /// Checks a trusted identity. Missing identity is denied even in denylist mode.
-    pub fn allows(&self, caller: Option<&BashPrincipal>) -> bool {
-        let Some(caller) = caller else { return false };
-        if caller.platform.trim().is_empty()
-            || caller.user_id.trim().is_empty()
-            || self.denylist.contains(caller)
-        {
-            return false;
-        }
-        self.mode == BashAccessMode::Denylist || self.allowlist.contains(caller)
+    /// Whether `caller` may run Bash: the tool is enabled and the caller is an explicitly listed
+    /// administrator. A turn without a caller is always denied.
+    pub fn allows(&self, caller: Option<&str>, commands: &CommandPolicy) -> bool {
+        self.enabled
+            && caller.is_some_and(|caller| commands.admins.iter().any(|admin| admin == caller))
     }
 }
 
-/// Returns the adapter-provided identity for an independently owned execution worker.
-pub(super) fn current_caller() -> Option<BashPrincipal> {
-    CALLER.try_with(Clone::clone).ok()
-}
-
-/// Live policy shared by the management API, availability hint and execution gate.
+/// Live settings shared by the management API, availability hint and execution gate.
 #[derive(Debug, Default)]
 pub struct BashPolicyStore(RwLock<BashPolicy>);
 
@@ -151,12 +124,5 @@ impl BashPolicyStore {
     /// Publishes a policy only after its successful persistence.
     pub fn set(&self, policy: BashPolicy) {
         *self.0.write().unwrap_or_else(|err| err.into_inner()) = policy;
-    }
-
-    /// Authorizes the current task's adapter-provided caller.
-    pub fn allows_current_caller(&self) -> bool {
-        CALLER
-            .try_with(|caller| self.get().allows(Some(caller)))
-            .unwrap_or(false)
     }
 }

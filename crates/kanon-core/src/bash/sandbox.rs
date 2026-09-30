@@ -21,7 +21,8 @@ use futures_util::StreamExt;
 use serde::{Deserialize, Serialize};
 use tokio::sync::{Mutex, OwnedSemaphorePermit, oneshot};
 
-use super::{BashExecutionMode, BashPolicy, BashPolicyStore, BashPrincipal, MAX_BASH_OUTPUT_BYTES};
+use super::{BashExecutionMode, BashPolicy, BashPolicyStore, MAX_BASH_OUTPUT_BYTES};
+use crate::access::CommandPolicyStore;
 
 /// Independent host directory exposed to the sandbox, never the node's configuration directory.
 pub const DEFAULT_BASH_WORKSPACE: &str = "./data/bash/workspace";
@@ -184,7 +185,9 @@ pub(super) struct Invocation {
     pub command: String,
     pub seconds: u64,
     pub policy: Arc<BashPolicyStore>,
-    pub caller: BashPrincipal,
+    pub commands: Arc<CommandPolicyStore>,
+    /// Verified `<platform>:<user id>`; the worker runs outside the turn's task-local scope.
+    pub caller: String,
     pub expected: BashPolicy,
 }
 
@@ -289,7 +292,7 @@ fn authorize(call: &Invocation) -> Result<(), String> {
     let current = call.policy.get();
     if current.execution_mode != BashExecutionMode::Sandbox
         || current != call.expected
-        || !current.allows(Some(&call.caller))
+        || !current.allows(Some(&call.caller), &call.commands.get())
     {
         return Err("Bash execution denied: permission or configuration changed".into());
     }
@@ -460,7 +463,7 @@ async fn run(call: Invocation, mut cancel: oneshot::Receiver<()>) -> Result<Stri
                     uid.to_string(),
                     gid.to_string(),
                     call.seconds.to_string(),
-                    call.command,
+                    call.command.clone(),
                 ]),
                 ..Default::default()
             },
@@ -471,10 +474,7 @@ async fn run(call: Invocation, mut cancel: oneshot::Receiver<()>) -> Result<Stri
         return Err("Sandbox execution cancelled".into());
     }
     // The container persists, but each exec still requires fresh sender authorization.
-    let current = call.policy.get();
-    if current != call.expected || !current.allows(Some(&call.caller)) {
-        return Err("Bash execution denied: permission or configuration changed".into());
-    }
+    authorize(&call)?;
     let mut capture = Capture::default();
     let started = std::time::Instant::now();
     let execution = async {

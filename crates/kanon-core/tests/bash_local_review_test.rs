@@ -3,9 +3,9 @@
 
 use async_trait::async_trait;
 use kanon_core::{
-    BashExecutionMode, BashLocalConfig, BashPolicy, BashPolicyStore, BashPrincipal,
-    BashReviewDecision, BashReviewRequest, BashReviewer, BashTool, ModelBashReviewer,
-    with_bash_caller,
+    BashExecutionMode, BashLocalConfig, BashPolicy, BashPolicyStore, BashReviewDecision,
+    BashReviewRequest, BashReviewer, BashTool, CommandPolicy, CommandPolicyStore,
+    ModelBashReviewer, with_bash_caller,
 };
 use kanon_llm::{
     AgentConfig, AgentFactory, AgentSlot, AgentTool, ChatMessage, ChatRequest, ChatResponse,
@@ -15,26 +15,36 @@ use serde_json::json;
 use std::sync::{Arc, Mutex};
 use tokio::sync::Notify;
 
-fn caller() -> BashPrincipal {
-    BashPrincipal {
-        platform: "test".into(),
-        user_id: "owner".into(),
-    }
+/// The administrator every call runs as.
+const ADMIN: &str = "test:owner";
+
+fn admins() -> Arc<CommandPolicyStore> {
+    Arc::new(CommandPolicyStore::new(CommandPolicy {
+        admins: vec![ADMIN.into()],
+        ..Default::default()
+    }))
 }
 fn policy(root: &std::path::Path, review: bool) -> Arc<BashPolicyStore> {
     Arc::new(BashPolicyStore::new(BashPolicy {
+        enabled: true,
         execution_mode: BashExecutionMode::Local,
         local: BashLocalConfig {
             working_dir: root.to_string_lossy().into_owned(),
             auto_review: review,
             review_model: None,
         },
-        allowlist: vec![caller()],
         ..Default::default()
     }))
 }
+fn tool(root: &std::path::Path, policy: Arc<BashPolicyStore>) -> BashTool {
+    BashTool::new(root.join("sandbox"), policy, admins()).unwrap()
+}
 async fn call(tool: &BashTool, command: &str) -> Result<String, String> {
-    with_bash_caller(caller(), tool.call("test", json!({"command":command}))).await
+    with_bash_caller(
+        Some(ADMIN.into()),
+        tool.call("test", json!({"command":command})),
+    )
+    .await
 }
 
 #[tokio::test]
@@ -44,7 +54,7 @@ async fn local_mode_runs_without_docker_and_keeps_sender_authorization() {
     let mut updated = settings.get();
     updated.sandbox.endpoint = "unix:///missing-docker.sock".into();
     settings.set(updated);
-    let tool = BashTool::new(dir.path().join("sandbox"), settings).unwrap();
+    let tool = tool(dir.path(), settings.clone());
     let output = call(
         &tool,
         "printf host > local-result; python3 -c 'print(1+1)' ",
@@ -58,13 +68,61 @@ async fn local_mode_runs_without_docker_and_keeps_sender_authorization() {
         std::fs::read_to_string(dir.path().join("local-result")).unwrap(),
         "host"
     );
+    // No caller, a caller who is not an administrator, and an administrator while Bash is
+    // switched off are all refused before anything starts.
+    for caller in [None, Some("test:stranger".to_string())] {
+        let denied = with_bash_caller(
+            caller,
+            tool.call("test", json!({"command":"touch forbidden"})),
+        )
+        .await
+        .unwrap_err();
+        assert!(
+            denied.contains("not an authorized administrator"),
+            "{denied}"
+        );
+    }
     assert!(
         tool.call("test", json!({"command":"touch forbidden"}))
             .await
-            .unwrap_err()
-            .contains("no permission")
+            .is_err(),
+        "a call outside any turn scope has no caller"
     );
+    let mut disabled = settings.get();
+    disabled.enabled = false;
+    settings.set(disabled);
+    assert!(call(&tool, "touch forbidden").await.is_err());
     assert!(!dir.path().join("forbidden").exists());
+}
+
+#[tokio::test]
+async fn group_roles_never_grant_bash_and_only_listed_admins_see_it_available() {
+    let dir = tempfile::tempdir().unwrap();
+    let tool = tool(dir.path(), policy(dir.path(), false));
+    // A group owner is an administrator for commands, but a shell is granted only by the
+    // operator's explicit list.
+    let mut commands = tool.command_policy().get();
+    assert!(commands.group_admins_are_admins);
+    commands.admins.clear();
+    tool.command_policy().set(commands);
+    assert!(
+        with_bash_caller(
+            Some("test:group-owner".into()),
+            tool.call("test", json!({"command":"true"}))
+        )
+        .await
+        .is_err()
+    );
+    for (caller, expected) in [
+        (None, "no single verified sender"),
+        (Some(ADMIN), "not a Kanon administrator"),
+    ] {
+        let status = with_bash_caller(caller.map(str::to_string), tool.availability()).await;
+        assert!(status.contains(expected), "{status}");
+    }
+    tool.command_policy().set(admins().get());
+    let status = with_bash_caller(Some(ADMIN.into()), tool.availability()).await;
+    assert!(status.starts_with("available locally"), "{status}");
 }
 
 struct FixedReviewer {
@@ -97,7 +155,7 @@ impl BashReviewer for FixedReviewer {
 #[tokio::test]
 async fn only_explicit_review_approval_can_start_a_host_process() {
     let dir = tempfile::tempdir().unwrap();
-    let tool = BashTool::new(dir.path().join("sandbox"), policy(dir.path(), true)).unwrap();
+    let tool = tool(dir.path(), policy(dir.path(), true));
     assert!(
         call(&tool, "touch missing-review")
             .await
@@ -134,7 +192,7 @@ async fn cleanup_is_decided_by_review_instead_of_a_command_blacklist() {
     let dir = tempfile::tempdir().unwrap();
     let target = dir.path().join("obsolete");
     std::fs::write(&target, "temporary build output").unwrap();
-    let tool = BashTool::new(dir.path().join("sandbox"), policy(dir.path(), true)).unwrap();
+    let tool = tool(dir.path(), policy(dir.path(), true));
     tool.set_reviewer(Arc::new(FixedReviewer {
         allow: false,
         fail: false,
@@ -182,7 +240,7 @@ impl BashReviewer for GatedReviewer {
 async fn approval_does_not_survive_permission_revocation() {
     let dir = tempfile::tempdir().unwrap();
     let settings = policy(dir.path(), true);
-    let tool = Arc::new(BashTool::new(dir.path().join("sandbox"), settings.clone()).unwrap());
+    let tool = Arc::new(tool(dir.path(), settings));
     let reviewer = Arc::new(GatedReviewer {
         started: Notify::new(),
         release: Notify::new(),
@@ -193,9 +251,10 @@ async fn approval_does_not_survive_permission_revocation() {
         async move { call(&tool, "touch revoked").await }
     });
     reviewer.started.notified().await;
-    let mut next = settings.get();
-    next.allowlist.clear();
-    settings.set(next);
+    // Removing the administrator while the review is pending must void its approval.
+    let mut next = tool.command_policy().get();
+    next.admins.clear();
+    tool.command_policy().set(next);
     reviewer.release.notify_one();
     assert!(
         task.await
@@ -252,7 +311,7 @@ async fn live_model_review_has_no_tools_or_history_and_malformed_json_denies() {
             ..Default::default()
         },
     );
-    let tool = BashTool::new(dir.path().join("sandbox"), policy(dir.path(), true)).unwrap();
+    let tool = tool(dir.path(), policy(dir.path(), true));
     tool.set_reviewer(Arc::new(ModelBashReviewer::new(Arc::downgrade(&factory))));
     call(&tool, "touch model-approved").await.unwrap();
     let requests = model.requests.lock().unwrap().clone();

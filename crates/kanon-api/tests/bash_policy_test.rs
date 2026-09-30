@@ -1,26 +1,35 @@
-//! Management policy round-trip, restart and failed-write tests for Bash permissions.
+//! Management round-trip, restart and failed-write tests for the Bash settings.
 mod common;
 
 use axum::http::{Method, StatusCode};
 use kanon_api::{ApiState, SystemConfigStore};
-use kanon_core::{BashPolicyStore, BashPrincipal, Supervisor};
+use kanon_core::{BashPolicy, BashPolicyStore, BashTool, CommandPolicyStore, Supervisor};
 use serde_json::json;
 use std::sync::Arc;
+
+/// A Bash tool with default settings and no administrators, as the node assembles it.
+fn bash_tool(root: &std::path::Path) -> Arc<BashTool> {
+    Arc::new(
+        BashTool::new(
+            root.join("workspace"),
+            Arc::new(BashPolicyStore::default()),
+            Arc::new(CommandPolicyStore::default()),
+        )
+        .unwrap(),
+    )
+}
 
 #[tokio::test]
 async fn bash_policy_round_trips_and_reloads_without_changing_the_tool_catalog() {
     let dir = tempfile::tempdir().unwrap();
     let config = Arc::new(SystemConfigStore::new(dir.path().join("system.json")));
-    let policy = Arc::new(BashPolicyStore::default());
+    let tool = bash_tool(dir.path());
     let state = ApiState::builder(Arc::new(Supervisor::new(
         Some(dir.path().join("run")),
         None,
     )))
     .with_system_config(config.clone())
-    .with_bash_policy(policy.clone())
-    .with_native_tools(vec![Arc::new(
-        kanon_core::BashTool::new(dir.path(), policy.clone()).unwrap(),
-    )])
+    .with_bash_tool(tool.clone())
     .build();
     let app = kanon_api::app(state.clone());
     let (_, before) = common::send_json(&app, Method::GET, "/api/v1/tools", None).await;
@@ -28,9 +37,14 @@ async fn bash_policy_round_trips_and_reloads_without_changing_the_tool_catalog()
         common::send_json(&app, Method::GET, "/api/v1/tools/bash/policy", None).await;
     assert_eq!(
         initial,
-        serde_json::to_value(kanon_core::BashPolicy::default()).unwrap()
+        serde_json::to_value(BashPolicy::default()).unwrap()
     );
-    let update = json!({"mode":"denylist", "allowlist":[], "denylist":[{"platform":"onebot", "user_id":"42"}]});
+    assert_eq!(initial["enabled"], false, "Bash is opt-in");
+
+    let mut update = initial.clone();
+    update["enabled"] = json!(true);
+    update["execution_mode"] = json!("local");
+    update["sandbox"]["network"] = json!(false);
     let (status, body) = common::send_json(
         &app,
         Method::PUT,
@@ -38,30 +52,23 @@ async fn bash_policy_round_trips_and_reloads_without_changing_the_tool_catalog()
         Some(update.clone()),
     )
     .await;
-    assert_eq!(status, StatusCode::OK);
-    let mut expected = update;
-    let defaults = serde_json::to_value(kanon_core::BashPolicy::default()).unwrap();
-    for key in ["sandbox", "execution_mode", "local"] {
-        expected[key] = defaults[key].clone();
-    }
-    assert_eq!(body, expected);
-    assert!(!policy.get().allows(Some(&BashPrincipal {
-        platform: "onebot".into(),
-        user_id: "42".into()
-    })));
-    assert!(policy.get().allows(Some(&BashPrincipal {
-        platform: "onebot".into(),
-        user_id: "43".into()
-    })));
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body, update);
+    assert_eq!(
+        tool.policy().get(),
+        state.bash_policy().get(),
+        "the console must publish into the store the tool enforces"
+    );
     let restored = config.load_node_settings().unwrap();
     assert_eq!(restored.bash_policy, state.bash_policy().get());
     let (_, after) = common::send_json(&app, Method::GET, "/api/v1/tools", None).await;
     assert_eq!(
         before, after,
-        "permission changes must not change tool definitions"
+        "settings changes must not change tool definitions"
     );
-    let invalid =
-        json!({"mode":"allowlist", "allowlist":[{"platform":"", "user_id":"42"}], "denylist":[]});
+
+    let mut invalid = update;
+    invalid["local"]["review_model"] = json!("no-provider");
     let (status, _) = common::send_json(
         &app,
         Method::PUT,
@@ -77,7 +84,7 @@ async fn bash_policy_round_trips_and_reloads_without_changing_the_tool_catalog()
 }
 
 #[tokio::test]
-async fn bash_and_notice_updates_preserve_each_other_and_adapter_settings() {
+async fn bash_command_and_notice_updates_preserve_each_other_and_adapter_settings() {
     let dir = tempfile::tempdir().unwrap();
     let config = Arc::new(SystemConfigStore::new(dir.path().join("system.json")));
     let adapter = kanon_adapter_qqofficial::QqOfficialConfig {
@@ -86,50 +93,58 @@ async fn bash_and_notice_updates_preserve_each_other_and_adapter_settings() {
         ..Default::default()
     };
     config.save_qqofficial(&adapter).unwrap();
+    let tool = bash_tool(dir.path());
     let state = ApiState::builder(Arc::new(Supervisor::new(
         Some(dir.path().join("run")),
         None,
     )))
     .with_system_config(config.clone())
+    .with_bash_tool(tool.clone())
     .build();
     let app = kanon_api::app(state.clone());
     let notice = json!({"welcome_members":true, "reply_to_poke":true, "note_recalls":false});
-    let bash = json!({
-        "allowlist":[{"platform":"qqofficial", "user_id":"owner"}],
-        "execution_mode":"local",
-        "local":{"working_dir":".", "auto_review":true}
-    });
-    // Exercise both update orders: each endpoint writes the same system.json document.
+    let mut bash = serde_json::to_value(BashPolicy::default()).unwrap();
+    bash["enabled"] = json!(true);
+    let commands = json!({"admins":["qqofficial:owner"]});
+    // Every endpoint writes the same system.json document; none may drop another's section.
     for (route, body) in [
         ("/api/v1/system/event-policy", notice.clone()),
         ("/api/v1/tools/bash/policy", bash),
+        ("/api/v1/system/command-policy", commands),
         ("/api/v1/system/event-policy", notice),
     ] {
         let (status, response) = common::send_json(&app, Method::PUT, route, Some(body)).await;
         assert_eq!(status, StatusCode::OK, "{response}");
     }
+    // Administrators edited in the console are the ones Bash enforces.
+    assert_eq!(tool.command_policy().get().admins, ["qqofficial:owner"]);
     let restored = config.load_node_settings().unwrap();
     assert_eq!(restored.bash_policy, state.bash_policy().get());
-    assert_eq!(restored.event_policy, state.event_policy().get());
+    assert_eq!(restored.command_policy, state.command_policy().get());
     assert!(restored.event_policy.welcome_members);
     assert!(!restored.event_policy.note_recalls);
     assert_eq!(config.load_qqofficial().unwrap(), Some(adapter));
 
-    // Startup must repopulate both live stores from the merged persisted settings.
+    // Startup must repopulate the stores of a freshly assembled tool from the persisted settings.
+    let restarted_tool = bash_tool(dir.path());
     let restarted = ApiState::builder(Arc::new(Supervisor::new(
         Some(dir.path().join("run")),
         None,
     )))
     .with_system_config(config)
     .with_node_settings(restored)
+    .with_bash_tool(restarted_tool.clone())
     .build();
     assert_eq!(restarted.event_policy().get(), state.event_policy().get());
-    assert_eq!(restarted.bash_policy().get(), state.bash_policy().get());
-    assert!(restarted.bash_policy().get().allows(Some(&BashPrincipal {
-        platform: "qqofficial".into(),
-        user_id: "owner".into(),
-    })));
-    assert!(!restarted.bash_policy().get().allows(None));
+    assert!(restarted_tool.policy().get().enabled);
+    let commands = restarted_tool.command_policy().get();
+    assert!(
+        restarted_tool
+            .policy()
+            .get()
+            .allows(Some("qqofficial:owner"), &commands)
+    );
+    assert!(!restarted_tool.policy().get().allows(None, &commands));
 }
 
 #[tokio::test]
@@ -142,58 +157,17 @@ async fn failed_policy_persistence_does_not_open_the_execution_gate() {
     .with_system_config(Arc::new(SystemConfigStore::new(dir.path())))
     .build();
     let app = kanon_api::app(state.clone());
+    let mut enabled = serde_json::to_value(BashPolicy::default()).unwrap();
+    enabled["enabled"] = json!(true);
     let (status, _) = common::send_json(
         &app,
         Method::PUT,
         "/api/v1/tools/bash/policy",
-        Some(json!({"mode":"denylist", "allowlist":[], "denylist":[]})),
+        Some(enabled),
     )
     .await;
     assert_eq!(status, StatusCode::BAD_REQUEST);
-    assert_eq!(
-        state.bash_policy().get().mode,
-        kanon_core::BashAccessMode::Allowlist
-    );
-}
-
-#[tokio::test]
-async fn older_permission_clients_preserve_saved_sandbox_network_and_limits() {
-    let dir = tempfile::tempdir().unwrap();
-    let state = ApiState::builder(Arc::new(Supervisor::new(
-        Some(dir.path().join("run")),
-        None,
-    )))
-    .with_system_config(Arc::new(SystemConfigStore::new(
-        dir.path().join("system.json"),
-    )))
-    .build();
-    let app = kanon_api::app(state.clone());
-    let mut initial = serde_json::to_value(kanon_core::BashPolicy::default()).unwrap();
-    initial["sandbox"]["network"] = json!(false);
-    initial["sandbox"]["memory_mb"] = json!(256);
-    initial["execution_mode"] = json!("local");
-    initial["local"]["auto_review"] = json!(false);
-    let (status, _) = common::send_json(
-        &app,
-        Method::PUT,
-        "/api/v1/tools/bash/policy",
-        Some(initial),
-    )
-    .await;
-    assert_eq!(status, StatusCode::OK);
-    let (status, after) = common::send_json(
-        &app,
-        Method::PUT,
-        "/api/v1/tools/bash/policy",
-        Some(json!({"mode":"denylist", "allowlist":[], "denylist":[]})),
-    )
-    .await;
-    assert_eq!(status, StatusCode::OK);
-    assert_eq!(after["sandbox"]["network"], false);
-    assert_eq!(after["sandbox"]["memory_mb"], 256);
-    assert_eq!(after["execution_mode"], "local");
-    assert_eq!(after["local"]["auto_review"], false);
-    assert_eq!(state.bash_policy().get().sandbox.memory_mb, 256);
+    assert!(!state.bash_policy().get().enabled);
 }
 
 #[cfg(unix)]
@@ -202,17 +176,11 @@ async fn older_permission_clients_preserve_saved_sandbox_network_and_limits() {
 async fn endpoint_changes_require_reset_on_the_old_daemon_first() {
     use kanon_llm::AgentTool;
     let dir = tempfile::tempdir().unwrap();
-    let caller = BashPrincipal {
-        platform: "test".into(),
-        user_id: "owner".into(),
-    };
-    let policy = kanon_core::BashPolicy {
-        allowlist: vec![caller.clone()],
+    let policy = BashPolicy {
+        enabled: true,
         ..Default::default()
     };
-    let policy_store = Arc::new(BashPolicyStore::new(policy.clone()));
-    let tool =
-        Arc::new(kanon_core::BashTool::new(dir.path().join("workspace"), policy_store).unwrap());
+    let tool = bash_tool(dir.path());
     let config = Arc::new(SystemConfigStore::new(dir.path().join("system.json")));
     let state = ApiState::builder(Arc::new(Supervisor::new(
         Some(dir.path().join("run")),
@@ -221,13 +189,20 @@ async fn endpoint_changes_require_reset_on_the_old_daemon_first() {
     .with_system_config(config.clone())
     .with_node_settings(kanon_api::NodeSettings {
         bash_policy: policy.clone(),
+        command_policy: kanon_core::CommandPolicy {
+            admins: vec!["test:owner".into()],
+            ..Default::default()
+        },
         ..Default::default()
     })
     .with_bash_tool(tool.clone())
     .build();
-    kanon_core::with_bash_caller(caller, tool.call("test", json!({"command":"true"})))
-        .await
-        .unwrap();
+    kanon_core::with_bash_caller(
+        Some("test:owner".into()),
+        tool.call("test", json!({"command":"true"})),
+    )
+    .await
+    .unwrap();
     let app = kanon_api::app(state.clone());
     let mut next = serde_json::to_value(policy.clone()).unwrap();
     next["sandbox"]["endpoint"] = json!(format!(
