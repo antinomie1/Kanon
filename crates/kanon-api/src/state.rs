@@ -16,8 +16,9 @@ use kanon_adapter_milky::MilkyAdapter;
 use kanon_adapter_onebot::OneBotAdapter;
 use kanon_adapter_qqofficial::QqOfficialAdapter;
 use kanon_core::{
-    CommandPolicyStore, ContextPolicyStore, EventIngress, EventPolicyStore, InstanceRegistry,
-    McpConfigStore, McpPool, ReplyPolicyStore, SkillStore, Supervisor, ToggleStore,
+    BashAvailabilityHook, BashPolicyStore, BashTool, CommandPolicyStore, ContextPolicyStore,
+    EventIngress, EventPolicyStore, InstanceRegistry, McpConfigStore, McpPool, ModelBashReviewer,
+    ReplyPolicyStore, SkillStore, Supervisor, ToggleStore,
 };
 use kanon_llm::{
     Agent, AgentConfig, AgentFactory, AgentSlot, InMemory, LlmProvider, Memory, PersonaRegistry,
@@ -77,8 +78,12 @@ struct ApiStateInner {
     context_policy: Arc<ContextPolicyStore>,
     /// Node-wide notice policy, shared with the pipeline worker.
     event_policy: Arc<EventPolicyStore>,
-    /// Node-wide command permissions, shared with the pipeline worker.
+    /// Node-wide command permissions, shared with the pipeline worker and the Bash tool.
     command_policy: Arc<CommandPolicyStore>,
+    /// Bash switch and execution backend, shared with the Bash tool.
+    bash_policy: Arc<BashPolicyStore>,
+    /// Typed tool handle for explicit persistent-container reset.
+    bash_tool: Option<Arc<BashTool>>,
     /// In-memory view of the persisted model-routing settings.
     ///
     /// Kept alongside the store so a read (listing providers, resolving a model) never touches the
@@ -238,6 +243,16 @@ impl ApiState {
         &self.inner.context_policy
     }
 
+    /// Current Bash switch and execution backend, shared with the execution gate.
+    pub fn bash_policy(&self) -> &Arc<BashPolicyStore> {
+        &self.inner.bash_policy
+    }
+
+    /// Native Bash runtime managed by the node, when registered.
+    pub fn bash_tool(&self) -> Option<&Arc<BashTool>> {
+        self.inner.bash_tool.as_ref()
+    }
+
     /// Node-wide notice policy shared with the pipeline worker.
     pub fn event_policy(&self) -> &Arc<EventPolicyStore> {
         &self.inner.event_policy
@@ -281,6 +296,7 @@ impl ApiState {
         self.inner
             .command_policy
             .set(settings.command_policy.clone());
+        self.inner.bash_policy.set(settings.bash_policy.clone());
         *self
             .inner
             .node_settings
@@ -445,6 +461,7 @@ pub struct ApiStateBuilder {
     skills: Option<Arc<SkillStore>>,
     system_config: Option<Arc<SystemConfigStore>>,
     node_settings: Option<NodeSettings>,
+    bash_tool: Option<Arc<BashTool>>,
     milky: Option<Arc<MilkyAdapter>>,
     /// OneBot v11 adapter hosted by this node.
     onebot: Option<Arc<OneBotAdapter>>,
@@ -485,6 +502,7 @@ impl ApiStateBuilder {
             skills: None,
             system_config: None,
             node_settings: None,
+            bash_tool: None,
             milky: None,
             onebot: None,
             qqofficial: None,
@@ -637,6 +655,15 @@ impl ApiStateBuilder {
         self
     }
 
+    /// Registers Bash, its per-turn status hook and its management handle together.
+    pub fn with_bash_tool(mut self, tool: Arc<BashTool>) -> Self {
+        self.native_tools.push(tool.clone());
+        self.hooks
+            .push(Arc::new(BashAvailabilityHook(tool.clone())));
+        self.bash_tool = Some(tool);
+        self
+    }
+
     /// Shares the OneBot v11 adapter registered by the composition root.
     pub fn with_onebot_adapter(mut self, adapter: Arc<OneBotAdapter>) -> Self {
         self.onebot = Some(adapter);
@@ -723,6 +750,9 @@ impl ApiStateBuilder {
             hooks,
             self.native_tools.clone(),
         ));
+        if let Some(tool) = &self.bash_tool {
+            tool.set_reviewer(Arc::new(ModelBashReviewer::new(Arc::downgrade(&factory))));
+        }
 
         // A provider the builder was handed is installed into the shared slot; dropping it
         // silently would leave the node reporting a provider it cannot use. A caller that supplied
@@ -754,9 +784,14 @@ impl ApiStateBuilder {
         let reply_policy = Arc::new(ReplyPolicyStore::new(node_settings.reply_policy));
         let context_policy = Arc::new(ContextPolicyStore::new(node_settings.context_policy));
         let event_policy = Arc::new(EventPolicyStore::new(node_settings.event_policy));
-        let command_policy = Arc::new(CommandPolicyStore::new(
-            node_settings.command_policy.clone(),
-        ));
+        // A registered Bash tool already holds the stores it enforces; the API must publish into
+        // those same stores, or a console edit would never reach the execution gate.
+        let (command_policy, bash_policy) = match &self.bash_tool {
+            Some(tool) => (tool.command_policy().clone(), tool.policy().clone()),
+            None => Default::default(),
+        };
+        command_policy.set(node_settings.command_policy.clone());
+        bash_policy.set(node_settings.bash_policy.clone());
 
         let instances = self.instances.unwrap_or_default();
         let plugin_state = self.plugin_state.unwrap_or_default();
@@ -799,6 +834,8 @@ impl ApiStateBuilder {
                 context_policy,
                 event_policy,
                 command_policy,
+                bash_policy,
+                bash_tool: self.bash_tool,
                 node_settings: Arc::new(RwLock::new(node_settings)),
                 milky: self.milky,
                 onebot: self.onebot,

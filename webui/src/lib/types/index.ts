@@ -949,3 +949,31 @@ export interface OneBotConfigRequest
   access_token?: string;
   clear_access_token?: boolean;
 }
+/**
+ * Bash switch and execution backend. Who may run it is the explicit administrator list of the
+ * command policy; group owners and admins never qualify.
+ */
+export interface BashPolicy {
+  enabled: boolean;
+  execution_mode: 'sandbox' | 'local';
+  local: BashLocalConfig;
+  sandbox: BashSandboxConfig;
+}
+
+/** Host execution with an optional pre-execution model review. */
+export interface BashLocalConfig {
+  working_dir: string;
+  auto_review: boolean;
+  review_model: string | null;
+}
+
+/** Operator-owned runtime; model calls cannot change sandbox limits or mounts. */
+export interface BashSandboxConfig {
+  endpoint: string;
+  image: string;
+  network: boolean;
+  memory_mb: number;
+  cpus: number;
+  pids_limit: number;
+  file_size_mb: number;
+}

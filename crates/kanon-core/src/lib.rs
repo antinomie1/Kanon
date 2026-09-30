@@ -11,6 +11,7 @@
 
 pub mod access;
 pub mod adapter;
+pub mod bash;
 pub mod conversation;
 pub mod instance;
 pub mod ipc;
@@ -30,6 +31,11 @@ pub use access::{
 pub use adapter::{
     AdapterDescriptor, AdapterError, AdapterKind, AdapterRegistry, Capability, EventIngress,
     IngestError, PlatformAdapter,
+};
+pub use bash::{
+    BashAvailabilityHook, BashExecutionMode, BashLocalConfig, BashPolicy, BashPolicyStore,
+    BashReviewDecision, BashReviewRequest, BashReviewer, BashSandboxConfig, BashTool,
+    DEFAULT_BASH_WORKSPACE, ModelBashReviewer, with_bash_caller,
 };
 pub use conversation::{
     ContextPolicy, ContextPolicyStore, ConversationKind, META_BOT_MENTIONED,

@@ -5,10 +5,10 @@
 use axum::Json;
 use axum::Router;
 use axum::extract::State;
-use axum::routing::get;
+use axum::routing::{get, post};
 use serde::Serialize;
 
-use kanon_core::{CommandPolicy, ContextPolicy, EventPolicy, ReplyPolicy};
+use kanon_core::{BashPolicy, CommandPolicy, ContextPolicy, EventPolicy, ReplyPolicy};
 
 use crate::error::ApiError;
 use crate::state::ApiState;
@@ -17,6 +17,11 @@ use crate::state::ApiState;
 pub fn routes() -> Router<ApiState> {
     Router::new()
         .route("/api/v1/system/config", get(system_config))
+        .route(
+            "/api/v1/tools/bash/policy",
+            get(get_bash_policy).put(put_bash_policy),
+        )
+        .route("/api/v1/tools/bash/reset", post(reset_bash_sandbox))
         .route(
             "/api/v1/system/reply-policy",
             get(get_reply_policy).put(put_reply_policy),
@@ -33,6 +38,48 @@ pub fn routes() -> Router<ApiState> {
             "/api/v1/system/command-policy",
             get(get_command_policy).put(put_command_policy),
         )
+}
+
+/// Explicit operator action; normal tool calls never discard a persistent container.
+async fn reset_bash_sandbox(
+    State(state): State<ApiState>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let tool = state
+        .bash_tool()
+        .ok_or_else(|| ApiError::Unavailable("Bash runtime is not registered".into()))?;
+    tool.reset_sandbox().await.map_err(ApiError::Conflict)?;
+    Ok(Json(serde_json::json!({"reset":true})))
+}
+
+/// Returns the Bash switch and execution backend without altering the static tool catalog.
+async fn get_bash_policy(State(state): State<ApiState>) -> Json<BashPolicy> {
+    Json(state.bash_policy().get())
+}
+
+/// Persists Bash settings before publishing them to the execution gate.
+///
+/// Who may run Bash is not part of this document: it is the explicit administrator list of the
+/// command policy, so there is exactly one place that grants elevated rights.
+async fn put_bash_policy(
+    State(state): State<ApiState>,
+    Json(policy): Json<BashPolicy>,
+) -> Result<Json<BashPolicy>, ApiError> {
+    policy.validate().map_err(ApiError::BadRequest)?;
+    // Held until the new settings are applied, so no command can start on the old Docker
+    // endpoint after the check that it owns no container there.
+    let _runtime_guard = match state.bash_tool() {
+        Some(tool) => tool
+            .prepare_policy_update(&policy)
+            .await
+            .map_err(ApiError::Conflict)?,
+        None => None,
+    };
+    let mut settings = state.node_settings();
+    settings.bash_policy = policy;
+    state
+        .apply_node_settings(settings)
+        .map_err(ApiError::BadRequest)?;
+    Ok(get_bash_policy(State(state)).await)
 }
 
 /// Comprehensive node and system configuration payload.

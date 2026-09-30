@@ -11,6 +11,7 @@ import {
 import { api } from '../../api/client';
 import { t } from '../../stores/i18n.svelte';
 import type { ToolItem, ToolSource } from '../../types';
+import BashPolicyPanel from './BashPolicyPanel.svelte';
 
 /**
  * Tool catalog console.
@@ -112,6 +113,9 @@ $effect(() => {
   {/if}
 
   {#if catalog}
+    {#if tools.some((tool) => tool.name === 'bash')}
+      <BashPolicyPanel />
+    {/if}
     <div class="grid grid-cols-2 sm:grid-cols-4 gap-3">
       {#each [
         { key: 'all', label: t('tools.total'), value: catalog.total },

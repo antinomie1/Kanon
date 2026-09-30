@@ -105,6 +105,112 @@ scan the QR code with mobile QQ or enter the AppID and AppSecret. It answers gro
 chats, guild @-messages and guild DMs, and brings quoted messages (text, images, voice transcripts,
 stickers, files) into the model's context.
 
+## Bash tool: persistent container or local host
+
+The operator chooses the execution mode under **Plugins & Adapters → Tools**:
+
+- **Persistent container** (default): reuse one managed container for the workspace across tool
+  calls and node restarts. Normal completion leaves it running, including background processes.
+- **Local host**: run native Bash with the Kanon account's host permissions. Docker is unnecessary.
+  Optional **AI review before execution** is enabled by default for this mode.
+
+Bash is off until the operator enables it, and then only the bot administrators listed by ID in
+the command policy (**System Settings → Command permissions**, `command_policy.admins` as
+`<platform>:<user id>`) may use it. Group owners and admins reported by a platform never qualify:
+a shell on the node is granted by the operator, not by a group. Identity comes from the original
+inbound event, never model arguments, message text or a session name. A turn has no Bash caller
+when it is a notice (a join or poke is not a request), when the instance shares one session with
+the whole group, or when it observes group chat — in those cases other members' words are in the
+turn's context and must not steer an administrator's shell. Console chat and plugin-originated LLM
+requests have no verified sender either. Permissions are rechecked after queueing and after review.
+
+The tool definition remains fixed for every sender. Availability and selected execution mode are
+appended once inside the originating user message, before persistence, preserving multimodal parts
+and the existing history/compaction prefix.
+
+`data/system.json` stores the operator settings under `bash_policy`; the console uses
+`GET`/`PUT /api/v1/tools/bash/policy`. For example:
+
+```json
+{
+  "command_policy": { "admins": ["onebot:123456"] },
+  "bash_policy": {
+    "enabled": true,
+    "execution_mode": "local",
+    "local": {
+      "working_dir": "./data/bash/workspace",
+      "auto_review": true,
+      "review_model": null
+    },
+    "sandbox": { "image": "kanon-bash-sandbox:2", "network": true }
+  }
+}
+```
+
+Local automatic review uses a separate request to the selected provider-qualified `review_model`,
+or the node's default model when unset. It receives the exact command and canonical working directory,
+with no tools or conversation history. Only a strict, explicit JSON approval starts execution.
+Rejection, missing/invalid output, unavailable models or a 30-second review timeout deny the command.
+Turning review off skips that model request; administrator checks and execution limits still apply.
+Review is risk screening, not a sandbox or a guarantee about opaque scripts and files they load.
+Local execution currently requires Unix Bash. The local starting directory defaults to the Bash
+workspace `./data/bash/workspace`, away from `data/system.json` and the session database, and can
+be changed by the operator.
+
+The intended operating model is an authorized user working with a basically benign AI. Automatic
+review helps catch accidental broad damage; the implementation does not try to classify every shell
+syntax or defend against deliberately disguised commands. Normal Bash, Python, Node, scripts, package
+managers, file cleanup, pipes and redirection are passed to Bash unchanged. There is no command
+blacklist or custom shell parser. Basic input validation, administrator checks and runtime limits remain.
+For local execution, enable automatic review when an extra mistake-prevention check is wanted.
+
+For container mode, prepare the trusted runtime image separately:
+
+```bash
+docker build -t kanon-bash-sandbox:2 sandbox/bash
+```
+
+The image supplies Bash, Python 3.12, Node 24/npm, Git and ripgrep. The native Docker API client
+requires a local Linux Docker daemon with seccomp and memory/CPU/PID controls. Docker unavailability
+never silently switches container mode to host execution. The default endpoint is
+`unix:///var/run/docker.sock` on Unix and `npipe:////./pipe/docker_engine` on Windows; remote TCP/SSH
+endpoints are rejected.
+
+The persistent container exposes only `./data/bash/workspace` at `/workspace`. Its HOME is
+`/workspace/.home`, so user-installed packages and caches survive container resets as well as node
+restarts. Container temporary files and background processes survive normal calls. Each call starts
+a new Bash process: shell-local variables and `cd` do not carry into the next call; use `cwd`, scripts
+or environment files for that state. All administrators and sessions share the workspace and its
+container.
+
+A stable workspace identity locates the container after a node restart. Calls are serialized within
+that runtime. Image or isolation-setting changes require the explicit **Reset container** action
+(`POST /api/v1/tools/bash/reset`); the tool refuses to silently discard the existing environment.
+API changes to the Docker endpoint are refused while the old endpoint still owns a container; reset
+it first. Reset before hand-editing the endpoint while the node is stopped as well.
+Reset removes the container and its temporary state, preserving workspace/HOME files. There is no
+idle expiry. On timeout, caller cancellation or abnormal termination, the container is restarted to
+terminate detached children; this also stops background jobs and clears temporary state.
+
+User code runs non-root with no capabilities and no-new-privileges. The system filesystem is read-only
+and PID/IPC/cgroup namespaces stay private. Networking defaults to public IPv4 access, with private,
+host and metadata ranges blocked except configured DNS; no ports are published. Operators can disable
+networking. Default limits are 512 MiB RAM/swap, one CPU, 128 processes/threads, 512 MiB per file and
+128 MiB temporary storage. Each execution has a 15-second default budget (1–120 seconds) and retains
+at most 64 KiB per output stream. The writable workspace has no aggregate disk quota.
+
+Custom images must preserve the trusted bootstrap/exec helpers and version-2 runtime contract.
+The model cannot choose the backend, reviewer, image, mounts or resource limits. Existing workspace
+ownership is not silently changed; root-run nodes should prepare existing workspace ownership for
+UID/GID 65534. Container isolation relies on a trusted Docker daemon/image and shares its Linux kernel.
+Use one active node per workspace; the container is a shared environment for its administrators.
+
+Run the real-container integration tests after building the image:
+
+```bash
+cargo test -p kanon-core --test bash_tool_test --test bash_sandbox_test -- --ignored --test-threads=1
+```
+
 ## Build outputs
 
 A default build produces exactly two executables:

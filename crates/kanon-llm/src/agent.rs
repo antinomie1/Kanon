@@ -166,6 +166,17 @@ impl AgentTool for NativeTool {
 /// - Observability, tracing, token budget tracking, and latency auditing.
 #[async_trait]
 pub trait AgentHook: Send + Sync {
+    /// Enriches the originating user message once, before it is appended to durable history.
+    ///
+    /// Runtime metadata belongs here so tool-loop requests and compaction reuse unchanged history.
+    async fn on_user_message(
+        &self,
+        _session_id: &str,
+        _message: &mut ChatMessage,
+    ) -> Result<(), AgentError> {
+        Ok(())
+    }
+
     /// Invoked immediately before transmitting the request payload to the model provider.
     async fn on_llm_request(
         &self,
@@ -564,9 +575,12 @@ impl Agent {
     pub async fn run_message(
         &self,
         session_id: &str,
-        message: ChatMessage,
+        mut message: ChatMessage,
         hosts: &[Arc<dyn ToolHost>],
     ) -> Result<AgentOutput, AgentError> {
+        for hook in &self.hooks {
+            hook.on_user_message(session_id, &mut message).await?;
+        }
         let user_input = message.content.clone().unwrap_or_default();
 
         // 1. Push user message to memory
@@ -910,10 +924,12 @@ impl Agent {
         user_input: &str,
         hosts: &[Arc<dyn ToolHost>],
     ) -> Result<ChatChunkStream, AgentError> {
-        // 1. Push user message to memory
-        self.memory
-            .push_message(session_id, ChatMessage::user(user_input))
-            .await?;
+        // Enrich only the originating message; request hooks must not fabricate later turns.
+        let mut message = ChatMessage::user(user_input);
+        for hook in &self.hooks {
+            hook.on_user_message(session_id, &mut message).await?;
+        }
+        self.memory.push_message(session_id, message).await?;
 
         // 2. Dynamically aggregate tools
         let tools = self.collect_tools(hosts);

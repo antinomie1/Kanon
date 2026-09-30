@@ -142,6 +142,32 @@ export const dictionaries = {
 
     // Tool catalog
     'tools.title': 'Tool Catalog',
+    'bash.title': 'Bash tool',
+    'bash.execution_mode': 'Execution mode',
+    'bash.mode_sandbox': 'Persistent container',
+    'bash.mode_local': 'Local host',
+    'bash.local_workdir': 'Local working directory',
+    'bash.local_hint':
+      'Commands run with the Kanon host account permissions. Administrator permission always applies.',
+    'bash.auto_review': 'AI review before local execution',
+    'bash.review_model': 'Reviewer model (blank uses the default model)',
+    'bash.review_hint':
+      'Each command requires an explicit approval from a separate model request. Rejection, invalid output or review failure blocks execution. Review reduces risk but is not isolation.',
+    'bash.reset': 'Reset container',
+    'bash.reset_confirm':
+      'Stop background processes and discard container temporary state? Workspace files and .home are retained. The next command creates a new container.',
+    'bash.sandbox_title': 'Persistent container sandbox',
+    'bash.network': 'Allow public Internet access',
+    'bash.sandbox_hint':
+      'The same container is reused across commands and node restarts. Workspace, .home and background processes persist. Reset after changing the image or isolation settings.',
+    'bash.image': 'Prepared sandbox image',
+    'bash.processes': 'process/thread limit',
+    'bash.hint':
+      'Access follows the current sender. Optional AI review helps catch accidental harm in local mode.',
+    'bash.enabled': 'Let administrators ask the AI to run Bash',
+    'bash.identity_hint':
+      'Only bot administrators listed by ID under System Settings → Command permissions may use it; group owners and admins do not count. It is never available to notices, group sessions shared by the whole group, groups the bot observes, or console chat.',
+    'bash.saved': 'Bash settings saved.',
     'tools.subtitle':
       'Every tool the model can call right now, and who provides it',
     'tools.total': 'Total tools',
@@ -899,6 +925,32 @@ export const dictionaries = {
 
     // Tool catalog
     'tools.title': '工具列表',
+    'bash.title': 'Bash 工具',
+    'bash.execution_mode': '执行模式',
+    'bash.mode_sandbox': '持久化容器',
+    'bash.mode_local': '本机执行',
+    'bash.local_workdir': '本机工作目录',
+    'bash.local_hint':
+      '使用 Kanon 运行账号的本机权限执行，始终检查管理员权限。',
+    'bash.auto_review': '本机执行前进行 AI 自动审查',
+    'bash.review_model': '审查模型（留空使用默认模型）',
+    'bash.review_hint':
+      '每次执行前单独调用模型审查；拒绝、输出无效或审查失败都会阻止执行。审查可以降低风险，但不提供隔离。',
+    'bash.reset': '重置容器',
+    'bash.reset_confirm':
+      '停止后台进程并清空容器临时状态？工作区和 .home 会保留，下次执行时创建新容器。',
+    'bash.sandbox_title': '持久化容器沙箱',
+    'bash.network': '允许公网联网',
+    'bash.sandbox_hint':
+      '跨命令和节点重启复用同一个容器，保留工作区、.home 和后台进程。修改镜像或隔离设置后需重置容器。',
+    'bash.image': '已准备的沙箱镜像',
+    'bash.processes': '进程/线程上限',
+    'bash.hint':
+      '只按本轮发送者判断权限；本机模式可开启 AI 审查，帮助发现误操作。',
+    'bash.enabled': '允许管理员让 AI 执行 Bash',
+    'bash.identity_hint':
+      '仅限在“系统配置 → 命令权限”中按 ID 列出的机器人管理员使用，群主和群管理员不算。平台通知、全群共享会话、开启旁听的群以及控制台聊天中始终不可用。',
+    'bash.saved': 'Bash 设置已保存。',
     'tools.subtitle': '模型当前可以调用的全部工具及其提供方',
     'tools.total': '工具总数',
     'tools.source_builtin': '内置',

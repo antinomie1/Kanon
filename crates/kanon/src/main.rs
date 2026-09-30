@@ -48,10 +48,10 @@ use kanon_core::ipc::{CoreApiService, CoreIpcServer, DEFAULT_INGEST_QUEUE_CAPACI
 use kanon_core::pipeline::PipelineEngine;
 use kanon_core::supervisor::Supervisor;
 use kanon_core::{
-    DEFAULT_INSTANCE_CATALOG, DEFAULT_MCP_CONFIG, DEFAULT_SKILLS_DIR, DEFAULT_TOGGLE_STATE,
-    EventIngress, HOST_WATCHDOG_INTERVAL, InstanceRegistry, MCP_WATCHDOG_INTERVAL, McpConfigStore,
-    McpPool, PLUGIN_SECTION, ReadSkillTool, SkillCatalogHook, SkillStore, ToggleStore,
-    sync_instance_personas,
+    BashPolicyStore, BashTool, CommandPolicyStore, DEFAULT_INSTANCE_CATALOG, DEFAULT_MCP_CONFIG,
+    DEFAULT_SKILLS_DIR, DEFAULT_TOGGLE_STATE, EventIngress, HOST_WATCHDOG_INTERVAL,
+    InstanceRegistry, MCP_WATCHDOG_INTERVAL, McpConfigStore, McpPool, PLUGIN_SECTION,
+    ReadSkillTool, SkillCatalogHook, SkillStore, ToggleStore, sync_instance_personas,
 };
 use tokio::sync::{mpsc, oneshot};
 use tracing_subscriber::EnvFilter;
@@ -167,6 +167,15 @@ async fn main() -> StartupResult<()> {
     // by the builder itself, so a bootstrapped directory and a console-configured one are applied
     // through exactly the same path.
     let node_settings = bootstrap_node_settings()?;
+    // Bash enforces the command policy's administrator list; the API state publishes console edits
+    // into these same stores, and the pipeline shares the command policy through the state.
+    let bash_tool = Arc::new(BashTool::new(
+        kanon_core::DEFAULT_BASH_WORKSPACE,
+        Arc::new(BashPolicyStore::new(node_settings.bash_policy.clone())),
+        Arc::new(CommandPolicyStore::new(
+            node_settings.command_policy.clone(),
+        )),
+    )?);
 
     // The persona library is the built-in base assistant plus the operator's saved personas. A
     // malformed `data/personas.json` is a hard startup error rather than a silent fallback, for the
@@ -214,6 +223,7 @@ async fn main() -> StartupResult<()> {
             plugin_state.clone(),
             instances.clone(),
         ))])
+        .with_bash_tool(bash_tool)
         .build();
 
     // Publish instance prompts as personas before the first message can arrive.
