@@ -1,8 +1,10 @@
 //! Integration tests verifying the convergence pass improvements:
-//! 1. Unified host registry between CoreApiService and Supervisor
+//! 1. Unified host registry between CoreApiService and Supervisor, including hosts that register
+//!    while the supervisor is still launching them
 //! 2. SendMessage routed into PipelineEngine outbound queue
 //! 3. Explicit unimplemented status for storage gRPC endpoints
 
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 use tempfile::tempdir;
@@ -12,7 +14,7 @@ use tonic::Code;
 use kanon_core::adapter::{AdapterError, PlatformAdapter};
 use kanon_core::ipc::{CoreApiService, CoreIpcServer, DEFAULT_INGEST_QUEUE_CAPACITY};
 use kanon_core::pipeline::PipelineEngine;
-use kanon_core::supervisor::Supervisor;
+use kanon_core::supervisor::{Supervisor, SupervisorError};
 use kanon_proto::v1::bot_api_service_client::BotApiServiceClient;
 use kanon_proto::v1::message_pipeline_service_server::{
     MessagePipelineService, MessagePipelineServiceServer,
@@ -27,7 +29,7 @@ use kanon_proto::v1::{
     ReloadPluginConfigRequest, ReloadPluginConfigResponse, SendMessageRequest, SetStorageRequest,
     TextSegment, ToolCallRequest, ToolCallResponse,
 };
-use kanon_transport::{IpcListener, connect_ipc};
+use kanon_transport::{IpcListener, connect_ipc, host_socket_path};
 
 /// Mock platform adapter capturing outbound deliveries.
 struct MockAdapter {
@@ -235,6 +237,97 @@ async fn test_unified_host_registration_into_supervisor() {
     let _ = host_shutdown_tx.send(());
     let _ = core_shutdown_tx.send(());
     let _ = host_task.await;
+    let _ = core_task.await;
+}
+
+/// Waits until `path` exists, failing the test after five seconds.
+async fn wait_for_path(path: &Path) {
+    for _ in 0..500 {
+        if path.exists() {
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    panic!("{} never appeared", path.display());
+}
+
+/// A launched host registers before it serves (the Rust SDK registers before it even binds its
+/// socket, because plugins need the core handle while loading). The core used to dial the
+/// missing socket back and log "Transport error connecting to host"; it must acknowledge the
+/// registration and leave the handshake to the launch.
+#[cfg(unix)]
+#[tokio::test]
+async fn a_host_registering_during_its_own_launch_is_acknowledged() {
+    let tmp = tempdir().expect("tempdir");
+    let core_sock = tmp.path().join("core.sock");
+    let supervisor = Arc::new(Supervisor::new(
+        Some(tmp.path().to_path_buf()),
+        Some(core_sock.clone()),
+    ));
+    let (event_tx, _event_rx) = mpsc::channel(DEFAULT_INGEST_QUEUE_CAPACITY);
+    let core_api = CoreApiService::new(event_tx).with_supervisor(supervisor.clone());
+    let core_server = CoreIpcServer::new(&core_sock, core_api);
+    let (core_shutdown_tx, core_shutdown_rx) = oneshot::channel();
+    let core_task = tokio::spawn(async move {
+        core_server
+            .run(async move {
+                let _ = core_shutdown_rx.await;
+            })
+            .await
+            .expect("Core server failed");
+    });
+    wait_for_path(&core_sock).await;
+
+    // A host that announces it started but never binds its socket, then exits: its launch stays
+    // in flight for about a second and then fails.
+    let launch = tokio::spawn({
+        let supervisor = supervisor.clone();
+        async move {
+            supervisor
+                .spawn_plugin(
+                    "slow_host",
+                    "sh",
+                    &["-c", "touch \"$KANON_HOST_SOCK.started\"; sleep 1"],
+                )
+                .await
+        }
+    });
+    let host_sock = host_socket_path("slow_host", Some(tmp.path()));
+    wait_for_path(&PathBuf::from(format!("{}.started", host_sock.display()))).await;
+
+    let mut client = BotApiServiceClient::new(connect_ipc(&core_sock).await.expect("dial core"));
+    let registration = RegisterHostRequest {
+        host_id: "slow_host".to_string(),
+        runtime: "rust".to_string(),
+        endpoint: host_sock.to_string_lossy().to_string(),
+        loaded_plugin_ids: vec!["test.plugin".to_string()],
+    };
+    let response = client
+        .register_host(registration.clone())
+        .await
+        .expect("RegisterHost RPC")
+        .into_inner();
+    assert!(response.success, "{}", response.message);
+    assert!(
+        supervisor.get_host("slow_host").await.is_none(),
+        "the launch, not the registration, adds a launched host once it serves"
+    );
+
+    // Once the launch has failed it no longer claims the id, so the same registration is an
+    // external one again and fails on the socket nobody bound.
+    let launched = launch.await.expect("launch task");
+    assert!(
+        matches!(launched, Err(SupervisorError::PrematureExit { .. })),
+        "{launched:?}"
+    );
+    let response = client
+        .register_host(registration)
+        .await
+        .expect("RegisterHost RPC")
+        .into_inner();
+    assert!(!response.success, "{}", response.message);
+
+    let _ = core_shutdown_tx.send(());
     let _ = core_task.await;
 }
 

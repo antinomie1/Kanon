@@ -4,7 +4,7 @@
 //! (`./run/host_<id>.sock`), verifying socket readiness, conducting initial
 //! `GetPluginMeta` handshakes, and ensuring graceful process termination and cleanup.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -541,6 +541,61 @@ pub struct Supervisor {
     unavailable_plugins: Arc<RwLock<HashMap<String, UnavailablePlugin>>>,
     /// Interpreter for TypeScript plugins; `bun`, then `node`, from `PATH` when unset.
     typescript_runtime: Option<PathBuf>,
+    /// Host ids whose process this supervisor is starting right now (see [`LaunchGuard`]).
+    ///
+    /// A launched host calls `RegisterHost` while its launch is still waiting for the socket, and
+    /// the Rust SDK does so before it even binds the socket. The launch owns that host's handshake
+    /// and registry entry, so [`Supervisor::register_host_endpoint`] must only acknowledge it:
+    /// dialing back would fail on the missing socket, or wait on a host that is itself waiting
+    /// for the registration reply. A std mutex suffices because no await happens while it is held.
+    launching: Arc<std::sync::Mutex<HashSet<String>>>,
+}
+
+/// Outcome of a host's `RegisterHost` call.
+#[derive(Debug)]
+pub enum HostRegistration {
+    /// The host is in the registry: it already was, or it was just attached from its endpoint.
+    Registered(Arc<ManagedHost>),
+    /// This supervisor is launching the host; that launch completes the handshake and adds the
+    /// registry entry once the host is serving.
+    Launching,
+}
+
+/// Marks a host id as being launched for as long as the guard lives.
+///
+/// Dropping clears the mark on every exit of the launch, including early returns and failures,
+/// so a host whose launch failed is never mistaken for one still starting.
+struct LaunchGuard {
+    launching: Arc<std::sync::Mutex<HashSet<String>>>,
+    host_id: String,
+}
+
+impl LaunchGuard {
+    fn new(launching: &Arc<std::sync::Mutex<HashSet<String>>>, host_id: &str) -> Self {
+        lock_launching(launching).insert(host_id.to_string());
+        Self {
+            launching: launching.clone(),
+            host_id: host_id.to_string(),
+        }
+    }
+}
+
+impl Drop for LaunchGuard {
+    fn drop(&mut self) {
+        lock_launching(&self.launching).remove(&self.host_id);
+    }
+}
+
+/// Locks the set of launching hosts.
+///
+/// Its critical sections are single `HashSet` operations that cannot panic midway, so a poisoned
+/// lock still guards a consistent set and is safe to reuse.
+fn lock_launching(
+    launching: &std::sync::Mutex<HashSet<String>>,
+) -> std::sync::MutexGuard<'_, HashSet<String>> {
+    launching
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
 }
 
 impl std::fmt::Debug for Supervisor {
@@ -676,6 +731,7 @@ impl Supervisor {
             config_versions: Arc::new(RwLock::new(HashMap::new())),
             unavailable_plugins: Arc::new(RwLock::new(HashMap::new())),
             typescript_runtime: None,
+            launching: Arc::new(std::sync::Mutex::new(HashSet::new())),
         }
     }
 
@@ -881,6 +937,9 @@ impl Supervisor {
         spec: LaunchSpec,
         manifest: Option<PluginManifest>,
     ) -> Result<Arc<ManagedHost>, SupervisorError> {
+        // Held until this function returns: the host registers itself while we are still
+        // waiting for its socket below, and that registration must not dial it (see `launching`).
+        let _launching = LaunchGuard::new(&self.launching, host_id);
         let socket_path = host_socket_path(host_id, Some(&self.run_dir));
 
         // Clean up stale socket file if it exists prior to launching child.
@@ -1262,22 +1321,35 @@ impl Supervisor {
 
     /// Binds an external or gRPC-registered plugin host endpoint into the unified Supervisor registry.
     ///
-    /// If the host has already been spawned and registered by this supervisor, returns the existing instance.
-    /// Otherwise, establishes an IPC connection to `endpoint`, performs the [`GetPluginMeta`] handshake,
-    /// and inserts a new [`ManagedHost`] into the host registry.
+    /// If the host has already been spawned and registered by this supervisor, returns the existing
+    /// instance. If this supervisor is still launching it, the registration is only acknowledged
+    /// ([`HostRegistration::Launching`]): the launch performs the handshake once the host serves.
+    /// Otherwise, establishes an IPC connection to `endpoint`, performs the [`GetPluginMeta`]
+    /// handshake, and inserts a new [`ManagedHost`] into the host registry.
     pub async fn register_host_endpoint(
         &self,
         host_id: &str,
         _runtime: &str,
         endpoint: &str,
         loaded_plugin_ids: &[String],
-    ) -> Result<Arc<ManagedHost>, SupervisorError> {
+    ) -> Result<HostRegistration, SupervisorError> {
+        // The launch mark is read before the registry: a launch sets it before spawning and
+        // inserts its host before clearing it, so reading in this order never misses a host that
+        // this supervisor owns. The reverse order could miss both and dial the host a second time,
+        // replacing the launched entry (and its child handle) with an unmanaged one.
+        if lock_launching(&self.launching).contains(host_id) {
+            tracing::info!(
+                host_id = %host_id,
+                "Host is being launched by this Supervisor; the launch completes its registration"
+            );
+            return Ok(HostRegistration::Launching);
+        }
         if let Some(existing) = self.get_host(host_id).await {
             tracing::info!(
                 host_id = %host_id,
                 "Host already known to Supervisor; keeping existing registration"
             );
-            return Ok(existing);
+            return Ok(HostRegistration::Registered(existing));
         }
 
         let socket_path = PathBuf::from(endpoint);
@@ -1326,7 +1398,7 @@ impl Supervisor {
             "Externally registered host added to unified Supervisor registry"
         );
 
-        Ok(managed_host)
+        Ok(HostRegistration::Registered(managed_host))
     }
 
     /// Retrieves an active managed host by its identifier.

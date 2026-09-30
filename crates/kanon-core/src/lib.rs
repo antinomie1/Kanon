@@ -71,8 +71,8 @@ pub use skill::{
     SkillStore, allowed_skills, catalog_prompt,
 };
 pub use supervisor::{
-    AdapterRoute, HOST_WATCHDOG_INTERVAL, HOST_WATCHDOG_MAX_RESTARTS, HostHealth, LaunchSpec,
-    ManagedHost, Supervisor, SupervisorError, UnavailablePlugin,
+    AdapterRoute, HOST_WATCHDOG_INTERVAL, HOST_WATCHDOG_MAX_RESTARTS, HostHealth, HostRegistration,
+    LaunchSpec, ManagedHost, Supervisor, SupervisorError, UnavailablePlugin,
     circuit_breaker::{CircuitBreaker, CircuitBreakerConfig, CircuitState},
 };
 pub use toggle::{DEFAULT_TOGGLE_STATE, MCP_SECTION, PLUGIN_SECTION, SKILL_SECTION, ToggleStore};

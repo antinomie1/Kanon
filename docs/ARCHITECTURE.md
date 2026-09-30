@@ -98,7 +98,7 @@ flowchart TB
 | 阶段 | 行为 | 责任方 |
 | :--- | :--- | :--- |
 | 启动 | `Supervisor` 以 `KANON_HOST_ID` / `KANON_HOST_SOCK` / `KANON_CORE_SOCK` 注入环境并拉起子进程 | Core |
-| 注册 | 宿主先绑定专属 `host_<id>.sock`，再 `RegisterHost`（注册即连通性探针；失败则显式进入 standalone） | 宿主 |
+| 注册 | 宿主调用 `RegisterHost`（注册即连通性探针；失败则显式进入 standalone）。Supervisor 正在拉起的宿主只获确认，`GetPluginMeta` 握手由拉起流程在其 `host_<id>.sock` 就绪后完成；只有外部宿主会被 Core 回拨，须先开始服务再注册 | 宿主 + Core |
 | 服务 | `MessagePipelineService`（事件/指令/工具/投递）+ `PluginHostService`（生命周期、配置热重载、管理动作） | 宿主 |
 | 存活 | 定时 `BotApiService.Ping` 探活 Core；**连续 3 次失败（默认 15s 间隔）即自行退出**，避免抢占平台连接 | 宿主（Python `CoreWatchdog` / Rust `watch_core` / TS `startCoreWatchdog`） |
 | 停止 | `SIGTERM`/`SIGINT` → 执行 `on_unload` → 关闭平台连接 → 卸载 socket | 宿主 |

@@ -22,7 +22,7 @@ use kanon_proto::v1::{
 use kanon_transport::{IpcListener, core_socket_path};
 
 use crate::adapter::{EventIngress, IngestError};
-use crate::supervisor::Supervisor;
+use crate::supervisor::{HostRegistration, Supervisor};
 use kanon_llm::{AgentSlot, ChatMessage, ChatRequest, LlmGateway};
 use tokio_stream::StreamExt;
 
@@ -146,9 +146,19 @@ impl BotApiService for CoreApiService {
             )
             .await
         {
-            Ok(_) => Ok(Response::new(RegisterHostResponse {
+            Ok(HostRegistration::Registered(_)) => Ok(Response::new(RegisterHostResponse {
                 success: true,
                 message: format!("Host '{}' registered successfully", req.host_id),
+                core_metadata: None,
+            })),
+            // The host was launched by this core, which finishes its handshake as soon as the
+            // host serves; the host must not wait for that, since it may register before serving.
+            Ok(HostRegistration::Launching) => Ok(Response::new(RegisterHostResponse {
+                success: true,
+                message: format!(
+                    "Host '{}' acknowledged; the core completes its handshake once it serves",
+                    req.host_id
+                ),
                 core_metadata: None,
             })),
             Err(e) => {
