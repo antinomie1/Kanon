@@ -4,6 +4,8 @@ import type {
   CallPluginToolResponse,
   ChatCompletionRequest,
   ChatCompletionResponse,
+  CommandPolicy,
+  CommandPolicyResponse,
   ContextPolicy,
   ContextPolicyResponse,
   CreatePersonaRequest,
@@ -139,6 +141,13 @@ export const api = {
     request<ContextPolicyResponse>('/api/v1/system/context-policy'),
   setContextPolicy: (policy: ContextPolicy) =>
     request<ContextPolicyResponse>('/api/v1/system/context-policy', {
+      method: 'PUT',
+      body: JSON.stringify(policy),
+    }),
+  getCommandPolicy: () =>
+    request<CommandPolicyResponse>('/api/v1/system/command-policy'),
+  setCommandPolicy: (policy: CommandPolicy) =>
+    request<CommandPolicyResponse>('/api/v1/system/command-policy', {
       method: 'PUT',
       body: JSON.stringify(policy),
     }),

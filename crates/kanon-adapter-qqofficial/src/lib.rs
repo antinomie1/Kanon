@@ -21,7 +21,7 @@ use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Arc, Mutex as StdMutex, RwLock};
 
 use async_trait::async_trait;
-use kanon_core::{AdapterError, EventIngress, PlatformAdapter};
+use kanon_core::{AdapterError, Capability, EventIngress, PlatformAdapter};
 use kanon_proto::v1::message_segment::Segment;
 use kanon_proto::v1::{
     DeliverMessageRequest, DeliverMessageResponse, PipelineEventRequest, audio_segment,
@@ -34,6 +34,17 @@ use tokio::task::JoinHandle;
 
 use api::{Api, MediaKind, MediaSource};
 use mapping::{Quote, QuoteStore};
+
+/// What this adapter implements through the generic adapter contract.
+///
+/// A public QQ bot only receives group messages that @-mention it, and group events carry openids
+/// rather than names or roles, so it does not declare group observation, sender names or roles.
+const CAPABILITIES: &[Capability] = &[
+    Capability::QuoteReply,
+    Capability::Acknowledge,
+    Capability::BotJoin,
+    Capability::FriendAdd,
+];
 
 /// How many recent messages are remembered for resolving quotes.
 const QUOTE_MEMORY: usize = 2048;
@@ -345,12 +356,19 @@ impl PlatformAdapter for QqOfficialAdapter {
         .map_err(|_| configuration_error("QQ Official lifecycle task failed".into()))
     }
 
-    /// Shows "typing…" in a C2C chat when the operator enabled it; other chats have no indicator.
+    fn capabilities(&self) -> &[Capability] {
+        CAPABILITIES
+    }
+
+    /// Shows "typing…" in a C2C chat; QQ has no indicator for other chats.
+    ///
+    /// QQ counts the indicator as one of the few passive replies a message allows, which is why
+    /// the reply policy leaves acknowledgements off unless an operator turns them on.
     async fn acknowledge(&self, event: &PipelineEventRequest) -> Result<(), AdapterError> {
         let api = {
             let shared = self.read();
             match &shared.api {
-                Some(api) if shared.config.typing_indicator => api.clone(),
+                Some(api) => api.clone(),
                 _ => return Ok(()),
             }
         };

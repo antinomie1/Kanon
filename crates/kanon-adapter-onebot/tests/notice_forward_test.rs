@@ -1,7 +1,7 @@
 //! OneBot notices, merged forwards, @-mention names and quotes of ingested events.
 
 use kanon_adapter_onebot::mapping::{
-    Request, attach_forward, delivery, forward_ids, map_event, map_notice, map_request,
+    accept_request_call, attach_forward, delivery, forward_ids, map_event, map_notice, map_request,
     name_mention, needs_lookup, unnamed_mentions,
 };
 use kanon_proto::prost_types::value::Kind;
@@ -102,21 +102,38 @@ fn joins_and_pokes_of_the_bot_become_notices() {
     );
 }
 
+/// Friend requests and invitations become request notices whose token accepts them; somebody
+/// else asking to join a group is the group admins' business.
 #[test]
-fn only_friend_requests_and_invitations_are_candidates_for_auto_accept() {
-    let friend =
-        map_request(&json!({"post_type": "request", "request_type": "friend", "flag": "f1"}));
-    assert!(matches!(friend, Some(Request::Friend { flag }) if flag == "f1"));
-    let invite = map_request(
-        &json!({"post_type": "request", "request_type": "group", "sub_type": "invite", "flag": "g1"}),
+fn requests_become_notices_that_can_be_accepted() {
+    let request = |value: Value| map_request("onebot", &value).unwrap();
+    let friend = request(json!({"post_type": "request", "request_type": "friend",
+        "self_id": 10001, "user_id": 20002, "flag": "f1"}))
+    .expect("a friend request is reported");
+    assert_eq!(
+        meta(&friend, "kanon.notice").as_deref(),
+        Some("friend_request")
     );
-    assert!(matches!(invite, Some(Request::GroupInvite { flag }) if flag == "g1"));
-    let join = map_request(
-        &json!({"post_type": "request", "request_type": "group", "sub_type": "add", "flag": "a1"}),
-    );
+    assert_eq!(friend.channel_id, "private:20002");
+    let (action, params) = accept_request_call(&friend).unwrap();
+    assert_eq!(action, "set_friend_add_request");
+    assert_eq!(params, json!({"flag": "f1", "approve": true}));
+
+    let invite = request(
+        json!({"post_type": "request", "request_type": "group", "sub_type": "invite",
+        "self_id": 10001, "user_id": 20002, "group_id": 30003, "flag": "g1"}),
+    )
+    .expect("an invitation is reported");
+    let (action, params) = accept_request_call(&invite).unwrap();
+    assert_eq!(action, "set_group_add_request");
+    assert_eq!(params["sub_type"], "invite");
+
     assert!(
-        join.is_none(),
-        "someone else asking to join is for the group admins"
+        request(
+            json!({"post_type": "request", "request_type": "group", "sub_type": "add",
+            "self_id": 10001, "user_id": 20002, "group_id": 30003, "flag": "a1"})
+        )
+        .is_none()
     );
 }
 
@@ -208,4 +225,13 @@ fn mentions_get_names_and_quotes_of_events_use_the_message_id() {
         params["message"][0],
         json!({"type": "reply", "data": {"id": "555"}})
     );
+}
+
+#[test]
+fn group_messages_report_the_generic_sender_name_and_role() {
+    let mut message = group_message(json!([{"type": "text", "data": {"text": "hi"}}]));
+    message["sender"] = json!({"nickname": "Alice", "card": "群名片", "role": "admin"});
+    let event = map_event("onebot", message).unwrap().unwrap();
+    assert_eq!(meta(&event, "kanon.sender_name").as_deref(), Some("群名片"));
+    assert_eq!(meta(&event, "kanon.sender_role").as_deref(), Some("admin"));
 }

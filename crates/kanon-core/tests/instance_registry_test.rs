@@ -15,6 +15,7 @@ fn draft(name: &str, enabled: bool, adapters: &[&str]) -> InstanceDraft {
         plugins: Default::default(),
         skills: Default::default(),
         mcp: Default::default(),
+        ..Default::default()
     }
 }
 
@@ -224,6 +225,7 @@ async fn update_preserves_session_history_and_validates_input() {
                 plugins: Default::default(),
                 skills: Default::default(),
                 mcp: Default::default(),
+                ..Default::default()
             },
         )
         .await

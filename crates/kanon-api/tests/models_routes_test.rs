@@ -359,3 +359,55 @@ async fn the_event_policy_is_applied_and_persisted() {
         .expect("settings reload");
     assert!(restored.event_policy.welcome_members);
 }
+
+#[tokio::test]
+async fn the_command_policy_is_validated_normalized_and_persisted() {
+    let dir = tempfile::tempdir().expect("config dir");
+    let state = isolated_state(dir.path().to_path_buf());
+    let app = kanon_api::app(state.clone());
+
+    let (_, body) =
+        common::send_json(&app, Method::GET, "/api/v1/system/command-policy", None).await;
+    assert_eq!(body["policy"]["access"]["model"], json!("admins"));
+    assert_eq!(body["policy"]["access"]["new"], json!("admins_in_groups"));
+
+    let (status, _) = common::send_json(
+        &app,
+        Method::PUT,
+        "/api/v1/system/command-policy",
+        Some(json!({ "admins": ["12345"] })),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::BAD_REQUEST,
+        "an admin needs its platform"
+    );
+
+    let (status, body) = common::send_json(
+        &app,
+        Method::PUT,
+        "/api/v1/system/command-policy",
+        Some(json!({
+            "admins": ["onebot:12345"],
+            "group_admins_are_admins": false,
+            "access": { "/NEW": "admins", "weather": "admins_in_groups" }
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "unexpected body: {body}");
+    assert_eq!(body["policy"]["access"]["new"], json!("admins"));
+    assert!(
+        body["policy"]["access"].get("model").is_none(),
+        "the submitted map is the policy"
+    );
+    let restored = state
+        .system_config()
+        .load_node_settings()
+        .expect("settings reload");
+    assert_eq!(
+        restored.command_policy.admins,
+        vec!["onebot:12345".to_string()]
+    );
+    assert!(restored.command_policy.access.contains_key("weather"));
+}

@@ -16,6 +16,9 @@ pub enum ManifestError {
     /// Deserialization failure due to invalid TOML syntax or schema violation.
     #[error("Failed to parse TOML manifest: {0}")]
     Toml(#[from] toml::de::Error),
+    /// A well-formed manifest that declares something a plugin cannot provide.
+    #[error("Invalid manifest: {0}")]
+    Invalid(String),
 }
 
 /// Metadata section `[plugin]` in `plugin.toml`.
@@ -83,6 +86,12 @@ pub struct AdapterSection {
     pub platform: String,
     /// Human-readable name shown in the management console.
     pub display_name: Option<String>,
+    /// Features the plugin implements through the generic adapter contract.
+    ///
+    /// Only capabilities that need no callback into the adapter may be declared: the plugin
+    /// protocol has no acknowledge or accept-request call, so declaring one is a manifest error.
+    #[serde(default)]
+    pub capabilities: Vec<crate::adapter::Capability>,
 }
 
 /// Complete representation of a parsed `plugin.toml` manifest.
@@ -117,6 +126,17 @@ impl PluginManifest {
     pub fn load_from_file(path: impl AsRef<Path>) -> Result<Self, ManifestError> {
         let content = std::fs::read_to_string(path.as_ref())?;
         let manifest: Self = toml::from_str(&content)?;
+        if let Some(capability) = manifest
+            .adapter
+            .iter()
+            .flat_map(|adapter| &adapter.capabilities)
+            .find(|capability| capability.needs_callback())
+        {
+            return Err(ManifestError::Invalid(format!(
+                "plugin adapters cannot declare {capability:?}: it needs a call into the adapter \
+                 that only built-in adapters provide"
+            )));
+        }
         Ok(manifest)
     }
 }

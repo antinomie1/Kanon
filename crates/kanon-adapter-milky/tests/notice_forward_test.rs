@@ -121,3 +121,38 @@ fn a_fetched_forward_is_stored_in_its_segment() {
         Some(Kind::StringValue("看图[image]".into()))
     );
 }
+
+#[test]
+fn requests_carry_a_token_that_names_what_to_accept() {
+    use kanon_adapter_milky::mapping::{AcceptRequest, accept_request_input, map_request};
+
+    let friend = map_request(
+        "milky",
+        &event(json!({
+            "time": 1, "self_id": 10001, "event_type": "friend_request",
+            "data": {"initiator_id": 20002, "initiator_uid": "u_abc", "comment": "hi", "via": "search"}
+        })),
+    )
+    .expect("a friend request is reported");
+    assert_eq!(
+        meta(&friend, "kanon.notice").as_deref(),
+        Some("friend_request")
+    );
+    assert!(matches!(
+        accept_request_input(&friend),
+        Ok(AcceptRequest::Friend(uid)) if uid == "u_abc"
+    ));
+
+    let invite = map_request(
+        "milky",
+        &event(json!({
+            "time": 1, "self_id": 10001, "event_type": "group_invitation",
+            "data": {"group_id": 30003, "invitation_seq": 7, "initiator_id": 20002}
+        })),
+    )
+    .expect("an invitation is reported");
+    assert!(matches!(
+        accept_request_input(&invite),
+        Ok(AcceptRequest::Group(30003, 7))
+    ));
+}

@@ -16,8 +16,8 @@ use kanon_adapter_milky::MilkyAdapter;
 use kanon_adapter_onebot::OneBotAdapter;
 use kanon_adapter_qqofficial::QqOfficialAdapter;
 use kanon_core::{
-    BashAvailabilityHook, BashPolicyStore, BashTool, ContextPolicyStore, EventIngress,
-    EventPolicyStore, InstanceRegistry, McpConfigStore, McpPool, ModelBashReviewer,
+    BashAvailabilityHook, BashPolicyStore, BashTool, CommandPolicyStore, ContextPolicyStore,
+    EventIngress, EventPolicyStore, InstanceRegistry, McpConfigStore, McpPool, ModelBashReviewer,
     ReplyPolicyStore, SkillStore, Supervisor, ToggleStore,
 };
 use kanon_llm::{
@@ -82,6 +82,8 @@ struct ApiStateInner {
     bash_tool: Option<Arc<BashTool>>,
     /// Node-wide notice policy, shared with the pipeline worker.
     event_policy: Arc<EventPolicyStore>,
+    /// Node-wide command permissions, shared with the pipeline worker.
+    command_policy: Arc<CommandPolicyStore>,
     /// In-memory view of the persisted model-routing settings.
     ///
     /// Kept alongside the store so a read (listing providers, resolving a model) never touches the
@@ -256,6 +258,11 @@ impl ApiState {
         &self.inner.event_policy
     }
 
+    /// Node-wide command permissions shared with the pipeline worker.
+    pub fn command_policy(&self) -> &Arc<CommandPolicyStore> {
+        &self.inner.command_policy
+    }
+
     /// Snapshot of the persisted model-routing settings.
     pub fn node_settings(&self) -> NodeSettings {
         self.inner
@@ -287,6 +294,9 @@ impl ApiState {
         self.inner.context_policy.set(settings.context_policy);
         self.inner.bash_policy.set(settings.bash_policy.clone());
         self.inner.event_policy.set(settings.event_policy);
+        self.inner
+            .command_policy
+            .set(settings.command_policy.clone());
         *self
             .inner
             .node_settings
@@ -789,6 +799,9 @@ impl ApiStateBuilder {
             .unwrap_or_default();
         bash_policy.set(node_settings.bash_policy.clone());
         let event_policy = Arc::new(EventPolicyStore::new(node_settings.event_policy));
+        let command_policy = Arc::new(CommandPolicyStore::new(
+            node_settings.command_policy.clone(),
+        ));
 
         let instances = self.instances.unwrap_or_default();
         let plugin_state = self.plugin_state.unwrap_or_default();
@@ -832,6 +845,7 @@ impl ApiStateBuilder {
                 bash_policy,
                 bash_tool: self.bash_tool,
                 event_policy,
+                command_policy,
                 node_settings: Arc::new(RwLock::new(node_settings)),
                 milky: self.milky,
                 onebot: self.onebot,

@@ -11,6 +11,7 @@ pub mod command;
 pub mod context;
 pub mod dead_letter;
 pub mod engine;
+pub mod group_log;
 pub mod observer;
 pub mod pre_filter;
 

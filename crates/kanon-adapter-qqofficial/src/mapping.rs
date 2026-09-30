@@ -464,6 +464,7 @@ pub fn map_event(
     }
     if !event.author.username.is_empty() {
         metadata["qqofficial.sender_name"] = json!(event.author.username);
+        metadata[kanon_core::META_SENDER_NAME] = json!(event.author.username);
     }
     if scene == "guild" && !event.guild_id.is_empty() {
         metadata["qqofficial.guild_id"] = json!(event.guild_id);

@@ -254,6 +254,19 @@ impl ManagedHost {
             })
     }
 
+    /// Returns the capabilities this host's adapter declaration lists, sorted.
+    pub fn adapter_capabilities(&self) -> Vec<crate::adapter::Capability> {
+        let mut capabilities: Vec<_> = self
+            .manifest
+            .as_ref()
+            .and_then(|manifest| manifest.adapter.as_ref())
+            .map(|adapter| adapter.capabilities.clone())
+            .unwrap_or_default();
+        capabilities.sort();
+        capabilities.dedup();
+        capabilities
+    }
+
     /// Returns the plugin identifier of this host's adapter declaration, when present.
     ///
     /// The manifest's plugin id is authoritative here even before a handshake reports metadata.
@@ -766,6 +779,11 @@ impl Supervisor {
                 circuit_state: CircuitState::Closed,
                 plugin_id: None,
                 host_id: None,
+                capabilities: {
+                    let mut capabilities = adapter.capabilities().to_vec();
+                    capabilities.sort();
+                    capabilities
+                },
             });
         }
 
@@ -791,6 +809,7 @@ impl Supervisor {
                     circuit_state: CircuitState::Closed,
                     plugin_id: plugin_id.clone(),
                     host_id: Some(host.host_id.clone()),
+                    capabilities: host.adapter_capabilities(),
                 });
             }
         }

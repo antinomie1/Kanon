@@ -25,7 +25,6 @@ class QqOfficialStore {
   formSecret = $state('');
   formSandbox = $state(false);
   formMarkdown = $state(false);
-  formTypingIndicator = $state(false);
 
   loading = $state(false);
   saving = $state(false);
@@ -130,7 +129,6 @@ class QqOfficialStore {
         app_id: this.formAppId,
         sandbox: this.formSandbox,
         markdown: this.formMarkdown,
-        typing_indicator: this.formTypingIndicator,
         secret: this.formSecret || undefined,
       });
       this.applyView(view);
@@ -162,7 +160,6 @@ class QqOfficialStore {
     this.formSecret = '';
     this.formSandbox = view.config.sandbox;
     this.formMarkdown = view.config.markdown;
-    this.formTypingIndicator = view.config.typing_indicator;
   }
 }
 

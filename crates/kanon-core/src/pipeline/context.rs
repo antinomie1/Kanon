@@ -158,8 +158,8 @@ fn notice_line(metadata: Option<&prost_types::Struct>) -> Option<String> {
         },
         NoticeKind::FriendAdd => format!("[事件] {} 添加你为好友", actor.unwrap_or("对方")),
         NoticeKind::Poke => format!("[事件] {} 戳了戳你", actor.unwrap_or("有人")),
-        // Recalls never reach the model as a turn of their own.
-        NoticeKind::Recall => return None,
+        // Recalls and requests never reach the model as a turn of their own.
+        NoticeKind::Recall | NoticeKind::FriendRequest | NoticeKind::GroupInvite => return None,
     })
 }
 

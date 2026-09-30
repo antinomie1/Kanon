@@ -170,6 +170,7 @@ async fn instance(registry: &InstanceRegistry, policy: Option<ReplyPolicy>) -> S
             plugins: Default::default(),
             skills: Default::default(),
             mcp: Default::default(),
+            ..Default::default()
         })
         .await
         .expect("create instance")
@@ -594,6 +595,7 @@ async fn instance_with_context(
             plugins: Default::default(),
             skills: Default::default(),
             mcp: Default::default(),
+            ..Default::default()
         })
         .await
         .expect("create instance")

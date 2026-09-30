@@ -305,14 +305,62 @@ export const dictionaries = {
     'events.recall': 'Tell the model about recalls',
     'events.recall_hint':
       'When a message the model already saw is recalled, its next turn in that conversation says so, so it stops referring to it. Recalled messages it never saw are not revealed.',
-    'adapters.automation': 'Automation',
-    'adapters.auto_accept_friends': 'Accept friend requests automatically',
-    'adapters.auto_accept_group_invites':
-      'Accept group invitations automatically',
-    'adapters.reaction_ack':
-      'React with 👍 to a group message the bot is about to answer',
-    'adapters.qq_typing':
-      'Show "typing…" in private chats while the model works (uses one of QQ\'s passive-reply slots)',
+
+    'reply.acknowledge': 'Show progress before answering',
+    'reply.acknowledge_hint':
+      "While the model works, the platform shows that an answer is coming — a typing indicator in QQ private chats (uses one of QQ's passive-reply slots), a 👍 on the group message in Milky.",
+    'events.accept_friends': 'Accept friend requests automatically',
+    'events.accept_friends_hint':
+      'Otherwise requests wait for a human on the platform.',
+    'events.accept_invites': 'Accept group invitations automatically',
+    'events.accept_invites_hint':
+      'Otherwise invitations wait for a human on the platform.',
+    'commands.title': 'Command permissions',
+    'commands.hint':
+      "Some commands change what other people get: /model switches the whole bot's model, /new in a shared group session clears everyone's context. Choose who may run them.",
+    'commands.admins': 'Bot administrators',
+    'commands.level_admins': 'Administrators only',
+    'commands.admins_hint':
+      "One per line as <platform>:<user id>. A refused command replies with the sender's ID, ready to paste here.",
+    'commands.group_admins': 'Group owners and admins count as administrators',
+    'commands.group_admins_hint':
+      'In their own group, as the platform reports their role.',
+    'commands.access': 'Who may run each command',
+    'commands.access_hint':
+      'Commands not listed are open to everyone; plugin commands can be added too.',
+    'commands.level_everyone': 'Everyone',
+    'commands.level_admins_in_groups':
+      'Anyone in private chats, admins in groups',
+    'commands.add': 'Add',
+    'commands.add_placeholder': 'command name, e.g. weather',
+    'commands.remove': 'Remove',
+    'commands.updated': 'Command permissions updated',
+    'group.title': 'Group context',
+    'group.hint': 'How the bot keeps track of conversations in groups.',
+    'group.scope_user': 'Each member has their own session',
+    'group.scope_group': 'The whole group shares one session',
+    'group.scope_user_hint':
+      "Members never see each other's history with the bot, and /new only resets the sender's own session.",
+    'group.scope_group_hint':
+      'The bot follows discussions between several people; every message is labelled with its speaker, and /new resets the whole group.',
+    'group.observe': 'Observe the group',
+    'group.observe_hint':
+      'Unanswered group messages (at most 30, from the last 30 minutes) are shown to the model the next time it is addressed. They are then sent to the model provider as well.',
+    'capability.supported_by': 'Supported by',
+    'capability.none': 'No registered adapter supports this',
+    'capability.sender_name': 'Sender names',
+    'capability.sender_role': 'Group roles',
+    'capability.group_messages': 'All group messages',
+    'capability.quote_reply': 'Quoted replies',
+    'capability.forward_content': 'Forward content',
+    'capability.acknowledge': 'Progress feedback',
+    'capability.member_join': 'Member joins',
+    'capability.bot_join': 'Added to groups',
+    'capability.friend_add': 'Added as friend',
+    'capability.poke': 'Pokes',
+    'capability.recall': 'Recalls',
+    'capability.friend_requests': 'Friend requests',
+    'capability.group_invites': 'Group invitations',
 
     // OneBot v11 adapter
     'adapters.onebot_title': 'OneBot v11 Adapter',
@@ -1033,12 +1081,58 @@ export const dictionaries = {
     'events.recall': '撤回提示',
     'events.recall_hint':
       '模型看过的消息被撤回后，在该会话的下一轮告诉模型，避免它继续引用。模型没看过的消息不会因此被透露。',
-    'adapters.automation': '自动化',
-    'adapters.auto_accept_friends': '自动同意好友申请',
-    'adapters.auto_accept_group_invites': '自动同意入群邀请',
-    'adapters.reaction_ack': '准备回复群消息时先给它点个 👍',
-    'adapters.qq_typing':
-      '私聊中模型思考时显示「对方正在输入」（会占用一次 QQ 被动回复额度）',
+
+    'reply.acknowledge': '回复前给出处理中反馈',
+    'reply.acknowledge_hint':
+      '模型思考时，让平台显示「正在回复」——QQ 私聊显示「对方正在输入」（会占用一次 QQ 被动回复额度），Milky 群聊给原消息点个 👍。',
+    'events.accept_friends': '自动同意好友申请',
+    'events.accept_friends_hint': '关闭时申请留在平台上等人工处理。',
+    'events.accept_invites': '自动同意入群邀请',
+    'events.accept_invites_hint': '关闭时邀请留在平台上等人工处理。',
+    'commands.title': '命令权限',
+    'commands.hint':
+      '有些命令会影响别人：/model 切换整个机器人的模型，共享群会话里的 /new 会清空全群的上下文。在这里决定谁能使用它们。',
+    'commands.admins': '机器人管理员',
+    'commands.level_admins': '仅管理员',
+    'commands.admins_hint':
+      '每行一个，格式为 <平台>:<用户 ID>。被拒绝的命令会回复发送者的 ID，可直接复制到这里。',
+    'commands.group_admins': '群主和群管理员也算管理员',
+    'commands.group_admins_hint':
+      '仅在其所在的群内生效，以平台报告的群角色为准。',
+    'commands.access': '各命令的使用权限',
+    'commands.access_hint': '未列出的命令所有人可用；也可以加入插件命令。',
+    'commands.level_everyone': '所有人',
+    'commands.level_admins_in_groups': '私聊所有人，群聊仅管理员',
+    'commands.add': '添加',
+    'commands.add_placeholder': '命令名，例如 weather',
+    'commands.remove': '移除',
+    'commands.updated': '命令权限已更新',
+    'group.title': '群聊上下文',
+    'group.hint': '机器人在群里如何记住对话。',
+    'group.scope_user': '每个成员各自一个会话',
+    'group.scope_group': '全群共享一个会话',
+    'group.scope_user_hint':
+      '成员之间看不到彼此与机器人的对话，/new 只重置发送者自己的会话。',
+    'group.scope_group_hint':
+      '机器人能跟上多人讨论，每条消息都会标注说话人，/new 会重置全群的会话。',
+    'group.observe': '旁听群聊',
+    'group.observe_hint':
+      '未被回复的群消息（最多 30 条、30 分钟内）会在机器人下次被 @ 时一并交给模型，这些消息因此也会发送给模型服务商。',
+    'capability.supported_by': '支持的适配器',
+    'capability.none': '当前没有已注册的适配器支持此功能',
+    'capability.sender_name': '发送者名称',
+    'capability.sender_role': '群角色',
+    'capability.group_messages': '全部群消息',
+    'capability.quote_reply': '引用回复',
+    'capability.forward_content': '合并转发内容',
+    'capability.acknowledge': '处理中反馈',
+    'capability.member_join': '进群通知',
+    'capability.bot_join': '被拉群通知',
+    'capability.friend_add': '加好友通知',
+    'capability.poke': '戳一戳',
+    'capability.recall': '撤回通知',
+    'capability.friend_requests': '好友申请',
+    'capability.group_invites': '入群邀请',
 
     // OneBot v11 adapter
     'adapters.onebot_title': 'OneBot v11 适配器',

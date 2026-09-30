@@ -126,6 +126,10 @@ pub struct ReplyPolicy {
     /// it is only noise, so it is an operator choice. Private conversations are never quoted.
     #[serde(default)]
     pub quote_message: bool,
+    /// Whether the adapter shows that an answer is on its way (a typing indicator, a reaction)
+    /// before the model starts; only adapters with the `acknowledge` capability do anything.
+    #[serde(default)]
+    pub acknowledge: bool,
 }
 
 /// Default reply probability for [`ReplyMode::Probability`].
@@ -141,6 +145,7 @@ impl Default for ReplyPolicy {
             mode: ReplyMode::Always,
             probability: default_probability(),
             quote_message: false,
+            acknowledge: false,
         }
     }
 }

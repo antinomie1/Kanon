@@ -141,6 +141,7 @@ async fn instance(registry: &InstanceRegistry, enabled: bool, adapters: &[&str])
             plugins: Default::default(),
             skills: Default::default(),
             mcp: Default::default(),
+            ..Default::default()
         })
         .await
         .expect("create instance")
@@ -295,6 +296,7 @@ async fn a_plugin_disabled_for_an_instance_is_removed_before_pre_filter() {
             )]),
             skills: Default::default(),
             mcp: Default::default(),
+            ..Default::default()
         })
         .await
         .expect("create instance");

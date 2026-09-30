@@ -354,6 +354,25 @@ fn translate_incoming_message(message: &IncomingMessage, self_id: i64) -> Incomi
     for (key, value) in extra {
         metadata_fields.insert(key, value);
     }
+    // Platform-neutral name (group card first) and role, read by the core for speaker labels and
+    // command access.
+    let generic_name = [META_SENDER_CARD, META_SENDER_NAME]
+        .into_iter()
+        .filter_map(|key| metadata_fields.get(key).and_then(Value::as_str))
+        .map(str::trim)
+        .find(|name| !name.is_empty())
+        .map(str::to_owned);
+    if let Some(name) = generic_name {
+        metadata_fields.insert(kanon_core::META_SENDER_NAME.to_string(), json!(name));
+    }
+    if let Some(role) = metadata_fields
+        .get(META_SENDER_ROLE)
+        .and_then(Value::as_str)
+        .filter(|role| !role.is_empty())
+        .map(str::to_owned)
+    {
+        metadata_fields.insert(kanon_core::META_SENDER_ROLE.to_string(), json!(role));
+    }
 
     IncomingTranslation {
         channel_id: channel_id(scene, peer_id),
@@ -1123,4 +1142,74 @@ pub fn attach_forward(
         .fields
         .insert("messages".into(), json_to_value(&Value::Array(rendered)));
     Ok(())
+}
+
+/// Translates a friend request or group invitation into a notice the core may accept.
+///
+/// The request token names what [`accept_request_input`] needs: the initiator's UID for a friend
+/// request, the group and invitation sequence for an invitation.
+pub fn map_request(platform: &str, event: &Event) -> Option<PipelineEventRequest> {
+    let self_id = event.self_id();
+    let (kind, channel, sender, token) = match event {
+        Event::FriendRequest { data, .. } => (
+            "friend_request",
+            channel_id(ChannelScene::Friend, data.initiator_id),
+            data.initiator_id,
+            format!("friend:{}", data.initiator_uid),
+        ),
+        Event::GroupInvitation { data, .. } => (
+            "group_invite",
+            channel_id(ChannelScene::Group, data.group_id),
+            data.initiator_id,
+            format!("group:{}:{}", data.group_id, data.invitation_seq),
+        ),
+        _ => return None,
+    };
+    let metadata = json!({
+        kanon_core::META_NOTICE: kind,
+        kanon_core::META_REQUEST_TOKEN: token,
+        kanon_core::META_NOTICE_ACTOR: sender.to_string(),
+        META_EVENT_TYPE: event.event_type(),
+    });
+    Some(PipelineEventRequest {
+        event_id: format!("{platform}:{self_id}:request:{token}"),
+        platform: platform.to_string(),
+        channel_id: channel,
+        sender_id: sender.to_string(),
+        raw_text: format!("[{kind}]"),
+        segments: Vec::new(),
+        metadata: Some(json_to_struct(&metadata)),
+    })
+}
+
+/// What a request notice's token asks the Milky API to accept.
+pub enum AcceptRequest {
+    /// `accept_friend_request` for this initiator UID.
+    Friend(String),
+    /// `accept_group_invitation` for this group and invitation sequence.
+    Group(i64, i64),
+}
+
+/// Reads the request token [`map_request`] wrote.
+pub fn accept_request_input(event: &PipelineEventRequest) -> Result<AcceptRequest, String> {
+    let token = match event
+        .metadata
+        .as_ref()
+        .and_then(|metadata| metadata.fields.get(kanon_core::META_REQUEST_TOKEN))
+        .and_then(|value| value.kind.as_ref())
+    {
+        Some(prost_types::value::Kind::StringValue(token)) => token.as_str(),
+        _ => return Err("request event lacks its token".into()),
+    };
+    if let Some(uid) = token.strip_prefix("friend:").filter(|uid| !uid.is_empty()) {
+        return Ok(AcceptRequest::Friend(uid.to_string()));
+    }
+    let parsed = token.strip_prefix("group:").and_then(|rest| {
+        let (group, seq) = rest.split_once(':')?;
+        Some((group.parse().ok()?, seq.parse().ok()?))
+    });
+    match parsed {
+        Some((group, seq)) => Ok(AcceptRequest::Group(group, seq)),
+        None => Err(format!("'{token}' is not a Milky request token")),
+    }
 }

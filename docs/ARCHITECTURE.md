@@ -258,6 +258,7 @@ parameters = { type = "object", properties = { city = { type = "string", descrip
 [adapter]
 platform = "weather_im"
 display_name = "Weather IM Adapter"
+capabilities = ["sender_name", "quote_reply"]   # 可选：声明实现了哪些通用能力（见 9.5）
 ```
 
 `plugin.toml` 不声明第三方依赖，出现未知小节（包括旧的 `[dependencies]`）会直接解析失败。Python 插件的依赖写在插件目录的 `pyproject.toml`（附 `uv.lock`），TypeScript 插件写在 `package.json`（附锁文件），由各自的原生工具在插件目录内安装到 `.venv` / `node_modules`。
@@ -835,7 +836,14 @@ sequenceDiagram
 - **撤回提示**：只有模型看过的消息被撤回时，才在该会话下一轮的当前用户消息前加 `[通知] …`；模型没看过的内容绝不因撤回而被透露。提示只进入当前轮，不改变请求前缀。
 - **合并转发**：适配器取回内容写入转发段载荷 `messages: [{sender, text, images}]`；上下文策略 `expand_forward`（默认开）决定是否逐条展开并为识图模型附带图片（有条数与图片上限）。
 - **引用回复**：回复策略 `quote_message` 开启时，群聊/频道中的模型回复首段为指向原事件的 `Reply` 段，由各适配器转换为原生引用。
-- **处理中反馈**：流水线决定用模型回答后，非阻塞调用内置适配器的 `acknowledge()`（默认无操作）；QQ 官方私聊可显示「正在输入」，Milky 群聊可对原消息点赞，均由各自适配器配置开启。
+- **处理中反馈**：回复策略 `acknowledge` 开启时，流水线决定用模型回答后非阻塞调用内置适配器的 `acknowledge()`（默认无操作）；QQ 官方私聊显示「正在输入」，Milky 群聊对原消息点赞。
+- **好友申请与入群邀请**：适配器以 `friend_request` / `group_invite` 通知入站，并在 `kanon.request_token` 中放入仅自己能解读的凭据；事件策略的 `accept_friend_requests` / `accept_group_invites` 开启时，核心调用该适配器的 `accept_request()`。
+
+**适配器能力声明 (Capabilities)**：凡依赖平台差异的功能都走上面的通用契约（元数据键、回复段、`acknowledge()`、`accept_request()`），每个适配器用 `Capability` 声明自己实现了哪些：`sender_name`、`sender_role`、`group_messages`、`quote_reply`、`forward_content`、`acknowledge`、`member_join`、`bot_join`、`friend_add`、`poke`、`recall`、`friend_requests`、`group_invites`。内置适配器实现 `PlatformAdapter::capabilities()`，插件在 `plugin.toml` 的 `[adapter] capabilities` 中声明（需要回调的 `acknowledge` / `friend_requests` / `group_invites` 仅内置适配器可用，插件声明即清单错误）。`GET /api/v1/adapters` 返回每个适配器的能力，控制台在每个相关设置旁列出支持它的适配器——新适配器只需如实声明，无需改动控制台。
+
+**命令权限**：节点级 `command_policy`（`/api/v1/system/command-policy`）列出管理员（`<平台>:<用户 ID>`），可选把群主/群管理员（`kanon.sender_role`）视为管理员，并按命令名设定 `everyone` / `admins_in_groups` / `admins`；默认 `/new` 为「群聊仅管理员」、`/model` 为「仅管理员」，未列出的命令（含插件命令）所有人可用。被拒绝时回复发送者 ID，方便运维加入管理员列表。
+
+**群聊上下文**（实例级）：`session_scope` 为 `user`（默认，群内每人一个会话）或 `group`（全群共享一个会话，每条消息以 `kanon.sender_name` 标注说话人）；`observe_group` 开启时，未被回复的群消息与机器人自己的回复进入有界缓冲（30 条 / 30 分钟），在该会话下次被回答时作为 `[群聊记录]` 放在当前轮开头，并按会话记录已读位置——每行只进入一次历史，请求前缀保持仅追加（`group_context_test` 验证）。旁听依赖 `group_messages` 能力。
 
 ---
 

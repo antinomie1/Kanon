@@ -8,6 +8,7 @@ import {
   RefreshCw,
   Server,
 } from 'lucide-svelte';
+import { commandPolicyStore } from '../../stores/commandPolicy.svelte';
 import { contextPolicyStore } from '../../stores/contextPolicy.svelte';
 import { eventPolicyStore } from '../../stores/eventPolicy.svelte';
 import { i18n, t } from '../../stores/i18n.svelte';
@@ -18,11 +19,15 @@ import {
   replyPolicyStore,
 } from '../../stores/replyPolicy.svelte';
 import type {
+  Capability,
+  CommandAccess,
+  CommandPolicy,
   ContextPolicy,
   EventPolicy,
   ReplyMode,
   ReplyPolicy,
 } from '../../types';
+import SupportBadge from '../ui/SupportBadge.svelte';
 
 let copiedSnippet = $state(false);
 
@@ -30,6 +35,7 @@ let copiedSnippet = $state(false);
 let policyMode = $state<ReplyMode>('always');
 let policyProbability = $state(0.5);
 let policyQuote = $state(false);
+let policyAck = $state(false);
 let policyRequested = false;
 let policySeeded = false;
 
@@ -53,6 +59,7 @@ $effect(() => {
     policyMode = policy.mode;
     policyProbability = policy.probability;
     policyQuote = policy.quote_message;
+    policyAck = policy.acknowledge;
     policySeeded = true;
   }
 });
@@ -85,6 +92,8 @@ let eventDraft = $state<EventPolicy>({
   greet_on_join: false,
   reply_to_poke: false,
   note_recalls: true,
+  accept_friend_requests: false,
+  accept_group_invites: false,
 });
 let eventRequested = false;
 let eventSeeded = false;
@@ -101,33 +110,111 @@ $effect(() => {
   }
 });
 
-/** The event switches, in the order the card renders them. */
+/** The event switches, in the order the card renders them, with the capability each needs. */
 const eventSwitches: {
   key: keyof EventPolicy;
   labelKey: string;
   hintKey: string;
+  capabilities: Capability[];
 }[] = [
   {
     key: 'welcome_members',
     labelKey: 'events.welcome',
     hintKey: 'events.welcome_hint',
+    capabilities: ['member_join'],
   },
   {
     key: 'greet_on_join',
     labelKey: 'events.greet',
     hintKey: 'events.greet_hint',
+    capabilities: ['bot_join', 'friend_add'],
   },
   {
     key: 'reply_to_poke',
     labelKey: 'events.poke',
     hintKey: 'events.poke_hint',
+    capabilities: ['poke'],
   },
   {
     key: 'note_recalls',
     labelKey: 'events.recall',
     hintKey: 'events.recall_hint',
+    capabilities: ['recall'],
+  },
+  {
+    key: 'accept_friend_requests',
+    labelKey: 'events.accept_friends',
+    hintKey: 'events.accept_friends_hint',
+    capabilities: ['friend_requests'],
+  },
+  {
+    key: 'accept_group_invites',
+    labelKey: 'events.accept_invites',
+    hintKey: 'events.accept_invites_hint',
+    capabilities: ['group_invites'],
   },
 ];
+
+/** Command-permission draft: administrators one per line, and an editable access table. */
+let adminsText = $state('');
+let groupAdminsAreAdmins = $state(true);
+let accessRows = $state<{ command: string; access: CommandAccess }[]>([]);
+let newCommand = $state('');
+let commandRequested = false;
+let commandSeeded = false;
+
+/** Access levels in the order the selector lists them. */
+const accessLevels: { value: CommandAccess; labelKey: string }[] = [
+  { value: 'everyone', labelKey: 'commands.level_everyone' },
+  { value: 'admins_in_groups', labelKey: 'commands.level_admins_in_groups' },
+  { value: 'admins', labelKey: 'commands.level_admins' },
+];
+
+function seedCommandPolicy(policy: CommandPolicy) {
+  adminsText = policy.admins.join('\n');
+  groupAdminsAreAdmins = policy.group_admins_are_admins;
+  accessRows = Object.entries(policy.access).map(([command, access]) => ({
+    command,
+    access,
+  }));
+}
+
+$effect(() => {
+  if (!commandRequested) {
+    commandRequested = true;
+    void commandPolicyStore.load();
+  }
+  const policy = commandPolicyStore.policy;
+  if (policy && !commandSeeded) {
+    seedCommandPolicy(policy);
+    commandSeeded = true;
+  }
+});
+
+/** Adds a command row, restricted to administrators by default. */
+function addCommand() {
+  const command = newCommand.trim().replace(/^\//, '').toLowerCase();
+  if (!command || accessRows.some((row) => row.command === command)) return;
+  accessRows = [...accessRows, { command, access: 'admins' }];
+  newCommand = '';
+}
+
+/** Saves the draft; the node normalizes it and the form adopts what it enforces. */
+async function saveCommandPolicy() {
+  const saved = await commandPolicyStore.save({
+    admins: adminsText
+      .split('\n')
+      .map((line) => line.trim())
+      .filter(Boolean),
+    group_admins_are_admins: groupAdminsAreAdmins,
+    access: Object.fromEntries(
+      accessRows.map((row) => [row.command, row.access]),
+    ),
+  });
+  if (saved && commandPolicyStore.policy) {
+    seedCommandPolicy(commandPolicyStore.policy);
+  }
+}
 
 /** Flips one event switch and persists the result immediately. */
 async function saveEventPolicy(next: EventPolicy) {
@@ -147,6 +234,7 @@ async function saveReplyPolicy() {
     mode: policyMode,
     probability: policyProbability,
     quote_message: policyQuote,
+    acknowledge: policyAck,
   };
   await replyPolicyStore.save(policy);
 }
@@ -299,10 +387,24 @@ function copySocketPath(path: string) {
       <span>
         <span class="block text-sm font-medium text-zinc-800 dark:text-zinc-200">{t('reply.quote')}</span>
         <span class="block text-xs text-zinc-500 mt-0.5">{t('reply.quote_hint')}</span>
+        <SupportBadge capabilities={['quote_reply']} />
       </span>
       <input
         type="checkbox"
         bind:checked={policyQuote}
+        class="mt-1 rounded text-indigo-600 focus:ring-0 w-4 h-4 shrink-0"
+      />
+    </label>
+
+    <label class="mt-4 flex items-start justify-between gap-4 cursor-pointer select-none">
+      <span>
+        <span class="block text-sm font-medium text-zinc-800 dark:text-zinc-200">{t('reply.acknowledge')}</span>
+        <span class="block text-xs text-zinc-500 mt-0.5">{t('reply.acknowledge_hint')}</span>
+        <SupportBadge capabilities={['acknowledge']} />
+      </span>
+      <input
+        type="checkbox"
+        bind:checked={policyAck}
         class="mt-1 rounded text-indigo-600 focus:ring-0 w-4 h-4 shrink-0"
       />
     </label>
@@ -387,6 +489,7 @@ function copySocketPath(path: string) {
         <span>
           <span class="block text-sm font-medium text-zinc-800 dark:text-zinc-200">{t('context.expand_forward')}</span>
           <span class="block text-xs text-zinc-500 mt-0.5">{t('context.expand_forward_hint')}</span>
+          <SupportBadge capabilities={['forward_content']} />
         </span>
         <input
           type="checkbox"
@@ -421,6 +524,7 @@ function copySocketPath(path: string) {
           <span>
             <span class="block text-sm font-medium text-zinc-800 dark:text-zinc-200">{t(item.labelKey)}</span>
             <span class="block text-xs text-zinc-500 mt-0.5">{t(item.hintKey)}</span>
+            <SupportBadge capabilities={item.capabilities} />
           </span>
           <input
             type="checkbox"
@@ -439,5 +543,95 @@ function copySocketPath(path: string) {
     {#if eventPolicyStore.notice}
       <p class="text-xs text-emerald-500 mt-4 font-mono">{t('events.updated')}</p>
     {/if}
+  </div>
+  <!-- Command permissions: who may run commands that affect other people. -->
+  <div class="bg-white dark:bg-zinc-900 border border-zinc-200 dark:border-zinc-800 rounded-xl p-6 shadow-xs">
+    <div class="pb-4 border-b border-zinc-100 dark:border-zinc-800">
+      <h3 class="text-base font-semibold text-zinc-900 dark:text-zinc-100">{t('commands.title')}</h3>
+      <p class="text-xs text-zinc-500 mt-0.5">{t('commands.hint')}</p>
+    </div>
+
+    <div class="mt-5 grid grid-cols-1 md:grid-cols-2 gap-6">
+      <div class="space-y-3">
+        <label class="block">
+          <span class="block text-sm font-medium text-zinc-800 dark:text-zinc-200">{t('commands.admins')}</span>
+          <span class="block text-xs text-zinc-500 mt-0.5 mb-2">{t('commands.admins_hint')}</span>
+          <textarea
+            bind:value={adminsText}
+            rows="4"
+            placeholder="onebot:12345&#10;qqofficial:5361A5D2..."
+            class="w-full px-3 py-2 rounded-lg bg-zinc-50 dark:bg-zinc-950 border border-zinc-200 dark:border-zinc-800 font-mono text-xs focus:outline-hidden"
+          ></textarea>
+        </label>
+        <label class="flex items-start justify-between gap-4 cursor-pointer select-none">
+          <span>
+            <span class="block text-sm font-medium text-zinc-800 dark:text-zinc-200">{t('commands.group_admins')}</span>
+            <span class="block text-xs text-zinc-500 mt-0.5">{t('commands.group_admins_hint')}</span>
+            <SupportBadge capabilities={['sender_role']} />
+          </span>
+          <input
+            type="checkbox"
+            bind:checked={groupAdminsAreAdmins}
+            class="mt-1 rounded text-indigo-600 focus:ring-0 w-4 h-4 shrink-0"
+          />
+        </label>
+      </div>
+
+      <div class="space-y-2">
+        <span class="block text-sm font-medium text-zinc-800 dark:text-zinc-200">{t('commands.access')}</span>
+        <span class="block text-xs text-zinc-500">{t('commands.access_hint')}</span>
+        {#each accessRows as row, index (row.command)}
+          <div class="flex items-center gap-2">
+            <span class="w-28 font-mono text-sm text-zinc-700 dark:text-zinc-300">/{row.command}</span>
+            <select
+              bind:value={accessRows[index].access}
+              class="flex-1 px-2 py-1.5 text-xs bg-zinc-50 dark:bg-zinc-950 border border-zinc-200 dark:border-zinc-800 rounded-md cursor-pointer"
+            >
+              {#each accessLevels as level (level.value)}
+                <option value={level.value}>{t(level.labelKey)}</option>
+              {/each}
+            </select>
+            <button
+              onclick={() => (accessRows = accessRows.filter((_, i) => i !== index))}
+              class="px-2 py-1 text-xs text-zinc-500 hover:text-rose-600 cursor-pointer"
+              title={t('commands.remove')}
+            >
+              ✕
+            </button>
+          </div>
+        {/each}
+        <div class="flex items-center gap-2 pt-1">
+          <input
+            bind:value={newCommand}
+            placeholder={t('commands.add_placeholder')}
+            onkeydown={(e) => e.key === 'Enter' && addCommand()}
+            class="flex-1 px-2 py-1.5 text-xs font-mono bg-zinc-50 dark:bg-zinc-950 border border-zinc-200 dark:border-zinc-800 rounded-md focus:outline-hidden"
+          />
+          <button
+            onclick={addCommand}
+            class="px-3 py-1.5 text-xs border border-zinc-200 dark:border-zinc-700 rounded-md hover:bg-zinc-100 dark:hover:bg-zinc-800 cursor-pointer"
+          >
+            {t('commands.add')}
+          </button>
+        </div>
+      </div>
+    </div>
+
+    {#if commandPolicyStore.error}
+      <p class="text-xs text-rose-500 mt-4 font-mono">{commandPolicyStore.error}</p>
+    {/if}
+    {#if commandPolicyStore.notice}
+      <p class="text-xs text-emerald-500 mt-4 font-mono">{t('commands.updated')}</p>
+    {/if}
+
+    <div class="mt-5 flex justify-end">
+      <button
+        onclick={saveCommandPolicy}
+        disabled={commandPolicyStore.saving}
+        class="px-4 py-1.5 bg-zinc-900 dark:bg-zinc-100 hover:bg-zinc-700 dark:hover:bg-zinc-200 disabled:opacity-50 text-white dark:text-zinc-950 rounded-md text-xs font-medium transition cursor-pointer"
+      >
+        {commandPolicyStore.saving ? t('models.saving') : t('common.save')}
+      </button>
+    </div>
   </div>
 </div>

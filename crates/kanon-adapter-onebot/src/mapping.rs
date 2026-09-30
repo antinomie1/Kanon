@@ -62,6 +62,21 @@ pub fn map_event(platform: &str, value: Value) -> Result<Option<PipelineEventReq
             metadata[format!("onebot.sender_{key}")] = json!(text);
         }
     }
+    // Platform-neutral name and role, read by the core for speaker labels and command access.
+    let name = ["card", "nickname"]
+        .into_iter()
+        .filter_map(|key| value["sender"][key].as_str())
+        .map(str::trim)
+        .find(|name| !name.is_empty());
+    if let Some(name) = name {
+        metadata[kanon_core::META_SENDER_NAME] = json!(name);
+    }
+    if let Some(role) = value["sender"]["role"]
+        .as_str()
+        .filter(|role| !role.is_empty())
+    {
+        metadata[kanon_core::META_SENDER_ROLE] = json!(role);
+    }
     Ok(Some(PipelineEventRequest {
         event_id: format!("{platform}:{self_id}:{channel_id}:{sender_id}:{message_id}"),
         platform: platform.into(),
@@ -571,30 +586,65 @@ pub fn set_notice_actor(notice: &mut PipelineEventRequest, name: &str) {
     }
 }
 
-/// A friend request or group invitation the account can accept automatically.
-pub enum Request {
-    /// Someone asked to become a friend.
-    Friend {
-        /// Opaque handle to answer with.
-        flag: String,
-    },
-    /// Someone invited the account into a group.
-    GroupInvite {
-        /// Opaque handle to answer with.
-        flag: String,
-    },
+/// Translates a friend request or group invitation into a notice the core may accept.
+///
+/// The OneBot `flag` travels as the request token; join requests from other people are the group
+/// admins' business and are not reported.
+pub fn map_request(platform: &str, value: &Value) -> Result<Option<PipelineEventRequest>, String> {
+    if value["post_type"].as_str() != Some("request") {
+        return Ok(None);
+    }
+    let kind = match (value["request_type"].as_str(), value["sub_type"].as_str()) {
+        (Some("friend"), _) => "friend_request",
+        (Some("group"), Some("invite")) => "group_invite",
+        _ => return Ok(None),
+    };
+    let flag = string(value, "flag")?;
+    let self_id = id(&value["self_id"])?;
+    let user_id = id(&value["user_id"])?;
+    let channel_id = match kind {
+        "group_invite" => format!("group:{}", id(&value["group_id"])?),
+        _ => format!("private:{user_id}"),
+    };
+    let metadata = json!({
+        kanon_core::META_NOTICE: kind,
+        kanon_core::META_REQUEST_TOKEN: flag,
+        kanon_core::META_NOTICE_ACTOR: user_id,
+        "onebot.self_id": self_id,
+    });
+    Ok(Some(PipelineEventRequest {
+        event_id: format!("{platform}:{self_id}:request:{kind}:{flag}"),
+        platform: platform.into(),
+        channel_id,
+        sender_id: user_id,
+        raw_text: format!("[{kind}]"),
+        segments: Vec::new(),
+        metadata: Some(to_struct(&metadata)?),
+    }))
 }
 
-/// Reads a request event; join requests from others are the group admins' business and ignored.
-pub fn map_request(value: &Value) -> Option<Request> {
-    if value["post_type"].as_str() != Some("request") {
-        return None;
-    }
-    let flag = value["flag"].as_str()?.to_owned();
-    match (value["request_type"].as_str()?, value["sub_type"].as_str()) {
-        ("friend", _) => Some(Request::Friend { flag }),
-        ("group", Some("invite")) => Some(Request::GroupInvite { flag }),
-        _ => None,
+/// The OneBot action and parameters that accept a request notice produced by [`map_request`].
+pub fn accept_request_call(event: &PipelineEventRequest) -> Result<(&'static str, Value), String> {
+    let field = |key: &str| match event
+        .metadata
+        .as_ref()
+        .and_then(|metadata| metadata.fields.get(key))
+        .and_then(|value| value.kind.as_ref())
+    {
+        Some(Kind::StringValue(text)) => Ok(text.clone()),
+        _ => Err(format!("request event lacks {key}")),
+    };
+    let flag = field(kanon_core::META_REQUEST_TOKEN)?;
+    match field(kanon_core::META_NOTICE)?.as_str() {
+        "friend_request" => Ok((
+            "set_friend_add_request",
+            json!({"flag": flag, "approve": true}),
+        )),
+        "group_invite" => Ok((
+            "set_group_add_request",
+            json!({"flag": flag, "sub_type": "invite", "approve": true}),
+        )),
+        other => Err(format!("'{other}' is not a request OneBot can accept")),
     }
 }
 

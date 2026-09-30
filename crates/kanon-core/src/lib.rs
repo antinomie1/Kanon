@@ -9,6 +9,7 @@
 //! executable that assembles this engine with the management gateway lives in
 //! `crates/kanon`.
 
+pub mod access;
 pub mod adapter;
 pub mod bash;
 pub mod conversation;
@@ -24,9 +25,12 @@ pub mod supervisor;
 mod time;
 pub mod toggle;
 
+pub use access::{
+    CommandAccess, CommandPolicy, CommandPolicyStore, META_SENDER_NAME, META_SENDER_ROLE,
+};
 pub use adapter::{
-    AdapterDescriptor, AdapterError, AdapterKind, AdapterRegistry, EventIngress, IngestError,
-    PlatformAdapter,
+    AdapterDescriptor, AdapterError, AdapterKind, AdapterRegistry, Capability, EventIngress,
+    IngestError, PlatformAdapter,
 };
 pub use bash::{
     BashAccessMode, BashAvailabilityHook, BashExecutionMode, BashLocalConfig, BashPolicy,
@@ -40,7 +44,7 @@ pub use conversation::{
 };
 pub use instance::{
     BotInstance, DEFAULT_INSTANCE_CATALOG, InstanceDraft, InstanceError, InstanceRegistry,
-    instance_persona_id, sync_instance_personas,
+    SessionScope, instance_persona_id, sync_instance_personas,
 };
 pub use ipc::{CoreApiService, CoreIpcServer};
 pub use manifest::{
@@ -53,8 +57,8 @@ pub use mcp::{
     prune_attachments,
 };
 pub use notice::{
-    EventPolicy, EventPolicyStore, META_NOTICE, META_NOTICE_ACTOR, META_NOTICE_TARGET, NoticeKind,
-    RecallLedger,
+    EventPolicy, EventPolicyStore, META_NOTICE, META_NOTICE_ACTOR, META_NOTICE_TARGET,
+    META_REQUEST_TOKEN, NoticeKind, RecallLedger,
 };
 pub use pipeline::{
     CommandRouter, DEFAULT_OUTBOUND_QUEUE_CAPACITY, DeliveryOutcome, HELP_COMMAND, INFO_COMMAND,

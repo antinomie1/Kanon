@@ -34,6 +34,10 @@ pub const META_NOTICE_ACTOR: &str = "kanon.notice_actor";
 /// Metadata key carrying the event ID of the message a recall removed.
 pub const META_NOTICE_TARGET: &str = "kanon.notice_target";
 
+/// Metadata key carrying the adapter's opaque handle for answering a friend request or group
+/// invitation; only the adapter that wrote it can read it.
+pub const META_REQUEST_TOKEN: &str = "kanon.request_token";
+
 /// How many answered messages are remembered as possible recall targets.
 const LEDGER_CAPACITY: usize = 1024;
 
@@ -56,6 +60,10 @@ pub enum NoticeKind {
     Poke,
     /// A message was recalled.
     Recall,
+    /// Someone asked to become the bot's friend.
+    FriendRequest,
+    /// Someone invited the bot into a group.
+    GroupInvite,
 }
 
 impl NoticeKind {
@@ -67,6 +75,8 @@ impl NoticeKind {
             Self::FriendAdd => "friend_add",
             Self::Poke => "poke",
             Self::Recall => "recall",
+            Self::FriendRequest => "friend_request",
+            Self::GroupInvite => "group_invite",
         }
     }
 
@@ -78,6 +88,8 @@ impl NoticeKind {
             "friend_add" => Some(Self::FriendAdd),
             "poke" => Some(Self::Poke),
             "recall" => Some(Self::Recall),
+            "friend_request" => Some(Self::FriendRequest),
+            "group_invite" => Some(Self::GroupInvite),
             _ => None,
         }
     }
@@ -110,6 +122,12 @@ pub struct EventPolicy {
     /// Tell the model, on its next turn, that a message it saw was recalled.
     #[serde(default = "default_true")]
     pub note_recalls: bool,
+    /// Accept every friend request automatically; otherwise it waits for a human on the platform.
+    #[serde(default)]
+    pub accept_friend_requests: bool,
+    /// Accept every invitation into a group automatically.
+    #[serde(default)]
+    pub accept_group_invites: bool,
 }
 
 impl Default for EventPolicy {
@@ -119,19 +137,31 @@ impl Default for EventPolicy {
             greet_on_join: false,
             reply_to_poke: false,
             note_recalls: true,
+            accept_friend_requests: false,
+            accept_group_invites: false,
         }
     }
 }
 
 impl EventPolicy {
+    /// Whether a request of this kind is accepted automatically.
+    pub fn accepts(&self, kind: NoticeKind) -> bool {
+        match kind {
+            NoticeKind::FriendRequest => self.accept_friend_requests,
+            NoticeKind::GroupInvite => self.accept_group_invites,
+            _ => false,
+        }
+    }
+
     /// Whether the bot answers this kind of notice.
     pub fn answers(&self, kind: NoticeKind) -> bool {
         match kind {
             NoticeKind::MemberJoin => self.welcome_members,
             NoticeKind::BotJoin | NoticeKind::FriendAdd => self.greet_on_join,
             NoticeKind::Poke => self.reply_to_poke,
-            // A recall is never answered; it can only become a note.
-            NoticeKind::Recall => false,
+            // A recall is never answered; it can only become a note. Requests are accepted or
+            // left alone, never talked to.
+            NoticeKind::Recall | NoticeKind::FriendRequest | NoticeKind::GroupInvite => false,
         }
     }
 }

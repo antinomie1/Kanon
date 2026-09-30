@@ -95,6 +95,19 @@ impl ItemPolicy {
     }
 }
 
+/// Whose conversation a group message belongs to.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SessionScope {
+    /// Each member of a group has a private session with the bot (the default): memories and
+    /// `/new` never affect anyone else.
+    #[default]
+    User,
+    /// The whole group shares one session, so the bot follows a discussion between several
+    /// people. Every message is labelled with its speaker.
+    Group,
+}
+
 /// One bot instance.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct BotInstance {
@@ -127,6 +140,13 @@ pub struct BotInstance {
     /// Controls whether the sender id and the message time are prepended to the prompt.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub context_policy: Option<ContextPolicy>,
+    /// Whether group sessions are per member or shared by the whole group.
+    #[serde(default)]
+    pub session_scope: SessionScope,
+    /// Record group messages the bot does not answer, and show the model what was said since its
+    /// last turn when it is next addressed. Needs an adapter that delivers every group message.
+    #[serde(default)]
+    pub observe_group: bool,
     /// Per-plugin overrides; absent identifiers inherit the node-wide switch.
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     pub plugins: HashMap<String, ItemPolicy>,
@@ -170,6 +190,12 @@ pub struct InstanceDraft {
     /// Optional context-extras override; absent inherits the node-wide policy.
     #[serde(default)]
     pub context_policy: Option<ContextPolicy>,
+    /// Per-member or shared group sessions.
+    #[serde(default)]
+    pub session_scope: SessionScope,
+    /// Whether unanswered group messages are shown to the model when it is next addressed.
+    #[serde(default)]
+    pub observe_group: bool,
     /// Per-plugin overrides.
     #[serde(default)]
     pub plugins: HashMap<String, ItemPolicy>,
@@ -720,6 +746,8 @@ fn build_instance(
         model,
         reply_policy: draft.reply_policy,
         context_policy: draft.context_policy,
+        session_scope: draft.session_scope,
+        observe_group: draft.observe_group,
         plugins: draft.plugins,
         skills: draft.skills,
         mcp: draft.mcp,
