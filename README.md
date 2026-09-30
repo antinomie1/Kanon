@@ -143,15 +143,17 @@ Local automatic review uses a separate request to the selected provider-qualifie
 or the node's default model when unset. It receives the exact command and canonical working directory,
 with no tools or conversation history. Only a strict, explicit JSON approval starts execution.
 Rejection, missing/invalid output, unavailable models or a 30-second review timeout deny the command.
-Turning review off skips that model request; sender authorization and basic command checks still apply.
+Turning review off skips that model request; sender authorization and execution limits still apply.
 Review is risk screening, not a sandbox or a guarantee about opaque scripts and files they load.
 Local execution currently requires Unix Bash. The local starting directory defaults to the node's
 working directory and can be changed by the operator.
 
-Normal Bash syntax, Python, Node, scripts, loops, variables, heredocs, pipes and redirection remain
-available. A small syntax-aware guard rejects recognizable destructive operations such as `rm`, `dd`,
-`sudo`, formatting/wiping, shutdown, `find -delete`, hard Git reset/forced clean and `printf -v`.
-It does not attempt to sandbox interpreter source or dynamically assembled commands.
+The intended operating model is an authorized user working with a basically benign AI. Automatic
+review helps catch accidental broad damage; the implementation does not try to classify every shell
+syntax or defend against deliberately disguised commands. Normal Bash, Python, Node, scripts, package
+managers, file cleanup, pipes and redirection are passed to Bash unchanged. There is no command
+blacklist or custom shell parser. Basic input validation, sender permissions and runtime limits remain.
+For local execution, enable automatic review when an extra mistake-prevention check is wanted.
 
 For container mode, prepare the trusted runtime image separately:
 
@@ -174,6 +176,8 @@ or environment files for that state. Authorized senders share the workspace and 
 A stable workspace identity locates the container after a node restart. Calls are serialized within
 that runtime. Image or isolation-setting changes require the explicit **Reset container** action
 (`POST /api/v1/tools/bash/reset`); the tool refuses to silently discard the existing environment.
+API changes to the Docker endpoint are refused while the old endpoint still owns a container; reset
+it first. Reset before hand-editing the endpoint while the node is stopped as well.
 Reset removes the container and its temporary state, preserving workspace/HOME files. There is no
 idle expiry. On timeout, caller cancellation or abnormal termination, the container is restarted to
 terminate detached children; this also stops background jobs and clears temporary state.

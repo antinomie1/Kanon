@@ -1,16 +1,20 @@
 //! Native host execution with bounded output and process-group cleanup.
 
 use super::MAX_BASH_OUTPUT_BYTES;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
-pub(super) fn bash_executable() -> Option<&'static str> {
+pub(super) fn bash_executable() -> Option<PathBuf> {
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
-        ["/bin/bash", "/usr/bin/bash"].into_iter().find(|path| {
-            std::fs::metadata(path)
-                .is_ok_and(|meta| meta.is_file() && meta.permissions().mode() & 0o111 != 0)
-        })
+        let paths = std::env::var_os("PATH").unwrap_or_default();
+        std::env::split_paths(&paths)
+            .map(|directory| directory.join("bash"))
+            .chain([PathBuf::from("/bin/bash"), PathBuf::from("/usr/bin/bash")])
+            .find(|path| {
+                std::fs::metadata(path)
+                    .is_ok_and(|meta| meta.is_file() && meta.permissions().mode() & 0o111 != 0)
+            })
     }
     #[cfg(not(unix))]
     {

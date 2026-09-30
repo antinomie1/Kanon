@@ -139,3 +139,69 @@ async fn older_permission_clients_preserve_saved_sandbox_network_and_limits() {
     assert_eq!(after["local"]["auto_review"], false);
     assert_eq!(state.bash_policy().get().sandbox.memory_mb, 256);
 }
+
+#[cfg(unix)]
+#[tokio::test]
+#[ignore = "requires local Docker and the sandbox/bash runtime image"]
+async fn endpoint_changes_require_reset_on_the_old_daemon_first() {
+    use kanon_llm::AgentTool;
+    let dir = tempfile::tempdir().unwrap();
+    let caller = BashPrincipal {
+        platform: "test".into(),
+        user_id: "owner".into(),
+    };
+    let policy = kanon_core::BashPolicy {
+        allowlist: vec![caller.clone()],
+        ..Default::default()
+    };
+    let policy_store = Arc::new(BashPolicyStore::new(policy.clone()));
+    let tool =
+        Arc::new(kanon_core::BashTool::new(dir.path().join("workspace"), policy_store).unwrap());
+    let config = Arc::new(SystemConfigStore::new(dir.path().join("system.json")));
+    let state = ApiState::builder(Arc::new(Supervisor::new(
+        Some(dir.path().join("run")),
+        None,
+    )))
+    .with_system_config(config.clone())
+    .with_node_settings(kanon_api::NodeSettings {
+        bash_policy: policy.clone(),
+        ..Default::default()
+    })
+    .with_bash_tool(tool.clone())
+    .build();
+    kanon_core::with_bash_caller(caller, tool.call("test", json!({"command":"true"})))
+        .await
+        .unwrap();
+    let app = kanon_api::app(state.clone());
+    let mut next = serde_json::to_value(policy.clone()).unwrap();
+    next["sandbox"]["endpoint"] = json!(format!(
+        "unix://{}",
+        dir.path().join("another-daemon.sock").display()
+    ));
+    let (status, _) = common::send_json(
+        &app,
+        Method::PUT,
+        "/api/v1/tools/bash/policy",
+        Some(next.clone()),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CONFLICT);
+    assert_eq!(
+        state.bash_policy().get().sandbox.endpoint,
+        policy.sandbox.endpoint
+    );
+    let (status, _) = common::send_json(&app, Method::POST, "/api/v1/tools/bash/reset", None).await;
+    assert_eq!(status, StatusCode::OK);
+    let (status, _) = common::send_json(
+        &app,
+        Method::PUT,
+        "/api/v1/tools/bash/policy",
+        Some(next.clone()),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        serde_json::to_value(config.load_node_settings().unwrap().bash_policy).unwrap(),
+        next
+    );
+}

@@ -129,6 +129,33 @@ async fn only_explicit_review_approval_can_start_a_host_process() {
     assert!(!dir.path().join("missing-review").exists());
 }
 
+#[tokio::test]
+async fn cleanup_is_decided_by_review_instead_of_a_command_blacklist() {
+    let dir = tempfile::tempdir().unwrap();
+    let target = dir.path().join("obsolete");
+    std::fs::write(&target, "temporary build output").unwrap();
+    let tool = BashTool::new(dir.path().join("sandbox"), policy(dir.path(), true)).unwrap();
+    tool.set_reviewer(Arc::new(FixedReviewer {
+        allow: false,
+        fail: false,
+        seen: Mutex::new(Vec::new()),
+    }));
+    assert!(
+        call(&tool, "rm obsolete")
+            .await
+            .unwrap_err()
+            .contains("denied by automatic review")
+    );
+    assert!(target.exists());
+    tool.set_reviewer(Arc::new(FixedReviewer {
+        allow: true,
+        fail: false,
+        seen: Mutex::new(Vec::new()),
+    }));
+    call(&tool, "rm obsolete").await.unwrap();
+    assert!(!target.exists());
+}
+
 struct GatedReviewer {
     started: Notify,
     release: Notify,

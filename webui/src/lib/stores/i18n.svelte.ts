@@ -145,7 +145,7 @@ export const dictionaries = {
     'bash.mode_local': 'Local host',
     'bash.local_workdir': 'Local working directory',
     'bash.local_hint':
-      'Commands run with the Kanon host account permissions. Sender permissions and basic command checks still apply.',
+      'Commands run with the Kanon host account permissions. Sender permissions always apply.',
     'bash.auto_review': 'AI review before local execution',
     'bash.review_model': 'Reviewer model (blank uses the default model)',
     'bash.review_hint':
@@ -160,7 +160,7 @@ export const dictionaries = {
     'bash.image': 'Prepared sandbox image',
     'bash.processes': 'process/thread limit',
     'bash.hint':
-      'Access follows the current sender. Obvious destructive commands are checked for every sender.',
+      'Access follows the current sender. Optional AI review helps catch accidental harm in local mode.',
     'bash.mode': 'Access mode',
     'bash.allowlist_mode': 'Allowlist: listed users only',
     'bash.denylist_mode': 'Denylist: everyone except listed users',
@@ -837,7 +837,7 @@ export const dictionaries = {
     'bash.mode_local': '本机执行',
     'bash.local_workdir': '本机工作目录',
     'bash.local_hint':
-      '使用 Kanon 运行账号的本机权限执行，仍受发送者权限和基础命令检查控制。',
+      '使用 Kanon 运行账号的本机权限执行，始终检查发送者权限。',
     'bash.auto_review': '本机执行前进行 AI 自动审查',
     'bash.review_model': '审查模型（留空使用默认模型）',
     'bash.review_hint':
@@ -852,7 +852,7 @@ export const dictionaries = {
     'bash.image': '已准备的沙箱镜像',
     'bash.processes': '进程/线程上限',
     'bash.hint':
-      '只按本轮发送者判断权限；对每个用户都会做明显危险指令的基础检查。',
+      '只按本轮发送者判断权限；本机模式可开启 AI 审查，帮助发现误操作。',
     'bash.mode': '权限模式',
     'bash.allowlist_mode': '白名单：仅指定用户可用',
     'bash.denylist_mode': '黑名单：除指定用户外都可用',

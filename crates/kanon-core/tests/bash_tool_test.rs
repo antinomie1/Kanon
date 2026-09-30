@@ -1,4 +1,4 @@
-//! Real subprocess and adversarial caller tests for the guarded Bash tool.
+//! Normal Bash workflows, caller permissions and runtime behavior.
 #![cfg(unix)]
 
 use std::sync::{Arc, Mutex};
@@ -79,54 +79,13 @@ async fn static_commands_quotes_pipelines_and_failures_are_executed() {
 
 #[tokio::test]
 #[ignore = "requires local Docker and the sandbox/bash runtime image"]
-async fn obvious_risks_are_blocked_before_any_spawn() {
+async fn routine_workspace_cleanup_uses_normal_bash_semantics() {
     let dir = tempfile::tempdir().unwrap();
-    let sentinel = dir.path().join("keep");
-    std::fs::write(&sentinel, "keep").unwrap();
     let tool = BashTool::new(dir.path(), permitted()).unwrap();
-    for command in [
-        "rm keep",
-        "/bin/rm keep",
-        "r\\m keep",
-        "'r'\"m\" keep",
-        "echo ok; rm keep",
-        "echo ok\nrm keep",
-        "true && dd if=keep of=lost",
-        "sudo ls",
-        "mkfs.ext4 disk",
-        "env rm keep",
-        "command rm keep",
-        "xargs rm",
-        "find . -delete",
-        "busybox rm keep",
-        "(rm keep)",
-        "if true; then rm keep; fi",
-        "git clean -fd",
-        "git reset --hard",
-        "printf -v 'x[$(: > printf-pwn)]' value",
-        "printf -v'x[$(: > printf-pwn)]' value",
-        "builtin printf -v 'x[$(: > printf-pwn)]' value",
-        "command printf -v target '%s' value",
-        "VALUE=ok printf -v target '%s' value",
-        ">sink rm keep",
-        "$'rm' keep",
-        "$'r\\x6d' keep",
-        "$'rm\\0ignored' keep",
-        "2>/dev/null printf -v target '%s' value",
-        "$'printf' -v target '%s' value",
-        "env -u UNUSED rm keep",
-        "printf keep | xargs -I '{}' rm '{}'",
-        "git -C . clean -fd",
-        "find . -exec rm '{}' ';'",
-    ] {
-        let error = run(&tool, json!({"command": command})).await.unwrap_err();
-        assert!(
-            error.starts_with("Bash command blocked:"),
-            "{command}: {error}"
-        );
-        assert_eq!(std::fs::read_to_string(&sentinel).unwrap(), "keep");
-        assert!(!dir.path().join("printf-pwn").exists());
-    }
+    let output = run(&tool, json!({"command": "mkdir -p build; echo temporary > build/result; rm -rf build; printf -v message '%s' cleaned; printf '%s' \"$message\""})).await.unwrap();
+    let output: Value = serde_json::from_str(&output).unwrap();
+    assert_eq!(output["stdout"], "cleaned");
+    assert!(!dir.path().join("build").exists());
     tool.reset_sandbox().await.unwrap();
 }
 

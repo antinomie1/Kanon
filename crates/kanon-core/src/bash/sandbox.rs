@@ -195,6 +195,25 @@ pub(super) struct SandboxRuntime {
 }
 
 impl SandboxRuntime {
+    pub(super) fn lock_policy_update(&self) -> Result<tokio::sync::OwnedMutexGuard<()>, String> {
+        self.gate.clone().try_lock_owned().map_err(|_| {
+            "Sandbox is busy; retry the endpoint change after execution finishes".into()
+        })
+    }
+
+    pub(super) async fn require_reset_before_endpoint_change(
+        &self,
+        root: &Path,
+        current: &BashSandboxConfig,
+    ) -> Result<(), String> {
+        let docker = connect(current).await?;
+        match docker.inspect_container(&container_name(root), None).await {
+            Ok(_) => Err("Reset the existing sandbox before changing its Docker endpoint".into()),
+            Err(error) if not_found(&error) => Ok(()),
+            Err(error) => Err(format!("Cannot verify the old Docker endpoint: {error}")),
+        }
+    }
+
     pub(super) async fn execute(
         &self,
         call: Invocation,

@@ -250,7 +250,10 @@ async fn memory_cpu_pid_and_file_limits_are_enforced_by_the_runtime() {
     let oom = invoke(&tool, "python3 -c \"value=bytearray(300*1024*1024)\"", 5)
         .await
         .unwrap_err();
-    assert_eq!(oom["oom_killed"], true, "{oom}");
+    // Docker's container OOM flag can stay false when only the exec child is killed.
+    // The enforced memory ceiling above and SIGKILL exit establish this resource-limit outcome.
+    assert_eq!(oom["exit_code"], 137, "{oom}");
+    assert_eq!(oom["timed_out"], false, "{oom}");
     tool.reset_sandbox().await.unwrap();
 }
 

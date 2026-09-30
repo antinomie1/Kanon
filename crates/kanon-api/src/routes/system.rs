@@ -66,6 +66,14 @@ async fn put_bash_policy(
     }
     let policy: BashPolicy =
         serde_json::from_value(submitted).map_err(|err| ApiError::BadRequest(err.to_string()))?;
+    policy.validate().map_err(ApiError::BadRequest)?;
+    let _runtime_guard = match state.bash_tool() {
+        Some(tool) => tool
+            .prepare_policy_update(&policy)
+            .await
+            .map_err(ApiError::Conflict)?,
+        None => None,
+    };
     let mut settings = state.node_settings();
     settings.bash_policy = policy;
     state

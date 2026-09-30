@@ -1,8 +1,7 @@
-//! Guarded native Bash tool, caller authorization and late, cache-safe availability hints.
+//! Bash execution for authorized users, with optional local review and persistent containers.
 
 mod access;
 mod local;
-mod policy;
 mod review;
 mod sandbox;
 
@@ -90,6 +89,25 @@ impl BashTool {
             .await
     }
 
+    /// Keeps endpoint changes serialized with execution until the caller persists the policy.
+    /// An existing container must be reset through the old endpoint before switching daemons.
+    pub async fn prepare_policy_update(
+        &self,
+        next: &BashPolicy,
+    ) -> Result<Option<tokio::sync::OwnedMutexGuard<()>>, String> {
+        if self.policy.get().sandbox.endpoint == next.sandbox.endpoint {
+            return Ok(None);
+        }
+        let guard = self.sandbox.lock_policy_update()?;
+        let current = self.policy.get();
+        if current.sandbox.endpoint != next.sandbox.endpoint {
+            self.sandbox
+                .require_reset_before_endpoint_change(&self.root, &current.sandbox)
+                .await?;
+        }
+        Ok(Some(guard))
+    }
+
     /// Returns the runtime status used only in the newly arriving user message.
     pub async fn availability(&self) -> String {
         if !self.policy.allows_current_caller() {
@@ -157,7 +175,7 @@ impl AgentTool for BashTool {
     fn definition(&self) -> ToolDefinition {
         ToolDefinition {
             name: "bash".into(),
-            description: "Runs Bash, Python, Node and scripts using the operator-selected persistent container or local host backend. Local execution can require automatic model review. Sender permissions and the basic dangerous-command guard always apply. Current availability and execution mode are included in the user message.".into(),
+            description: "Runs Bash, Python, Node and scripts for authorized users using the operator-selected persistent container or local host backend. Local execution can require automatic review to catch accidental harm. Commands use normal Bash semantics without a command blacklist. Current availability and execution mode are included in the user message.".into(),
             parameters: serde_json::json!({
                 "type": "object", "additionalProperties": false,
                 "properties": {
@@ -183,8 +201,13 @@ impl AgentTool for BashTool {
         if !(1..=120).contains(&args.timeout_seconds) {
             return Err("timeout_seconds must be between 1 and 120".into());
         }
-        let command =
-            policy::prepare(&args.command).map_err(|err| format!("Bash command blocked: {err}"))?;
+        if args.command.trim().is_empty()
+            || args.command.len() > 16 * 1024
+            || args.command.contains('\0')
+        {
+            return Err("Command must be nonempty, NUL-free and at most 16384 bytes".into());
+        }
+        let command = args.command;
         if Path::new(&args.cwd).is_absolute() {
             return Err("cwd must be relative to the node workspace".into());
         }
