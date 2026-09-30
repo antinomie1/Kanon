@@ -8,7 +8,7 @@ use axum::extract::State;
 use axum::routing::get;
 use serde::Serialize;
 
-use kanon_core::{ContextPolicy, EventPolicy, ReplyPolicy};
+use kanon_core::{CommandPolicy, ContextPolicy, EventPolicy, ReplyPolicy};
 
 use crate::error::ApiError;
 use crate::state::ApiState;
@@ -28,6 +28,10 @@ pub fn routes() -> Router<ApiState> {
         .route(
             "/api/v1/system/event-policy",
             get(get_event_policy).put(put_event_policy),
+        )
+        .route(
+            "/api/v1/system/command-policy",
+            get(get_command_policy).put(put_command_policy),
         )
 }
 
@@ -237,4 +241,37 @@ async fn put_event_policy(
 
     tracing::info!(?policy, "Node-wide event policy updated");
     Ok(get_event_policy(State(state)).await)
+}
+
+/// Response describing the node-wide command permissions.
+#[derive(Debug, Serialize)]
+pub struct CommandPolicyResponse {
+    /// The effective policy, normalized.
+    pub policy: CommandPolicy,
+}
+
+/// Handler for `GET /api/v1/system/command-policy`.
+async fn get_command_policy(State(state): State<ApiState>) -> Json<CommandPolicyResponse> {
+    Json(CommandPolicyResponse {
+        policy: state.command_policy().get(),
+    })
+}
+
+/// Handler for `PUT /api/v1/system/command-policy`.
+///
+/// The policy is normalized (command names lose their slash and case) and validated before it is
+/// applied and persisted, so the stored document is exactly what the pipeline enforces.
+async fn put_command_policy(
+    State(state): State<ApiState>,
+    Json(policy): Json<CommandPolicy>,
+) -> Result<Json<CommandPolicyResponse>, ApiError> {
+    let policy = policy.prepare().map_err(ApiError::BadRequest)?;
+    let mut settings = state.node_settings();
+    settings.command_policy = policy;
+    state
+        .apply_node_settings(settings)
+        .map_err(ApiError::BadRequest)?;
+
+    tracing::info!("Node-wide command policy updated");
+    Ok(get_command_policy(State(state)).await)
 }

@@ -13,10 +13,10 @@ pub use client::{OneBotClient, OneBotError};
 pub use config::{DEFAULT_PLATFORM, OneBotConfig, TransportKind};
 
 use async_trait::async_trait;
-use kanon_core::{AdapterError, EventIngress, PlatformAdapter};
+use kanon_core::{AdapterError, Capability, EventIngress, PlatformAdapter};
 use kanon_proto::v1::{
-    DeliverMessageRequest, DeliverMessageResponse, audio_segment, image_segment,
-    message_segment::Segment,
+    DeliverMessageRequest, DeliverMessageResponse, PipelineEventRequest, audio_segment,
+    image_segment, message_segment::Segment,
 };
 use serde::Serialize;
 use std::sync::{Arc, RwLock};
@@ -25,6 +25,25 @@ use tokio::{
     sync::{Mutex, mpsc},
     task::JoinHandle,
 };
+
+/// What this adapter implements through the generic adapter contract.
+///
+/// OneBot v11 has no standard way to show a typing indicator or react to a message, so it does
+/// not acknowledge.
+const CAPABILITIES: &[Capability] = &[
+    Capability::SenderName,
+    Capability::SenderRole,
+    Capability::GroupMessages,
+    Capability::QuoteReply,
+    Capability::ForwardContent,
+    Capability::MemberJoin,
+    Capability::BotJoin,
+    Capability::FriendAdd,
+    Capability::Poke,
+    Capability::Recall,
+    Capability::FriendRequests,
+    Capability::GroupInvites,
+];
 
 /// Observable lifecycle of the universal connection.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -270,6 +289,20 @@ impl PlatformAdapter for OneBotAdapter {
     }
     fn is_connected(&self) -> bool {
         self.status().connected
+    }
+
+    fn capabilities(&self) -> &[Capability] {
+        CAPABILITIES
+    }
+
+    /// Accepts a friend request or group invitation with the `flag` its notice carried.
+    async fn accept_request(&self, event: &PipelineEventRequest) -> Result<(), AdapterError> {
+        let (action, params) =
+            mapping::accept_request_call(event).map_err(|e| self.delivery_error(e))?;
+        self.client()
+            .call_void(action, &params)
+            .await
+            .map_err(|error| self.delivery_error(error.to_string()))
     }
 
     async fn start(&self, ingress: EventIngress) -> Result<(), AdapterError> {

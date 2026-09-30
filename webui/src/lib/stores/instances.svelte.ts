@@ -9,6 +9,7 @@ import type {
   PersonaItem,
   ReplyMode,
   ReplyPolicy,
+  SessionScope,
 } from '../types';
 import { modelsStore } from './models.svelte';
 
@@ -74,8 +75,14 @@ class InstancesStore {
   formIncludeTimestamp = $state(false);
   /** Quote the answered message in groups (reply override only). */
   formReplyQuote = $state(false);
+  /** Progress feedback before answering (reply override only). */
+  formReplyAck = $state(false);
   /** Expand merged forwards (context override only). */
   formExpandForward = $state(true);
+  /** Per-member or shared group sessions. */
+  formSessionScope = $state<SessionScope>('user');
+  /** Show unanswered group messages to the model on its next turn. */
+  formObserveGroup = $state(false);
   formPlugins = $state<Record<string, ItemPolicy>>({});
   formSkills = $state<Record<string, ItemPolicy>>({});
   formMcp = $state<Record<string, ItemPolicy>>({});
@@ -231,8 +238,11 @@ class InstancesStore {
     this.formReplyPolicyMode = 'inherit';
     this.formReplyProbability = 0.5;
     this.formReplyQuote = false;
+    this.formReplyAck = false;
     this.formContextInherit = true;
     this.formExpandForward = true;
+    this.formSessionScope = 'user';
+    this.formObserveGroup = false;
     this.formIncludeChannelId = false;
     this.formIncludeSenderId = false;
     this.formIncludeTimestamp = false;
@@ -256,6 +266,7 @@ class InstancesStore {
     this.formReplyPolicyMode = instance.reply_policy?.mode ?? 'inherit';
     this.formReplyProbability = instance.reply_policy?.probability ?? 0.5;
     this.formReplyQuote = instance.reply_policy?.quote_message ?? false;
+    this.formReplyAck = instance.reply_policy?.acknowledge ?? false;
     // A null override is the `inherit` choice; a stored policy is shown verbatim.
     this.formContextInherit = instance.context_policy === null;
     this.formIncludeChannelId =
@@ -263,6 +274,8 @@ class InstancesStore {
     this.formIncludeSenderId =
       instance.context_policy?.include_sender_id ?? false;
     this.formExpandForward = instance.context_policy?.expand_forward ?? true;
+    this.formSessionScope = instance.session_scope ?? 'user';
+    this.formObserveGroup = instance.observe_group ?? false;
     this.formIncludeTimestamp =
       instance.context_policy?.include_timestamp ?? false;
     this.formPlugins = { ...instance.plugins };
@@ -298,6 +311,7 @@ class InstancesStore {
               mode: this.formReplyPolicyMode,
               probability: this.formReplyProbability,
               quote_message: this.formReplyQuote,
+              acknowledge: this.formReplyAck,
             },
       context_policy: this.formContextInherit
         ? null
@@ -307,6 +321,8 @@ class InstancesStore {
             include_timestamp: this.formIncludeTimestamp,
             expand_forward: this.formExpandForward,
           },
+      session_scope: this.formSessionScope,
+      observe_group: this.formObserveGroup,
       plugins: this.formPlugins,
       skills: this.formSkills,
       mcp: this.formMcp,

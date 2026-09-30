@@ -87,6 +87,8 @@ export interface ReplyPolicy {
   probability: number;
   /** Quote the message being answered in a group or channel (never in private chats). */
   quote_message: boolean;
+  /** Show progress feedback (typing, a reaction) before the model answers. */
+  acknowledge: boolean;
 }
 
 /**
@@ -121,7 +123,32 @@ export interface EventPolicy {
   reply_to_poke: boolean;
   /** Tell the model when a message it saw was recalled. */
   note_recalls: boolean;
+  /** Accept friend requests automatically. */
+  accept_friend_requests: boolean;
+  /** Accept group invitations automatically. */
+  accept_group_invites: boolean;
 }
+
+/** Who may run a command. */
+export type CommandAccess = 'everyone' | 'admins_in_groups' | 'admins';
+
+/** Node-wide command permissions and bot administrators. */
+export interface CommandPolicy {
+  /** Administrators as `<platform>:<user id>`. */
+  admins: string[];
+  /** Treat group owners and admins as bot administrators in their group. */
+  group_admins_are_admins: boolean;
+  /** Access level per command name (without the slash); unlisted commands are open. */
+  access: Record<string, CommandAccess>;
+}
+
+/** Response of `GET`/`PUT /api/v1/system/command-policy`. */
+export interface CommandPolicyResponse {
+  policy: CommandPolicy;
+}
+
+/** Whether group members each have a session with the bot or share one. */
+export type SessionScope = 'user' | 'group';
 
 /** Response of `GET`/`PUT /api/v1/system/event-policy`. */
 export interface EventPolicyResponse {
@@ -170,6 +197,8 @@ export interface BotInstanceView {
   reply_policy: ReplyPolicy | null;
   /** Context-extras override; `null` inherits the node-wide policy. */
   context_policy: ContextPolicy | null;
+  session_scope: SessionScope;
+  observe_group: boolean;
   plugins: Record<string, ItemPolicy>;
   skills: Record<string, ItemPolicy>;
   mcp: Record<string, ItemPolicy>;
@@ -197,6 +226,8 @@ export interface InstanceRequest {
   reply_policy?: ReplyPolicy | null;
   /** `null` (or omitted) inherits the node-wide context policy. */
   context_policy?: ContextPolicy | null;
+  session_scope?: SessionScope;
+  observe_group?: boolean;
   plugins?: Record<string, ItemPolicy>;
   skills?: Record<string, ItemPolicy>;
   mcp?: Record<string, ItemPolicy>;
@@ -548,6 +579,27 @@ export interface PluginConfigUpdateResponse {
 }
 
 // Adapter types
+/**
+ * A platform-dependent feature an adapter implements through the generic adapter contract.
+ *
+ * Settings that depend on one are shown with the adapters that declare it, so an operator can tell
+ * which platforms a switch actually affects.
+ */
+export type Capability =
+  | 'sender_name'
+  | 'sender_role'
+  | 'group_messages'
+  | 'quote_reply'
+  | 'forward_content'
+  | 'acknowledge'
+  | 'member_join'
+  | 'bot_join'
+  | 'friend_add'
+  | 'poke'
+  | 'recall'
+  | 'friend_requests'
+  | 'group_invites';
+
 export interface AdapterItem {
   platform: string;
   kind: 'builtin' | 'plugin';
@@ -555,6 +607,8 @@ export interface AdapterItem {
   connected: boolean;
   host_id: string | null;
   plugin_id?: string;
+  /** Features this adapter declares. */
+  capabilities: Capability[];
 }
 
 export interface AdaptersResponse {
@@ -582,12 +636,6 @@ export interface MilkyConfig {
   display_name: string | null;
   base_url: string;
   transport: MilkyTransport;
-  /** Accept friend requests automatically. */
-  auto_accept_friends: boolean;
-  /** Accept group invitations automatically. */
-  auto_accept_group_invites: boolean;
-  /** React with a thumbs-up to a group message the bot is about to answer. */
-  reaction_ack: boolean;
 }
 
 export interface MilkyLogin {
@@ -634,12 +682,7 @@ export interface MilkyConfigRequest {
   display_name: string | null;
   base_url: string;
   transport: MilkyTransport;
-  /** Omitted keeps the stored choice. */
-  auto_accept_friends?: boolean;
-  /** Omitted keeps the stored choice. */
-  auto_accept_group_invites?: boolean;
-  /** Omitted keeps the stored choice. */
-  reaction_ack?: boolean;
+
   /** Omitted or empty keeps the stored credential. */
   access_token?: string;
   /** Explicitly removes the stored credential. */
@@ -825,8 +868,6 @@ export interface QqOfficialConfig {
   app_id: string;
   sandbox: boolean;
   markdown: boolean;
-  /** Show "typing…" in private chats while the model works. */
-  typing_indicator: boolean;
 }
 
 /** Live QQ Official gateway status returned by the node. */
@@ -876,10 +917,6 @@ export interface OneBotConfig {
   display_name: string | null;
   transport: OneBotTransport;
   ws_url: string;
-  /** Accept friend requests automatically. */
-  auto_accept_friends: boolean;
-  /** Accept group invitations automatically. */
-  auto_accept_group_invites: boolean;
 }
 
 /** Live connection status returned by the node. */

@@ -31,9 +31,6 @@ class MilkyStore {
   formToken = $state('');
   /** Explicit removal of the stored credential. */
   formClearToken = $state(false);
-  formAutoAcceptFriends = $state(false);
-  formAutoAcceptGroupInvites = $state(false);
-  formReactionAck = $state(false);
 
   loading = $state(false);
   saving = $state(false);
@@ -211,9 +208,6 @@ class MilkyStore {
           ? undefined
           : this.formToken || undefined,
         clear_access_token: this.formClearToken,
-        auto_accept_friends: this.formAutoAcceptFriends,
-        auto_accept_group_invites: this.formAutoAcceptGroupInvites,
-        reaction_ack: this.formReactionAck,
       });
       this.applyView(view);
       this.message = 'saved';
@@ -253,9 +247,6 @@ class MilkyStore {
     this.formTransport = view.config.transport;
     this.formToken = '';
     this.formClearToken = false;
-    this.formAutoAcceptFriends = view.config.auto_accept_friends;
-    this.formAutoAcceptGroupInvites = view.config.auto_accept_group_invites;
-    this.formReactionAck = view.config.reaction_ack;
   }
 }
 

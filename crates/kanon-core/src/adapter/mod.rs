@@ -20,6 +20,14 @@
 //!
 //! Adapters are resolved by platform on the outbound path only; the pipeline itself stays unaware
 //! of which route served a message.
+//!
+//! # Capabilities
+//! Platforms differ: one reports group roles, another cannot receive a group message nobody
+//! @-mentioned. Every feature that depends on such a difference goes through one generic
+//! contract — metadata keys, reply segments, [`PlatformAdapter::acknowledge`],
+//! [`PlatformAdapter::accept_request`] — and every adapter declares which of them it honours as a
+//! [`Capability`]. The catalog reports the declarations, so a console can say, for any setting,
+//! which adapters it affects, and a new adapter only has to declare what it implements.
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -28,11 +36,58 @@ use async_trait::async_trait;
 use kanon_proto::v1::{
     DeliverMessageRequest, DeliverMessageResponse, IngestEventRequest, PipelineEventRequest,
 };
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use tokio::sync::{RwLock, mpsc};
 
 use crate::supervisor::circuit_breaker::CircuitState;
+
+/// A platform-dependent feature an adapter implements through the generic adapter contract.
+///
+/// Serialized in `snake_case`; plugin adapters declare the same names under `[adapter]
+/// capabilities` in `plugin.toml`. A capability that needs a callback into the adapter
+/// ([`Capability::Acknowledge`], [`Capability::FriendRequests`], [`Capability::GroupInvites`]) is
+/// only available to built-in adapters, because the plugin protocol has no such call.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Capability {
+    /// Events carry the sender's display name (`kanon.sender_name`).
+    SenderName,
+    /// Group events carry the sender's role (`kanon.sender_role`: owner, admin or member).
+    SenderRole,
+    /// Every group message is delivered, not only the ones that @-mention the bot.
+    GroupMessages,
+    /// A reply segment is sent as a native quote of the message it names.
+    QuoteReply,
+    /// Merged forwards arrive with their content (`messages` in the forward payload).
+    ForwardContent,
+    /// [`PlatformAdapter::acknowledge`] shows that an answer is being prepared.
+    Acknowledge,
+    /// Reports members joining a group (`member_join` notice).
+    MemberJoin,
+    /// Reports the bot being added to a group (`bot_join` notice).
+    BotJoin,
+    /// Reports the bot being added as a friend (`friend_add` notice).
+    FriendAdd,
+    /// Reports pokes of the bot (`poke` notice).
+    Poke,
+    /// Reports recalled messages (`recall` notice).
+    Recall,
+    /// Reports friend requests and accepts them through [`PlatformAdapter::accept_request`].
+    FriendRequests,
+    /// Reports group invitations and accepts them through [`PlatformAdapter::accept_request`].
+    GroupInvites,
+}
+
+impl Capability {
+    /// Whether the capability needs a call into the adapter, which only built-in adapters offer.
+    pub fn needs_callback(self) -> bool {
+        matches!(
+            self,
+            Self::Acknowledge | Self::FriendRequests | Self::GroupInvites
+        )
+    }
+}
 
 /// Errors raised by a platform adapter or by adapter routing.
 #[derive(Debug, Error)]
@@ -59,6 +114,14 @@ pub enum AdapterError {
     /// A platform identifier was declared twice, which would make routing ambiguous.
     #[error("platform '{0}' is already served by another adapter")]
     DuplicatePlatform(String),
+    /// The adapter does not implement a capability the core asked it to use.
+    #[error("adapter '{platform}' does not support {capability:?}")]
+    Unsupported {
+        /// Platform identifier asked for the capability.
+        platform: String,
+        /// The capability it lacks.
+        capability: Capability,
+    },
     /// Inbound payload verification (e.g. HMAC signature or bearer token) failed.
     #[error("adapter '{platform}' authentication failed: {reason}")]
     Authentication {
@@ -162,6 +225,8 @@ pub struct AdapterDescriptor {
     pub plugin_id: Option<String>,
     /// Owning host process identifier (plugin adapters only).
     pub host_id: Option<String>,
+    /// Features this adapter implements, sorted.
+    pub capabilities: Vec<Capability>,
 }
 
 /// Contract implemented by in-process platform adapters.
@@ -176,6 +241,15 @@ pub trait PlatformAdapter: Send + Sync {
     /// Human-readable name shown in the management console.
     fn display_name(&self) -> &str {
         self.platform()
+    }
+
+    /// Features this adapter implements through the generic contract.
+    ///
+    /// Declaring a capability is a promise: the core relies on it (for example, it only offers
+    /// group observation where every group message is delivered) and the console reports it next to
+    /// each setting that depends on it. The default declares nothing.
+    fn capabilities(&self) -> &[Capability] {
+        &[]
     }
 
     /// Whether the adapter can currently accept outbound messages.
@@ -200,6 +274,19 @@ pub trait PlatformAdapter: Send + Sync {
     /// A failure is logged by the caller and never delays or cancels the answer.
     async fn acknowledge(&self, _event: &PipelineEventRequest) -> Result<(), AdapterError> {
         Ok(())
+    }
+
+    /// Accepts the friend request or group invitation a `friend_request` / `group_invite` notice
+    /// reported, using the opaque token the adapter put in its metadata.
+    ///
+    /// Called by the core when the node's event policy accepts such requests automatically. An
+    /// adapter that declares [`Capability::FriendRequests`] or [`Capability::GroupInvites`] must
+    /// implement it; the default reports the capability as unsupported.
+    async fn accept_request(&self, _event: &PipelineEventRequest) -> Result<(), AdapterError> {
+        Err(AdapterError::Unsupported {
+            platform: self.platform().to_string(),
+            capability: Capability::FriendRequests,
+        })
     }
 
     /// Verifies the authenticity of an inbound payload (e.g. HMAC signature or webhook token).

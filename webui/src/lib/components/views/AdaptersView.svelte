@@ -163,6 +163,14 @@ $effect(() => {
                 {adapter.connected ? 'Active' : 'Inbound-only'}
               </span>
             {/if}
+            <!-- What the adapter declares it supports; settings elsewhere name adapters by these. -->
+            {#each adapter.capabilities ?? [] as capability (capability)}
+              <span
+                class="px-1.5 py-0.5 rounded text-[10px] bg-zinc-100 dark:bg-zinc-800 text-zinc-500 dark:text-zinc-400"
+              >
+                {t(`capability.${capability}`)}
+              </span>
+            {/each}
           </div>
 
           <div class="flex items-center gap-2 self-end sm:self-auto">
@@ -175,7 +183,7 @@ $effect(() => {
               />
               <button
                 onclick={openQqConfig}
-                class="px-2.5 py-1 text-xs font-medium text-zinc-600 dark:text-zinc-400 hover:text-zinc-900 dark:hover:text-zinc-100 hover:bg-zinc-100 dark:hover:bg-zinc-800 border border-zinc-200 dark:border-zinc-700 rounded-md transition cursor-pointer flex items-center gap-1"
+                class="px-2.5 py-1 text-xs font-medium text-zinc-600 dark:text-zinc-400 hover:text-zinc-900 dark:hover:text-zinc-100 hover:bg-zinc-100 dark:hover:bg-zinc-800 border border-zinc-200 dark:border-zinc-700 rounded-md transition cursor-pointer flex items-center gap-1 whitespace-nowrap shrink-0"
               >
                 <Settings class="w-3.5 h-3.5" />
                 <span>{t('plugins.config')}</span>
@@ -191,7 +199,7 @@ $effect(() => {
               />
               <button
                 onclick={openMilkyConfig}
-                class="px-2.5 py-1 text-xs font-medium text-zinc-600 dark:text-zinc-400 hover:text-zinc-900 dark:hover:text-zinc-100 hover:bg-zinc-100 dark:hover:bg-zinc-800 border border-zinc-200 dark:border-zinc-700 rounded-md transition cursor-pointer flex items-center gap-1"
+                class="px-2.5 py-1 text-xs font-medium text-zinc-600 dark:text-zinc-400 hover:text-zinc-900 dark:hover:text-zinc-100 hover:bg-zinc-100 dark:hover:bg-zinc-800 border border-zinc-200 dark:border-zinc-700 rounded-md transition cursor-pointer flex items-center gap-1 whitespace-nowrap shrink-0"
               >
                 <Settings class="w-3.5 h-3.5" />
                 <span>{t('plugins.config')}</span>
@@ -207,7 +215,7 @@ $effect(() => {
               />
               <button
                 onclick={openOneBotConfig}
-                class="px-2.5 py-1 text-xs font-medium text-zinc-600 dark:text-zinc-400 hover:text-zinc-900 dark:hover:text-zinc-100 hover:bg-zinc-100 dark:hover:bg-zinc-800 border border-zinc-200 dark:border-zinc-700 rounded-md transition cursor-pointer flex items-center gap-1"
+                class="px-2.5 py-1 text-xs font-medium text-zinc-600 dark:text-zinc-400 hover:text-zinc-900 dark:hover:text-zinc-100 hover:bg-zinc-100 dark:hover:bg-zinc-800 border border-zinc-200 dark:border-zinc-700 rounded-md transition cursor-pointer flex items-center gap-1 whitespace-nowrap shrink-0"
               >
                 <Settings class="w-3.5 h-3.5" />
                 <span>{t('plugins.config')}</span>

@@ -34,7 +34,7 @@ use std::path::{Path, PathBuf};
 use kanon_adapter_milky::MilkyConfig;
 use kanon_adapter_onebot::OneBotConfig;
 use kanon_adapter_qqofficial::QqOfficialConfig;
-use kanon_core::{ContextPolicy, EventPolicy, ReplyPolicy};
+use kanon_core::{CommandPolicy, ContextPolicy, EventPolicy, ReplyPolicy};
 use kanon_llm::{ModelRef, ModelSpec, ProviderEntry};
 use serde::{Deserialize, Serialize};
 
@@ -131,6 +131,8 @@ pub struct NodeSettings {
     pub context_policy: ContextPolicy,
     /// Node-wide notice policy: which joins, pokes and recalls the bot reacts to.
     pub event_policy: EventPolicy,
+    /// Node-wide command permissions and bot administrators.
+    pub command_policy: CommandPolicy,
 }
 
 impl NodeSettings {
@@ -145,6 +147,7 @@ impl NodeSettings {
     /// the console describing a node that cannot answer.
     pub fn validate(&self) -> Result<(), String> {
         self.reply_policy.validate()?;
+        self.command_policy.clone().prepare()?;
 
         let mut names = std::collections::HashSet::new();
         for provider in &self.providers {
@@ -256,6 +259,9 @@ struct SystemConfigDocument {
     /// Node-wide notice policy.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     event_policy: Option<EventPolicy>,
+    /// Node-wide command permissions.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    command_policy: Option<CommandPolicy>,
     /// Milky platform adapter configuration, when one was saved.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     milky: Option<MilkyConfig>,
@@ -447,6 +453,7 @@ impl SystemConfigStore {
             reply_policy: document.reply_policy.unwrap_or_default(),
             context_policy: document.context_policy.unwrap_or_default(),
             event_policy: document.event_policy.unwrap_or_default(),
+            command_policy: document.command_policy.unwrap_or_default(),
             models: document.models.unwrap_or_default(),
             ..NodeSettings::default()
         };
@@ -498,6 +505,7 @@ impl SystemConfigStore {
         document.reply_policy = Some(settings.reply_policy);
         document.context_policy = Some(settings.context_policy);
         document.event_policy = Some(settings.event_policy);
+        document.command_policy = Some(settings.command_policy.clone());
 
         self.write_document(&document)
     }

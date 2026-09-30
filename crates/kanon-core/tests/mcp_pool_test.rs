@@ -183,6 +183,7 @@ async fn instance_with_policy(
             plugins: Default::default(),
             skills: Default::default(),
             mcp: HashMap::from([(server_id.to_string(), policy)]),
+            ..Default::default()
         })
         .await
         .expect("create instance")

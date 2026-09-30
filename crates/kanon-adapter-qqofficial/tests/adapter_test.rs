@@ -147,7 +147,6 @@ fn config(enabled: bool) -> QqOfficialConfig {
         secret: Some("SECRET".into()),
         sandbox: false,
         markdown: false,
-        typing_indicator: true,
     }
 }
 

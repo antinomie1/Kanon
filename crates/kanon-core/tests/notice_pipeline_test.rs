@@ -67,6 +67,7 @@ async fn harness(
             plugins: Default::default(),
             skills: Default::default(),
             mcp: Default::default(),
+            ..Default::default()
         })
         .await
         .expect("create instance");

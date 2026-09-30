@@ -229,11 +229,11 @@ where
                             Ok(None) => {}
                             Err(err) => record_error(state, format!("OneBot notice mapping failed: {err}")),
                         },
-                        Some("request") => {
-                            if let Some(answer) = auto_accept(config, &value) {
-                                lookups.spawn(answer_request(api.clone(), answer));
-                            }
-                        }
+                        Some("request") => match mapping::map_request(&config.platform, &value) {
+                            Ok(Some(request)) => ingest(state, config, ingress, request),
+                            Ok(None) => {}
+                            Err(err) => record_error(state, format!("OneBot request mapping failed: {err}")),
+                        },
                         _ => match mapping::map_event(&config.platform, value) {
                             // Plain messages go straight in, keeping their order; only a message
                             // that needs a lookup waits for it.
@@ -436,31 +436,4 @@ async fn display_name(
         .map(str::trim)
         .find(|name| !name.is_empty())
         .map(str::to_owned)
-}
-
-/// The API call that accepts a request, when the configuration says to.
-fn auto_accept(config: &OneBotConfig, value: &Value) -> Option<(&'static str, Value)> {
-    match mapping::map_request(value)? {
-        mapping::Request::Friend { flag } if config.auto_accept_friends => Some((
-            "set_friend_add_request",
-            json!({"flag": flag, "approve": true}),
-        )),
-        mapping::Request::GroupInvite { flag } if config.auto_accept_group_invites => Some((
-            "set_group_add_request",
-            json!({"flag": flag, "sub_type": "invite", "approve": true}),
-        )),
-        _ => None,
-    }
-}
-
-/// Answers a request; nothing is ingested.
-async fn answer_request(
-    api: mpsc::Sender<Command>,
-    (action, params): (&'static str, Value),
-) -> Option<PipelineEventRequest> {
-    match OneBotClient::request(api, action, &params).await {
-        Ok(_) => tracing::info!(action, "OneBot request accepted automatically"),
-        Err(err) => tracing::warn!(action, error = %err, "OneBot request could not be accepted"),
-    }
-    None
 }

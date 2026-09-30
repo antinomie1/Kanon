@@ -18,6 +18,7 @@ import { instancesStore } from '../../stores/instances.svelte';
 import { modelsStore } from '../../stores/models.svelte';
 import { describeReplyPolicy } from '../../stores/replyPolicy.svelte';
 import type { ItemPolicy } from '../../types';
+import SupportBadge from '../ui/SupportBadge.svelte';
 
 /** Policy kinds in the order the form renders them. */
 const policyKinds: PolicyKind[] = ['plugins', 'skills', 'mcp'];
@@ -437,6 +438,14 @@ $effect(() => {
                   class="rounded text-indigo-600 focus:ring-0 w-4 h-4"
                 />
               </label>
+              <label class="flex items-center justify-between gap-4 text-sm text-zinc-700 dark:text-zinc-300 cursor-pointer select-none">
+                <span>{t('reply.acknowledge')}</span>
+                <input
+                  type="checkbox"
+                  bind:checked={instancesStore.formReplyAck}
+                  class="rounded text-indigo-600 focus:ring-0 w-4 h-4"
+                />
+              </label>
             {/if}
 
             {#if instancesStore.formReplyPolicyMode === 'inherit'}
@@ -453,6 +462,38 @@ $effect(() => {
             {:else}
               <p class="text-xs text-zinc-400">{t('instances.reply_override_hint')}</p>
             {/if}
+          </div>
+
+          <!-- Group context: shared or per-member sessions, and observation of the group. -->
+          <div class="space-y-3 border-t border-zinc-200 dark:border-zinc-800 pt-4">
+            <div>
+              <span class="text-xs font-medium text-zinc-500">{t('group.title')}</span>
+              <p class="text-xs text-zinc-400 mt-0.5">{t('group.hint')}</p>
+            </div>
+            <select
+              bind:value={instancesStore.formSessionScope}
+              class="w-full px-3 py-2 text-sm bg-zinc-50 dark:bg-zinc-800 border border-zinc-200 dark:border-zinc-700 rounded-lg focus:outline-hidden cursor-pointer"
+            >
+              <option value="user">{t('group.scope_user')}</option>
+              <option value="group">{t('group.scope_group')}</option>
+            </select>
+            <p class="text-xs text-zinc-400">
+              {instancesStore.formSessionScope === 'group'
+                ? t('group.scope_group_hint')
+                : t('group.scope_user_hint')}
+            </p>
+            <label class="flex items-start justify-between gap-4 text-sm text-zinc-700 dark:text-zinc-300 cursor-pointer select-none">
+              <span>
+                <span class="block">{t('group.observe')}</span>
+                <span class="block text-xs text-zinc-400 mt-0.5">{t('group.observe_hint')}</span>
+                <SupportBadge capabilities={['group_messages']} />
+              </span>
+              <input
+                type="checkbox"
+                bind:checked={instancesStore.formObserveGroup}
+                class="mt-1 rounded text-indigo-600 focus:ring-0 w-4 h-4 shrink-0"
+              />
+            </label>
           </div>
 
           <!-- Context extras: whether the sender id and the message time reach the model. -->

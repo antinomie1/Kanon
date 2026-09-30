@@ -72,6 +72,10 @@ pub struct InstanceView {
     pub reply_policy: Option<ReplyPolicy>,
     /// Context-extras override; `null` inherits the node-wide policy.
     pub context_policy: Option<ContextPolicy>,
+    /// Per-member or shared group sessions.
+    pub session_scope: kanon_core::SessionScope,
+    /// Whether unanswered group messages reach the model on its next turn.
+    pub observe_group: bool,
     /// Per-plugin overrides.
     pub plugins: std::collections::HashMap<String, kanon_core::instance::ItemPolicy>,
     /// Per-skill overrides.
@@ -134,6 +138,12 @@ pub struct InstanceRequest {
     /// Optional context-extras override; omit or `null` to inherit the node-wide policy.
     #[serde(default)]
     pub context_policy: Option<ContextPolicy>,
+    /// `user` (default) or `group`.
+    #[serde(default)]
+    pub session_scope: kanon_core::SessionScope,
+    /// Show unanswered group messages to the model on its next turn.
+    #[serde(default)]
+    pub observe_group: bool,
     /// Per-plugin overrides (`inherit` | `enable` | `disable`).
     #[serde(default)]
     pub plugins: std::collections::HashMap<String, kanon_core::instance::ItemPolicy>,
@@ -156,6 +166,8 @@ impl From<InstanceRequest> for InstanceDraft {
             model: request.model,
             reply_policy: request.reply_policy,
             context_policy: request.context_policy,
+            session_scope: request.session_scope,
+            observe_group: request.observe_group,
             plugins: request.plugins,
             skills: request.skills,
             mcp: request.mcp,
@@ -202,6 +214,8 @@ async fn view(state: &ApiState, instance: &BotInstance) -> InstanceView {
         model: instance.model.clone(),
         reply_policy: instance.reply_policy,
         context_policy: instance.context_policy,
+        session_scope: instance.session_scope,
+        observe_group: instance.observe_group,
         plugins: instance.plugins.clone(),
         skills: instance.skills.clone(),
         mcp: instance.mcp.clone(),

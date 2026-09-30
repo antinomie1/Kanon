@@ -179,18 +179,6 @@ let showToken = $state(false);
         </div>
       </div>
 
-      <div class="md:col-span-2 space-y-2 p-3 rounded-lg bg-zinc-50 dark:bg-zinc-950/50 border border-zinc-100 dark:border-zinc-800">
-        <span class="block text-xs font-medium text-zinc-600 dark:text-zinc-400">{t('adapters.automation')}</span>
-        <label class="flex items-center gap-2 cursor-pointer">
-          <input type="checkbox" bind:checked={store.formAutoAcceptFriends} class="cursor-pointer" />
-          <span class="text-xs text-zinc-700 dark:text-zinc-300">{t('adapters.auto_accept_friends')}</span>
-        </label>
-        <label class="flex items-center gap-2 cursor-pointer">
-          <input type="checkbox" bind:checked={store.formAutoAcceptGroupInvites} class="cursor-pointer" />
-          <span class="text-xs text-zinc-700 dark:text-zinc-300">{t('adapters.auto_accept_group_invites')}</span>
-        </label>
-      </div>
-
       <p class="md:col-span-2 text-xs text-zinc-500 dark:text-zinc-400">
         {t('adapters.onebot_readonly_hint')}
       </p>

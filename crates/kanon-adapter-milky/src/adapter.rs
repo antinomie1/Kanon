@@ -29,7 +29,7 @@ use std::sync::{Arc, RwLock};
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 use async_trait::async_trait;
-use kanon_core::{AdapterError, EventIngress, PlatformAdapter};
+use kanon_core::{AdapterError, Capability, EventIngress, PlatformAdapter};
 use kanon_proto::v1::{DeliverMessageRequest, DeliverMessageResponse, IngestEventRequest};
 use serde::Serialize;
 
@@ -43,6 +43,22 @@ use crate::protocol::{
     SendGroupMessageReactionInput, SendPrivateMessageInput,
 };
 use kanon_proto::v1::PipelineEventRequest;
+
+/// What this adapter implements through the generic adapter contract.
+const CAPABILITIES: &[Capability] = &[
+    Capability::SenderName,
+    Capability::SenderRole,
+    Capability::GroupMessages,
+    Capability::QuoteReply,
+    Capability::ForwardContent,
+    Capability::Acknowledge,
+    Capability::MemberJoin,
+    Capability::BotJoin,
+    Capability::Poke,
+    Capability::Recall,
+    Capability::FriendRequests,
+    Capability::GroupInvites,
+];
 
 /// Reaction used to acknowledge a message: QQ face 76, the thumbs-up.
 const ACK_REACTION: &str = "76";
@@ -517,12 +533,54 @@ impl PlatformAdapter for MilkyAdapter {
         }
     }
 
-    /// Reacts to a group message the bot is about to answer, when the operator enabled it.
+    fn capabilities(&self) -> &[Capability] {
+        CAPABILITIES
+    }
+
+    /// Accepts a friend request or group invitation with the token its notice carried.
+    async fn accept_request(&self, event: &PipelineEventRequest) -> Result<(), AdapterError> {
+        let client = self
+            .state
+            .read()
+            .expect("adapter state poisoned")
+            .client
+            .clone()
+            .ok_or_else(|| AdapterError::Configuration {
+                platform: self.platform.clone(),
+                reason: "the Milky adapter is disabled".to_string(),
+            })?;
+        let input =
+            mapping::accept_request_input(event).map_err(|reason| AdapterError::Delivery {
+                platform: self.platform.clone(),
+                reason,
+            })?;
+        let result = match input {
+            mapping::AcceptRequest::Friend(initiator_uid) => {
+                client
+                    .accept_friend_request(&AcceptFriendRequestInput {
+                        initiator_uid,
+                        is_filtered: false,
+                    })
+                    .await
+            }
+            mapping::AcceptRequest::Group(group_id, invitation_seq) => {
+                client
+                    .accept_group_invitation(&AcceptGroupInvitationInput {
+                        group_id,
+                        invitation_seq,
+                    })
+                    .await
+            }
+        };
+        result.map_err(|err| err.into_adapter_error(&self.platform))
+    }
+
+    /// Reacts to a group message the bot is about to answer.
     async fn acknowledge(&self, event: &PipelineEventRequest) -> Result<(), AdapterError> {
         let client = {
             let state = self.state.read().expect("adapter state poisoned");
             match &state.client {
-                Some(client) if state.config.reaction_ack => client.clone(),
+                Some(client) => client.clone(),
                 _ => return Ok(()),
             }
         };
@@ -628,10 +686,7 @@ fn handle_event(state: &Arc<RwLock<State>>, platform: &str, ingress: &EventIngre
         guard.status.last_event_at_unix_ms = Some(now_unix_millis());
     }
 
-    let (client, config) = {
-        let guard = state.read().expect("adapter state poisoned");
-        (guard.client.clone(), guard.config.clone())
-    };
+    let client = state.read().expect("adapter state poisoned").client.clone();
 
     if let Some(notice) = mapping::map_notice(platform, event) {
         match client {
@@ -654,8 +709,9 @@ fn handle_event(state: &Arc<RwLock<State>>, platform: &str, ingress: &EventIngre
         return;
     }
 
-    if let Some(client) = client.clone() {
-        accept_request(client, &config, event);
+    if let Some(request) = mapping::map_request(platform, event) {
+        ingest(state, platform, ingress, request);
+        return;
     }
 
     let request = match mapping::inbound_message(platform, self_id, event) {
@@ -731,41 +787,6 @@ async fn display_name(client: &MilkyClient, group_id: Option<i64>, user_id: i64)
         }
     };
     Some(name.trim().to_string()).filter(|name| !name.is_empty())
-}
-
-/// Accepts a friend request or group invitation when the configuration says to.
-fn accept_request(client: Arc<MilkyClient>, config: &MilkyConfig, event: &Event) {
-    match event {
-        Event::FriendRequest { data, .. } if config.auto_accept_friends => {
-            let input = AcceptFriendRequestInput {
-                initiator_uid: data.initiator_uid.clone(),
-                is_filtered: false,
-            };
-            tokio::spawn(async move {
-                match client.accept_friend_request(&input).await {
-                    Ok(()) => tracing::info!("Milky friend request accepted automatically"),
-                    Err(err) => {
-                        tracing::warn!(error = %err, "Milky friend request could not be accepted")
-                    }
-                }
-            });
-        }
-        Event::GroupInvitation { data, .. } if config.auto_accept_group_invites => {
-            let input = AcceptGroupInvitationInput {
-                group_id: data.group_id,
-                invitation_seq: data.invitation_seq,
-            };
-            tokio::spawn(async move {
-                match client.accept_group_invitation(&input).await {
-                    Ok(()) => tracing::info!("Milky group invitation accepted automatically"),
-                    Err(err) => {
-                        tracing::warn!(error = %err, "Milky group invitation could not be accepted")
-                    }
-                }
-            });
-        }
-        _ => {}
-    }
 }
 
 /// Pushes one event into the core without waiting for capacity.
