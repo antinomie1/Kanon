@@ -1112,7 +1112,7 @@ impl PipelineEngine {
         // Bash identity is taken from the adapter's event before plugin pre-filters can rewrite
         // it. A notice is not a message: its "sender" is a joining member or a poker, who never
         // asked for anything, so a notice turn has no caller.
-        let bash_caller = (notice.is_none() && !event.sender_id.trim().is_empty())
+        let bash_sender = (notice.is_none() && !event.sender_id.trim().is_empty())
             .then(|| format!("{platform}:{}", event.sender_id));
         if let Some(kind) = notice {
             let policy = self
@@ -1264,11 +1264,18 @@ impl PipelineEngine {
         };
         // Phase 2-: Command permissions, checked once for built-in and plugin commands alike.
         // Without a policy store (an embedded pipeline) every command stays open, which is the
-        // pre-policy behaviour; the node always installs one.
+        // pre-policy behaviour; the node always installs one. An instance with its own command
+        // policy replaces the node's, administrators included.
         if let (Some((cmd_name, _)), Some(store)) = (
             CommandRouter::parse_command(command_text),
             self.command_policy.as_ref(),
-        ) && !store.get().allows(&cmd_name, &filtered_event)
+        ) && !instance
+            .as_ref()
+            .map_or_else(
+                || store.get(),
+                |instance| instance.effective_command_policy(store.get()),
+            )
+            .allows(&cmd_name, &filtered_event)
         {
             // The sender's own ID is part of the answer: it is exactly what an operator adds to
             // the administrator list to grant access.
@@ -1607,9 +1614,13 @@ impl PipelineEngine {
             };
 
             // A shared or observed group session puts other members' words into this turn's
-            // context; they must not be able to steer an administrator's shell, so such a turn
-            // runs without a Bash caller.
-            let bash_caller = bash_caller.filter(|_| !shared && !observing);
+            // context, and they could steer an administrator's shell. The turn records that fact
+            // and the Bash gate refuses it unless the instance explicitly allows shared contexts.
+            let bash_caller = bash_sender.map(|id| crate::BashCaller {
+                id,
+                instance: instance.as_ref().map(|instance| instance.id.clone()),
+                shared_context: shared || observing,
+            });
             match crate::with_bash_caller(
                 bash_caller,
                 router.execute_message(&session_id, user_message, &tool_hosts),

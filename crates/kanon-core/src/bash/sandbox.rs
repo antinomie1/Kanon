@@ -21,8 +21,8 @@ use futures_util::StreamExt;
 use serde::{Deserialize, Serialize};
 use tokio::sync::{Mutex, OwnedSemaphorePermit, oneshot};
 
-use super::{BashExecutionMode, BashPolicy, BashPolicyStore, MAX_BASH_OUTPUT_BYTES};
-use crate::access::CommandPolicyStore;
+use super::access::{BashCaller, Gate};
+use super::{BashExecutionMode, BashPolicy, MAX_BASH_OUTPUT_BYTES};
 
 /// Independent host directory exposed to the sandbox, never the node's configuration directory.
 pub const DEFAULT_BASH_WORKSPACE: &str = "./data/bash/workspace";
@@ -184,10 +184,10 @@ pub(super) struct Invocation {
     pub cwd: PathBuf,
     pub command: String,
     pub seconds: u64,
-    pub policy: Arc<BashPolicyStore>,
-    pub commands: Arc<CommandPolicyStore>,
-    /// Verified `<platform>:<user id>`; the worker runs outside the turn's task-local scope.
-    pub caller: String,
+    /// Live stores the worker rechecks before every step.
+    pub gate: Arc<Gate>,
+    /// Verified caller; the worker runs outside the turn's task-local scope.
+    pub caller: BashCaller,
     pub expected: BashPolicy,
 }
 
@@ -288,11 +288,11 @@ fn cancelled(cancel: &mut oneshot::Receiver<()>) -> bool {
     !matches!(cancel.try_recv(), Err(oneshot::error::TryRecvError::Empty))
 }
 
-fn authorize(call: &Invocation) -> Result<(), String> {
-    let current = call.policy.get();
+async fn authorize(call: &Invocation) -> Result<(), String> {
+    let current = call.gate.policy.get();
     if current.execution_mode != BashExecutionMode::Sandbox
         || current != call.expected
-        || !current.allows(Some(&call.caller), &call.commands.get())
+        || call.gate.check(Some(&call.caller)).await.is_err()
     {
         return Err("Bash execution denied: permission or configuration changed".into());
     }
@@ -424,7 +424,7 @@ async fn ensure_container(
 }
 
 async fn run(call: Invocation, mut cancel: oneshot::Receiver<()>) -> Result<String, String> {
-    authorize(&call)?;
+    authorize(&call).await?;
     let (docker, image) = probe(&call.expected.sandbox).await?;
     if cancelled(&mut cancel) {
         return Err("Sandbox execution cancelled".into());
@@ -433,7 +433,7 @@ async fn run(call: Invocation, mut cancel: oneshot::Receiver<()>) -> Result<Stri
     if cancelled(&mut cancel) {
         return Err("Sandbox execution cancelled".into());
     }
-    authorize(&call)?;
+    authorize(&call).await?;
     let relative = call
         .cwd
         .strip_prefix(&call.root)
@@ -474,7 +474,7 @@ async fn run(call: Invocation, mut cancel: oneshot::Receiver<()>) -> Result<Stri
         return Err("Sandbox execution cancelled".into());
     }
     // The container persists, but each exec still requires fresh sender authorization.
-    authorize(&call)?;
+    authorize(&call).await?;
     let mut capture = Capture::default();
     let started = std::time::Instant::now();
     let execution = async {

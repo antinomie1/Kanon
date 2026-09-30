@@ -33,9 +33,9 @@ pub use adapter::{
     IngestError, PlatformAdapter,
 };
 pub use bash::{
-    BashAvailabilityHook, BashExecutionMode, BashLocalConfig, BashPolicy, BashPolicyStore,
-    BashReviewDecision, BashReviewRequest, BashReviewer, BashSandboxConfig, BashTool,
-    DEFAULT_BASH_WORKSPACE, ModelBashReviewer, with_bash_caller,
+    BashAvailabilityHook, BashCaller, BashExecutionMode, BashLocalConfig, BashPolicy,
+    BashPolicyStore, BashReviewDecision, BashReviewRequest, BashReviewer, BashSandboxConfig,
+    BashTool, DEFAULT_BASH_WORKSPACE, ModelBashReviewer, with_bash_caller,
 };
 pub use conversation::{
     ContextPolicy, ContextPolicyStore, ConversationKind, META_BOT_MENTIONED,
@@ -43,8 +43,8 @@ pub use conversation::{
     ReplyPolicyStore, bot_mentioned,
 };
 pub use instance::{
-    BotInstance, DEFAULT_INSTANCE_CATALOG, InstanceDraft, InstanceError, InstanceRegistry,
-    SessionScope, instance_persona_id, sync_instance_personas,
+    BashScope, BotInstance, DEFAULT_INSTANCE_CATALOG, InstanceDraft, InstanceError,
+    InstanceRegistry, SessionScope, instance_persona_id, sync_instance_personas,
 };
 pub use ipc::{CoreApiService, CoreIpcServer};
 pub use manifest::{

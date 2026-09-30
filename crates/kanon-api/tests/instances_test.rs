@@ -261,3 +261,49 @@ async fn health_reports_instance_counts() {
     assert_eq!(body["instances"]["total"], json!(2));
     assert_eq!(body["instances"]["enabled"], json!(1));
 }
+
+#[tokio::test]
+async fn command_permissions_and_bash_scope_are_stored_per_instance() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let state = common::fixture_state(PathBuf::from(dir.path()), true).await;
+    let app = kanon_api::app(state);
+
+    // A malformed administrator is refused before anything reaches the catalog.
+    let mut invalid = instance_body("Ops Bot", false, &[]);
+    invalid["command_policy"] = json!({"admins": ["no-platform"]});
+    let (status, _) =
+        common::send_json(&app, Method::POST, "/api/v1/instances", Some(invalid)).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert_eq!(list(&app).await["total"], json!(0));
+
+    // A valid override is stored as the node enforces it: trimmed admins, bare command names.
+    let mut body = instance_body("Ops Bot", false, &[]);
+    body["command_policy"] = json!({
+        "admins": [" onebot:1 "],
+        "group_admins_are_admins": false,
+        "access": {"/Weather": "admins"},
+    });
+    body["bash"] = json!("shared_context");
+    let (status, created) =
+        common::send_json(&app, Method::POST, "/api/v1/instances", Some(body)).await;
+    assert_eq!(status, StatusCode::OK);
+    let instance = &created["instance"];
+    assert_eq!(instance["bash"], json!("shared_context"));
+    assert_eq!(
+        instance["command_policy"],
+        json!({
+            "admins": ["onebot:1"],
+            "group_admins_are_admins": false,
+            "access": {"weather": "admins"},
+        })
+    );
+
+    // The listing carries what an inheriting instance would get, for the console's hints.
+    let listed = list(&app).await;
+    assert_eq!(listed["node_command_policy"]["admins"], json!([]));
+    assert_eq!(listed["node_bash_enabled"], json!(false));
+    assert_eq!(
+        listed["instances"][0]["command_policy"],
+        instance["command_policy"]
+    );
+}

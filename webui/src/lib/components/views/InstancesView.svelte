@@ -17,7 +17,8 @@ import type { PolicyKind } from '../../stores/instances.svelte';
 import { instancesStore } from '../../stores/instances.svelte';
 import { modelsStore } from '../../stores/models.svelte';
 import { describeReplyPolicy } from '../../stores/replyPolicy.svelte';
-import type { ItemPolicy } from '../../types';
+import type { BashScope, ItemPolicy } from '../../types';
+import CommandPolicyEditor from '../ui/CommandPolicyEditor.svelte';
 import SupportBadge from '../ui/SupportBadge.svelte';
 
 /** Policy kinds in the order the form renders them. */
@@ -38,6 +39,36 @@ const replyChoices: { value: string; labelKey: string }[] = [
   { value: 'probability', labelKey: 'reply.mode_probability' },
   { value: 'never', labelKey: 'reply.mode_never' },
 ];
+
+/** Bash scopes in the order the selector lists them, with the hint shown for each. */
+const bashScopes: { value: BashScope; labelKey: string; hintKey: string }[] = [
+  {
+    value: 'disabled',
+    labelKey: 'instances.bash_disabled',
+    hintKey: 'instances.bash_disabled_hint',
+  },
+  {
+    value: 'own_context',
+    labelKey: 'instances.bash_own',
+    hintKey: 'instances.bash_own_hint',
+  },
+  {
+    value: 'shared_context',
+    labelKey: 'instances.bash_shared',
+    hintKey: 'instances.bash_shared_hint',
+  },
+];
+
+/** Console label of a Bash scope. */
+function bashLabelKey(scope: BashScope): string {
+  return bashScopes.find((choice) => choice.value === scope)?.labelKey ?? '';
+}
+
+/** Hint for the Bash scope currently selected in the form. */
+const bashHintKey = $derived(
+  bashScopes.find((choice) => choice.value === instancesStore.formBash)
+    ?.hintKey ?? '',
+);
 
 /** Section heading key for one policy kind. */
 function policyTitleKey(kind: PolicyKind): string {
@@ -214,6 +245,12 @@ $effect(() => {
                   {/if}
                   {#if instance.system_prompt}
                     <span>· {t('instances.custom_prompt')}</span>
+                  {/if}
+                  {#if instance.command_policy}
+                    <span>· {t('instances.own_commands')}</span>
+                  {/if}
+                  {#if instance.bash !== 'own_context'}
+                    <span>· Bash: {t(bashLabelKey(instance.bash))}</span>
                   {/if}
                   {#if instancesStore.overrideCount(instance) > 0}
                     <span>
@@ -553,6 +590,64 @@ $effect(() => {
                   policy: describeContextPolicy(instancesStore.nodeContextPolicy),
                 })}
               </p>
+            {/if}
+          </div>
+
+          <!-- Command permissions: inherit the node's, or give this bot its own administrators. -->
+          <div class="space-y-3 border-t border-zinc-200 dark:border-zinc-800 pt-4">
+            <div>
+              <span class="text-xs font-medium text-zinc-500">{t('commands.title')}</span>
+              <p class="text-xs text-zinc-400 mt-0.5">{t('instances.commands_hint')}</p>
+            </div>
+
+            <label class="flex items-center gap-2 text-sm text-zinc-700 dark:text-zinc-300 cursor-pointer select-none">
+              <input
+                type="checkbox"
+                bind:checked={instancesStore.formCommandInherit}
+                class="rounded text-indigo-600 focus:ring-0 w-4 h-4"
+              />
+              <span>{t('reply.inherit')}</span>
+            </label>
+
+            {#if instancesStore.formCommandInherit}
+              <p class="text-xs text-zinc-400">
+                {t('instances.commands_inherit_hint', {
+                  admins: instancesStore.nodeCommandPolicy?.admins.join(', ') || '—',
+                })}
+              </p>
+            {:else}
+              <CommandPolicyEditor bind:draft={instancesStore.formCommandDraft} />
+            {/if}
+          </div>
+
+          <!-- Bash: where this bot's administrators may run it; the node-wide switch still wins. -->
+          <div class="space-y-3 border-t border-zinc-200 dark:border-zinc-800 pt-4">
+            <div>
+              <span class="text-xs font-medium text-zinc-500">{t('bash.title')}</span>
+              <p class="text-xs text-zinc-400 mt-0.5">{t('instances.bash_hint')}</p>
+            </div>
+            <select
+              bind:value={instancesStore.formBash}
+              class="w-full px-3 py-2 text-sm bg-zinc-50 dark:bg-zinc-800 border border-zinc-200 dark:border-zinc-700 rounded-lg focus:outline-hidden cursor-pointer"
+            >
+              {#each bashScopes as choice (choice.value)}
+                <option value={choice.value}>{t(choice.labelKey)}</option>
+              {/each}
+            </select>
+            <p class="text-xs text-zinc-400">{t(bashHintKey)}</p>
+            {#if instancesStore.formBash === 'shared_context'}
+              <p class="text-xs text-amber-600 dark:text-amber-400 flex items-start gap-1.5">
+                <AlertCircle class="w-3.5 h-3.5 mt-0.5 shrink-0" />
+                {t('instances.bash_shared_warning')}
+              </p>
+            {:else if instancesStore.formBash === 'own_context' && (instancesStore.formSessionScope === 'group' || instancesStore.formObserveGroup)}
+              <p class="text-xs text-amber-600 dark:text-amber-400 flex items-start gap-1.5">
+                <AlertCircle class="w-3.5 h-3.5 mt-0.5 shrink-0" />
+                {t('instances.bash_groups_excluded')}
+              </p>
+            {/if}
+            {#if !instancesStore.nodeBashEnabled && instancesStore.formBash !== 'disabled'}
+              <p class="text-xs text-zinc-400">{t('instances.bash_node_off')}</p>
             {/if}
           </div>
 

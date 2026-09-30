@@ -26,6 +26,7 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use tokio::sync::RwLock;
 
+use crate::access::CommandPolicy;
 use crate::conversation::{ContextPolicy, ReplyPolicy};
 
 /// Default location of the instance catalog, relative to the node working directory.
@@ -108,6 +109,24 @@ pub enum SessionScope {
     Group,
 }
 
+/// Where an instance lets its administrators run Bash; the node-wide Bash switch still wins.
+///
+/// "Own context" means the model sees only the administrator's own conversation: a private chat,
+/// or a per-member group session in a group the instance does not observe. A shared or observed
+/// group session also carries other members' words, and those can steer the commands the model
+/// runs on the administrator's behalf — so allowing it is a separate, explicit choice.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum BashScope {
+    /// Never, whatever the node-wide switch says.
+    Disabled,
+    /// Only in conversations whose context is the administrator's own (the default).
+    #[default]
+    OwnContext,
+    /// Also in shared or observed group sessions.
+    SharedContext,
+}
+
 /// One bot instance.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct BotInstance {
@@ -147,6 +166,15 @@ pub struct BotInstance {
     /// last turn when it is next addressed. Needs an adapter that delivers every group message.
     #[serde(default)]
     pub observe_group: bool,
+    /// Command-permission override; `None` inherits the node-wide policy.
+    ///
+    /// It replaces the node policy as a whole, administrators included: two bots on one node can
+    /// serve different communities, and each community has its own administrators.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub command_policy: Option<CommandPolicy>,
+    /// Where this instance's administrators may run Bash.
+    #[serde(default)]
+    pub bash: BashScope,
     /// Per-plugin overrides; absent identifiers inherit the node-wide switch.
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     pub plugins: HashMap<String, ItemPolicy>,
@@ -196,6 +224,12 @@ pub struct InstanceDraft {
     /// Whether unanswered group messages are shown to the model when it is next addressed.
     #[serde(default)]
     pub observe_group: bool,
+    /// Optional command-permission override; absent inherits the node-wide policy.
+    #[serde(default)]
+    pub command_policy: Option<CommandPolicy>,
+    /// Where this instance's administrators may run Bash.
+    #[serde(default)]
+    pub bash: BashScope,
     /// Per-plugin overrides.
     #[serde(default)]
     pub plugins: HashMap<String, ItemPolicy>,
@@ -287,6 +321,12 @@ impl BotInstance {
     /// Context-extras policy that governs this instance, given the node-wide default.
     pub fn effective_context_policy(&self, node_policy: ContextPolicy) -> ContextPolicy {
         self.context_policy.unwrap_or(node_policy)
+    }
+
+    /// Command permissions and administrators that govern this instance, given the node-wide
+    /// default.
+    pub fn effective_command_policy(&self, node_policy: CommandPolicy) -> CommandPolicy {
+        self.command_policy.clone().unwrap_or(node_policy)
     }
 }
 
@@ -735,6 +775,12 @@ fn build_instance(
     if let Some(policy) = draft.reply_policy.as_ref() {
         policy.validate().map_err(InstanceError::Invalid)?;
     }
+    // Normalized like the node-wide policy, so a stored override matches exactly what is enforced.
+    let command_policy = draft
+        .command_policy
+        .map(CommandPolicy::prepare)
+        .transpose()
+        .map_err(InstanceError::Invalid)?;
 
     Ok(BotInstance {
         id,
@@ -748,6 +794,8 @@ fn build_instance(
         context_policy: draft.context_policy,
         session_scope: draft.session_scope,
         observe_group: draft.observe_group,
+        command_policy,
+        bash: draft.bash,
         plugins: draft.plugins,
         skills: draft.skills,
         mcp: draft.mcp,

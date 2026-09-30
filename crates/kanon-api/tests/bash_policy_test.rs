@@ -3,7 +3,10 @@ mod common;
 
 use axum::http::{Method, StatusCode};
 use kanon_api::{ApiState, SystemConfigStore};
-use kanon_core::{BashPolicy, BashPolicyStore, BashTool, CommandPolicyStore, Supervisor};
+use kanon_core::instance::InstanceRegistry;
+use kanon_core::{
+    BashCaller, BashPolicy, BashPolicyStore, BashTool, CommandPolicyStore, Supervisor,
+};
 use serde_json::json;
 use std::sync::Arc;
 
@@ -14,6 +17,7 @@ fn bash_tool(root: &std::path::Path) -> Arc<BashTool> {
             root.join("workspace"),
             Arc::new(BashPolicyStore::default()),
             Arc::new(CommandPolicyStore::default()),
+            Arc::new(InstanceRegistry::in_memory()),
         )
         .unwrap(),
     )
@@ -137,14 +141,19 @@ async fn bash_command_and_notice_updates_preserve_each_other_and_adapter_setting
     .build();
     assert_eq!(restarted.event_policy().get(), state.event_policy().get());
     assert!(restarted_tool.policy().get().enabled);
-    let commands = restarted_tool.command_policy().get();
     assert!(
         restarted_tool
-            .policy()
+            .command_policy()
             .get()
-            .allows(Some("qqofficial:owner"), &commands)
+            .admins
+            .iter()
+            .any(|admin| admin == "qqofficial:owner")
     );
-    assert!(!restarted_tool.policy().get().allows(None, &commands));
+    let anonymous = kanon_core::with_bash_caller(None, restarted_tool.availability()).await;
+    assert!(
+        anonymous.contains("no single verified sender"),
+        "{anonymous}"
+    );
 }
 
 #[tokio::test]
@@ -198,7 +207,7 @@ async fn endpoint_changes_require_reset_on_the_old_daemon_first() {
     .with_bash_tool(tool.clone())
     .build();
     kanon_core::with_bash_caller(
-        Some("test:owner".into()),
+        Some(BashCaller::new("test:owner")),
         tool.call("test", json!({"command":"true"})),
     )
     .await

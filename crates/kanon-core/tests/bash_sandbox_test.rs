@@ -1,8 +1,9 @@
 //! Isolation tests against the real prepared Docker runtime. No host shell fallback is used.
 
+use kanon_core::instance::InstanceRegistry;
 use kanon_core::{
-    BashPolicy, BashPolicyStore, BashSandboxConfig, BashTool, CommandPolicy, CommandPolicyStore,
-    with_bash_caller,
+    BashCaller, BashPolicy, BashPolicyStore, BashSandboxConfig, BashTool, CommandPolicy,
+    CommandPolicyStore, with_bash_caller,
 };
 use kanon_llm::AgentTool;
 use serde_json::{Value, json};
@@ -18,6 +19,9 @@ fn admins() -> Arc<CommandPolicyStore> {
         ..Default::default()
     }))
 }
+fn instances() -> Arc<InstanceRegistry> {
+    Arc::new(InstanceRegistry::in_memory())
+}
 fn policy() -> Arc<BashPolicyStore> {
     Arc::new(BashPolicyStore::new(BashPolicy {
         enabled: true,
@@ -26,7 +30,7 @@ fn policy() -> Arc<BashPolicyStore> {
 }
 async fn invoke(tool: &BashTool, command: &str, seconds: u64) -> Result<Value, Value> {
     let result = with_bash_caller(
-        Some(ADMIN.into()),
+        Some(BashCaller::new(ADMIN)),
         tool.call(
             "sandbox-test",
             json!({"command":command, "timeout_seconds":seconds}),
@@ -81,7 +85,7 @@ async fn unavailable_sandbox_never_executes_the_command_on_the_host() {
         dir.path().join("missing-docker.sock").display()
     );
     policy.set(config);
-    let tool = BashTool::new(dir.path(), policy, admins()).unwrap();
+    let tool = BashTool::new(dir.path(), policy, admins(), instances()).unwrap();
     let result = invoke(&tool, "echo unsafe > host-marker", 5)
         .await
         .unwrap_err();
@@ -102,7 +106,7 @@ async fn interpreter_escape_attempts_cannot_read_or_modify_host_files() {
     let workspace = dir.path().join("workspace");
     let secret = dir.path().join("host-secret");
     std::fs::write(&secret, "host secret must remain private").unwrap();
-    let tool = BashTool::new(&workspace, policy(), admins()).unwrap();
+    let tool = BashTool::new(&workspace, policy(), admins(), instances()).unwrap();
     #[cfg(unix)]
     std::os::unix::fs::symlink(&secret, workspace.join("escape-link")).unwrap();
     let script = format!(
@@ -150,7 +154,7 @@ PY"#,
 #[ignore = "requires local Docker and the sandbox/bash runtime image"]
 async fn public_network_works_and_private_metadata_routes_are_rejected() {
     let dir = tempfile::tempdir().unwrap();
-    let tool = BashTool::new(dir.path(), policy(), admins()).unwrap();
+    let tool = BashTool::new(dir.path(), policy(), admins(), instances()).unwrap();
     let script = r#"python3 - <<'PY'
 import json, socket, urllib.request
 result = {'public': urllib.request.urlopen('https://example.com', timeout=5).status}
@@ -178,7 +182,7 @@ async fn operator_can_disable_network_and_model_cannot_override_it() {
     let mut settings = policy.get();
     settings.sandbox.network = false;
     policy.set(settings);
-    let tool = BashTool::new(dir.path(), policy, admins()).unwrap();
+    let tool = BashTool::new(dir.path(), policy, admins(), instances()).unwrap();
     let result = invoke(
         &tool,
         "python3 -c \"import socket; socket.create_connection(('1.1.1.1',443),timeout=1)\"",
@@ -188,7 +192,7 @@ async fn operator_can_disable_network_and_model_cannot_override_it() {
     .unwrap_err();
     assert_ne!(result["exit_code"], 0);
     let override_attempt = with_bash_caller(
-        Some(ADMIN.into()),
+        Some(BashCaller::new(ADMIN)),
         tool.call("test", json!({"command":"true", "network":true})),
     )
     .await
@@ -202,7 +206,7 @@ async fn operator_can_disable_network_and_model_cannot_override_it() {
 async fn cancellation_restarts_the_container_and_kills_detached_children() {
     let dir = tempfile::tempdir().unwrap();
     let workspace = dir.path().join("workspace");
-    let tool = Arc::new(BashTool::new(&workspace, policy(), admins()).unwrap());
+    let tool = Arc::new(BashTool::new(&workspace, policy(), admins(), instances()).unwrap());
     let task = tokio::spawn({
         let tool = tool.clone();
         async move {
@@ -237,7 +241,7 @@ async fn memory_cpu_pid_and_file_limits_are_enforced_by_the_runtime() {
     settings.sandbox.pids_limit = 64;
     settings.sandbox.file_size_mb = 16;
     policy.set(settings);
-    let tool = BashTool::new(dir.path(), policy, admins()).unwrap();
+    let tool = BashTool::new(dir.path(), policy, admins(), instances()).unwrap();
     let script = "python3 -c \"import json,pathlib,resource; p=pathlib.Path('/sys/fs/cgroup'); print(json.dumps({'memory':p.joinpath('memory.max').read_text().strip(),'pids':p.joinpath('pids.max').read_text().strip(),'cpu':p.joinpath('cpu.max').read_text().strip(),'file':resource.getrlimit(resource.RLIMIT_FSIZE)[1]}))\"";
     let result = invoke(&tool, script, 5).await.unwrap();
     let limits: Value = serde_json::from_str(result["stdout"].as_str().unwrap()).unwrap();
@@ -266,7 +270,7 @@ async fn memory_cpu_pid_and_file_limits_are_enforced_by_the_runtime() {
 async fn persistent_container_survives_calls_reconnect_and_background_work_until_reset() {
     let dir = tempfile::tempdir().unwrap();
     let settings = policy();
-    let tool = BashTool::new(dir.path(), settings.clone(), admins()).unwrap();
+    let tool = BashTool::new(dir.path(), settings.clone(), admins(), instances()).unwrap();
     let first = invoke(&tool, "echo temp > /tmp/persistent-marker; echo home > \"$HOME/persistent-marker\"; python3 -c \"import subprocess; p=subprocess.Popen(['sleep','30'],stdin=subprocess.DEVNULL,stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL,start_new_session=True); print(p.pid)\"", 5).await.unwrap();
     let pid: u32 = first["stdout"].as_str().unwrap().trim().parse().unwrap();
     let second = invoke(
@@ -282,7 +286,7 @@ async fn persistent_container_survives_calls_reconnect_and_background_work_until
     let package = invoke(&tool, "mkdir -p \"$HOME/.local/bin\"; printf '#!/bin/sh\\nprintf package-ok\\n' > \"$HOME/.local/bin/persistent-cli\"; chmod +x \"$HOME/.local/bin/persistent-cli\"; persistent-cli", 5).await.unwrap();
     assert_eq!(package["stdout"], "package-ok");
     drop(tool);
-    let reconnected = BashTool::new(dir.path(), settings.clone(), admins()).unwrap();
+    let reconnected = BashTool::new(dir.path(), settings.clone(), admins(), instances()).unwrap();
     let third = invoke(&reconnected, "cat /tmp/persistent-marker", 5)
         .await
         .unwrap();

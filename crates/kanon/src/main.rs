@@ -167,14 +167,16 @@ async fn main() -> StartupResult<()> {
     // by the builder itself, so a bootstrapped directory and a console-configured one are applied
     // through exactly the same path.
     let node_settings = bootstrap_node_settings()?;
-    // Bash enforces the command policy's administrator list; the API state publishes console edits
-    // into these same stores, and the pipeline shares the command policy through the state.
+    // Bash enforces the command policy's administrator list — the serving instance's own, or the
+    // node's; the API state publishes console edits into these same stores, and the pipeline
+    // shares the command policy and the instance catalog through the state.
     let bash_tool = Arc::new(BashTool::new(
         kanon_core::DEFAULT_BASH_WORKSPACE,
         Arc::new(BashPolicyStore::new(node_settings.bash_policy.clone())),
         Arc::new(CommandPolicyStore::new(
             node_settings.command_policy.clone(),
         )),
+        instances.clone(),
     )?);
 
     // The persona library is the built-in base assistant plus the operator's saved personas. A

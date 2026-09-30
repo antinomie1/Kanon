@@ -8,7 +8,12 @@ import {
   RefreshCw,
   Server,
 } from 'lucide-svelte';
-import { commandPolicyStore } from '../../stores/commandPolicy.svelte';
+import {
+  type CommandPolicyDraft,
+  commandPolicyOfDraft,
+  commandPolicyStore,
+  draftOfCommandPolicy,
+} from '../../stores/commandPolicy.svelte';
 import { contextPolicyStore } from '../../stores/contextPolicy.svelte';
 import { eventPolicyStore } from '../../stores/eventPolicy.svelte';
 import { i18n, t } from '../../stores/i18n.svelte';
@@ -20,14 +25,14 @@ import {
 } from '../../stores/replyPolicy.svelte';
 import type {
   Capability,
-  CommandAccess,
-  CommandPolicy,
   ContextPolicy,
   EventPolicy,
   ReplyMode,
   ReplyPolicy,
 } from '../../types';
+import CommandPolicyEditor from '../ui/CommandPolicyEditor.svelte';
 import SupportBadge from '../ui/SupportBadge.svelte';
+import BashPolicyPanel from './BashPolicyPanel.svelte';
 
 let copiedSnippet = $state(false);
 
@@ -155,29 +160,14 @@ const eventSwitches: {
   },
 ];
 
-/** Command-permission draft: administrators one per line, and an editable access table. */
-let adminsText = $state('');
-let groupAdminsAreAdmins = $state(true);
-let accessRows = $state<{ command: string; access: CommandAccess }[]>([]);
-let newCommand = $state('');
+/** Command-permission draft, seeded from the node once its policy has been read. */
+let commandDraft = $state<CommandPolicyDraft>({
+  admins: '',
+  groupAdminsAreAdmins: true,
+  rows: [],
+});
 let commandRequested = false;
 let commandSeeded = false;
-
-/** Access levels in the order the selector lists them. */
-const accessLevels: { value: CommandAccess; labelKey: string }[] = [
-  { value: 'everyone', labelKey: 'commands.level_everyone' },
-  { value: 'admins_in_groups', labelKey: 'commands.level_admins_in_groups' },
-  { value: 'admins', labelKey: 'commands.level_admins' },
-];
-
-function seedCommandPolicy(policy: CommandPolicy) {
-  adminsText = policy.admins.join('\n');
-  groupAdminsAreAdmins = policy.group_admins_are_admins;
-  accessRows = Object.entries(policy.access).map(([command, access]) => ({
-    command,
-    access,
-  }));
-}
 
 $effect(() => {
   if (!commandRequested) {
@@ -186,33 +176,18 @@ $effect(() => {
   }
   const policy = commandPolicyStore.policy;
   if (policy && !commandSeeded) {
-    seedCommandPolicy(policy);
+    commandDraft = draftOfCommandPolicy(policy);
     commandSeeded = true;
   }
 });
 
-/** Adds a command row, restricted to administrators by default. */
-function addCommand() {
-  const command = newCommand.trim().replace(/^\//, '').toLowerCase();
-  if (!command || accessRows.some((row) => row.command === command)) return;
-  accessRows = [...accessRows, { command, access: 'admins' }];
-  newCommand = '';
-}
-
 /** Saves the draft; the node normalizes it and the form adopts what it enforces. */
 async function saveCommandPolicy() {
-  const saved = await commandPolicyStore.save({
-    admins: adminsText
-      .split('\n')
-      .map((line) => line.trim())
-      .filter(Boolean),
-    group_admins_are_admins: groupAdminsAreAdmins,
-    access: Object.fromEntries(
-      accessRows.map((row) => [row.command, row.access]),
-    ),
-  });
+  const saved = await commandPolicyStore.save(
+    commandPolicyOfDraft(commandDraft),
+  );
   if (saved && commandPolicyStore.policy) {
-    seedCommandPolicy(commandPolicyStore.policy);
+    commandDraft = draftOfCommandPolicy(commandPolicyStore.policy);
   }
 }
 
@@ -551,70 +526,8 @@ function copySocketPath(path: string) {
       <p class="text-xs text-zinc-500 mt-0.5">{t('commands.hint')}</p>
     </div>
 
-    <div class="mt-5 grid grid-cols-1 md:grid-cols-2 gap-6">
-      <div class="space-y-3">
-        <label class="block">
-          <span class="block text-sm font-medium text-zinc-800 dark:text-zinc-200">{t('commands.admins')}</span>
-          <span class="block text-xs text-zinc-500 mt-0.5 mb-2">{t('commands.admins_hint')}</span>
-          <textarea
-            bind:value={adminsText}
-            rows="4"
-            placeholder="onebot:12345&#10;qqofficial:5361A5D2..."
-            class="w-full px-3 py-2 rounded-lg bg-zinc-50 dark:bg-zinc-950 border border-zinc-200 dark:border-zinc-800 font-mono text-xs focus:outline-hidden"
-          ></textarea>
-        </label>
-        <label class="flex items-start justify-between gap-4 cursor-pointer select-none">
-          <span>
-            <span class="block text-sm font-medium text-zinc-800 dark:text-zinc-200">{t('commands.group_admins')}</span>
-            <span class="block text-xs text-zinc-500 mt-0.5">{t('commands.group_admins_hint')}</span>
-            <SupportBadge capabilities={['sender_role']} />
-          </span>
-          <input
-            type="checkbox"
-            bind:checked={groupAdminsAreAdmins}
-            class="mt-1 rounded text-indigo-600 focus:ring-0 w-4 h-4 shrink-0"
-          />
-        </label>
-      </div>
-
-      <div class="space-y-2">
-        <span class="block text-sm font-medium text-zinc-800 dark:text-zinc-200">{t('commands.access')}</span>
-        <span class="block text-xs text-zinc-500">{t('commands.access_hint')}</span>
-        {#each accessRows as row, index (row.command)}
-          <div class="flex items-center gap-2">
-            <span class="w-28 font-mono text-sm text-zinc-700 dark:text-zinc-300">/{row.command}</span>
-            <select
-              bind:value={accessRows[index].access}
-              class="flex-1 px-2 py-1.5 text-xs bg-zinc-50 dark:bg-zinc-950 border border-zinc-200 dark:border-zinc-800 rounded-md cursor-pointer"
-            >
-              {#each accessLevels as level (level.value)}
-                <option value={level.value}>{t(level.labelKey)}</option>
-              {/each}
-            </select>
-            <button
-              onclick={() => (accessRows = accessRows.filter((_, i) => i !== index))}
-              class="px-2 py-1 text-xs text-zinc-500 hover:text-rose-600 cursor-pointer"
-              title={t('commands.remove')}
-            >
-              ✕
-            </button>
-          </div>
-        {/each}
-        <div class="flex items-center gap-2 pt-1">
-          <input
-            bind:value={newCommand}
-            placeholder={t('commands.add_placeholder')}
-            onkeydown={(e) => e.key === 'Enter' && addCommand()}
-            class="flex-1 px-2 py-1.5 text-xs font-mono bg-zinc-50 dark:bg-zinc-950 border border-zinc-200 dark:border-zinc-800 rounded-md focus:outline-hidden"
-          />
-          <button
-            onclick={addCommand}
-            class="px-3 py-1.5 text-xs border border-zinc-200 dark:border-zinc-700 rounded-md hover:bg-zinc-100 dark:hover:bg-zinc-800 cursor-pointer"
-          >
-            {t('commands.add')}
-          </button>
-        </div>
-      </div>
+    <div class="mt-5">
+      <CommandPolicyEditor bind:draft={commandDraft} />
     </div>
 
     {#if commandPolicyStore.error}
@@ -634,4 +547,6 @@ function copySocketPath(path: string) {
       </button>
     </div>
   </div>
+  <!-- Bash: the node-wide switch and execution backend; instances choose where it applies. -->
+  <BashPolicyPanel />
 </div>

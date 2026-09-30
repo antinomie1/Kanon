@@ -1,7 +1,9 @@
 import { api } from '../api/client';
 import type {
   AdapterItem,
+  BashScope,
   BotInstanceView,
+  CommandPolicy,
   ContextPolicy,
   InstanceRequest,
   InstancesResponse,
@@ -11,6 +13,11 @@ import type {
   ReplyPolicy,
   SessionScope,
 } from '../types';
+import {
+  type CommandPolicyDraft,
+  commandPolicyOfDraft,
+  draftOfCommandPolicy,
+} from './commandPolicy.svelte';
 import { modelsStore } from './models.svelte';
 
 /** One toggleable item an instance may opt in or out of. */
@@ -83,6 +90,16 @@ class InstancesStore {
   formSessionScope = $state<SessionScope>('user');
   /** Show unanswered group messages to the model on its next turn. */
   formObserveGroup = $state(false);
+  /** `true` sends `command_policy: null`, inheriting the node-wide command policy. */
+  formCommandInherit = $state(true);
+  /** Command-policy override being edited; only sent when not inheriting. */
+  formCommandDraft = $state<CommandPolicyDraft>({
+    admins: '',
+    groupAdminsAreAdmins: true,
+    rows: [],
+  });
+  /** Where this instance's administrators may run Bash. */
+  formBash = $state<BashScope>('own_context');
   formPlugins = $state<Record<string, ItemPolicy>>({});
   formSkills = $state<Record<string, ItemPolicy>>({});
   formMcp = $state<Record<string, ItemPolicy>>({});
@@ -108,6 +125,16 @@ class InstancesStore {
   /** Node-wide context policy an instance without an override inherits, for the form hint. */
   get nodeContextPolicy(): ContextPolicy | null {
     return this.catalog?.node_context_policy ?? null;
+  }
+
+  /** Node-wide command policy an instance without an override inherits. */
+  get nodeCommandPolicy(): CommandPolicy | null {
+    return this.catalog?.node_command_policy ?? null;
+  }
+
+  /** Whether Bash is switched on node-wide; an instance scope cannot enable it on its own. */
+  get nodeBashEnabled(): boolean {
+    return this.catalog?.node_bash_enabled ?? false;
   }
 
   /** Node default model shown by the "inherit" option, when one is configured. */
@@ -243,6 +270,9 @@ class InstancesStore {
     this.formExpandForward = true;
     this.formSessionScope = 'user';
     this.formObserveGroup = false;
+    this.formCommandInherit = true;
+    this.formCommandDraft = this.inheritedCommandDraft();
+    this.formBash = 'own_context';
     this.formIncludeChannelId = false;
     this.formIncludeSenderId = false;
     this.formIncludeTimestamp = false;
@@ -276,6 +306,13 @@ class InstancesStore {
     this.formExpandForward = instance.context_policy?.expand_forward ?? true;
     this.formSessionScope = instance.session_scope ?? 'user';
     this.formObserveGroup = instance.observe_group ?? false;
+    // A null override is the `inherit` choice; the editor then starts from the node policy, so
+    // switching to an override begins with what currently applies instead of an empty list.
+    this.formCommandInherit = instance.command_policy === null;
+    this.formCommandDraft = instance.command_policy
+      ? draftOfCommandPolicy(instance.command_policy)
+      : this.inheritedCommandDraft();
+    this.formBash = instance.bash ?? 'own_context';
     this.formIncludeTimestamp =
       instance.context_policy?.include_timestamp ?? false;
     this.formPlugins = { ...instance.plugins };
@@ -288,6 +325,14 @@ class InstancesStore {
 
   closeForm() {
     this.isFormOpen = false;
+  }
+
+  /** Editor seed for an instance that inherits: a copy of the node-wide command policy. */
+  private inheritedCommandDraft(): CommandPolicyDraft {
+    const node = this.nodeCommandPolicy;
+    return node
+      ? draftOfCommandPolicy(node)
+      : { admins: '', groupAdminsAreAdmins: true, rows: [] };
   }
 
   toggleAdapter(platform: string) {
@@ -323,6 +368,10 @@ class InstancesStore {
           },
       session_scope: this.formSessionScope,
       observe_group: this.formObserveGroup,
+      command_policy: this.formCommandInherit
+        ? null
+        : commandPolicyOfDraft(this.formCommandDraft),
+      bash: this.formBash,
       plugins: this.formPlugins,
       skills: this.formSkills,
       mcp: this.formMcp,
@@ -354,6 +403,8 @@ class InstancesStore {
     this.saving = true;
     this.error = null;
     try {
+      // Every other field is sent back verbatim: an update replaces the whole instance, so a
+      // start/stop toggle must not silently reset its overrides to their defaults.
       const res = await api.updateInstance(instance.id, {
         name: instance.name,
         enabled: !instance.enabled,
@@ -361,8 +412,12 @@ class InstancesStore {
         persona_id: instance.persona_id,
         system_prompt: instance.system_prompt,
         model: instance.model,
-        // Preserved verbatim: a start/stop toggle must not silently drop the instance's overrides.
         reply_policy: instance.reply_policy,
+        context_policy: instance.context_policy,
+        session_scope: instance.session_scope,
+        observe_group: instance.observe_group,
+        command_policy: instance.command_policy,
+        bash: instance.bash,
         plugins: instance.plugins,
         skills: instance.skills,
         mcp: instance.mcp,
