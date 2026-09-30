@@ -139,6 +139,7 @@ PY"#,
         std::fs::read_to_string(workspace.join("allowed")).unwrap(),
         "sandbox output"
     );
+    tool.reset_sandbox().await.unwrap();
 }
 
 #[tokio::test]
@@ -162,6 +163,7 @@ PY"#;
     assert_eq!(facts["public"], 200);
     assert_eq!(facts["host"], "blocked");
     assert_eq!(facts["metadata"], "blocked");
+    tool.reset_sandbox().await.unwrap();
 }
 
 #[tokio::test]
@@ -188,11 +190,12 @@ async fn operator_can_disable_network_and_model_cannot_override_it() {
     .await
     .unwrap_err();
     assert!(override_attempt.contains("Invalid Bash arguments"));
+    tool.reset_sandbox().await.unwrap();
 }
 
 #[tokio::test]
 #[ignore = "requires local Docker and the sandbox/bash runtime image"]
-async fn cancellation_removes_the_container_and_detached_children() {
+async fn cancellation_restarts_the_container_and_kills_detached_children() {
     let dir = tempfile::tempdir().unwrap();
     let workspace = dir.path().join("workspace");
     let tool = Arc::new(BashTool::new(&workspace, policy()).unwrap());
@@ -216,6 +219,7 @@ async fn cancellation_removes_the_container_and_detached_children() {
         !workspace.join("leaked").exists(),
         "setsid child must die with the container"
     );
+    tool.reset_sandbox().await.unwrap();
 }
 
 #[tokio::test]
@@ -247,4 +251,57 @@ async fn memory_cpu_pid_and_file_limits_are_enforced_by_the_runtime() {
         .await
         .unwrap_err();
     assert_eq!(oom["oom_killed"], true, "{oom}");
+    tool.reset_sandbox().await.unwrap();
+}
+
+#[tokio::test]
+#[ignore = "requires local Docker and the sandbox/bash runtime image"]
+async fn persistent_container_survives_calls_reconnect_and_background_work_until_reset() {
+    let dir = tempfile::tempdir().unwrap();
+    let settings = policy();
+    let tool = BashTool::new(dir.path(), settings.clone()).unwrap();
+    let first = invoke(&tool, "echo temp > /tmp/persistent-marker; echo home > \"$HOME/persistent-marker\"; python3 -c \"import subprocess; p=subprocess.Popen(['sleep','30'],stdin=subprocess.DEVNULL,stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL,start_new_session=True); print(p.pid)\"", 5).await.unwrap();
+    let pid: u32 = first["stdout"].as_str().unwrap().trim().parse().unwrap();
+    let second = invoke(
+        &tool,
+        &format!("python3 -c 'import os; os.kill({pid},0)'; cat /tmp/persistent-marker"),
+        5,
+    )
+    .await
+    .unwrap();
+    assert_eq!(first["container_id"], second["container_id"]);
+    assert_eq!(second["container_reused"], true);
+    assert_eq!(second["stdout"], "temp\n");
+    let package = invoke(&tool, "mkdir -p \"$HOME/.local/bin\"; printf '#!/bin/sh\\nprintf package-ok\\n' > \"$HOME/.local/bin/persistent-cli\"; chmod +x \"$HOME/.local/bin/persistent-cli\"; persistent-cli", 5).await.unwrap();
+    assert_eq!(package["stdout"], "package-ok");
+    drop(tool);
+    let reconnected = BashTool::new(dir.path(), settings.clone()).unwrap();
+    let third = invoke(&reconnected, "cat /tmp/persistent-marker", 5)
+        .await
+        .unwrap();
+    assert_eq!(
+        first["container_id"], third["container_id"],
+        "a node reconnect must adopt the same managed container"
+    );
+    let mut changed = settings.get();
+    changed.sandbox.network = false;
+    settings.set(changed);
+    let error = invoke(&reconnected, "true", 5).await.unwrap_err();
+    assert!(
+        error["error"]
+            .as_str()
+            .unwrap()
+            .contains("reset the container")
+    );
+    reconnected.reset_sandbox().await.unwrap();
+    let fourth = invoke(
+        &reconnected,
+        "test ! -e /tmp/persistent-marker; persistent-cli; cat \"$HOME/persistent-marker\"",
+        5,
+    )
+    .await
+    .unwrap();
+    assert_ne!(first["container_id"], fourth["container_id"]);
+    assert_eq!(fourth["stdout"], "package-okhome\n");
+    reconnected.reset_sandbox().await.unwrap();
 }

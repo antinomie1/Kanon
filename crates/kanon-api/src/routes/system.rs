@@ -4,7 +4,7 @@
 use axum::Json;
 use axum::Router;
 use axum::extract::State;
-use axum::routing::get;
+use axum::routing::{get, post};
 use serde::Serialize;
 
 use kanon_core::{BashPolicy, ContextPolicy, ReplyPolicy};
@@ -20,6 +20,7 @@ pub fn routes() -> Router<ApiState> {
             "/api/v1/tools/bash/policy",
             get(get_bash_policy).put(put_bash_policy),
         )
+        .route("/api/v1/tools/bash/reset", post(reset_bash_sandbox))
         .route(
             "/api/v1/system/reply-policy",
             get(get_reply_policy).put(put_reply_policy),
@@ -28,6 +29,17 @@ pub fn routes() -> Router<ApiState> {
             "/api/v1/system/context-policy",
             get(get_context_policy).put(put_context_policy),
         )
+}
+
+/// Explicit operator action; normal tool calls never discard a persistent container.
+async fn reset_bash_sandbox(
+    State(state): State<ApiState>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let tool = state
+        .bash_tool()
+        .ok_or_else(|| ApiError::Unavailable("Bash runtime is not registered".into()))?;
+    tool.reset_sandbox().await.map_err(ApiError::Conflict)?;
+    Ok(Json(serde_json::json!({"reset":true})))
 }
 
 /// Returns the Bash-only caller policy without altering the model's static tool catalog.
@@ -45,12 +57,12 @@ async fn put_bash_policy(
     let object = submitted
         .as_object_mut()
         .ok_or_else(|| ApiError::BadRequest("Bash policy must be an object".into()))?;
-    if !object.contains_key("sandbox") {
-        object.insert(
-            "sandbox".into(),
-            serde_json::to_value(state.bash_policy().get().sandbox)
-                .map_err(|err| ApiError::BadRequest(err.to_string()))?,
-        );
+    let current = serde_json::to_value(state.bash_policy().get())
+        .map_err(|err| ApiError::BadRequest(err.to_string()))?;
+    for key in ["sandbox", "execution_mode", "local"] {
+        if !object.contains_key(key) {
+            object.insert(key.into(), current[key].clone());
+        }
     }
     let policy: BashPolicy =
         serde_json::from_value(submitted).map_err(|err| ApiError::BadRequest(err.to_string()))?;

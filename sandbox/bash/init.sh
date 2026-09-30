@@ -1,15 +1,13 @@
 #!/bin/sh
 # Only this trusted bootstrap runs with setup capabilities. User code starts after they are dropped.
 set -eu
-if [ "$#" -ne 4 ]; then
+if [ "$#" -ne 2 ]; then
     echo 'Invalid sandbox startup contract' >&2
     exit 125
 fi
 sandbox_uid=$1
 sandbox_gid=$2
-sandbox_seconds=$3
-sandbox_command=$4
-case "$sandbox_uid:$sandbox_gid:$sandbox_seconds" in
+case "$sandbox_uid:$sandbox_gid" in
     *[!0-9:]*) echo 'Invalid sandbox startup values' >&2; exit 125 ;;
 esac
 if [ "$sandbox_uid" -eq 0 ]; then
@@ -39,10 +37,11 @@ for sandbox_range in 0.0.0.0/8 10.0.0.0/8 100.64.0.0/10 127.0.0.0/8 169.254.0.0/
     /usr/sbin/iptables -A OUTPUT -d "$sandbox_range" -j REJECT
 done
 
-# The image watchdog remains effective when the caller disconnects. The node additionally removes
-# the container on timeout/cancellation, which terminates every process, including detached children.
+# The marker is created by root after network setup. The persistent container stays alive;
+# each subsequent command uses the trusted exec helper to drop identity and capabilities again.
+/usr/bin/touch /tmp/kanon-ready
+/usr/bin/chmod 0444 /tmp/kanon-ready
 exec /usr/bin/setpriv \
     --reuid="$sandbox_uid" --regid="$sandbox_gid" --clear-groups \
     --bounding-set=-all --inh-caps=-all --ambient-caps=-all --no-new-privs \
-    /usr/bin/timeout --signal=TERM --kill-after=1 "$sandbox_seconds" \
-    /bin/bash --noprofile --norc -o pipefail -c "$sandbox_command"
+    /usr/bin/sleep infinity

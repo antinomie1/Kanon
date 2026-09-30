@@ -256,6 +256,8 @@ export const api = {
   // Tool catalog: every tool the model can call, grouped by provider.
   getTools: () => request<ToolCatalog>('/api/v1/tools'),
   getBashPolicy: () => request<BashPolicy>('/api/v1/tools/bash/policy'),
+  resetBashSandbox: () =>
+    request<{ reset: boolean }>('/api/v1/tools/bash/reset', { method: 'POST' }),
   setBashPolicy: (policy: BashPolicy) =>
     request<BashPolicy>('/api/v1/tools/bash/policy', {
       method: 'PUT',

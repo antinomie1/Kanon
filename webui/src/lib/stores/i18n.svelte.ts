@@ -140,10 +140,23 @@ export const dictionaries = {
     // Tool catalog
     'tools.title': 'Tool Catalog',
     'bash.title': 'Who may ask the AI to run Bash',
-    'bash.sandbox_title': 'Container sandbox',
+    'bash.execution_mode': 'Execution mode',
+    'bash.mode_sandbox': 'Persistent container',
+    'bash.mode_local': 'Local host',
+    'bash.local_workdir': 'Local working directory',
+    'bash.local_hint':
+      'Commands run with the Kanon host account permissions. Sender permissions and basic command checks still apply.',
+    'bash.auto_review': 'AI review before local execution',
+    'bash.review_model': 'Reviewer model (blank uses the default model)',
+    'bash.review_hint':
+      'Each command requires an explicit approval from a separate model request. Rejection, invalid output or review failure blocks execution. Review reduces risk but is not isolation.',
+    'bash.reset': 'Reset container',
+    'bash.reset_confirm':
+      'Stop background processes and discard container temporary state? Workspace files and .home are retained. The next command creates a new container.',
+    'bash.sandbox_title': 'Persistent container sandbox',
     'bash.network': 'Allow public Internet access',
     'bash.sandbox_hint':
-      'Only the dedicated workspace is shared. Host/LAN/metadata addresses are blocked. Missing Docker or runtime image denies execution.',
+      'The same container is reused across commands and node restarts. Workspace, .home and background processes persist. Reset after changing the image or isolation settings.',
     'bash.image': 'Prepared sandbox image',
     'bash.processes': 'process/thread limit',
     'bash.hint':
@@ -819,10 +832,23 @@ export const dictionaries = {
     // Tool catalog
     'tools.title': '工具列表',
     'bash.title': '谁可以让 AI 执行 Bash',
-    'bash.sandbox_title': '容器沙箱',
+    'bash.execution_mode': '执行模式',
+    'bash.mode_sandbox': '持久化容器',
+    'bash.mode_local': '本机执行',
+    'bash.local_workdir': '本机工作目录',
+    'bash.local_hint':
+      '使用 Kanon 运行账号的本机权限执行，仍受发送者权限和基础命令检查控制。',
+    'bash.auto_review': '本机执行前进行 AI 自动审查',
+    'bash.review_model': '审查模型（留空使用默认模型）',
+    'bash.review_hint':
+      '每次执行前单独调用模型审查；拒绝、输出无效或审查失败都会阻止执行。审查可以降低风险，但不提供隔离。',
+    'bash.reset': '重置容器',
+    'bash.reset_confirm':
+      '停止后台进程并清空容器临时状态？工作区和 .home 会保留，下次执行时创建新容器。',
+    'bash.sandbox_title': '持久化容器沙箱',
     'bash.network': '允许公网联网',
     'bash.sandbox_hint':
-      '只共享独立工作区，阻止宿主、内网和元数据地址。Docker 或运行镜像缺失时会拒绝执行。',
+      '跨命令和节点重启复用同一个容器，保留工作区、.home 和后台进程。修改镜像或隔离设置后需重置容器。',
     'bash.image': '已准备的沙箱镜像',
     'bash.processes': '进程/线程上限',
     'bash.hint':

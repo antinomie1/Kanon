@@ -40,7 +40,10 @@ async fn bash_policy_round_trips_and_reloads_without_changing_the_tool_catalog()
     .await;
     assert_eq!(status, StatusCode::OK);
     let mut expected = update;
-    expected["sandbox"] = serde_json::to_value(kanon_core::BashSandboxConfig::default()).unwrap();
+    let defaults = serde_json::to_value(kanon_core::BashPolicy::default()).unwrap();
+    for key in ["sandbox", "execution_mode", "local"] {
+        expected[key] = defaults[key].clone();
+    }
     assert_eq!(body, expected);
     assert!(!policy.get().allows(Some(&BashPrincipal {
         platform: "onebot".into(),
@@ -112,6 +115,8 @@ async fn older_permission_clients_preserve_saved_sandbox_network_and_limits() {
     let mut initial = serde_json::to_value(kanon_core::BashPolicy::default()).unwrap();
     initial["sandbox"]["network"] = json!(false);
     initial["sandbox"]["memory_mb"] = json!(256);
+    initial["execution_mode"] = json!("local");
+    initial["local"]["auto_review"] = json!(false);
     let (status, _) = common::send_json(
         &app,
         Method::PUT,
@@ -130,5 +135,7 @@ async fn older_permission_clients_preserve_saved_sandbox_network_and_limits() {
     assert_eq!(status, StatusCode::OK);
     assert_eq!(after["sandbox"]["network"], false);
     assert_eq!(after["sandbox"]["memory_mb"], 256);
+    assert_eq!(after["execution_mode"], "local");
+    assert_eq!(after["local"]["auto_review"], false);
     assert_eq!(state.bash_policy().get().sandbox.memory_mb, 256);
 }

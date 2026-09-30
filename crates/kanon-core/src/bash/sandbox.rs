@@ -1,27 +1,27 @@
-//! Docker-backed execution. There is deliberately no unsandboxed fallback.
+//! Persistent Docker execution, with explicit reset and serialized commands per workspace.
 
+use bollard::exec::{StartExecOptions, StartExecResults};
+use sha2::{Digest, Sha256};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::sync::{
-    Arc,
-    atomic::{AtomicU64, Ordering},
-};
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::sync::Arc;
+use std::time::Duration;
 
 use bollard::Docker;
 use bollard::container::LogOutput;
 use bollard::models::{
-    ContainerCreateBody, HealthConfig, HostConfig, HostConfigCgroupnsModeEnum, HostConfigLogConfig,
-    Mount, MountBindOptions, MountTypeEnum, ResourcesUlimits,
+    ContainerCreateBody, ExecConfig, HealthConfig, HostConfig, HostConfigCgroupnsModeEnum,
+    HostConfigLogConfig, Mount, MountBindOptions, MountTypeEnum, ResourcesUlimits, RestartPolicy,
+    RestartPolicyNameEnum,
 };
 use bollard::query_parameters::{
-    AttachContainerOptionsBuilder, CreateContainerOptionsBuilder, RemoveContainerOptionsBuilder,
+    CreateContainerOptionsBuilder, RemoveContainerOptionsBuilder, RestartContainerOptionsBuilder,
 };
 use futures_util::StreamExt;
 use serde::{Deserialize, Serialize};
-use tokio::sync::{OwnedSemaphorePermit, oneshot};
+use tokio::sync::{Mutex, OwnedSemaphorePermit, oneshot};
 
-use super::{BashPolicyStore, BashPrincipal, MAX_BASH_OUTPUT_BYTES};
+use super::{BashExecutionMode, BashPolicy, BashPolicyStore, BashPrincipal, MAX_BASH_OUTPUT_BYTES};
 
 /// Independent host directory exposed to the sandbox, never the node's configuration directory.
 pub const DEFAULT_BASH_WORKSPACE: &str = "./data/bash/workspace";
@@ -55,7 +55,7 @@ impl Default for BashSandboxConfig {
                 "unix:///var/run/docker.sock"
             }
             .into(),
-            image: "kanon-bash-sandbox:1".into(),
+            image: "kanon-bash-sandbox:2".into(),
             network: true,
             memory_mb: 512,
             cpus: 1.0,
@@ -97,26 +97,7 @@ impl BashSandboxConfig {
 
 /// Checks the local daemon and prepared image, returning an immutable image id for execution.
 pub(super) async fn probe(config: &BashSandboxConfig) -> Result<(Docker, String), String> {
-    config.validate()?;
-    #[cfg(unix)]
-    let docker = Docker::connect_with_unix(
-        config
-            .endpoint
-            .strip_prefix("unix://")
-            .ok_or("This host requires a Unix Docker socket")?,
-        10,
-        bollard::API_DEFAULT_VERSION,
-    );
-    #[cfg(windows)]
-    let docker =
-        Docker::connect_with_named_pipe(config.endpoint.as_str(), 10, bollard::API_DEFAULT_VERSION);
-    #[cfg(not(any(unix, windows)))]
-    return Err("Docker sandbox is unsupported on this host".into());
-    let docker = docker
-        .map_err(|err| format!("Docker sandbox unavailable: {err}"))?
-        .negotiate_version()
-        .await
-        .map_err(|err| format!("Docker sandbox unavailable: {err}"))?;
+    let docker = connect(config).await?;
     let info = docker
         .info()
         .await
@@ -148,7 +129,7 @@ pub(super) async fn probe(config: &BashSandboxConfig) -> Result<(Docker, String)
             .as_ref()
             .and_then(|labels| labels.get("org.kanon.bash-sandbox.version"))
             .map(String::as_str)
-            != Some("1")
+            != Some("2")
         || image_config
             .volumes
             .as_ref()
@@ -157,6 +138,30 @@ pub(super) async fn probe(config: &BashSandboxConfig) -> Result<(Docker, String)
         return Err("Image does not satisfy the Kanon sandbox runtime contract".into());
     }
     Ok((docker, image.id.ok_or("Sandbox image has no immutable id")?))
+}
+
+async fn connect(config: &BashSandboxConfig) -> Result<Docker, String> {
+    config.validate()?;
+    #[cfg(unix)]
+    let docker = Docker::connect_with_unix(
+        config
+            .endpoint
+            .strip_prefix("unix://")
+            .ok_or("This host requires a Unix Docker socket")?,
+        10,
+        bollard::API_DEFAULT_VERSION,
+    );
+    #[cfg(windows)]
+    let docker =
+        Docker::connect_with_named_pipe(config.endpoint.as_str(), 10, bollard::API_DEFAULT_VERSION);
+    #[cfg(not(any(unix, windows)))]
+    return Err("Docker sandbox is unsupported on this host".into());
+    let docker = docker
+        .map_err(|err| format!("Docker sandbox unavailable: {err}"))?
+        .negotiate_version()
+        .await
+        .map_err(|err| format!("Docker sandbox unavailable: {err}"))?;
+    Ok(docker)
 }
 
 /// Chooses a non-root execution identity matching the node's workspace ownership when possible.
@@ -172,189 +177,404 @@ pub(super) fn identity() -> (u32, u32) {
     (65534, 65534)
 }
 
-/// Starts an independently owned worker, so dropping a caller cannot abandon container creation.
-pub(super) async fn execute(
-    root: PathBuf,
-    cwd: PathBuf,
-    command: String,
-    seconds: u64,
-    policy: Arc<BashPolicyStore>,
-    caller: BashPrincipal,
-    slot: OwnedSemaphorePermit,
-) -> Result<String, String> {
-    let (cancel, receiver) = oneshot::channel();
-    let _cancel = CancelOnDrop(Some(cancel));
-    let task = tokio::spawn(async move {
-        let _slot = slot;
-        run(root, cwd, command, seconds, policy, caller, receiver).await
-    });
-    task.await
-        .map_err(|err| format!("Sandbox worker failed: {err}"))?
+/// Immutable invocation captured after authorization and argument validation.
+pub(super) struct Invocation {
+    pub root: PathBuf,
+    pub cwd: PathBuf,
+    pub command: String,
+    pub seconds: u64,
+    pub policy: Arc<BashPolicyStore>,
+    pub caller: BashPrincipal,
+    pub expected: BashPolicy,
+}
+
+/// One persistent container per workspace. Commands and resets share one lifecycle lock.
+#[derive(Default)]
+pub(super) struct SandboxRuntime {
+    gate: Arc<Mutex<()>>,
+}
+
+impl SandboxRuntime {
+    pub(super) async fn execute(
+        &self,
+        call: Invocation,
+        slot: OwnedSemaphorePermit,
+    ) -> Result<String, String> {
+        let (sender, mut cancel) = oneshot::channel();
+        let _cancel = CancelOnDrop(Some(sender));
+        let gate = self.gate.clone();
+        tokio::spawn(async move {
+            let _slot = slot;
+            let _guard = tokio::select! {
+                guard = gate.lock_owned() => guard,
+                _ = &mut cancel => return Err("Sandbox execution cancelled".into()),
+            };
+            run(call, cancel).await
+        })
+        .await
+        .map_err(|error| format!("Sandbox worker failed: {error}"))?
+    }
+
+    pub(super) async fn reset(
+        &self,
+        root: &Path,
+        config: &BashSandboxConfig,
+    ) -> Result<(), String> {
+        let _guard = self
+            .gate
+            .try_lock()
+            .map_err(|_| "Sandbox is executing a command; retry reset after it finishes")?;
+        let docker = connect(config).await?;
+        let name = container_name(root);
+        match docker.inspect_container(&name, None).await {
+            Ok(info) => {
+                verify_owner(
+                    info.config
+                        .as_ref()
+                        .and_then(|config| config.labels.as_ref()),
+                    root,
+                )?;
+                docker
+                    .remove_container(
+                        &name,
+                        Some(
+                            RemoveContainerOptionsBuilder::default()
+                                .force(true)
+                                .v(true)
+                                .build(),
+                        ),
+                    )
+                    .await
+                    .map_err(|error| error.to_string())
+            }
+            Err(error) if not_found(&error) => Ok(()),
+            Err(error) => Err(error.to_string()),
+        }
+    }
 }
 
 struct CancelOnDrop(Option<oneshot::Sender<()>>);
 impl Drop for CancelOnDrop {
     fn drop(&mut self) {
-        if let Some(cancel) = self.0.take() {
-            let _ = cancel.send(());
+        if let Some(sender) = self.0.take() {
+            let _ = sender.send(());
         }
     }
 }
 
-async fn run(
-    root: PathBuf,
-    cwd: PathBuf,
-    command: String,
-    seconds: u64,
-    policy: Arc<BashPolicyStore>,
-    caller: BashPrincipal,
-    mut cancel: oneshot::Receiver<()>,
-) -> Result<String, String> {
-    let config = policy.get().sandbox;
-    let (docker, image) = probe(&config).await?;
-    if !matches!(cancel.try_recv(), Err(oneshot::error::TryRecvError::Empty)) {
+fn cancelled(cancel: &mut oneshot::Receiver<()>) -> bool {
+    !matches!(cancel.try_recv(), Err(oneshot::error::TryRecvError::Empty))
+}
+
+fn authorize(call: &Invocation) -> Result<(), String> {
+    let current = call.policy.get();
+    if current.execution_mode != BashExecutionMode::Sandbox
+        || current != call.expected
+        || !current.allows(Some(&call.caller))
+    {
+        return Err("Bash execution denied: permission or configuration changed".into());
+    }
+    Ok(())
+}
+
+fn digest(bytes: &[u8]) -> String {
+    Sha256::digest(bytes)
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect()
+}
+fn workspace_key(root: &Path) -> String {
+    digest(root.as_os_str().as_encoded_bytes())
+}
+fn container_name(root: &Path) -> String {
+    format!("kanon-bash-{}", &workspace_key(root)[..32])
+}
+fn not_found(error: &bollard::errors::Error) -> bool {
+    matches!(
+        error,
+        bollard::errors::Error::DockerResponseServerError {
+            status_code: 404,
+            ..
+        }
+    )
+}
+fn verify_owner(labels: Option<&HashMap<String, String>>, root: &Path) -> Result<(), String> {
+    if labels.and_then(|labels| labels.get("org.kanon.bash-sandbox.workspace"))
+        != Some(&workspace_key(root))
+        || labels
+            .and_then(|labels| labels.get("org.kanon.bash-sandbox.managed"))
+            .map(String::as_str)
+            != Some("2")
+    {
+        return Err(
+            "Container name is occupied by a different owner; refusing to use or remove it".into(),
+        );
+    }
+    Ok(())
+}
+
+async fn ready(docker: &Docker, id: &str) -> Result<(), String> {
+    tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            let info = docker
+                .inspect_container(id, None)
+                .await
+                .map_err(|error| error.to_string())?;
+            let state = info.state.ok_or("Container has no state")?;
+            if state.running != Some(true) {
+                return Err("Sandbox initialization stopped; inspect its Docker logs".into());
+            }
+            if state
+                .health
+                .and_then(|health| health.status)
+                .is_some_and(|status| status.to_string() == "healthy")
+            {
+                return Ok(());
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    })
+    .await
+    .map_err(|_| "Sandbox initialization timed out")?
+}
+
+async fn ensure_container(
+    docker: &Docker,
+    call: &Invocation,
+    image: String,
+) -> Result<(String, bool), String> {
+    let name = container_name(&call.root);
+    let fingerprint = digest(
+        &serde_json::to_vec(&(&call.expected.sandbox, &image, identity()))
+            .map_err(|error| error.to_string())?,
+    );
+    let mut reused = true;
+    match docker.inspect_container(&name, None).await {
+        Ok(_) => {}
+        Err(error) if not_found(&error) => {
+            let mut body = container_body(&call.root, &call.expected.sandbox, image)?;
+            body.labels.as_mut().unwrap().insert(
+                "org.kanon.bash-sandbox.workspace".into(),
+                workspace_key(&call.root),
+            );
+            body.labels.as_mut().unwrap().insert(
+                "org.kanon.bash-sandbox.fingerprint".into(),
+                fingerprint.clone(),
+            );
+            match docker
+                .create_container(
+                    Some(CreateContainerOptionsBuilder::default().name(&name).build()),
+                    body,
+                )
+                .await
+            {
+                Ok(_) => reused = false,
+                Err(bollard::errors::Error::DockerResponseServerError {
+                    status_code: 409, ..
+                }) => {}
+                Err(error) => return Err(format!("Failed to create persistent sandbox: {error}")),
+            }
+        }
+        Err(error) => return Err(error.to_string()),
+    }
+    let info = docker
+        .inspect_container(&name, None)
+        .await
+        .map_err(|error| error.to_string())?;
+    let labels = info
+        .config
+        .as_ref()
+        .and_then(|config| config.labels.as_ref());
+    verify_owner(labels, &call.root)?;
+    if labels.and_then(|labels| labels.get("org.kanon.bash-sandbox.fingerprint"))
+        != Some(&fingerprint)
+    {
+        return Err("Sandbox image or isolation settings changed; reset the container in Tools to apply them".into());
+    }
+    if info.state.as_ref().and_then(|state| state.running) != Some(true) {
+        docker
+            .start_container(&name, None)
+            .await
+            .map_err(|error| error.to_string())?;
+    }
+    ready(docker, &name).await?;
+    Ok((info.id.ok_or("Sandbox has no container id")?, reused))
+}
+
+async fn run(call: Invocation, mut cancel: oneshot::Receiver<()>) -> Result<String, String> {
+    authorize(&call)?;
+    let (docker, image) = probe(&call.expected.sandbox).await?;
+    if cancelled(&mut cancel) {
         return Err("Sandbox execution cancelled".into());
     }
-    static NEXT: AtomicU64 = AtomicU64::new(0);
-    let name = format!(
-        "kanon-bash-{}-{}-{}",
-        std::process::id(),
-        NEXT.fetch_add(1, Ordering::Relaxed),
-        SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .map_err(|err| err.to_string())?
-            .as_nanos()
+    let (id, reused) = ensure_container(&docker, &call, image).await?;
+    if cancelled(&mut cancel) {
+        return Err("Sandbox execution cancelled".into());
+    }
+    authorize(&call)?;
+    let relative = call
+        .cwd
+        .strip_prefix(&call.root)
+        .map_err(|error| error.to_string())?;
+    let cwd = format!(
+        "/workspace/{}",
+        relative
+            .components()
+            .map(|part| part.as_os_str().to_str().ok_or("Invalid cwd encoding"))
+            .collect::<Result<Vec<_>, _>>()?
+            .join("/")
     );
-    let body = container_body(&root, &cwd, &command, seconds, &config, image)?;
-    // Creation is owned by this worker and never cancelled with the caller: after a successful
-    // create we know the exact container that must be removed, including a not-yet-started one.
-    let created = docker
-        .create_container(
-            Some(CreateContainerOptionsBuilder::default().name(&name).build()),
-            body,
+    let (uid, gid) = identity();
+    let exec = docker
+        .create_exec(
+            &id,
+            ExecConfig {
+                attach_stdout: Some(true),
+                attach_stderr: Some(true),
+                attach_stdin: Some(false),
+                tty: Some(false),
+                privileged: Some(false),
+                user: Some("0:0".into()),
+                working_dir: Some(cwd),
+                cmd: Some(vec![
+                    "/usr/local/libexec/kanon-sandbox-exec".into(),
+                    uid.to_string(),
+                    gid.to_string(),
+                    call.seconds.to_string(),
+                    call.command,
+                ]),
+                ..Default::default()
+            },
         )
-        .await;
-    let id = match created {
-        Ok(created) => created.id,
-        Err(err) => {
-            let _ = docker
-                .remove_container(
-                    &name,
-                    Some(
-                        RemoveContainerOptionsBuilder::default()
-                            .force(true)
-                            .v(true)
-                            .build(),
-                    ),
-                )
-                .await;
-            return Err(format!("Failed to create sandbox: {err}"));
-        }
-    };
-    let outcome = async {
-        if !matches!(cancel.try_recv(), Err(oneshot::error::TryRecvError::Empty)) { return Err("Sandbox execution cancelled".into()); }
-        if !policy.get().allows(Some(&caller)) { return Err("Bash execution denied: permission was revoked".into()); }
-        let mut attached = docker.attach_container(&id, Some(AttachContainerOptionsBuilder::default().stdout(true).stderr(true).stream(true).build())).await.map_err(|err| err.to_string())?;
-        if !matches!(cancel.try_recv(), Err(oneshot::error::TryRecvError::Empty)) { return Err("Sandbox execution cancelled".into()); }
-        if !policy.get().allows(Some(&caller)) { return Err("Bash execution denied: permission was revoked".into()); }
-        docker.start_container(&id, None).await.map_err(|err| format!("Failed to start sandbox: {err}"))?;
-        let mut output = Capture::default();
-        let start = std::time::Instant::now();
-        let io = async {
-            let read = async {
-                while let Some(frame) = attached.output.next().await {
-                    match frame.map_err(|err| err.to_string())? {
-                        LogOutput::StdErr { message } => output.append(false, &message),
-                        LogOutput::StdOut { message } | LogOutput::Console { message } => output.append(true, &message),
+        .await
+        .map_err(|error| error.to_string())?;
+    if cancelled(&mut cancel) {
+        return Err("Sandbox execution cancelled".into());
+    }
+    // The container persists, but each exec still requires fresh sender authorization.
+    let current = call.policy.get();
+    if current != call.expected || !current.allows(Some(&call.caller)) {
+        return Err("Bash execution denied: permission or configuration changed".into());
+    }
+    let mut capture = Capture::default();
+    let started = std::time::Instant::now();
+    let execution = async {
+        match docker
+            .start_exec(
+                &exec.id,
+                Some(StartExecOptions {
+                    detach: false,
+                    tty: false,
+                    output_capacity: Some(8192),
+                }),
+            )
+            .await
+            .map_err(|error| error.to_string())?
+        {
+            StartExecResults::Attached { mut output, .. } => {
+                while let Some(frame) = output.next().await {
+                    match frame.map_err(|error| error.to_string())? {
+                        LogOutput::StdOut { message } | LogOutput::Console { message } => {
+                            capture.append(true, &message)
+                        }
+                        LogOutput::StdErr { message } => capture.append(false, &message),
                         LogOutput::StdIn { .. } => {}
                     }
                 }
-                Ok::<_, String>(())
-            };
-            let wait = async {
-                let stream = docker.wait_container(&id, None);
-                tokio::pin!(stream);
-                match stream.next().await.ok_or("Sandbox returned no exit status")? {
-                    Ok(result) => Ok(result.status_code),
-                    Err(bollard::errors::Error::DockerContainerWaitError { code, .. }) => Ok(code),
-                    Err(error) => Err(error.to_string()),
-                }
-            };
-            tokio::try_join!(read, wait).map(|(_, code)| code)
-        };
-        let result = tokio::select! {
-            _ = &mut cancel => return Err("Sandbox execution cancelled".into()),
-            result = tokio::time::timeout(Duration::from_secs(seconds + 3), io) => result,
-        };
-        let state = docker.inspect_container(&id, None).await.map_err(|err| format!("Sandbox state inspection failed: {err}"))?.state;
-        let oom = state.as_ref().and_then(|state| state.oom_killed).unwrap_or(false);
-        let (code, timed_out) = match result {
-            Ok(Ok(code)) => (Some(code), !oom && (code == 124 || code == 137 && start.elapsed().as_secs() >= seconds)),
-            Ok(Err(err)) => return Err(format!("Sandbox output/wait failed: {err}")),
-            Err(_) => (None, true),
-        };
-        let result = serde_json::json!({"stdout":String::from_utf8_lossy(&output.stdout), "stderr":String::from_utf8_lossy(&output.stderr),
-            "exit_code":code, "timed_out":timed_out, "oom_killed":oom, "stdout_truncated":output.stdout_truncated,
-            "stderr_truncated":output.stderr_truncated, "sandbox":true, "workspace":"/workspace"}).to_string();
-        if code == Some(0) && !timed_out && !oom { Ok(result) } else { Err(result) }
-    }.await;
-    // Force-removal targets the whole container, so setsid/detached children cannot survive a call.
-    docker
-        .remove_container(
-            &id,
-            Some(
-                RemoveContainerOptionsBuilder::default()
-                    .force(true)
-                    .v(true)
-                    .build(),
-            ),
-        )
+            }
+            StartExecResults::Detached => return Err("Unexpected detached command stream".into()),
+        }
+        loop {
+            let state = docker
+                .inspect_exec(&exec.id)
+                .await
+                .map_err(|error| error.to_string())?;
+            if state.running != Some(true) {
+                return state
+                    .exit_code
+                    .ok_or("Command returned no exit code".into());
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    };
+    let outcome = tokio::select! {
+        _ = &mut cancel => Err("Sandbox execution cancelled".to_string()),
+        result = tokio::time::timeout(Duration::from_secs(call.seconds + 3), execution) => result.map_err(|_| "Sandbox execution timed out".to_string()).and_then(|result| result),
+    };
+    let code = outcome.as_ref().ok().copied();
+    let timed_out = outcome
+        .as_ref()
+        .err()
+        .is_some_and(|error| error.contains("timed out"))
+        || matches!(code, Some(124 | 137))
+            && started.elapsed() >= Duration::from_millis(call.seconds * 1000 - 200);
+    let oom = docker
+        .inspect_container(&id, None)
         .await
-        .map_err(|err| format!("Sandbox cleanup failed for {id}: {err}"))?;
-    outcome
+        .map_err(|error| error.to_string())?
+        .state
+        .and_then(|state| state.oom_killed)
+        .unwrap_or(false);
+    // Restart only on interruption/abnormal termination. This kills escaped/detached children,
+    // preserves the container id and mounted files, and never interrupts another serialized call.
+    if outcome.is_err() || timed_out || code == Some(137) || oom {
+        docker
+            .restart_container(
+                &id,
+                Some(RestartContainerOptionsBuilder::default().t(1).build()),
+            )
+            .await
+            .map_err(|error| format!("Failed to restart interrupted sandbox: {error}"))?;
+        ready(&docker, &id).await?;
+    }
+    if let Err(error) = outcome
+        && !timed_out
+    {
+        return Err(error);
+    }
+    let result = serde_json::json!({"stdout":String::from_utf8_lossy(&capture.stdout), "stderr":String::from_utf8_lossy(&capture.stderr),
+        "exit_code":code, "timed_out":timed_out, "oom_killed":oom, "stdout_truncated":capture.stdout_truncated,
+        "stderr_truncated":capture.stderr_truncated, "sandbox":true, "execution_mode":"sandbox", "workspace":"/workspace", "container_id":id, "container_reused":reused}).to_string();
+    if code == Some(0) && !timed_out && !oom {
+        Ok(result)
+    } else {
+        Err(result)
+    }
 }
 
 fn container_body(
     root: &Path,
-    cwd: &Path,
-    command: &str,
-    seconds: u64,
     config: &BashSandboxConfig,
     image: String,
 ) -> Result<ContainerCreateBody, String> {
     let source = root
         .to_str()
         .ok_or("Sandbox workspace must have a UTF-8 path")?;
-    let relative = cwd.strip_prefix(root).map_err(|err| err.to_string())?;
-    let workdir = format!(
-        "/workspace/{}",
-        relative
-            .components()
-            .map(|component| component.as_os_str().to_str().ok_or("Invalid cwd encoding"))
-            .collect::<Result<Vec<_>, _>>()?
-            .join("/")
-    );
     let (uid, gid) = identity();
     let memory = i64::from(config.memory_mb) * 1024 * 1024;
     Ok(ContainerCreateBody {
         image: Some(image),
         user: Some("0:0".into()),
         entrypoint: Some(vec!["/usr/local/libexec/kanon-sandbox-init".into()]),
-        cmd: Some(vec![
-            uid.to_string(),
-            gid.to_string(),
-            seconds.to_string(),
-            command.into(),
-        ]),
-        working_dir: Some(workdir),
+        cmd: Some(vec![uid.to_string(), gid.to_string()]),
+        working_dir: Some("/workspace".into()),
         open_stdin: Some(false),
         tty: Some(false),
         healthcheck: Some(HealthConfig {
-            test: Some(vec!["NONE".into()]),
-            ..Default::default()
+            test: Some(vec![
+                "CMD".into(),
+                "/usr/bin/test".into(),
+                "-f".into(),
+                "/tmp/kanon-ready".into(),
+            ]),
+            interval: Some(1_000_000_000),
+            timeout: Some(1_000_000_000),
+            start_period: Some(3_000_000_000),
+            start_interval: Some(100_000_000),
+            retries: Some(3),
         }),
         env: Some(vec![
-            "HOME=/tmp".into(),
+            "HOME=/workspace/.home".into(),
             "LANG=C.UTF-8".into(),
             "BASH_ENV=".into(),
             "ENV=".into(),
@@ -364,10 +584,14 @@ fn container_body(
         ]),
         labels: Some(HashMap::from([(
             "org.kanon.bash-sandbox.managed".into(),
-            "1".into(),
+            "2".into(),
         )])),
         host_config: Some(HostConfig {
             init: Some(true),
+            restart_policy: Some(RestartPolicy {
+                name: Some(RestartPolicyNameEnum::UNLESS_STOPPED),
+                maximum_retry_count: None,
+            }),
             privileged: Some(false),
             readonly_rootfs: Some(true),
             cap_drop: Some(vec!["ALL".into()]),

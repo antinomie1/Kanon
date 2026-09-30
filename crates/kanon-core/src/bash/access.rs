@@ -36,11 +36,48 @@ pub enum BashAccessMode {
     Denylist,
 }
 
+/// Operator-selected execution backend. Tool arguments cannot change it.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum BashExecutionMode {
+    /// Reuse the workspace's persistent Docker container.
+    #[default]
+    Sandbox,
+    /// Run Bash on the node host, optionally gated by model review.
+    Local,
+}
+
+/// Host execution settings; review is independent from sender authorization.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct BashLocalConfig {
+    /// Operator-approved starting directory, relative to the node working directory or absolute.
+    pub working_dir: String,
+    /// Require an explicit model approval before every host execution.
+    pub auto_review: bool,
+    /// Optional provider-qualified reviewer model; absent uses the node's default model.
+    pub review_model: Option<String>,
+}
+
+impl Default for BashLocalConfig {
+    fn default() -> Self {
+        Self {
+            working_dir: ".".into(),
+            auto_review: true,
+            review_model: None,
+        }
+    }
+}
+
 /// Persisted caller policy, independent of the command safety policy.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct BashPolicy {
-    /// Mandatory Docker sandbox configuration, controlled only by the operator.
+    /// Execution backend selected by the operator.
+    pub execution_mode: BashExecutionMode,
+    /// Local execution and automatic review settings.
+    pub local: BashLocalConfig,
+    /// Persistent Docker sandbox configuration, controlled only by the operator.
     pub sandbox: super::BashSandboxConfig,
     /// Whether access is restricted to the allowlist or open except for the denylist.
     pub mode: BashAccessMode,
@@ -54,6 +91,15 @@ impl BashPolicy {
     /// Rejects empty identities rather than accepting a policy that cannot match real events.
     pub fn validate(&self) -> Result<(), String> {
         self.sandbox.validate()?;
+        if self.local.working_dir.trim().is_empty() || self.local.working_dir.contains('\0') {
+            return Err("Local Bash working directory must be nonempty and NUL-free".into());
+        }
+        if let Some(model) = &self.local.review_model
+            && !model.trim().is_empty()
+            && kanon_llm::ModelRef::parse(model).provider().is_none()
+        {
+            return Err("Bash review model must use <provider>/<model-id>".into());
+        }
         for entry in self.allowlist.iter().chain(&self.denylist) {
             if entry.platform.trim().is_empty()
                 || entry.user_id.trim().is_empty()

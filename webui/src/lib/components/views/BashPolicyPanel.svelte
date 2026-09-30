@@ -2,7 +2,12 @@
 import { onMount } from 'svelte';
 import { api } from '../../api/client';
 import { t } from '../../stores/i18n.svelte';
-import type { BashPolicy, BashPrincipal, BashSandboxConfig } from '../../types';
+import type {
+  BashLocalConfig,
+  BashPolicy,
+  BashPrincipal,
+  BashSandboxConfig,
+} from '../../types';
 
 let mode = $state<BashPolicy['mode']>('allowlist');
 let allowlist = $state('');
@@ -12,6 +17,9 @@ let saving = $state(false);
 let error = $state('');
 let saved = $state(false);
 let sandbox = $state<BashSandboxConfig | null>(null);
+let executionMode = $state<BashPolicy['execution_mode']>('sandbox');
+let local = $state<BashLocalConfig | null>(null);
+let reviewModel = $state('');
 
 /** One platform:user identity per line; split once so platform-scoped ids remain intact. */
 function parseEntries(text: string): BashPrincipal[] {
@@ -36,6 +44,9 @@ onMount(async () => {
     const policy = await api.getBashPolicy();
     mode = policy.mode;
     sandbox = policy.sandbox;
+    executionMode = policy.execution_mode;
+    local = policy.local;
+    reviewModel = policy.local.review_model ?? '';
     allowlist = policy.allowlist
       .map((entry) => `${entry.platform}:${entry.user_id}`)
       .join('\n');
@@ -49,18 +60,33 @@ onMount(async () => {
 });
 
 async function save() {
-  if (!sandbox) return;
+  if (!sandbox || !local) return;
   saving = true;
   error = '';
   saved = false;
   try {
     await api.setBashPolicy({
       sandbox,
+      execution_mode: executionMode,
+      local: { ...local, review_model: reviewModel.trim() || null },
       mode,
       allowlist: parseEntries(allowlist),
       denylist: parseEntries(denylist),
     });
     saved = true;
+  } catch (e) {
+    error = e instanceof Error ? e.message : String(e);
+  } finally {
+    saving = false;
+  }
+}
+
+async function resetSandbox() {
+  if (!window.confirm(t('bash.reset_confirm'))) return;
+  saving = true;
+  error = '';
+  try {
+    await api.resetBashSandbox();
   } catch (e) {
     error = e instanceof Error ? e.message : String(e);
   } finally {
@@ -90,7 +116,34 @@ async function save() {
     </label>
   </div>
   <p class="text-xs text-zinc-500">{t('bash.identity_hint')}</p>
-  {#if sandbox}
+  <label class="block text-sm space-y-1">
+    <span>{t('bash.execution_mode')}</span>
+    <select bind:value={executionMode} disabled={!loaded || saving} onchange={() => { saved = false; }} class="block w-full rounded-lg border border-zinc-300 dark:border-zinc-700 bg-transparent p-2">
+      <option value="sandbox">{t('bash.mode_sandbox')}</option>
+      <option value="local">{t('bash.mode_local')}</option>
+    </select>
+  </label>
+  {#if executionMode === 'local' && local}
+    <div class="space-y-2 border-t border-zinc-200 dark:border-zinc-800 pt-3">
+      <p class="text-xs text-zinc-500">{t('bash.local_hint')}</p>
+      <label class="block text-sm space-y-1">
+        <span>{t('bash.local_workdir')}</span>
+        <input bind:value={local.working_dir} disabled={!loaded || saving} oninput={() => { saved = false; }} class="block w-full rounded-lg border border-zinc-300 dark:border-zinc-700 bg-transparent p-2 font-mono text-xs" />
+      </label>
+      <label class="flex items-center gap-2 text-sm">
+        <input type="checkbox" bind:checked={local.auto_review} disabled={!loaded || saving} onchange={() => { saved = false; }} />
+        <span>{t('bash.auto_review')}</span>
+      </label>
+      {#if local.auto_review}
+        <p class="text-xs text-zinc-500">{t('bash.review_hint')}</p>
+        <label class="block text-sm space-y-1">
+          <span>{t('bash.review_model')}</span>
+          <input bind:value={reviewModel} disabled={!loaded || saving} oninput={() => { saved = false; }} class="block w-full rounded-lg border border-zinc-300 dark:border-zinc-700 bg-transparent p-2 font-mono text-xs" />
+        </label>
+      {/if}
+    </div>
+  {/if}
+  {#if executionMode === 'sandbox' && sandbox}
     <div class="space-y-2 border-t border-zinc-200 dark:border-zinc-800 pt-3">
       <h4 class="text-sm font-semibold">{t('bash.sandbox_title')}</h4>
       <label class="flex items-center gap-2 text-sm">
@@ -103,6 +156,7 @@ async function save() {
         <input bind:value={sandbox.image} disabled={!loaded || saving} oninput={() => { saved = false; }} class="block w-full rounded-lg border border-zinc-300 dark:border-zinc-700 bg-transparent p-2 font-mono text-xs" />
       </label>
       <p class="text-xs text-zinc-500">{sandbox.memory_mb} MiB · {sandbox.cpus} CPU · {sandbox.pids_limit} {t('bash.processes')}</p>
+      <button type="button" onclick={resetSandbox} disabled={!loaded || saving} class="rounded-lg border border-zinc-300 dark:border-zinc-700 px-3 py-2 text-sm disabled:opacity-50">{t('bash.reset')}</button>
     </div>
   {/if}
   {#if error}<p role="alert" class="text-sm text-rose-600">{error}</p>{/if}

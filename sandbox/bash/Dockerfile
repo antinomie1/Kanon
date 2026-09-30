@@ -10,8 +10,11 @@ RUN ln -s ../lib/node_modules/npm/bin/npm-cli.js /usr/local/bin/npm \
     && ln -s ../lib/node_modules/npm/bin/npx-cli.js /usr/local/bin/npx \
     && bash --version && python3 --version && node --version
 COPY init.sh /usr/local/libexec/kanon-sandbox-init
-RUN chmod 0555 /usr/local/libexec/kanon-sandbox-init
-LABEL org.kanon.bash-sandbox.version="1"
-ENV HOME=/tmp LANG=C.UTF-8 PYTHONDONTWRITEBYTECODE=1 PIP_NO_CACHE_DIR=1
+COPY exec.sh /usr/local/libexec/kanon-sandbox-exec
+RUN chmod 0555 /usr/local/libexec/kanon-sandbox-init /usr/local/libexec/kanon-sandbox-exec
+LABEL org.kanon.bash-sandbox.version="2"
+ENV HOME=/workspace/.home LANG=C.UTF-8 PYTHONDONTWRITEBYTECODE=1 PIP_NO_CACHE_DIR=1
+ENV PATH=/workspace/.home/.local/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin \
+    NPM_CONFIG_PREFIX=/workspace/.home/.local
 WORKDIR /workspace
 ENTRYPOINT ["/usr/local/libexec/kanon-sandbox-init"]

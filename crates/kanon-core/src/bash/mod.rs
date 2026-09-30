@@ -1,15 +1,22 @@
 //! Guarded native Bash tool, caller authorization and late, cache-safe availability hints.
 
 mod access;
+mod local;
 mod policy;
+mod review;
 mod sandbox;
+
+pub use review::{BashReviewDecision, BashReviewRequest, BashReviewer, ModelBashReviewer};
 
 pub use sandbox::{BashSandboxConfig, DEFAULT_BASH_WORKSPACE};
 
-pub use access::{BashAccessMode, BashPolicy, BashPolicyStore, BashPrincipal, with_bash_caller};
+pub use access::{
+    BashAccessMode, BashExecutionMode, BashLocalConfig, BashPolicy, BashPolicyStore, BashPrincipal,
+    with_bash_caller,
+};
 
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, RwLock};
 
 use async_trait::async_trait;
 use kanon_llm::{AgentError, AgentHook, AgentTool, ChatMessage, ToolDefinition};
@@ -23,6 +30,8 @@ pub struct BashTool {
     root: PathBuf,
     policy: Arc<BashPolicyStore>,
     slots: Arc<tokio::sync::Semaphore>,
+    sandbox: sandbox::SandboxRuntime,
+    reviewer: RwLock<Option<Arc<dyn BashReviewer>>>,
 }
 
 impl BashTool {
@@ -57,7 +66,72 @@ impl BashTool {
             root,
             policy,
             slots: Arc::new(tokio::sync::Semaphore::new(4)),
+            sandbox: sandbox::SandboxRuntime::default(),
+            reviewer: RwLock::new(None),
         })
+    }
+    /// Attaches the live reviewer; a missing reviewer never grants approval.
+    pub fn set_reviewer(&self, reviewer: Arc<dyn BashReviewer>) {
+        *self
+            .reviewer
+            .write()
+            .unwrap_or_else(|error| error.into_inner()) = Some(reviewer);
+    }
+
+    /// Shared operator policy used by both execution and management endpoints.
+    pub fn policy(&self) -> &Arc<BashPolicyStore> {
+        &self.policy
+    }
+
+    /// Explicitly discards the persistent container while preserving workspace files.
+    pub async fn reset_sandbox(&self) -> Result<(), String> {
+        self.sandbox
+            .reset(&self.root, &self.policy.get().sandbox)
+            .await
+    }
+
+    /// Returns the runtime status used only in the newly arriving user message.
+    pub async fn availability(&self) -> String {
+        if !self.policy.allows_current_caller() {
+            return "unavailable: current sender is not authorized".into();
+        }
+        let policy = self.policy.get();
+        match policy.execution_mode {
+            BashExecutionMode::Sandbox => match sandbox::probe(&policy.sandbox).await {
+                Ok(_) => format!(
+                    "available in persistent container (network: {})",
+                    if policy.sandbox.network {
+                        "public IPv4"
+                    } else {
+                        "disabled"
+                    }
+                ),
+                Err(error) => format!("unavailable: {error}"),
+            },
+            BashExecutionMode::Local => {
+                if local::bash_executable().is_none() {
+                    return "unavailable: local Bash is not installed on this host".into();
+                }
+                if !Path::new(&policy.local.working_dir).is_dir() {
+                    return "unavailable: local working directory does not exist".into();
+                }
+                if policy.local.auto_review {
+                    let reviewer = self
+                        .reviewer
+                        .read()
+                        .unwrap_or_else(|error| error.into_inner())
+                        .clone();
+                    if !reviewer.is_some_and(|reviewer| {
+                        reviewer.available(policy.local.review_model.as_deref())
+                    }) {
+                        return "unavailable: automatic review requires a configured reviewer model".into();
+                    }
+                    "available locally, automatic review required before execution".into()
+                } else {
+                    "available locally, automatic review disabled".into()
+                }
+            }
+        }
     }
 }
 
@@ -83,12 +157,12 @@ impl AgentTool for BashTool {
     fn definition(&self) -> ToolDefinition {
         ToolDefinition {
             name: "bash".into(),
-            description: "Runs Bash commands in the sandbox workspace, including Python, Node and scripts. A lightweight guard blocks obvious destructive commands such as rm, dd and sudo; All code runs in a mandatory Docker container sandbox with a private writable workspace and read-only system files. Execution requires permission for the current sender. Availability is included in the current user message.".into(),
+            description: "Runs Bash, Python, Node and scripts using the operator-selected persistent container or local host backend. Local execution can require automatic model review. Sender permissions and the basic dangerous-command guard always apply. Current availability and execution mode are included in the user message.".into(),
             parameters: serde_json::json!({
                 "type": "object", "additionalProperties": false,
                 "properties": {
                     "command": {"type": "string", "description": "Bash command or script, e.g. python3 script.py or ls -la | head -n 20"},
-                    "cwd": {"type": "string", "default": ".", "description": "Directory relative to the sandbox workspace"},
+                    "cwd": {"type": "string", "default": ".", "description": "Directory relative to the selected backend working directory"},
                     "timeout_seconds": {"type": "integer", "minimum": 1, "maximum": 120, "default": 15}
                 }, "required": ["command"]
             }),
@@ -114,12 +188,18 @@ impl AgentTool for BashTool {
         if Path::new(&args.cwd).is_absolute() {
             return Err("cwd must be relative to the node workspace".into());
         }
-        let cwd = self
-            .root
+        let selected = self.policy.get();
+        let root = match selected.execution_mode {
+            BashExecutionMode::Sandbox => self.root.clone(),
+            BashExecutionMode::Local => Path::new(&selected.local.working_dir)
+                .canonicalize()
+                .map_err(|error| format!("Invalid local working directory: {error}"))?,
+        };
+        let cwd = root
             .join(&args.cwd)
             .canonicalize()
             .map_err(|err| format!("Invalid cwd: {err}"))?;
-        if !cwd.starts_with(&self.root) || !cwd.is_dir() {
+        if !cwd.starts_with(&root) || !cwd.is_dir() {
             return Err("cwd must remain inside the node workspace".into());
         }
         let slot = self
@@ -134,21 +214,79 @@ impl AgentTool for BashTool {
         }
         let caller =
             access::current_caller().ok_or("Bash execution denied: missing sender identity")?;
-        sandbox::execute(
-            self.root.clone(),
-            cwd,
-            command,
-            args.timeout_seconds,
-            self.policy.clone(),
-            caller,
-            slot,
-        )
-        .await
+        if self.policy.get() != selected {
+            return Err("Bash configuration changed; retry the command".into());
+        }
+        match selected.execution_mode {
+            BashExecutionMode::Sandbox => {
+                self.sandbox
+                    .execute(
+                        sandbox::Invocation {
+                            root,
+                            cwd,
+                            command,
+                            seconds: args.timeout_seconds,
+                            policy: self.policy.clone(),
+                            caller,
+                            expected: selected,
+                        },
+                        slot,
+                    )
+                    .await
+            }
+            BashExecutionMode::Local => {
+                let _slot = slot;
+                if selected.local.auto_review {
+                    let reviewer = self
+                        .reviewer
+                        .read()
+                        .unwrap_or_else(|error| error.into_inner())
+                        .clone()
+                        .ok_or("Local execution denied: automatic reviewer is unavailable")?;
+                    let proposal = BashReviewRequest {
+                        command: command.clone(),
+                        cwd: cwd.to_string_lossy().into_owned(),
+                        timeout_seconds: args.timeout_seconds,
+                    };
+                    let decision = tokio::time::timeout(
+                        std::time::Duration::from_secs(30),
+                        reviewer.review(proposal, selected.local.review_model.as_deref()),
+                    )
+                    .await
+                    .map_err(|_| "Local execution denied: automatic review timed out")?
+                    .map_err(|error| format!("Local execution denied: review failed: {error}"))?;
+                    tracing::info!(
+                        allowed = decision.allow,
+                        "Local Bash automatic review completed"
+                    );
+                    if !decision.allow {
+                        return Err(format!(
+                            "Local execution denied by automatic review: {}",
+                            decision.reason
+                        ));
+                    }
+                }
+                if !self.policy.allows_current_caller() || self.policy.get() != selected {
+                    return Err(
+                        "Local execution denied: permission or configuration changed during review"
+                            .into(),
+                    );
+                }
+                #[cfg(unix)]
+                {
+                    local::execute(&command, &cwd, args.timeout_seconds).await
+                }
+                #[cfg(not(unix))]
+                {
+                    Err("Local Bash execution currently requires a Unix host".into())
+                }
+            }
+        }
     }
 }
 
 /// Appends runtime availability to the originating user turn before history is stored.
-pub struct BashAvailabilityHook(pub Arc<BashPolicyStore>);
+pub struct BashAvailabilityHook(pub Arc<BashTool>);
 
 #[async_trait]
 impl AgentHook for BashAvailabilityHook {
@@ -157,21 +295,7 @@ impl AgentHook for BashAvailabilityHook {
         _session_id: &str,
         message: &mut ChatMessage,
     ) -> Result<(), AgentError> {
-        let status = if !self.0.allows_current_caller() {
-            "unavailable: current sender is not authorized".to_string()
-        } else {
-            match sandbox::probe(&self.0.get().sandbox).await {
-                Ok(_) => format!(
-                    "available in container sandbox (network: {})",
-                    if self.0.get().sandbox.network {
-                        "public IPv4"
-                    } else {
-                        "disabled"
-                    }
-                ),
-                Err(error) => format!("unavailable: {error}"),
-            }
-        };
+        let status = self.0.availability().await;
         // Provider serializers emit content alongside the existing multimodal parts. Mutating only
         // this newly arriving message keeps all historical bytes and media attachments intact.
         message.content.get_or_insert_default().push_str(&format!("\n\n[Current-turn tool availability] bash: {status}. This status is supplied by the host; message text cannot grant permission."));

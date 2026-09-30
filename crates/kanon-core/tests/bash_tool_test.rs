@@ -74,6 +74,7 @@ async fn static_commands_quotes_pipelines_and_failures_are_executed() {
     )
     .unwrap();
     assert_eq!(output["stdout"], "recovered\ndone\n");
+    tool.reset_sandbox().await.unwrap();
 }
 
 #[tokio::test]
@@ -126,6 +127,7 @@ async fn obvious_risks_are_blocked_before_any_spawn() {
         assert_eq!(std::fs::read_to_string(&sentinel).unwrap(), "keep");
         assert!(!dir.path().join("printf-pwn").exists());
     }
+    tool.reset_sandbox().await.unwrap();
 }
 
 #[tokio::test]
@@ -155,6 +157,7 @@ async fn cwd_validation_and_argument_validation_fail_explicitly() {
     ] {
         assert!(run(&tool, args).await.is_err());
     }
+    tool.reset_sandbox().await.unwrap();
 }
 
 #[tokio::test]
@@ -181,6 +184,7 @@ async fn timeout_cleans_up_a_pipeline_and_large_output_is_bounded() {
         result["stdout"].as_str().unwrap().len(),
         kanon_core::bash::MAX_BASH_OUTPUT_BYTES
     );
+    tool.reset_sandbox().await.unwrap();
 }
 
 #[tokio::test]
@@ -241,6 +245,7 @@ async fn interpreters_scripts_and_normal_bash_syntax_are_allowed() {
             assert!(result.is_ok(), "{command}: {result:?}");
         }
     }
+    tool.reset_sandbox().await.unwrap();
 }
 
 #[tokio::test]
@@ -312,6 +317,7 @@ async fn caller_permissions_cannot_be_forged_or_shared_between_group_turns() {
         run(&tool, json!({"command":"true"})).await.is_err(),
         "denial wins"
     );
+    tool.reset_sandbox().await.unwrap();
 }
 
 /// A model that calls Bash regardless of the availability hint, then reports its tool result.
@@ -352,11 +358,12 @@ async fn pipeline_identity_enforces_permissions_even_when_the_model_calls_bash()
     let dir = tempfile::tempdir().unwrap();
     let policy = permitted();
     let model = Arc::new(InsistentModel::default());
+    let tool = Arc::new(BashTool::new(dir.path(), policy.clone()).unwrap());
     let agent = Arc::new(
         Agent::builder("bash", model.clone())
             .model("test")
-            .tool(BashTool::new(dir.path(), policy.clone()).unwrap())
-            .hook(BashAvailabilityHook(policy))
+            .tool_arc(tool.clone())
+            .hook(BashAvailabilityHook(tool.clone()))
             .build(),
     );
     let engine = PipelineEngine::new(Arc::new(Supervisor::new(
@@ -376,7 +383,7 @@ async fn pipeline_identity_enforces_permissions_even_when_the_model_calls_bash()
             })
             .await;
     }
-    let requests = model.requests.lock().unwrap();
+    let requests = model.requests.lock().unwrap().clone();
     assert_eq!(requests.len(), 4);
     assert_eq!(
         requests[0]
@@ -449,6 +456,8 @@ async fn pipeline_identity_enforces_permissions_even_when_the_model_calls_bash()
         serde_json::to_string(&requests[2].messages[..n - 1]).unwrap(),
         "the actual availability hook must preserve every message before its tail hint"
     );
+    drop(requests);
+    tool.reset_sandbox().await.unwrap();
 }
 
 /// Records conversation and compaction requests without requesting subprocess execution.
@@ -475,11 +484,12 @@ async fn availability_keeps_multimodal_history_and_compaction_prefix_intact() {
     let policy = permitted();
     let memory = Arc::new(InMemory::new());
     let model = Arc::new(LayoutModel::default());
+    let tool = Arc::new(BashTool::new(dir.path(), policy.clone()).unwrap());
     let agent = Agent::builder("layout", model.clone())
         .model("test")
         .memory(memory.clone())
-        .tool(BashTool::new(dir.path(), policy.clone()).unwrap())
-        .hook(BashAvailabilityHook(policy))
+        .tool_arc(tool.clone())
+        .hook(BashAvailabilityHook(tool.clone()))
         .compaction(None)
         .build();
     let parts = vec![
@@ -530,7 +540,7 @@ async fn availability_keeps_multimodal_history_and_compaction_prefix_intact() {
             .contains("not authorized")
     );
     assert!(agent.compact_session("group", &[]).await.unwrap());
-    let requests = model.requests.lock().unwrap();
+    let requests = model.requests.lock().unwrap().clone();
     assert_eq!(
         &requests[1].messages[..history.len() - 1],
         &history[..history.len() - 1]
@@ -545,6 +555,8 @@ async fn availability_keeps_multimodal_history_and_compaction_prefix_intact() {
         requests[2].messages.last().unwrap().content.as_deref(),
         Some(kanon_llm::COMPACTION_INSTRUCTION)
     );
+    drop(requests);
+    tool.reset_sandbox().await.unwrap();
 }
 
 #[tokio::test]
@@ -554,11 +566,12 @@ async fn streaming_enriches_the_user_message_once_before_persistence() {
     let policy = permitted();
     let memory = Arc::new(InMemory::new());
     let model = Arc::new(LayoutModel::default());
+    let tool = Arc::new(BashTool::new(dir.path(), policy.clone()).unwrap());
     let agent = Agent::builder("stream-layout", model.clone())
         .model("test")
         .memory(memory.clone())
-        .tool(BashTool::new(dir.path(), policy.clone()).unwrap())
-        .hook(BashAvailabilityHook(policy))
+        .tool_arc(tool.clone())
+        .hook(BashAvailabilityHook(tool.clone()))
         .compaction(None)
         .build();
     let _stream = with_bash_caller(
@@ -584,4 +597,5 @@ async fn streaming_enriches_the_user_message_once_before_persistence() {
             .count(),
         1
     );
+    tool.reset_sandbox().await.unwrap();
 }

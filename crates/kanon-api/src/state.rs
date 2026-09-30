@@ -15,8 +15,9 @@ use std::time::Instant;
 use kanon_adapter_milky::MilkyAdapter;
 use kanon_adapter_onebot::OneBotAdapter;
 use kanon_core::{
-    BashPolicyStore, ContextPolicyStore, EventIngress, InstanceRegistry, McpConfigStore, McpPool,
-    ReplyPolicyStore, SkillStore, Supervisor, ToggleStore,
+    BashAvailabilityHook, BashPolicyStore, BashTool, ContextPolicyStore, EventIngress,
+    InstanceRegistry, McpConfigStore, McpPool, ModelBashReviewer, ReplyPolicyStore, SkillStore,
+    Supervisor, ToggleStore,
 };
 use kanon_llm::{
     Agent, AgentConfig, AgentFactory, AgentSlot, InMemory, LlmProvider, Memory, PersonaRegistry,
@@ -76,6 +77,8 @@ struct ApiStateInner {
     context_policy: Arc<ContextPolicyStore>,
     /// Live caller policy also held by the Bash tool and availability hook.
     bash_policy: Arc<BashPolicyStore>,
+    /// Typed tool handle for explicit persistent-container reset.
+    bash_tool: Option<Arc<BashTool>>,
     /// In-memory view of the persisted model-routing settings.
     ///
     /// Kept alongside the store so a read (listing providers, resolving a model) never touches the
@@ -236,6 +239,11 @@ impl ApiState {
     /// Current Bash permission policy, shared with the execution gate.
     pub fn bash_policy(&self) -> &Arc<BashPolicyStore> {
         &self.inner.bash_policy
+    }
+
+    /// Native Bash runtime managed by the node, when registered.
+    pub fn bash_tool(&self) -> Option<&Arc<BashTool>> {
+        self.inner.bash_tool.as_ref()
     }
 
     /// Snapshot of the persisted model-routing settings.
@@ -428,6 +436,7 @@ pub struct ApiStateBuilder {
     system_config: Option<Arc<SystemConfigStore>>,
     node_settings: Option<NodeSettings>,
     bash_policy: Option<Arc<BashPolicyStore>>,
+    bash_tool: Option<Arc<BashTool>>,
     milky: Option<Arc<MilkyAdapter>>,
     /// OneBot v11 adapter hosted by this node.
     onebot: Option<Arc<OneBotAdapter>>,
@@ -467,6 +476,7 @@ impl ApiStateBuilder {
             system_config: None,
             node_settings: None,
             bash_policy: None,
+            bash_tool: None,
             milky: None,
             onebot: None,
             config_base_dir: None,
@@ -624,6 +634,15 @@ impl ApiStateBuilder {
         self
     }
 
+    /// Registers Bash, its per-turn status hook and its management handle together.
+    pub fn with_bash_tool(mut self, tool: Arc<BashTool>) -> Self {
+        self.native_tools.push(tool.clone());
+        self.hooks
+            .push(Arc::new(BashAvailabilityHook(tool.clone())));
+        self.bash_tool = Some(tool);
+        self
+    }
+
     /// Shares the OneBot v11 adapter registered by the composition root.
     pub fn with_onebot_adapter(mut self, adapter: Arc<OneBotAdapter>) -> Self {
         self.onebot = Some(adapter);
@@ -704,6 +723,9 @@ impl ApiStateBuilder {
             hooks,
             self.native_tools.clone(),
         ));
+        if let Some(tool) = &self.bash_tool {
+            tool.set_reviewer(Arc::new(ModelBashReviewer::new(Arc::downgrade(&factory))));
+        }
 
         // A provider the builder was handed is installed into the shared slot; dropping it
         // silently would leave the node reporting a provider it cannot use. A caller that supplied
@@ -734,7 +756,12 @@ impl ApiStateBuilder {
         }
         let reply_policy = Arc::new(ReplyPolicyStore::new(node_settings.reply_policy));
         let context_policy = Arc::new(ContextPolicyStore::new(node_settings.context_policy));
-        let bash_policy = self.bash_policy.unwrap_or_default();
+        let bash_policy = self
+            .bash_tool
+            .as_ref()
+            .map(|tool| tool.policy().clone())
+            .or(self.bash_policy)
+            .unwrap_or_default();
         bash_policy.set(node_settings.bash_policy.clone());
 
         let instances = self.instances.unwrap_or_default();
@@ -777,6 +804,7 @@ impl ApiStateBuilder {
                 reply_policy,
                 context_policy,
                 bash_policy,
+                bash_tool: self.bash_tool,
                 node_settings: Arc::new(RwLock::new(node_settings)),
                 milky: self.milky,
                 onebot: self.onebot,

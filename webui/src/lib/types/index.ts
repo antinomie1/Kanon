@@ -832,10 +832,19 @@ export interface BashPrincipal {
 
 /** Permission to ask the AI to execute Bash; denial wins in either mode. */
 export interface BashPolicy {
+  execution_mode: 'sandbox' | 'local';
+  local: BashLocalConfig;
   sandbox: BashSandboxConfig;
   mode: 'allowlist' | 'denylist';
   allowlist: BashPrincipal[];
   denylist: BashPrincipal[];
+}
+
+/** Host execution with an optional pre-execution model review. */
+export interface BashLocalConfig {
+  working_dir: string;
+  auto_review: boolean;
+  review_model: string | null;
 }
 
 /** Operator-owned runtime; model calls cannot change sandbox limits or mounts. */
