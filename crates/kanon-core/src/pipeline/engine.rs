@@ -1959,7 +1959,7 @@ impl PipelineEngine {
                 architecture => architecture,
             };
             rendered.push_str(&format!(
-                "System: {} | Kernel: Darwin {} | Arch: {architecture}\n",
+                "系统: {} | Kernel: Darwin {} | Arch: {architecture}\n",
                 distribution_name(),
                 kernel_release().unwrap_or_else(|| "unknown".to_string())
             ));
