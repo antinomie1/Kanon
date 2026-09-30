@@ -467,7 +467,7 @@ async fn info_reports_host_time_model_and_adapter() {
             assert_eq!(command, "info");
             let text = reply_text(&replies);
             #[cfg(target_os = "macos")]
-            assert!(text.starts_with("System: macOS "), "{text}");
+            assert!(text.starts_with("系统: macOS "), "{text}");
             #[cfg(not(target_os = "macos"))]
             assert!(text.contains("系统:"), "{text}");
             assert!(text.contains("时间:"), "{text}");
@@ -514,7 +514,7 @@ async fn info_reports_macos_product_and_kernel_versions() {
                 architecture => architecture,
             };
             let expected = format!(
-                "System: macOS {product_version} | Kernel: Darwin {kernel_version} | Arch: {architecture}"
+                "系统: macOS {product_version} | Kernel: Darwin {kernel_version} | Arch: {architecture}"
             );
             assert_eq!(text.lines().next(), Some(expected.as_str()));
         }
