@@ -52,6 +52,9 @@ pub struct QqOfficialConfigRequest {
     /// Send replies as native Markdown.
     #[serde(default)]
     pub markdown: bool,
+    /// Show "typing…" in private chats while the model works.
+    #[serde(default)]
+    pub typing_indicator: bool,
 }
 
 /// A new QR binding task.
@@ -113,6 +116,7 @@ async fn update_config(
         secret,
         sandbox: body.sandbox,
         markdown: body.markdown,
+        typing_indicator: body.typing_indicator,
     };
     apply_and_save(&state, adapter, candidate).await?;
     tracing::info!(

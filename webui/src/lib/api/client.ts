@@ -10,6 +10,8 @@ import type {
   DeleteProviderRequest,
   DiscoverModelsRequest,
   DiscoverModelsResponse,
+  EventPolicy,
+  EventPolicyResponse,
   FetchModelsRequest,
   FetchModelsResponse,
   InstallPluginResponse,
@@ -136,6 +138,13 @@ export const api = {
     request<ContextPolicyResponse>('/api/v1/system/context-policy'),
   setContextPolicy: (policy: ContextPolicy) =>
     request<ContextPolicyResponse>('/api/v1/system/context-policy', {
+      method: 'PUT',
+      body: JSON.stringify(policy),
+    }),
+  getEventPolicy: () =>
+    request<EventPolicyResponse>('/api/v1/system/event-policy'),
+  setEventPolicy: (policy: EventPolicy) =>
+    request<EventPolicyResponse>('/api/v1/system/event-policy', {
       method: 'PUT',
       body: JSON.stringify(policy),
     }),

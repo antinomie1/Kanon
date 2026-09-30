@@ -259,6 +259,7 @@ async fn main() -> StartupResult<()> {
             .with_toggles(plugin_state.clone())
             .with_reply_policy(state.reply_policy().clone())
             .with_context_policy(state.context_policy().clone())
+            .with_event_policy(state.event_policy().clone())
             .with_mcp_pool(mcp_pool.clone()),
     );
     let pipeline_worker = engine.clone().start_worker(event_rx);

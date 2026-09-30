@@ -47,6 +47,8 @@
 //! | `POST` | `/api/v1/models/discover` | Read a provider's own model listing |
 //! | `GET` | `/api/v1/system/reply-policy` | Node-wide reply policy |
 //! | `PUT` | `/api/v1/system/reply-policy` | Update the node-wide reply policy |
+//! | `GET` | `/api/v1/system/event-policy` | Node-wide notice policy (welcomes, pokes, recall notes) |
+//! | `PUT` | `/api/v1/system/event-policy` | Update the node-wide notice policy |
 //! | `GET` | `/api/v1/skills` | Installed skills with their node-wide switch |
 //! | `POST` | `/api/v1/skills` | Install a skill from a zip archive or local directory |
 //! | `DELETE` | `/api/v1/skills/:id` | Remove an installed skill |

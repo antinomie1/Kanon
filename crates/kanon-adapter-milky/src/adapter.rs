@@ -19,11 +19,11 @@
 //! which is what keeps `is_connected` synchronous for the registry while `apply` stays async.
 //!
 //! # Non-message events
-//! Milky pushes 21 event types; only `message_receive` is a conversational turn. The remaining 20
-//! (a recall, a nudge, a group rename, a member joining) are counted and reflected in the status,
-//! but deliberately *not* ingested: feeding them to the pipeline as if a user had typed them would
-//! make the bot answer events nobody addressed to it. Exposing them to plugins would need a
-//! core-side primitive that does not exist yet, so the adapter does not pretend it has one.
+//! Milky pushes 21 event types; only `message_receive` is a conversational turn. A member joining,
+//! a nudge of the bot and a recall are ingested as core notices (see `kanon_core::notice`), whose
+//! node-wide event policy decides whether the bot reacts; friend requests and group invitations
+//! are accepted when the configuration says so. Everything else is counted and reflected in the
+//! status only.
 
 use std::sync::{Arc, RwLock};
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
@@ -37,7 +37,15 @@ use crate::client::{MilkyClient, MilkyError};
 use crate::config::{ConfigError, MilkyConfig, TransportKind};
 use crate::event_source::{EventSource, EventSourceHandle, StreamEvent};
 use crate::mapping::{self, ChannelScene};
-use crate::protocol::{Event, SendGroupMessageInput, SendPrivateMessageInput};
+use crate::protocol::{
+    AcceptFriendRequestInput, AcceptGroupInvitationInput, Event, GetForwardedMessagesInput,
+    GetGroupMemberInfoInput, GetUserProfileInput, SendGroupMessageInput,
+    SendGroupMessageReactionInput, SendPrivateMessageInput,
+};
+use kanon_proto::v1::PipelineEventRequest;
+
+/// Reaction used to acknowledge a message: QQ face 76, the thumbs-up.
+const ACK_REACTION: &str = "76";
 
 /// Connection state of the adapter, as shown in the management console.
 ///
@@ -509,6 +517,42 @@ impl PlatformAdapter for MilkyAdapter {
         }
     }
 
+    /// Reacts to a group message the bot is about to answer, when the operator enabled it.
+    async fn acknowledge(&self, event: &PipelineEventRequest) -> Result<(), AdapterError> {
+        let client = {
+            let state = self.state.read().expect("adapter state poisoned");
+            match &state.client {
+                Some(client) if state.config.reaction_ack => client.clone(),
+                _ => return Ok(()),
+            }
+        };
+        let Ok(target) = mapping::parse_channel_id(&event.channel_id) else {
+            return Ok(());
+        };
+        let message_seq = event
+            .metadata
+            .as_ref()
+            .and_then(|metadata| metadata.fields.get(mapping::META_MESSAGE_SEQ))
+            .and_then(|value| match value.kind {
+                Some(kanon_proto::prost_types::value::Kind::NumberValue(seq)) => Some(seq as i64),
+                _ => None,
+            });
+        // Only a group message can carry a reaction; notices have no message to react to.
+        let (ChannelScene::Group, Some(message_seq)) = (target.scene, message_seq) else {
+            return Ok(());
+        };
+        client
+            .send_group_message_reaction(&SendGroupMessageReactionInput {
+                group_id: target.peer_id,
+                message_seq,
+                reaction: ACK_REACTION.to_string(),
+                reaction_type: "face".to_string(),
+                is_add: true,
+            })
+            .await
+            .map_err(|err| err.into_adapter_error(&self.platform))
+    }
+
     /// Captures the ingest handle and brings up the event stream.
     async fn start(&self, ingress: EventIngress) -> Result<(), AdapterError> {
         {
@@ -584,10 +628,40 @@ fn handle_event(state: &Arc<RwLock<State>>, platform: &str, ingress: &EventIngre
         guard.status.last_event_at_unix_ms = Some(now_unix_millis());
     }
 
+    let (client, config) = {
+        let guard = state.read().expect("adapter state poisoned");
+        (guard.client.clone(), guard.config.clone())
+    };
+
+    if let Some(notice) = mapping::map_notice(platform, event) {
+        match client {
+            Some(client) => {
+                let (state, platform, ingress) =
+                    (state.clone(), platform.to_string(), ingress.clone());
+                tokio::spawn(async move {
+                    let mut request = notice.event;
+                    if let Some(actor) = notice.actor_id {
+                        let name = display_name(&client, notice.group_id, actor)
+                            .await
+                            .unwrap_or_else(|| actor.to_string());
+                        mapping::set_notice_actor(&mut request, &name);
+                    }
+                    ingest(&state, &platform, &ingress, request);
+                });
+            }
+            None => ingest(state, platform, ingress, notice.event),
+        }
+        return;
+    }
+
+    if let Some(client) = client.clone() {
+        accept_request(client, &config, event);
+    }
+
     let request = match mapping::inbound_message(platform, self_id, event) {
         Ok(Some(request)) => request,
         Ok(None) => {
-            // A non-message event: counted, deliberately not ingested.
+            // Any other event: counted, deliberately not ingested.
             tracing::trace!(event_type, "Milky event observed but not ingested");
             return;
         }
@@ -599,6 +673,108 @@ fn handle_event(state: &Arc<RwLock<State>>, platform: &str, ingress: &EventIngre
         }
     };
 
+    // A merged forward is fetched before the message goes in, so the model reads what was
+    // forwarded instead of a title. Everything else is ingested at once, keeping its order.
+    let forwards = mapping::forward_ids(&request);
+    match client {
+        Some(client) if !forwards.is_empty() => {
+            let (state, platform, ingress) = (state.clone(), platform.to_string(), ingress.clone());
+            tokio::spawn(async move {
+                let mut request = request;
+                for forward_id in forwards {
+                    let fetched = client
+                        .get_forwarded_messages(&GetForwardedMessagesInput {
+                            forward_id: forward_id.clone(),
+                        })
+                        .await
+                        .map_err(|err| err.to_string())
+                        .and_then(|out| {
+                            mapping::attach_forward(&mut request, &forward_id, &out.messages)
+                        });
+                    if let Err(err) = fetched {
+                        // An expired forward must not drop the message that carried it.
+                        tracing::warn!(error = %err, "Milky merged forward unavailable");
+                    }
+                }
+                ingest(&state, &platform, &ingress, request);
+            });
+        }
+        _ => ingest(state, platform, ingress, request),
+    }
+}
+
+/// Group card, else nickname, of an account; `None` when the implementation cannot tell.
+async fn display_name(client: &MilkyClient, group_id: Option<i64>, user_id: i64) -> Option<String> {
+    let name = match group_id {
+        Some(group_id) => {
+            let member = client
+                .get_group_member_info(&GetGroupMemberInfoInput {
+                    group_id,
+                    user_id,
+                    no_cache: false,
+                })
+                .await
+                .ok()?
+                .member;
+            if member.card.trim().is_empty() {
+                member.nickname
+            } else {
+                member.card
+            }
+        }
+        None => {
+            client
+                .get_user_profile(&GetUserProfileInput { user_id })
+                .await
+                .ok()?
+                .nickname
+        }
+    };
+    Some(name.trim().to_string()).filter(|name| !name.is_empty())
+}
+
+/// Accepts a friend request or group invitation when the configuration says to.
+fn accept_request(client: Arc<MilkyClient>, config: &MilkyConfig, event: &Event) {
+    match event {
+        Event::FriendRequest { data, .. } if config.auto_accept_friends => {
+            let input = AcceptFriendRequestInput {
+                initiator_uid: data.initiator_uid.clone(),
+                is_filtered: false,
+            };
+            tokio::spawn(async move {
+                match client.accept_friend_request(&input).await {
+                    Ok(()) => tracing::info!("Milky friend request accepted automatically"),
+                    Err(err) => {
+                        tracing::warn!(error = %err, "Milky friend request could not be accepted")
+                    }
+                }
+            });
+        }
+        Event::GroupInvitation { data, .. } if config.auto_accept_group_invites => {
+            let input = AcceptGroupInvitationInput {
+                group_id: data.group_id,
+                invitation_seq: data.invitation_seq,
+            };
+            tokio::spawn(async move {
+                match client.accept_group_invitation(&input).await {
+                    Ok(()) => tracing::info!("Milky group invitation accepted automatically"),
+                    Err(err) => {
+                        tracing::warn!(error = %err, "Milky group invitation could not be accepted")
+                    }
+                }
+            });
+        }
+        _ => {}
+    }
+}
+
+/// Pushes one event into the core without waiting for capacity.
+fn ingest(
+    state: &Arc<RwLock<State>>,
+    platform: &str,
+    ingress: &EventIngress,
+    request: PipelineEventRequest,
+) {
     let event_id = request.event_id.clone();
     let ingest = IngestEventRequest {
         platform: platform.to_string(),

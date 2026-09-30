@@ -302,9 +302,11 @@ fn outgoing(segment: &MessageSegment) -> Result<Value, String> {
             "all".into()
         } else { parse_id(&mention.target_user_id)?.to_string() }}),
         ),
+        // A quote of an ingested event names its full Kanon event ID; the OneBot message ID is
+        // its last component.
         Some(Segment::Reply(reply)) => (
             "reply",
-            json!({"id": parse_id(&reply.target_message_id)?.to_string()}),
+            json!({"id": parse_id(reply.target_message_id.rsplit(':').next().unwrap_or_default())?.to_string()}),
         ),
         Some(Segment::Image(image)) => {
             let file = match image.source.as_ref().ok_or("image has no source")? {
@@ -465,4 +467,272 @@ fn from_value(value: &prost_types::Value) -> Value {
         Some(Kind::ListValue(list)) => Value::Array(list.values.iter().map(from_value).collect()),
         Some(Kind::StructValue(value)) => from_struct(value),
     }
+}
+
+/// A notice translated for the pipeline, with the account whose name should become its actor.
+pub struct Notice {
+    /// The notice event; its actor metadata is filled once the name is known.
+    pub event: PipelineEventRequest,
+    /// Group the actor belongs to, for a group-card lookup.
+    pub group_id: Option<i64>,
+    /// Account whose display name describes the notice.
+    pub actor_id: Option<i64>,
+}
+
+/// Translates the notices Kanon reacts to: joins, pokes of the bot, recalls and new friends.
+///
+/// A recall names the recalled message by the event ID [`map_event`] gave it, so the core can tell
+/// whether the model ever saw it.
+pub fn map_notice(platform: &str, value: &Value) -> Result<Option<Notice>, String> {
+    if value["post_type"].as_str() != Some("notice") {
+        return Ok(None);
+    }
+    let self_id = id(&value["self_id"])?;
+    let user_id = id(&value["user_id"])?;
+    let group_id = match &value["group_id"] {
+        Value::Null => None,
+        group => Some(id(group)?),
+    };
+    let optional = |key: &str| match &value[key] {
+        Value::Null => Ok(None),
+        other => id(other).map(Some),
+    };
+    // (kind, conversation sender, actor, recalled message)
+    let (kind, sender, actor, target) = match value["notice_type"].as_str().unwrap_or_default() {
+        "group_increase" if user_id == self_id => {
+            let operator = optional("operator_id")?.filter(|op| op != "0");
+            (
+                "bot_join",
+                operator.clone().unwrap_or_default(),
+                operator,
+                None,
+            )
+        }
+        "group_increase" => ("member_join", user_id.clone(), Some(user_id.clone()), None),
+        "notify"
+            if value["sub_type"].as_str() == Some("poke")
+                && optional("target_id")?.as_deref() == Some(self_id.as_str()) =>
+        {
+            ("poke", user_id.clone(), Some(user_id.clone()), None)
+        }
+        "group_recall" | "friend_recall" => {
+            let channel = match &group_id {
+                Some(group) => format!("group:{group}"),
+                None => format!("private:{user_id}"),
+            };
+            let target = format!(
+                "{platform}:{self_id}:{channel}:{user_id}:{}",
+                message_id(&value["message_id"])?
+            );
+            let operator = optional("operator_id")?.unwrap_or_else(|| user_id.clone());
+            ("recall", user_id.clone(), Some(operator), Some(target))
+        }
+        "friend_add" => ("friend_add", user_id.clone(), Some(user_id.clone()), None),
+        _ => return Ok(None),
+    };
+    let (channel_id, conversation_kind) = match &group_id {
+        Some(group) => (format!("group:{group}"), "group"),
+        None => (format!("private:{user_id}"), "private"),
+    };
+    let mut metadata = json!({
+        kanon_core::META_NOTICE: kind,
+        kanon_core::META_CONVERSATION_KIND: conversation_kind,
+        "onebot.self_id": self_id,
+        "onebot.notice_type": value["notice_type"],
+    });
+    if let Some(target) = target {
+        metadata[kanon_core::META_NOTICE_TARGET] = json!(target);
+    }
+    let time = value["time"].as_i64().unwrap_or_default();
+    Ok(Some(Notice {
+        event: PipelineEventRequest {
+            event_id: format!("{platform}:{self_id}:notice:{kind}:{time}:{channel_id}:{sender}"),
+            platform: platform.into(),
+            channel_id,
+            sender_id: sender,
+            raw_text: format!("[{kind}]"),
+            segments: Vec::new(),
+            metadata: Some(to_struct(&metadata)?),
+        },
+        group_id: group_id.as_deref().map(parse_id).transpose()?,
+        actor_id: actor.as_deref().map(parse_id).transpose()?,
+    }))
+}
+
+/// Records the actor's display name on a notice.
+pub fn set_notice_actor(notice: &mut PipelineEventRequest, name: &str) {
+    if let Some(metadata) = notice.metadata.as_mut() {
+        metadata.fields.insert(
+            kanon_core::META_NOTICE_ACTOR.into(),
+            prost_types::Value {
+                kind: Some(Kind::StringValue(name.into())),
+            },
+        );
+    }
+}
+
+/// A friend request or group invitation the account can accept automatically.
+pub enum Request {
+    /// Someone asked to become a friend.
+    Friend {
+        /// Opaque handle to answer with.
+        flag: String,
+    },
+    /// Someone invited the account into a group.
+    GroupInvite {
+        /// Opaque handle to answer with.
+        flag: String,
+    },
+}
+
+/// Reads a request event; join requests from others are the group admins' business and ignored.
+pub fn map_request(value: &Value) -> Option<Request> {
+    if value["post_type"].as_str() != Some("request") {
+        return None;
+    }
+    let flag = value["flag"].as_str()?.to_owned();
+    match (value["request_type"].as_str()?, value["sub_type"].as_str()) {
+        ("friend", _) => Some(Request::Friend { flag }),
+        ("group", Some("invite")) => Some(Request::GroupInvite { flag }),
+        _ => None,
+    }
+}
+
+/// IDs of merged forwards in an event whose content has not been fetched yet.
+pub fn forward_ids(event: &PipelineEventRequest) -> Vec<String> {
+    event
+        .segments
+        .iter()
+        .filter_map(|segment| match &segment.segment {
+            Some(Segment::Custom(custom)) if custom.type_name == "onebot.forward" => {
+                payload_str(custom, "id").map(str::to_owned)
+            }
+            _ => None,
+        })
+        .collect()
+}
+
+/// Stores a fetched merged forward in its segment as `messages: [{sender, text, images}]`.
+///
+/// Implementations disagree on the response shape: the v11 standard returns `message` as `node`
+/// segments, NapCat and LLOneBot return `messages` as message objects. Both are read.
+pub fn attach_forward(
+    event: &mut PipelineEventRequest,
+    forward_id: &str,
+    data: &Value,
+) -> Result<(), String> {
+    let entries: Vec<(String, &Value)> = if let Some(messages) = data["messages"].as_array() {
+        messages
+            .iter()
+            .map(|entry| {
+                let sender = &entry["sender"];
+                let name = sender["card"]
+                    .as_str()
+                    .filter(|card| !card.is_empty())
+                    .or_else(|| sender["nickname"].as_str())
+                    .map(str::to_owned)
+                    .unwrap_or_else(|| sender["user_id"].to_string());
+                let content = if entry["message"].is_null() {
+                    &entry["content"]
+                } else {
+                    &entry["message"]
+                };
+                (name, content)
+            })
+            .collect()
+    } else if let Some(nodes) = data["message"].as_array() {
+        nodes
+            .iter()
+            .map(|node| {
+                let data = &node["data"];
+                let name = data["nickname"]
+                    .as_str()
+                    .map(str::to_owned)
+                    .unwrap_or_else(|| data["user_id"].to_string());
+                (name, &data["content"])
+            })
+            .collect()
+    } else {
+        return Err("get_forward_msg returned neither messages nor message".into());
+    };
+    let mut messages = Vec::with_capacity(entries.len());
+    for (sender, content) in entries {
+        let segments = parse_message(content)?;
+        let images: Vec<String> = segments
+            .iter()
+            .filter_map(|segment| match &segment.segment {
+                Some(Segment::Image(ImageSegment {
+                    source: Some(image_segment::Source::Url(url)),
+                    ..
+                })) => Some(url.clone()),
+                _ => None,
+            })
+            .collect();
+        messages.push(json!({"sender": sender, "text": render(&segments), "images": images}));
+    }
+    let segment = event
+        .segments
+        .iter_mut()
+        .find_map(|segment| match &mut segment.segment {
+            Some(Segment::Custom(custom))
+                if custom.type_name == "onebot.forward"
+                    && payload_str(custom, "id") == Some(forward_id) =>
+            {
+                Some(custom)
+            }
+            _ => None,
+        })
+        .ok_or("event has no such forward segment")?;
+    segment
+        .payload
+        .get_or_insert_with(Default::default)
+        .fields
+        .insert("messages".into(), to_value(&Value::Array(messages))?);
+    Ok(())
+}
+
+/// Users @-mentioned in a group message whose display name is still unknown.
+pub fn unnamed_mentions(event: &PipelineEventRequest) -> Vec<i64> {
+    let mut ids: Vec<i64> = event
+        .segments
+        .iter()
+        .filter_map(|segment| match &segment.segment {
+            Some(Segment::Mention(mention))
+                if !mention.is_all && mention.display_name.is_empty() =>
+            {
+                parse_id(&mention.target_user_id).ok()
+            }
+            _ => None,
+        })
+        .collect();
+    ids.sort_unstable();
+    ids.dedup();
+    ids
+}
+
+/// Fills a mentioned user's display name, so the model reads `@Alice` instead of a QQ number.
+pub fn name_mention(event: &mut PipelineEventRequest, user_id: i64, name: &str) {
+    let target = user_id.to_string();
+    for segment in &mut event.segments {
+        if let Some(Segment::Mention(mention)) = &mut segment.segment
+            && mention.target_user_id == target
+        {
+            mention.display_name = name.to_owned();
+        }
+    }
+}
+
+/// Whether a message references something that must be fetched before the model can read it.
+pub fn needs_lookup(event: &PipelineEventRequest) -> bool {
+    reply_target(event).is_some()
+        || !forward_ids(event).is_empty()
+        || (group_of(event).is_some() && !unnamed_mentions(event).is_empty())
+}
+
+/// The group a `group:<id>` channel names.
+pub fn group_of(event: &PipelineEventRequest) -> Option<i64> {
+    event
+        .channel_id
+        .strip_prefix("group:")
+        .and_then(|id| parse_id(id).ok())
 }

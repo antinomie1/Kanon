@@ -148,6 +148,10 @@ let qrOpen = $state(false);
         <input type="checkbox" bind:checked={store.formSandbox} class="cursor-pointer" />
         <span class="text-xs text-zinc-700 dark:text-zinc-300">{t('adapters.qq_sandbox')}</span>
       </label>
+      <label class="flex items-center gap-2 cursor-pointer md:col-span-2">
+        <input type="checkbox" bind:checked={store.formTypingIndicator} class="cursor-pointer" />
+        <span class="text-xs text-zinc-700 dark:text-zinc-300">{t('adapters.qq_typing')}</span>
+      </label>
     </div>
 
     <div class="flex flex-wrap items-center gap-2">

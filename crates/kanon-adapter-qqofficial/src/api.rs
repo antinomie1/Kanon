@@ -47,8 +47,12 @@ impl Endpoints {
 pub enum MediaKind {
     /// `file_type = 1`.
     Image = 1,
+    /// `file_type = 2`.
+    Video = 2,
     /// `file_type = 3`; QQ only plays SILK audio.
     Voice = 3,
+    /// `file_type = 4`, a named file.
+    File = 4,
 }
 
 /// Where uploaded media comes from.
@@ -162,6 +166,7 @@ impl Api {
         target: &str,
         kind: MediaKind,
         source: MediaSource,
+        file_name: Option<&str>,
     ) -> Result<String, String> {
         use base64::Engine;
 
@@ -172,6 +177,9 @@ impl Api {
         // `srv_send_msg = false`: the upload only yields a handle; the message that carries it
         // is sent separately so it can be a passive reply to the user's message.
         let mut body = json!({"file_type": kind as u8, "srv_send_msg": false});
+        if kind == MediaKind::File {
+            body["file_name"] = json!(file_name.unwrap_or("file"));
+        }
         match source {
             MediaSource::Url(url) => body["url"] = json!(url),
             MediaSource::Bytes(bytes) => {

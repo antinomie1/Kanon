@@ -113,7 +113,7 @@ impl OneBotClient {
             .map(|_| ())
     }
 
-    async fn request<In: Serialize + ?Sized>(
+    pub(super) async fn request<In: Serialize + ?Sized>(
         sender: mpsc::Sender<transport::Command>,
         action: &str,
         input: &In,

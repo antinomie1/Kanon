@@ -34,7 +34,7 @@ use std::path::{Path, PathBuf};
 use kanon_adapter_milky::MilkyConfig;
 use kanon_adapter_onebot::OneBotConfig;
 use kanon_adapter_qqofficial::QqOfficialConfig;
-use kanon_core::{ContextPolicy, ReplyPolicy};
+use kanon_core::{ContextPolicy, EventPolicy, ReplyPolicy};
 use kanon_llm::{ModelRef, ModelSpec, ProviderEntry};
 use serde::{Deserialize, Serialize};
 
@@ -129,6 +129,8 @@ pub struct NodeSettings {
     pub reply_policy: ReplyPolicy,
     /// Node-wide context-extras policy inherited by instances without an override.
     pub context_policy: ContextPolicy,
+    /// Node-wide notice policy: which joins, pokes and recalls the bot reacts to.
+    pub event_policy: EventPolicy,
 }
 
 impl NodeSettings {
@@ -251,6 +253,9 @@ struct SystemConfigDocument {
     /// Node-wide context-extras policy.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     context_policy: Option<ContextPolicy>,
+    /// Node-wide notice policy.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    event_policy: Option<EventPolicy>,
     /// Milky platform adapter configuration, when one was saved.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     milky: Option<MilkyConfig>,
@@ -441,6 +446,7 @@ impl SystemConfigStore {
         let mut settings = NodeSettings {
             reply_policy: document.reply_policy.unwrap_or_default(),
             context_policy: document.context_policy.unwrap_or_default(),
+            event_policy: document.event_policy.unwrap_or_default(),
             models: document.models.unwrap_or_default(),
             ..NodeSettings::default()
         };
@@ -491,6 +497,7 @@ impl SystemConfigStore {
         document.models = Some(settings.models.clone());
         document.reply_policy = Some(settings.reply_policy);
         document.context_policy = Some(settings.context_policy);
+        document.event_policy = Some(settings.event_policy);
 
         self.write_document(&document)
     }

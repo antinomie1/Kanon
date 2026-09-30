@@ -79,6 +79,15 @@ pub struct MilkyConfigRequest {
     /// Removes the stored credential.
     #[serde(default)]
     pub clear_access_token: bool,
+    /// Accept friend requests automatically; omitted keeps the stored choice.
+    #[serde(default)]
+    pub auto_accept_friends: Option<bool>,
+    /// Accept group invitations automatically; omitted keeps the stored choice.
+    #[serde(default)]
+    pub auto_accept_group_invites: Option<bool>,
+    /// React to messages the bot is about to answer; omitted keeps the stored choice.
+    #[serde(default)]
+    pub reaction_ack: Option<bool>,
 }
 
 /// Returns the platform identifier used when a request omits one.
@@ -142,6 +151,13 @@ async fn update_config(
         base_url: body.base_url,
         access_token,
         transport: body.transport,
+        auto_accept_friends: body
+            .auto_accept_friends
+            .unwrap_or(stored.auto_accept_friends),
+        auto_accept_group_invites: body
+            .auto_accept_group_invites
+            .unwrap_or(stored.auto_accept_group_invites),
+        reaction_ack: body.reaction_ack.unwrap_or(stored.reaction_ack),
     };
 
     // Apply first: it validates as well, and a rejected configuration must leave both the running
@@ -195,7 +211,7 @@ async fn test_config(
         display_name: stored.display_name.clone(),
         base_url: body.base_url,
         access_token,
-        transport: stored.transport,
+        ..stored
     };
 
     match adapter.test_connection(Some(candidate)).await {

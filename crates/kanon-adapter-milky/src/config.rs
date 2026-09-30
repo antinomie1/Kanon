@@ -127,6 +127,16 @@ pub struct MilkyConfig {
     /// Transport used to receive inbound events.
     #[serde(default)]
     pub transport: TransportKind,
+    /// Accept every friend request automatically; otherwise requests wait for a human in QQ.
+    #[serde(default)]
+    pub auto_accept_friends: bool,
+    /// Accept every invitation into a group automatically.
+    #[serde(default)]
+    pub auto_accept_group_invites: bool,
+    /// React with a thumbs-up to a group message the bot is about to answer, so the sender sees
+    /// it was noticed while the model is still thinking.
+    #[serde(default)]
+    pub reaction_ack: bool,
 }
 
 /// Returns the default platform identifier for serde defaults.
@@ -149,6 +159,9 @@ impl Default for MilkyConfig {
             base_url: default_base_url(),
             access_token: None,
             transport: TransportKind::Sse,
+            auto_accept_friends: false,
+            auto_accept_group_invites: false,
+            reaction_ack: false,
         }
     }
 }

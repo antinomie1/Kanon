@@ -85,6 +85,8 @@ export type ReplyMode = 'always' | 'mention' | 'probability' | 'never';
 export interface ReplyPolicy {
   mode: ReplyMode;
   probability: number;
+  /** Quote the message being answered in a group or channel (never in private chats). */
+  quote_message: boolean;
 }
 
 /**
@@ -100,6 +102,30 @@ export interface ContextPolicy {
   include_sender_id: boolean;
   /** Include the message timestamp in the prompt. */
   include_timestamp: boolean;
+  /** Expand a merged forward into the messages it carries (on by default). */
+  expand_forward: boolean;
+}
+
+/**
+ * Which platform notices the bot reacts to, node-wide.
+ *
+ * Reactions are off by default; recall notes are on because they only correct what the model
+ * already saw and are never visible in the chat.
+ */
+export interface EventPolicy {
+  /** Welcome a member who joined a group. */
+  welcome_members: boolean;
+  /** Say hello when the bot is added to a group or as a friend. */
+  greet_on_join: boolean;
+  /** Answer when somebody pokes the bot. */
+  reply_to_poke: boolean;
+  /** Tell the model when a message it saw was recalled. */
+  note_recalls: boolean;
+}
+
+/** Response of `GET`/`PUT /api/v1/system/event-policy`. */
+export interface EventPolicyResponse {
+  policy: EventPolicy;
 }
 
 /** Response of `GET`/`PUT /api/v1/system/context-policy`. */
@@ -556,6 +582,12 @@ export interface MilkyConfig {
   display_name: string | null;
   base_url: string;
   transport: MilkyTransport;
+  /** Accept friend requests automatically. */
+  auto_accept_friends: boolean;
+  /** Accept group invitations automatically. */
+  auto_accept_group_invites: boolean;
+  /** React with a thumbs-up to a group message the bot is about to answer. */
+  reaction_ack: boolean;
 }
 
 export interface MilkyLogin {
@@ -602,6 +634,12 @@ export interface MilkyConfigRequest {
   display_name: string | null;
   base_url: string;
   transport: MilkyTransport;
+  /** Omitted keeps the stored choice. */
+  auto_accept_friends?: boolean;
+  /** Omitted keeps the stored choice. */
+  auto_accept_group_invites?: boolean;
+  /** Omitted keeps the stored choice. */
+  reaction_ack?: boolean;
   /** Omitted or empty keeps the stored credential. */
   access_token?: string;
   /** Explicitly removes the stored credential. */
@@ -787,6 +825,8 @@ export interface QqOfficialConfig {
   app_id: string;
   sandbox: boolean;
   markdown: boolean;
+  /** Show "typing…" in private chats while the model works. */
+  typing_indicator: boolean;
 }
 
 /** Live QQ Official gateway status returned by the node. */
@@ -836,6 +876,10 @@ export interface OneBotConfig {
   display_name: string | null;
   transport: OneBotTransport;
   ws_url: string;
+  /** Accept friend requests automatically. */
+  auto_accept_friends: boolean;
+  /** Accept group invitations automatically. */
+  auto_accept_group_invites: boolean;
 }
 
 /** Live connection status returned by the node. */
@@ -856,7 +900,15 @@ export interface OneBotConfigView {
 }
 
 /** An empty credential preserves the saved token; clearing is explicit. */
-export interface OneBotConfigRequest extends OneBotConfig {
+export interface OneBotConfigRequest
+  extends Omit<
+    OneBotConfig,
+    'auto_accept_friends' | 'auto_accept_group_invites'
+  > {
+  /** Omitted keeps the stored choice. */
+  auto_accept_friends?: boolean;
+  /** Omitted keeps the stored choice. */
+  auto_accept_group_invites?: boolean;
   access_token?: string;
   clear_access_token?: boolean;
 }

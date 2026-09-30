@@ -72,6 +72,10 @@ class InstancesStore {
   formIncludeChannelId = $state(false);
   formIncludeSenderId = $state(false);
   formIncludeTimestamp = $state(false);
+  /** Quote the answered message in groups (reply override only). */
+  formReplyQuote = $state(false);
+  /** Expand merged forwards (context override only). */
+  formExpandForward = $state(true);
   formPlugins = $state<Record<string, ItemPolicy>>({});
   formSkills = $state<Record<string, ItemPolicy>>({});
   formMcp = $state<Record<string, ItemPolicy>>({});
@@ -226,7 +230,9 @@ class InstancesStore {
     this.formModel = '';
     this.formReplyPolicyMode = 'inherit';
     this.formReplyProbability = 0.5;
+    this.formReplyQuote = false;
     this.formContextInherit = true;
+    this.formExpandForward = true;
     this.formIncludeChannelId = false;
     this.formIncludeSenderId = false;
     this.formIncludeTimestamp = false;
@@ -249,10 +255,14 @@ class InstancesStore {
     // A null override is the `inherit` choice; any stored policy is shown verbatim.
     this.formReplyPolicyMode = instance.reply_policy?.mode ?? 'inherit';
     this.formReplyProbability = instance.reply_policy?.probability ?? 0.5;
+    this.formReplyQuote = instance.reply_policy?.quote_message ?? false;
     // A null override is the `inherit` choice; a stored policy is shown verbatim.
     this.formContextInherit = instance.context_policy === null;
+    this.formIncludeChannelId =
+      instance.context_policy?.include_channel_id ?? false;
     this.formIncludeSenderId =
       instance.context_policy?.include_sender_id ?? false;
+    this.formExpandForward = instance.context_policy?.expand_forward ?? true;
     this.formIncludeTimestamp =
       instance.context_policy?.include_timestamp ?? false;
     this.formPlugins = { ...instance.plugins };
@@ -287,6 +297,7 @@ class InstancesStore {
           : {
               mode: this.formReplyPolicyMode,
               probability: this.formReplyProbability,
+              quote_message: this.formReplyQuote,
             },
       context_policy: this.formContextInherit
         ? null
@@ -294,6 +305,7 @@ class InstancesStore {
             include_channel_id: this.formIncludeChannelId,
             include_sender_id: this.formIncludeSenderId,
             include_timestamp: this.formIncludeTimestamp,
+            expand_forward: this.formExpandForward,
           },
       plugins: this.formPlugins,
       skills: this.formSkills,

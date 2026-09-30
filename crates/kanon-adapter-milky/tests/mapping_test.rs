@@ -377,7 +377,8 @@ fn text_rendering_never_drops_a_segment() {
     assert_eq!(render_text(&segments), "look [image][voice][file:a.txt]");
 }
 
-/// Non-conversational events are observed but never ingested as if a user had typed them.
+/// Non-conversational events are never translated as if a user had typed them; the notices among
+/// them are handled by `map_notice` instead.
 #[test]
 fn non_message_events_are_not_ingested() {
     let event = event(json!({

@@ -28,6 +28,8 @@ class OneBotStore {
   formToken = $state('');
   /** Explicit removal of the stored credential. */
   formClearToken = $state(false);
+  formAutoAcceptFriends = $state(false);
+  formAutoAcceptGroupInvites = $state(false);
 
   loading = $state(false);
   saving = $state(false);
@@ -198,6 +200,8 @@ class OneBotStore {
           ? undefined
           : this.formToken || undefined,
         clear_access_token: this.formClearToken,
+        auto_accept_friends: this.formAutoAcceptFriends,
+        auto_accept_group_invites: this.formAutoAcceptGroupInvites,
       });
       this.applyView(view);
       this.message = 'saved';
@@ -218,6 +222,8 @@ class OneBotStore {
     this.formTransport = view.config.transport;
     this.formToken = '';
     this.formClearToken = false;
+    this.formAutoAcceptFriends = view.config.auto_accept_friends;
+    this.formAutoAcceptGroupInvites = view.config.auto_accept_group_invites;
   }
 }
 

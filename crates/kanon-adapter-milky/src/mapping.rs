@@ -40,8 +40,8 @@ use serde_json::{Map, Value, json};
 use thiserror::Error;
 
 use crate::protocol::{
-    Event, IncomingMessage, IncomingSegment, OutgoingSegment, OutgoingSegmentFaceData,
-    OutgoingSegmentImageData, OutgoingSegmentVideoData,
+    Event, IncomingForwardedMessage, IncomingMessage, IncomingSegment, OutgoingSegment,
+    OutgoingSegmentFaceData, OutgoingSegmentImageData, OutgoingSegmentVideoData,
 };
 
 /// Prefix marking a custom segment as a preserved Milky payload.
@@ -644,9 +644,14 @@ pub fn outbound_segment(segment: &MessageSegment) -> Result<OutgoingSegment, Map
                 .map_err(|_| MappingError::MentionTarget(mention.target_user_id.clone()))?;
             Ok(OutgoingSegment::Mention(user_id))
         }
+        // A quote of an ingested event names its full Kanon event ID, whose last component is the
+        // Milky message sequence.
         Some(Segment::Reply(reply)) => {
             let message_seq = reply
                 .target_message_id
+                .rsplit(':')
+                .next()
+                .unwrap_or_default()
                 .trim()
                 .parse::<i64>()
                 .map_err(|_| MappingError::ReplyTarget(reply.target_message_id.clone()))?;
@@ -919,4 +924,203 @@ pub fn outbound_segment_type(segment: &OutgoingSegment) -> &'static str {
         OutgoingSegment::Forward(_) => "forward",
         OutgoingSegment::LightApp(_) => "light_app",
     }
+}
+
+/// A notice translated for the pipeline, with the account whose name should become its actor.
+pub struct Notice {
+    /// The notice event; its actor metadata is filled once the name is known.
+    pub event: PipelineEventRequest,
+    /// Group the actor belongs to, for a group-card lookup.
+    pub group_id: Option<i64>,
+    /// Account whose display name describes the notice.
+    pub actor_id: Option<i64>,
+}
+
+/// Translates the notices Kanon reacts to: joins, nudges of the bot and recalls.
+///
+/// A recall names the recalled message by the event ID [`inbound_message`] gave it, so the core
+/// can tell whether the model ever saw it.
+pub fn map_notice(platform: &str, event: &Event) -> Option<Notice> {
+    let self_id = event.self_id();
+    // (kind, scene, peer, conversation sender, actor, recalled message)
+    let (kind, scene, peer, sender, actor, target) = match event {
+        Event::GroupMemberIncrease { data, .. } if data.user_id == self_id => {
+            let inviter = data.invitor_id.or(data.operator_id);
+            (
+                "bot_join",
+                ChannelScene::Group,
+                data.group_id,
+                inviter.unwrap_or_default(),
+                inviter,
+                None,
+            )
+        }
+        Event::GroupMemberIncrease { data, .. } => (
+            "member_join",
+            ChannelScene::Group,
+            data.group_id,
+            data.user_id,
+            Some(data.user_id),
+            None,
+        ),
+        Event::GroupNudge { data, .. } if data.receiver_id == self_id => (
+            "poke",
+            ChannelScene::Group,
+            data.group_id,
+            data.sender_id,
+            Some(data.sender_id),
+            None,
+        ),
+        Event::FriendNudge { data, .. } if data.is_self_receive && !data.is_self_send => (
+            "poke",
+            ChannelScene::Friend,
+            data.user_id,
+            data.user_id,
+            Some(data.user_id),
+            None,
+        ),
+        Event::MessageRecall { data, .. } => {
+            let scene = match data.message_scene.as_str() {
+                "group" => ChannelScene::Group,
+                "temp" => ChannelScene::Temp,
+                _ => ChannelScene::Friend,
+            };
+            let target = format!(
+                "{platform}:{self_id}:{}:{}:{}",
+                channel_id(scene, data.peer_id),
+                data.sender_id,
+                data.message_seq
+            );
+            (
+                "recall",
+                scene,
+                data.peer_id,
+                data.sender_id,
+                Some(data.operator_id),
+                Some(target),
+            )
+        }
+        _ => return None,
+    };
+    let channel = channel_id(scene, peer);
+    let group_id = (scene == ChannelScene::Group).then_some(peer);
+    let mut metadata = json!({
+        kanon_core::META_NOTICE: kind,
+        kanon_core::META_CONVERSATION_KIND: if group_id.is_some() { "group" } else { "private" },
+        META_EVENT_TYPE: event.event_type(),
+    });
+    if let Some(target) = target {
+        metadata[kanon_core::META_NOTICE_TARGET] = json!(target);
+    }
+    let time = match event {
+        Event::GroupMemberIncrease { time, .. }
+        | Event::GroupNudge { time, .. }
+        | Event::FriendNudge { time, .. }
+        | Event::MessageRecall { time, .. } => *time,
+        _ => 0,
+    };
+    Some(Notice {
+        event: PipelineEventRequest {
+            event_id: format!("{platform}:{self_id}:notice:{kind}:{time}:{channel}:{sender}"),
+            platform: platform.to_string(),
+            channel_id: channel,
+            sender_id: if sender == 0 {
+                String::new()
+            } else {
+                sender.to_string()
+            },
+            raw_text: format!("[{kind}]"),
+            segments: Vec::new(),
+            metadata: Some(json_to_struct(&metadata)),
+        },
+        group_id,
+        actor_id: actor.filter(|id| *id != 0),
+    })
+}
+
+/// Records the actor's display name on a notice.
+pub fn set_notice_actor(notice: &mut PipelineEventRequest, name: &str) {
+    if let Some(metadata) = notice.metadata.as_mut() {
+        metadata.fields.insert(
+            kanon_core::META_NOTICE_ACTOR.into(),
+            json_to_value(&json!(name)),
+        );
+    }
+}
+
+/// IDs of merged forwards in an event whose content has not been fetched yet.
+pub fn forward_ids(event: &PipelineEventRequest) -> Vec<String> {
+    event
+        .segments
+        .iter()
+        .filter_map(|segment| match &segment.segment {
+            Some(Segment::Custom(custom))
+                if custom.type_name == format!("{CUSTOM_SEGMENT_PREFIX}forward") =>
+            {
+                match custom
+                    .payload
+                    .as_ref()?
+                    .fields
+                    .get("forward_id")?
+                    .kind
+                    .as_ref()?
+                {
+                    prost_types::value::Kind::StringValue(id) => Some(id.clone()),
+                    _ => None,
+                }
+            }
+            _ => None,
+        })
+        .collect()
+}
+
+/// Stores a fetched merged forward in its segment as `messages: [{sender, text, images}]`.
+pub fn attach_forward(
+    event: &mut PipelineEventRequest,
+    forward_id: &str,
+    messages: &[IncomingForwardedMessage],
+) -> Result<(), String> {
+    let rendered: Vec<Value> = messages
+        .iter()
+        .map(|message| {
+            let images: Vec<&str> = message
+                .segments
+                .iter()
+                .filter_map(|segment| match segment {
+                    IncomingSegment::Image(image) => Some(image.temp_url.as_str()),
+                    _ => None,
+                })
+                .collect();
+            json!({
+                "sender": message.sender_name,
+                "text": render_text(&message.segments),
+                "images": images,
+            })
+        })
+        .collect();
+    let target = forward_id.to_string();
+    let custom = event
+        .segments
+        .iter_mut()
+        .find_map(|segment| match &mut segment.segment {
+            Some(Segment::Custom(custom))
+                if custom.type_name == format!("{CUSTOM_SEGMENT_PREFIX}forward")
+                    && custom
+                        .payload
+                        .as_ref()
+                        .and_then(|payload| payload.fields.get("forward_id"))
+                        .and_then(|value| value.kind.as_ref())
+                        == Some(&prost_types::value::Kind::StringValue(target.clone())) =>
+            {
+                Some(custom)
+            }
+            _ => None,
+        })
+        .ok_or_else(|| format!("event has no forward segment {forward_id}"))?;
+    custom
+        .payload
+        .get_or_insert_with(Default::default)
+        .fields
+        .insert("messages".into(), json_to_value(&Value::Array(rendered)));
+    Ok(())
 }

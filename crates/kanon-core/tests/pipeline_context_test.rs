@@ -190,6 +190,60 @@ fn forwarded_messages_expand_their_title_and_summary() {
     assert!(content.contains("共 3 条消息"));
 }
 
+/// A forward whose content the adapter fetched, as `messages: [{sender, text, images}]`.
+fn fetched_forward() -> Segment {
+    let payload = serde_json::json!({
+        "forward_id": "f1",
+        "title": "群聊的聊天记录",
+        "summary": "查看 2 条转发消息",
+        "messages": [
+            {"sender": "张三", "text": "明天几点集合", "images": []},
+            {"sender": "李四", "text": "[image] 八点，看图", "images": ["https://img/map.png"]},
+        ],
+    });
+    Segment::Custom(RawCustomSegment {
+        type_name: "onebot.forward".to_string(),
+        payload: kanon_llm::tool_router::json_to_prost_struct(&payload),
+    })
+}
+
+#[test]
+fn a_fetched_forward_is_expanded_with_its_pictures() {
+    let message = build_with_defaults(&event(vec![fetched_forward()], "[forward]"), &caps(true));
+
+    assert_eq!(
+        message.content.as_deref(),
+        Some("[合并转发: 群聊的聊天记录]\n张三: 明天几点集合\n李四: [image] 八点，看图")
+    );
+    assert_eq!(
+        message.parts.as_ref().map(Vec::len),
+        Some(1),
+        "the forwarded picture is attached"
+    );
+}
+
+#[test]
+fn forward_expansion_can_be_turned_off() {
+    let policy = ContextPolicy {
+        expand_forward: false,
+        ..ContextPolicy::default()
+    };
+    let message = build_user_message(
+        &event(vec![fetched_forward()], "[forward]"),
+        &caps(true),
+        &policy,
+    );
+
+    assert_eq!(
+        message.content.as_deref(),
+        Some("[合并转发: 群聊的聊天记录] 查看 2 条转发消息")
+    );
+    assert!(
+        !message.has_parts(),
+        "no forwarded pictures when expansion is off"
+    );
+}
+
 #[test]
 fn audio_and_files_are_described_in_text() {
     let message = build_with_defaults(
@@ -301,6 +355,7 @@ fn the_sender_id_and_time_are_included_only_when_the_policy_asks() {
             include_channel_id: true,
             include_sender_id: true,
             include_timestamp: true,
+            ..Default::default()
         },
     );
     let content = on.content.unwrap_or_default();

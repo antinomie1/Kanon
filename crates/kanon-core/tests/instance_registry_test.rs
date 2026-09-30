@@ -264,11 +264,13 @@ async fn instance_policies_survive_a_restart() {
     submitted.reply_policy = Some(ReplyPolicy {
         mode: ReplyMode::Mention,
         probability: 0.5,
+        ..Default::default()
     });
     submitted.context_policy = Some(ContextPolicy {
         include_channel_id: true,
         include_sender_id: false,
         include_timestamp: true,
+        ..Default::default()
     });
     registry.create(submitted).await.expect("create instance");
 

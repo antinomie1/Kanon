@@ -19,7 +19,7 @@ use kanon_core::{AdapterError, EventIngress, PlatformAdapter};
 use kanon_proto::v1::message_segment::Segment;
 use kanon_proto::v1::{
     DeliverMessageRequest, ImageSegment, IngestEventRequest, MessageSegment, PipelineEventRequest,
-    TextSegment, image_segment,
+    ReplySegment, TextSegment, image_segment,
 };
 use serde_json::{Value, json};
 use tokio::sync::mpsc;
@@ -74,7 +74,7 @@ async fn start_mock() -> (Mock, mpsc::UnboundedReceiver<Socket>) {
         .route("/token", post(token))
         .route("/gateway", get(gateway))
         .route("/ws", get(ws))
-        .route("/v2/groups/:group/:kind", post(v2))
+        .route("/v2/:scope/:target/:kind", post(v2))
         .with_state(mock.clone());
     tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
     (mock, accepted)
@@ -126,13 +126,13 @@ async fn pump(mut socket: WebSocket, mock: Mock) {
 
 async fn v2(
     State(mock): State<Mock>,
-    Path((group, kind)): Path<(String, String)>,
+    Path((scope, target, kind)): Path<(String, String, String)>,
     headers: HeaderMap,
     Json(body): Json<Value>,
 ) -> Json<Value> {
     assert_eq!(headers["authorization"], "QQBot TOKEN");
     let mut calls = mock.calls.lock().unwrap();
-    calls.push((format!("/v2/groups/{group}/{kind}"), body));
+    calls.push((format!("/v2/{scope}/{target}/{kind}"), body));
     let n = calls.len();
     Json(match kind.as_str() {
         "files" => json!({"file_uuid": "u", "file_info": "FILE_INFO", "ttl": 60}),
@@ -147,6 +147,7 @@ fn config(enabled: bool) -> QqOfficialConfig {
         secret: Some("SECRET".into()),
         sandbox: false,
         markdown: false,
+        typing_indicator: true,
     }
 }
 
@@ -373,4 +374,128 @@ async fn disabled_adapter_refuses_delivery_and_validates_credentials() {
         !adapter.config().enabled,
         "a rejected apply changes nothing"
     );
+}
+
+/// Connects the adapter and completes identify and READY on the mock gateway.
+async fn connected(
+    mock: &Mock,
+    accepted: &mut mpsc::UnboundedReceiver<Socket>,
+) -> (
+    QqOfficialAdapter,
+    Socket,
+    mpsc::Receiver<IngestEventRequest>,
+) {
+    let adapter = QqOfficialAdapter::with_endpoints(config(true), endpoints(mock)).unwrap();
+    let (ingest_tx, ingest) = mpsc::channel(8);
+    adapter.start(EventIngress::new(ingest_tx)).await.unwrap();
+    let mut socket = next_socket(accepted).await;
+    socket.send(json!({"op": 10, "d": {"heartbeat_interval": 30000}}));
+    socket.recv().await;
+    socket.send(
+        json!({"op": 0, "s": 1, "t": "READY", "d": {"session_id": "S", "user": {"id": "BOT"}}}),
+    );
+    wait_for_state(&adapter, ConnectionState::Connected).await;
+    (adapter, socket, ingest)
+}
+
+fn text_segment(content: &str) -> MessageSegment {
+    MessageSegment {
+        segment: Some(Segment::Text(TextSegment {
+            content: content.into(),
+        })),
+    }
+}
+
+/// Typing in C2C, a native quote, a document sent as a file, and a greeting for being added to a
+/// group — which QQ only accepts as a passive reply quoting the gateway event.
+#[tokio::test]
+async fn typing_quotes_files_and_join_greetings() {
+    let (mock, mut accepted) = start_mock().await;
+    let (adapter, socket, mut ingest) = connected(&mock, &mut accepted).await;
+
+    socket.send(json!({"op": 0, "s": 2, "t": "C2C_MESSAGE_CREATE", "d": {
+        "id": "C1", "content": "在吗", "author": {"user_openid": "U1"},
+    }}));
+    let private = next_event(&mut ingest).await;
+    adapter
+        .acknowledge(&private)
+        .await
+        .expect("typing indicator");
+    {
+        let calls = mock.calls.lock().unwrap();
+        let (path, typing) = calls.last().expect("typing request");
+        assert_eq!(path, "/v2/users/U1/messages");
+        assert_eq!(typing["msg_type"], 6);
+        assert_eq!(typing["input_notify"]["input_type"], 1);
+        assert_eq!(typing["msg_id"], "C1");
+    }
+
+    let document = std::env::temp_dir().join(format!("kanon-qq-{}.pdf", std::process::id()));
+    std::fs::write(&document, b"%PDF").unwrap();
+    adapter
+        .deliver(DeliverMessageRequest {
+            platform: "qqofficial".into(),
+            channel_id: "group:G1".into(),
+            event_id: "MSG9".into(),
+            segments: vec![
+                MessageSegment {
+                    segment: Some(Segment::Reply(ReplySegment {
+                        target_message_id: "MSG9".into(),
+                        snippet: String::new(),
+                    })),
+                },
+                text_segment("报告在这"),
+                MessageSegment {
+                    segment: Some(Segment::Image(ImageSegment {
+                        source: Some(image_segment::Source::FilePath(
+                            document.to_string_lossy().into_owned(),
+                        )),
+                        mime_type: Some("application/pdf".into()),
+                        filename: None,
+                    })),
+                },
+            ],
+            ..Default::default()
+        })
+        .await
+        .expect("delivery");
+    std::fs::remove_file(&document).ok();
+    {
+        let calls = mock.calls.lock().unwrap();
+        let recent = &calls[calls.len() - 3..];
+        assert_eq!(
+            recent[0].1["message_reference"],
+            json!({"message_id": "MSG9"})
+        );
+        assert_eq!(recent[1].0, "/v2/groups/G1/files");
+        assert_eq!(recent[1].1["file_type"], 4);
+        assert_eq!(
+            recent[1].1["file_name"],
+            document.file_name().unwrap().to_string_lossy().as_ref()
+        );
+        assert_eq!(recent[2].1["msg_type"], 7);
+    }
+
+    socket.send(
+        json!({"op": 0, "s": 3, "t": "GROUP_ADD_ROBOT", "id": "GROUP_ADD_ROBOT:abc",
+        "d": {"group_openid": "G2", "op_member_openid": "OP", "timestamp": 1}}),
+    );
+    let greeting = next_event(&mut ingest).await;
+    assert_eq!(greeting.channel_id, "group:G2");
+    assert_eq!(greeting.event_id, "event:GROUP_ADD_ROBOT:abc");
+    adapter
+        .deliver(DeliverMessageRequest {
+            platform: "qqofficial".into(),
+            channel_id: greeting.channel_id.clone(),
+            event_id: greeting.event_id.clone(),
+            segments: vec![text_segment("大家好")],
+            ..Default::default()
+        })
+        .await
+        .expect("greeting");
+    let calls = mock.calls.lock().unwrap();
+    let (path, body) = calls.last().unwrap();
+    assert_eq!(path, "/v2/groups/G2/messages");
+    assert_eq!(body["event_id"], "GROUP_ADD_ROBOT:abc");
+    assert!(body.get("msg_id").is_none());
 }

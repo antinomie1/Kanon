@@ -32,6 +32,12 @@ use serde_json::{Map, Value, json};
 
 use crate::config::PLATFORM;
 
+/// Prefix of an event ID that names a gateway event rather than a message.
+///
+/// QQ lets a bot answer a bot-added or friend-added event passively by echoing the event's own ID
+/// as `event_id` (instead of a message's `msg_id`); the prefix tells delivery which field to use.
+pub const EVENT_ID_PREFIX: &str = "event:";
+
 /// `message_type` of a message that quotes another one.
 const MSG_TYPE_QUOTE: i64 = 103;
 
@@ -285,6 +291,55 @@ impl MessageEvent {
                 .filter(|id| !id.is_empty())
         })
     }
+}
+
+/// Maps a bot-added-to-group or friend-added dispatch to a notice event; `None` for any other.
+///
+/// `gateway_id` is the dispatch's top-level `id`, which a greeting must quote to be delivered as
+/// a passive reply. The operator who added the bot is known only by an openid, so no actor name
+/// is reported.
+pub fn map_notice(
+    event_type: &str,
+    gateway_id: &str,
+    data: &Value,
+) -> Option<Result<PipelineEventRequest, String>> {
+    let (notice, scene, peer, sender, kind) = match event_type {
+        "GROUP_ADD_ROBOT" => (
+            "bot_join",
+            "group",
+            &data["group_openid"],
+            &data["op_member_openid"],
+            "group",
+        ),
+        "FRIEND_ADD" => (
+            "friend_add",
+            "c2c",
+            &data["openid"],
+            &data["openid"],
+            "private",
+        ),
+        _ => return None,
+    };
+    let peer = peer.as_str().unwrap_or_default();
+    if peer.is_empty() || gateway_id.is_empty() {
+        return Some(Err(format!(
+            "{event_type} event lacks its conversation or event ID"
+        )));
+    }
+    let metadata = json!({
+        kanon_core::META_NOTICE: notice,
+        kanon_core::META_CONVERSATION_KIND: kind,
+        "qqofficial.scene": scene,
+    });
+    Some(to_struct(&metadata).map(|metadata| PipelineEventRequest {
+        event_id: format!("{EVENT_ID_PREFIX}{gateway_id}"),
+        platform: PLATFORM.into(),
+        channel_id: format!("{scene}:{peer}"),
+        sender_id: sender.as_str().unwrap_or_default().to_owned(),
+        raw_text: format!("[{notice}]"),
+        segments: Vec::new(),
+        metadata: Some(metadata),
+    }))
 }
 
 /// Maps one gateway dispatch to a pipeline event; non-message events yield `None`.

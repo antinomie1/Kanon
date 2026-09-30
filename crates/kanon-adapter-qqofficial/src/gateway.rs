@@ -188,7 +188,14 @@ async fn connect(
                                 set_state(state, ConnectionState::Connected, None);
                                 tracing::info!("QQ Official gateway session resumed");
                             }
-                            _ => dispatch(state, ingress, quotes, kind, &payload["d"]),
+                            _ => dispatch(
+                                state,
+                                ingress,
+                                quotes,
+                                kind,
+                                payload["id"].as_str().unwrap_or_default(),
+                                &payload["d"],
+                            ),
                         }
                     }
                     Some(1) => {
@@ -238,6 +245,7 @@ fn dispatch(
     ingress: &EventIngress,
     quotes: &Mutex<QuoteStore>,
     kind: &str,
+    gateway_id: &str,
     data: &Value,
 ) {
     let bot_id = state
@@ -245,9 +253,12 @@ fn dispatch(
         .expect("QQ Official state poisoned")
         .bot_id
         .clone();
-    let mapped = {
-        let mut quotes = quotes.lock().expect("QQ Official quote store poisoned");
-        mapping::map_event(kind, data, &bot_id, &mut quotes)
+    let mapped = match mapping::map_notice(kind, gateway_id, data) {
+        Some(notice) => notice.map(Some),
+        None => {
+            let mut quotes = quotes.lock().expect("QQ Official quote store poisoned");
+            mapping::map_event(kind, data, &bot_id, &mut quotes)
+        }
     };
     let event = match mapped {
         Ok(Some(event)) => event,

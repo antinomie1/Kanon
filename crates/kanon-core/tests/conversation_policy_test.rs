@@ -117,6 +117,7 @@ fn probability_mode_uses_the_supplied_sample() {
     let policy = ReplyPolicy {
         mode: ReplyMode::Probability,
         probability: 0.25,
+        ..Default::default()
     };
 
     assert!(policy.should_reply(ConversationKind::Group, false, 0.24));
@@ -129,10 +130,12 @@ fn an_out_of_range_probability_is_rejected_rather_than_clamped() {
     let too_big = ReplyPolicy {
         mode: ReplyMode::Probability,
         probability: 5.0,
+        ..Default::default()
     };
     let negative = ReplyPolicy {
         mode: ReplyMode::Probability,
         probability: -0.1,
+        ..Default::default()
     };
 
     assert!(too_big.validate().is_err());
@@ -159,6 +162,7 @@ fn the_policy_renders_a_human_readable_description() {
         ReplyPolicy {
             mode: ReplyMode::Probability,
             probability: 0.5,
+            ..Default::default()
         }
         .describe(),
         "probability 50%"

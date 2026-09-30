@@ -30,6 +30,7 @@ fn normalization_trims_and_drops_trailing_slash() {
         base_url: "  http://127.0.0.1:3010/  ".to_string(),
         access_token: Some("  token  ".to_string()),
         transport: TransportKind::Websocket,
+        ..Default::default()
     }
     .normalized();
 
@@ -246,6 +247,7 @@ fn config_round_trips_through_json() {
         base_url: "http://127.0.0.1:3010".to_string(),
         access_token: Some("token".to_string()),
         transport: TransportKind::Websocket,
+        ..Default::default()
     };
 
     let encoded = serde_json::to_string(&config).expect("configuration should serialize");

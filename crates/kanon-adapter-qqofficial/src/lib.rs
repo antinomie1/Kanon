@@ -24,7 +24,8 @@ use async_trait::async_trait;
 use kanon_core::{AdapterError, EventIngress, PlatformAdapter};
 use kanon_proto::v1::message_segment::Segment;
 use kanon_proto::v1::{
-    DeliverMessageRequest, DeliverMessageResponse, audio_segment, image_segment,
+    DeliverMessageRequest, DeliverMessageResponse, PipelineEventRequest, audio_segment,
+    image_segment,
 };
 use serde::Serialize;
 use serde_json::{Value, json};
@@ -269,6 +270,32 @@ fn next_msg_seq() -> u32 {
 struct Media {
     kind: MediaKind,
     source: MediaSource,
+    /// Name shown for a file; QQ requires one for `file_type = 4`.
+    name: Option<String>,
+}
+
+impl Media {
+    /// What the item is, judged by the MIME type the pipeline reports. Tool output of any kind
+    /// arrives as an image segment, so a video or a document is recognized here and sent as what
+    /// it is instead of failing as a broken picture.
+    fn kind_for(mime_type: Option<&str>) -> MediaKind {
+        match mime_type.map(str::to_ascii_lowercase) {
+            None => MediaKind::Image,
+            Some(mime) if mime.starts_with("image/") => MediaKind::Image,
+            Some(mime) if mime.starts_with("video/") => MediaKind::Video,
+            Some(_) => MediaKind::File,
+        }
+    }
+
+    /// Text remembered for a quote of this item.
+    fn placeholder(&self) -> String {
+        match self.kind {
+            MediaKind::Image => "[image]".into(),
+            MediaKind::Voice => "[voice]".into(),
+            MediaKind::Video => "[video]".into(),
+            MediaKind::File => format!("[file:{}]", self.name.as_deref().unwrap_or("file")),
+        }
+    }
 }
 
 #[async_trait]
@@ -318,6 +345,30 @@ impl PlatformAdapter for QqOfficialAdapter {
         .map_err(|_| configuration_error("QQ Official lifecycle task failed".into()))
     }
 
+    /// Shows "typing…" in a C2C chat when the operator enabled it; other chats have no indicator.
+    async fn acknowledge(&self, event: &PipelineEventRequest) -> Result<(), AdapterError> {
+        let api = {
+            let shared = self.read();
+            match &shared.api {
+                Some(api) if shared.config.typing_indicator => api.clone(),
+                _ => return Ok(()),
+            }
+        };
+        let Some(openid) = event.channel_id.strip_prefix("c2c:") else {
+            return Ok(());
+        };
+        if event.event_id.is_empty() || event.event_id.starts_with(mapping::EVENT_ID_PREFIX) {
+            return Ok(());
+        }
+        let mut body =
+            json!({"msg_type": 6, "input_notify": {"input_type": 1, "input_second": 60}});
+        reply_fields(&mut body, Some(&event.event_id), true);
+        api.send_v2("c2c", openid, &body)
+            .await
+            .map(|_| ())
+            .map_err(|err| self.delivery_error(format!("typing indicator failed: {err}")))
+    }
+
     async fn deliver(
         &self,
         request: DeliverMessageRequest,
@@ -353,6 +404,7 @@ impl PlatformAdapter for QqOfficialAdapter {
 
         let mut text = String::new();
         let mut media = Vec::new();
+        let mut quote: Option<String> = None;
         for segment in &request.segments {
             match segment.segment.as_ref() {
                 Some(Segment::Text(part)) => {
@@ -369,10 +421,24 @@ impl PlatformAdapter for QqOfficialAdapter {
                         &mention.display_name
                     });
                 }
-                // The passive reply's `msg_id` already threads the answer to the user's message.
-                Some(Segment::Reply(_)) => {}
+                // Quoted natively on the text message; a gateway event is not a quotable message.
+                Some(Segment::Reply(reply)) => {
+                    quote = Some(reply.target_message_id.clone())
+                        .filter(|id| !id.is_empty() && !id.starts_with(mapping::EVENT_ID_PREFIX));
+                }
                 Some(Segment::Image(image)) => media.push(Media {
-                    kind: MediaKind::Image,
+                    kind: Media::kind_for(image.mime_type.as_deref()),
+                    name: image
+                        .filename
+                        .clone()
+                        .or_else(|| match image.source.as_ref() {
+                            Some(image_segment::Source::FilePath(path)) => {
+                                std::path::Path::new(path)
+                                    .file_name()
+                                    .map(|name| name.to_string_lossy().into_owned())
+                            }
+                            _ => None,
+                        }),
                     source: self
                         .media_source(image.source.as_ref().map(|source| match source {
                             image_segment::Source::Url(url) => Source::Url(url),
@@ -383,6 +449,7 @@ impl PlatformAdapter for QqOfficialAdapter {
                 }),
                 Some(Segment::Audio(audio)) => media.push(Media {
                     kind: MediaKind::Voice,
+                    name: None,
                     source: self
                         .media_source(audio.source.as_ref().map(|source| match source {
                             audio_segment::Source::Url(url) => Source::Url(url),
@@ -409,22 +476,27 @@ impl PlatformAdapter for QqOfficialAdapter {
         let mut sent = Vec::new();
         if !text.is_empty() {
             let response = self
-                .send_text(&api, scene, target, &text, markdown, msg_id)
+                .send_text(
+                    &api,
+                    scene,
+                    target,
+                    &text,
+                    markdown,
+                    msg_id,
+                    quote.as_deref(),
+                )
                 .await
                 .map_err(|err| self.delivery_error(err))?;
             self.remember(&response, &text);
             sent.push(response);
         }
         for item in media {
-            let placeholder = match item.kind {
-                MediaKind::Image => "[image]",
-                MediaKind::Voice => "[voice]",
-            };
+            let placeholder = item.placeholder();
             let response = self
                 .send_media(&api, scene, target, item, msg_id)
                 .await
                 .map_err(|err| self.delivery_error(err))?;
-            self.remember(&response, placeholder);
+            self.remember(&response, &placeholder);
             sent.push(response);
         }
 
@@ -473,7 +545,12 @@ impl QqOfficialAdapter {
         text: &str,
         markdown: bool,
         msg_id: Option<&str>,
+        quote: Option<&str>,
     ) -> Result<Value, String> {
+        // QQ cannot quote a message from a Markdown message, so a quote only rides on plain text.
+        let reference = quote
+            .filter(|_| !markdown || !matches!(scene, "group" | "c2c"))
+            .map(|id| json!({"message_id": id}));
         match scene {
             "group" | "c2c" => {
                 let mut body = if markdown {
@@ -481,11 +558,17 @@ impl QqOfficialAdapter {
                 } else {
                     json!({"msg_type": 0, "content": text})
                 };
+                if let Some(reference) = reference {
+                    body["message_reference"] = reference;
+                }
                 reply_fields(&mut body, msg_id, true);
                 api.send_v2(scene, target, &body).await
             }
             _ => {
                 let mut body = json!({"content": text});
+                if let Some(reference) = reference {
+                    body["message_reference"] = reference;
+                }
                 reply_fields(&mut body, msg_id, false);
                 guild_send(api, scene, target, &body).await
             }
@@ -502,7 +585,9 @@ impl QqOfficialAdapter {
     ) -> Result<Value, String> {
         match scene {
             "group" | "c2c" => {
-                let file_info = api.upload(scene, target, item.kind, item.source).await?;
+                let file_info = api
+                    .upload(scene, target, item.kind, item.source, item.name.as_deref())
+                    .await?;
                 let mut body = json!({"msg_type": 7, "media": {"file_info": file_info}});
                 reply_fields(&mut body, msg_id, true);
                 api.send_v2(scene, target, &body).await
@@ -516,8 +601,10 @@ impl QqOfficialAdapter {
                             "QQ guild channels only accept image URLs, not local files".into()
                         );
                     }
-                    (MediaKind::Voice, _) => {
-                        return Err("QQ guild channels cannot receive voice messages".into());
+                    (kind, _) => {
+                        return Err(format!(
+                            "QQ guild channels only accept images, not {kind:?} attachments"
+                        ));
                     }
                 };
                 let mut body = json!({"image": url});
@@ -547,9 +634,14 @@ impl QqOfficialAdapter {
 }
 
 /// Adds the passive-reply fields; `msg_seq` only exists on the v2 group and C2C endpoints.
+///
+/// A reply to a message quotes it as `msg_id`; a reply to a gateway event (bot added, friend
+/// added) quotes the event as `event_id`, which is the only way QQ accepts such a greeting.
 fn reply_fields(body: &mut Value, msg_id: Option<&str>, with_seq: bool) {
-    if let Some(msg_id) = msg_id {
-        body["msg_id"] = json!(msg_id);
+    match msg_id.map(|id| id.strip_prefix(mapping::EVENT_ID_PREFIX).ok_or(id)) {
+        Some(Ok(event_id)) => body["event_id"] = json!(event_id),
+        Some(Err(msg_id)) => body["msg_id"] = json!(msg_id),
+        None => {}
     }
     if with_seq {
         body["msg_seq"] = json!(next_msg_seq());

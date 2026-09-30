@@ -8,6 +8,13 @@
 //! the single place that decides how each segment becomes model input, so every adapter — present
 //! and future — inherits the same treatment as soon as it reports segments.
 //!
+//! # Notices and merged forwards
+//! A notice event (see [`crate::notice`]) becomes one bracketed line describing what happened, so
+//! the model answers a newcomer or a poke in its own persona. A merged forward whose adapter
+//! fetched its content (`messages: [{sender, text, images}]` in the custom payload) is expanded
+//! into one line per message when the context policy allows it; its pictures are attached for a
+//! vision model, capped so a forwarded photo album cannot flood the request.
+//!
 //! # Placeholders are still emitted
 //! Every attachment also contributes a short textual marker. Two reasons: a model without vision
 //! must not silently lose the fact that a picture was sent, and conversation history stays readable
@@ -23,6 +30,16 @@ use kanon_proto::v1::message_segment::Segment;
 use serde_json::Value;
 
 use crate::conversation::{ContextPolicy, META_TIMESTAMP, META_TIMESTAMP_TEXT};
+use crate::notice::{META_NOTICE_ACTOR, NoticeKind, metadata_str};
+
+/// Forwarded messages shown at most; longer forwards say how many were left out.
+const MAX_FORWARD_MESSAGES: usize = 50;
+
+/// Characters kept of one forwarded message.
+const MAX_FORWARD_TEXT: usize = 500;
+
+/// Pictures attached from one merged forward.
+const MAX_FORWARD_IMAGES: usize = 4;
 
 /// Builds the user message for a conversation turn.
 ///
@@ -49,6 +66,9 @@ pub fn build_user_message(
             && let Some(timestamp) = event_timestamp(event.metadata.as_ref())
         {
             text.push(&format!("[时间: {timestamp}]"));
+        }
+        if let Some(line) = notice_line(event.metadata.as_ref()) {
+            text.push(&line);
         }
     }
 
@@ -96,13 +116,13 @@ pub fn build_user_message(
                     .as_ref()
                     .map(|payload| prost_struct_to_json(payload.clone()))
                     .unwrap_or(Value::Null);
-                render_custom(&custom.type_name, &json, &mut text);
-                // A sticker is an image. Its URL is attached too, so the model can actually see it
-                // instead of only being told that an emoji was used.
-                if capabilities.vision
-                    && let Some(part) = custom_media_part(&custom.type_name, &json)
-                {
-                    images.push(part);
+                let expand = context_policy.expand_forward;
+                render_custom(&custom.type_name, &json, expand, &mut text);
+                // A sticker is an image, and so are pictures inside an expanded forward. Their URLs
+                // are attached too, so the model can actually see them instead of only being told
+                // that a picture was there.
+                if capabilities.vision {
+                    images.extend(custom_media_parts(&custom.type_name, &json, expand));
                 }
             }
             None => {}
@@ -127,16 +147,50 @@ pub fn build_user_message(
     }
 }
 
-/// Returns the image a custom (platform-preserved) segment carries, if any.
+/// Describes a notice event in one line, or `None` for an ordinary message.
+fn notice_line(metadata: Option<&prost_types::Struct>) -> Option<String> {
+    let actor = metadata_str(metadata, META_NOTICE_ACTOR);
+    Some(match NoticeKind::from_metadata(metadata)? {
+        NoticeKind::MemberJoin => format!("[事件] {} 加入了群聊", actor.unwrap_or("新成员")),
+        NoticeKind::BotJoin => match actor {
+            Some(actor) => format!("[事件] 你刚被 {actor} 拉进了这个群"),
+            None => "[事件] 你刚加入了这个群".to_string(),
+        },
+        NoticeKind::FriendAdd => format!("[事件] {} 添加你为好友", actor.unwrap_or("对方")),
+        NoticeKind::Poke => format!("[事件] {} 戳了戳你", actor.unwrap_or("有人")),
+        // Recalls never reach the model as a turn of their own.
+        NoticeKind::Recall => return None,
+    })
+}
+
+/// Returns the images a custom (platform-preserved) segment carries.
 ///
-/// Only kinds whose payload is documented to hold an image URL are read: guessing from a generic
+/// Only kinds whose payload is documented to hold image URLs are read: guessing from a generic
 /// `url` field would attach a web page as if it were a picture.
-fn custom_media_part(type_name: &str, json: &Value) -> Option<ContentPart> {
+fn custom_media_parts(type_name: &str, json: &Value, expand_forward: bool) -> Vec<ContentPart> {
     match custom_kind(type_name) {
         // A Milky market-face sticker carries the rendered image URL; a QQ built-in face does not.
-        "market_face" => field_str(json, "url").map(|url| ContentPart::image_url(url, None)),
-        _ => None,
+        "market_face" => field_str(json, "url")
+            .map(|url| vec![ContentPart::image_url(url, None)])
+            .unwrap_or_default(),
+        "forward" if expand_forward => forward_messages(json)
+            .iter()
+            .flat_map(|message| message["images"].as_array().into_iter().flatten())
+            .filter_map(Value::as_str)
+            .filter(|url| !url.trim().is_empty())
+            .take(MAX_FORWARD_IMAGES)
+            .map(|url| ContentPart::image_url(url, None))
+            .collect(),
+        _ => Vec::new(),
     }
+}
+
+/// The messages an adapter fetched into a merged-forward payload.
+fn forward_messages(json: &Value) -> &[Value] {
+    json["messages"]
+        .as_array()
+        .map(Vec::as_slice)
+        .unwrap_or(&[])
 }
 
 /// Strips the adapter namespace from a custom segment type name.
@@ -148,11 +202,32 @@ fn custom_kind(type_name: &str) -> &str {
 }
 
 /// Renders one custom (platform-preserved) segment into the model text.
-fn render_custom(type_name: &str, json: &Value, text: &mut TextBuffer) {
+fn render_custom(type_name: &str, json: &Value, expand_forward: bool, text: &mut TextBuffer) {
     // Adapters namespace their preserved segments (`milky.forward`); the kind is what matters here.
     let kind = custom_kind(type_name);
 
     let rendered = match kind {
+        "forward" if expand_forward && !forward_messages(json).is_empty() => {
+            let title = field_str(json, "title").unwrap_or("合并转发");
+            let messages = forward_messages(json);
+            let mut detail = format!("[合并转发: {title}]");
+            for message in messages.iter().take(MAX_FORWARD_MESSAGES) {
+                let sender = field_str(message, "sender").unwrap_or("某人");
+                let body: String = field_str(message, "text")
+                    .unwrap_or_default()
+                    .chars()
+                    .take(MAX_FORWARD_TEXT)
+                    .collect();
+                detail.push_str(&format!("\n{sender}: {body}"));
+            }
+            if messages.len() > MAX_FORWARD_MESSAGES {
+                detail.push_str(&format!(
+                    "\n（共 {} 条，仅显示前 {MAX_FORWARD_MESSAGES} 条）",
+                    messages.len()
+                ));
+            }
+            detail
+        }
         "forward" => {
             let title = field_str(json, "title").unwrap_or("合并转发");
             let mut detail = format!("[合并转发: {title}]");

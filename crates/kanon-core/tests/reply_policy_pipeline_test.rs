@@ -256,10 +256,12 @@ async fn probability_mode_is_deterministic_at_the_extremes() {
     let always = ReplyPolicy {
         mode: ReplyMode::Probability,
         probability: 1.0,
+        ..Default::default()
     };
     let never = ReplyPolicy {
         mode: ReplyMode::Probability,
         probability: 0.0,
+        ..Default::default()
     };
 
     let registry = Arc::new(InstanceRegistry::in_memory());
@@ -625,6 +627,7 @@ async fn the_node_context_policy_is_applied_from_the_first_event() {
             include_channel_id: true,
             include_sender_id: false,
             include_timestamp: false,
+            ..Default::default()
         },
     );
 
@@ -651,6 +654,7 @@ async fn the_instance_context_policy_overrides_the_node_one() {
             include_channel_id: false,
             include_sender_id: true,
             include_timestamp: false,
+            ..Default::default()
         }),
     )
     .await;
@@ -661,6 +665,7 @@ async fn the_instance_context_policy_overrides_the_node_one() {
             include_channel_id: true,
             include_sender_id: false,
             include_timestamp: false,
+            ..Default::default()
         },
     );
 

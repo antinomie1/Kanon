@@ -30,6 +30,9 @@ use crate::adapter::{AdapterDescriptor, AdapterError, AdapterKind};
 use crate::conversation::{ContextPolicyStore, ConversationKind, ReplyPolicyStore, bot_mentioned};
 use crate::instance::InstanceRegistry;
 use crate::mcp::McpPool;
+use crate::notice::{
+    EventPolicyStore, META_NOTICE_ACTOR, META_NOTICE_TARGET, NoticeKind, RecallLedger, metadata_str,
+};
 use crate::pipeline::command::CommandRouter;
 use crate::pipeline::context::build_user_message;
 use crate::pipeline::dead_letter::DeadLetterWriter;
@@ -196,6 +199,13 @@ pub enum PipelineResult {
         command: String,
         /// Answer delivered back to the conversation.
         replies: Vec<MessageSegment>,
+    },
+    /// A platform notice (join, poke, recall) that the event policy does not answer.
+    Notice {
+        /// Notice kind, as reported by the adapter.
+        kind: &'static str,
+        /// What happened to it, suitable for logs and traces.
+        outcome: String,
     },
     /// No enabled bot instance claims the event's platform, so nothing may answer it.
     NoInstance {
@@ -397,6 +407,10 @@ pub struct PipelineEngine {
     reply_policy: Option<Arc<ReplyPolicyStore>>,
     /// Node-wide context-extras policy, when the control plane provides one.
     context_policy: Option<Arc<ContextPolicyStore>>,
+    /// Node-wide notice policy; without one only the defaults apply (recall notes, no reactions).
+    event_policy: Option<Arc<EventPolicyStore>>,
+    /// Messages the model answered and recall notes awaiting their conversation's next turn.
+    recalls: RecallLedger,
     /// MCP servers contributing tools alongside plugin hosts.
     mcp: Option<Arc<McpPool>>,
     /// Optional lifecycle observer used by the management control plane for tracing.
@@ -428,6 +442,8 @@ impl PipelineEngine {
             toggles: None,
             reply_policy: None,
             context_policy: None,
+            event_policy: None,
+            recalls: RecallLedger::default(),
             mcp: None,
             observer: None,
             dead_letter: Arc::new(DeadLetterWriter::default()),
@@ -490,6 +506,12 @@ impl PipelineEngine {
     /// Shares the node-wide reply policy used when an instance does not override it.
     pub fn with_reply_policy(mut self, policy: Arc<ReplyPolicyStore>) -> Self {
         self.reply_policy = Some(policy);
+        self
+    }
+
+    /// Shares the node-wide notice policy (welcomes, pokes, recall notes) with the control plane.
+    pub fn with_event_policy(mut self, policy: Arc<EventPolicyStore>) -> Self {
+        self.event_policy = Some(policy);
         self
     }
 
@@ -1040,6 +1062,45 @@ impl PipelineEngine {
             None => None,
         };
 
+        // Phase 0a: Notices.
+        //
+        // A join, poke or recall is not a message. Only the node's event policy decides whether the
+        // bot reacts at all; a notice it reacts to then skips commands and the reply policy (the
+        // operator explicitly asked for the reaction) and reaches the model as a one-line event.
+        let notice = NoticeKind::from_metadata(event.metadata.as_ref());
+        if let Some(kind) = notice {
+            let policy = self
+                .event_policy
+                .as_ref()
+                .map(|store| store.get())
+                .unwrap_or_default();
+            let outcome = if kind == NoticeKind::Recall {
+                let target = metadata_str(event.metadata.as_ref(), META_NOTICE_TARGET);
+                let actor = metadata_str(event.metadata.as_ref(), META_NOTICE_ACTOR);
+                match target {
+                    Some(target) if policy.note_recalls => {
+                        if self.recalls.note_recall(target, actor) {
+                            "noted for the conversation's next turn".to_string()
+                        } else {
+                            "the model never saw the recalled message".to_string()
+                        }
+                    }
+                    Some(_) => "recall notes are disabled by the event policy".to_string(),
+                    None => "the recall names no message".to_string(),
+                }
+            } else if !policy.answers(kind) {
+                "disabled by the event policy".to_string()
+            } else {
+                String::new()
+            };
+            if !outcome.is_empty() {
+                return PipelineResult::Notice {
+                    kind: kind.as_str(),
+                    outcome,
+                };
+            }
+        }
+
         // Phase 0b: Per-instance plugin policy.
         //
         // Filtering here (rather than inside each later phase) means a plugin this instance
@@ -1126,7 +1187,12 @@ impl PipelineEngine {
         //
         // Group platforms render a mention as leading text (`@bot /model`), so mentions are
         // stripped before parsing; otherwise a command typed in a group would never be recognised.
-        let command_text = strip_leading_mentions(&text_candidate);
+        // A notice carries no user text, so it can never be a command.
+        let command_text = if notice.is_some() {
+            ""
+        } else {
+            strip_leading_mentions(&text_candidate)
+        };
         if let Some((cmd_name, args)) = CommandRouter::parse_command(command_text) {
             if cmd_name.eq_ignore_ascii_case(NEW_SESSION_COMMAND)
                 && let Some(instance) = instance.as_ref()
@@ -1207,15 +1273,23 @@ impl PipelineEngine {
         // answer, while an unaddressed group message never reaches the LLM when the instance asked
         // to be mentioned first. Pre-filters have already run, so a plugin still observes every
         // inbound event — this gate only decides whether the *bot* answers.
-        if let Some(instance) = instance.as_ref() {
-            let kind = ConversationKind::from_metadata(filtered_event.metadata.as_ref());
+        let kind = ConversationKind::from_metadata(filtered_event.metadata.as_ref());
+        let node_reply_policy = self
+            .reply_policy
+            .as_ref()
+            .map(|store| store.get())
+            .unwrap_or_default();
+        let reply_policy = instance.as_ref().map_or(node_reply_policy, |instance| {
+            instance.effective_reply_policy(node_reply_policy)
+        });
+        // Quoting only makes sense for a message in a shared conversation; a notice has none.
+        let quote_reply =
+            reply_policy.quote_message && kind.is_policy_governed() && notice.is_none();
+        if let Some(instance) = instance.as_ref()
+            && notice.is_none()
+        {
             let mentioned = bot_mentioned(filtered_event.metadata.as_ref());
-            let policy = instance.effective_reply_policy(
-                self.reply_policy
-                    .as_ref()
-                    .map(|store| store.get())
-                    .unwrap_or_default(),
-            );
+            let policy = reply_policy;
             let sample = reply_sample(&filtered_event.event_id);
             if !policy.should_reply(kind, mentioned, sample) {
                 let reason = format!(
@@ -1279,6 +1353,26 @@ impl PipelineEngine {
                 )
             },
         );
+        // Recall notes waiting for this conversation ride on its next model turn, as leading text
+        // of the current user message: runtime facts belong to the current turn, never to the
+        // cached prefix. They are only taken when a model will actually read them.
+        let ledger_key = format!("{platform}\u{1f}{conversation}");
+        let mut filtered_event = filtered_event;
+        if resolved_agent.is_some() {
+            let notes = self.recalls.take_notes(&ledger_key);
+            // A text-only event is rendered from `raw_text` only when it has no segments; once a
+            // note becomes a segment, the text must be one too or it would vanish.
+            if !notes.is_empty()
+                && filtered_event.segments.is_empty()
+                && !filtered_event.raw_text.trim().is_empty()
+            {
+                let text = filtered_event.raw_text.clone();
+                filtered_event.segments.push(text_reply(text));
+            }
+            for (index, note) in notes.into_iter().enumerate() {
+                filtered_event.segments.insert(index, text_reply(note));
+            }
+        }
         let user_message = build_user_message(&filtered_event, &capabilities, &context_policy);
 
         if (user_message
@@ -1289,6 +1383,26 @@ impl PipelineEngine {
             && let Some(agent) = resolved_agent
         {
             let router = ToolRouter::from_arc(agent.clone());
+
+            // Remember what the model is shown, so a later recall of it can be noted.
+            if notice.is_none() {
+                self.recalls.record_turn(
+                    &filtered_event.event_id,
+                    &ledger_key,
+                    &filtered_event.raw_text,
+                );
+            }
+
+            // Let a built-in adapter show that an answer is coming (typing, a reaction). Spawned:
+            // platform I/O must never delay the model call.
+            if let Some(adapter) = self.supervisor.adapters().get(&platform).await {
+                let event = filtered_event.clone();
+                tokio::spawn(async move {
+                    if let Err(err) = adapter.acknowledge(&event).await {
+                        tracing::warn!(error = %err, "Adapter failed to acknowledge an event");
+                    }
+                });
+            }
 
             // Sessions are namespaced by the instance that owns the conversation, so two bots can
             // never share context. An unpartitioned pipeline keeps the legacy conversation key.
@@ -1395,6 +1509,19 @@ impl PipelineEngine {
                                 filename: None,
                             })),
                         });
+                    }
+
+                    // The platform adapter turns this into its native quote of the triggering message.
+                    if quote_reply {
+                        replies.insert(
+                            0,
+                            MessageSegment {
+                                segment: Some(Segment::Reply(kanon_proto::v1::ReplySegment {
+                                    target_message_id: filtered_event.event_id.clone(),
+                                    snippet: String::new(),
+                                })),
+                            },
+                        );
                     }
 
                     self.observe(PipelineStage::LlmReplied {
@@ -1886,6 +2013,15 @@ impl PipelineEngine {
                     channel_id = %channel_id,
                     command = %command,
                     "Pipeline answered a built-in informational command"
+                );
+            }
+            PipelineResult::Notice { kind, outcome } => {
+                tracing::info!(
+                    platform = %platform,
+                    channel_id = %channel_id,
+                    notice = %kind,
+                    outcome = %outcome,
+                    "Pipeline handled a platform notice without answering"
                 );
             }
             PipelineResult::NoInstance { .. } => {

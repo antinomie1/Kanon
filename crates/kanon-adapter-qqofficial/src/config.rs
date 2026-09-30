@@ -24,6 +24,9 @@ pub struct QqOfficialConfig {
     /// Send text as native Markdown (`msg_type = 2`). The bot needs the Markdown permission; a
     /// refused message is reported as a delivery error rather than silently resent as plain text.
     pub markdown: bool,
+    /// Show "typing…" in a private (C2C) chat while the model works on an answer. QQ counts it
+    /// as one of the few passive replies a message allows, so it is opt-in.
+    pub typing_indicator: bool,
 }
 
 impl QqOfficialConfig {

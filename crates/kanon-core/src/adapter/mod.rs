@@ -25,7 +25,9 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use kanon_proto::v1::{DeliverMessageRequest, DeliverMessageResponse, IngestEventRequest};
+use kanon_proto::v1::{
+    DeliverMessageRequest, DeliverMessageResponse, IngestEventRequest, PipelineEventRequest,
+};
 use serde::Serialize;
 use thiserror::Error;
 use tokio::sync::{RwLock, mpsc};
@@ -189,6 +191,16 @@ pub trait PlatformAdapter: Send + Sync {
         &self,
         request: DeliverMessageRequest,
     ) -> Result<DeliverMessageResponse, AdapterError>;
+
+    /// Tells the user their message is being worked on, before the model starts answering it.
+    ///
+    /// The pipeline calls this — without awaiting it — once it has decided to answer `event` with
+    /// the model, so an adapter can show a typing indicator or react to the message. Only the
+    /// adapter knows whether its platform and configuration support that; the default does nothing.
+    /// A failure is logged by the caller and never delays or cancels the answer.
+    async fn acknowledge(&self, _event: &PipelineEventRequest) -> Result<(), AdapterError> {
+        Ok(())
+    }
 
     /// Verifies the authenticity of an inbound payload (e.g. HMAC signature or webhook token).
     ///

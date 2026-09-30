@@ -37,6 +37,10 @@ pub struct OneBotConfig {
     /// Bearer credential, omitted from management responses.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub access_token: Option<String>,
+    /// Accept every friend request automatically; otherwise requests wait for a human in QQ.
+    pub auto_accept_friends: bool,
+    /// Accept every invitation into a group automatically.
+    pub auto_accept_group_invites: bool,
 }
 
 impl Default for OneBotConfig {
@@ -48,6 +52,8 @@ impl Default for OneBotConfig {
             transport: TransportKind::default(),
             ws_url: "ws://127.0.0.1:6700".into(),
             access_token: None,
+            auto_accept_friends: false,
+            auto_accept_group_invites: false,
         }
     }
 }
