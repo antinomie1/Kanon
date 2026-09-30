@@ -9,6 +9,7 @@ description = "Decoupled RESTful API and WebSocket gateway for Kanon"
 kanon-core = { path = "../kanon-core" }
 kanon-adapter-milky = { path = "../kanon-adapter-milky" }
 kanon-adapter-onebot = { path = "../kanon-adapter-onebot" }
+kanon-adapter-qqofficial = { path = "../kanon-adapter-qqofficial" }
 kanon-llm = { path = "../kanon-llm" }
 kanon-proto = { path = "../kanon-proto" }
 kanon-storage = { path = "../kanon-storage" }
@@ -18,7 +19,6 @@ serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 zip = { version = "2.2", default-features = false, features = ["deflate"] }
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
-base64 = "0.22"
 tower-http = { version = "0.5", features = ["cors", "trace"] }
 futures-util = "0.3"
 tokio-stream = "0.1"
@@ -28,7 +28,6 @@ tonic = "0.12"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt", "registry"] }
 sysinfo = { version = "0.33", default-features = false, features = ["system"] }
-ring = "0.17"
 rust-embed = "8.12.0"
 mime_guess = "2.0.5"
 tempfile = "3.12"

@@ -2,7 +2,7 @@
 //!
 //! This crate owns *assembly only*, and it is the only place in the workspace that turns the
 //! libraries into a running node. The microkernel ([`kanon_core`]), the management gateway
-//! ([`kanon_api`]) and the platform adapter ([`kanon_adapter_milky`]) are libraries with no
+//! ([`kanon_api`]) and the platform adapters (Milky, OneBot v11, QQ Official) are libraries with no
 //! entrypoints of their own; `kanon-dev` is the separate developer CLI and never runs a node.
 //!
 //! As the composition root it starts the core IPC server (`core.sock`), the pipeline worker, the
@@ -28,7 +28,7 @@
 //! Model routing lives in the same document: a named provider directory plus a per-model settings
 //! catalog, both editable through the console. A model is addressed as `<provider>/<model-id>`,
 //! and exactly one of them is the node's global default model. The document also carries the
-//! node-wide reply and context policies and the OneBot and Milky adapter sections.
+//! node-wide reply and context policies and the OneBot, Milky and QQ Official adapter sections.
 //!
 //! Conversations are durable: history, compaction summaries and session records live in
 //! `data/sessions.db`, and the operator's personas in `data/personas.json`. Both are opened before
@@ -39,6 +39,7 @@ use std::sync::Arc;
 
 use kanon_adapter_milky::MilkyAdapter;
 use kanon_adapter_onebot::OneBotAdapter;
+use kanon_adapter_qqofficial::QqOfficialAdapter;
 use kanon_api::{
     ApiServer, ApiState, DEFAULT_SESSION_DB, NodeSettings, Observability, PersonaStore,
     StartupConfig, SystemConfigStore, open_session_manager,
@@ -154,6 +155,7 @@ async fn main() -> StartupResult<()> {
     // connection it could not feed.
     let milky_adapter = register_milky_adapter(&supervisor).await?;
     let onebot_adapter = register_onebot_adapter(&supervisor).await?;
+    let qqofficial_adapter = register_qqofficial_adapter(&supervisor).await?;
 
     // --- Management gateway state & agent engine --------------------------------------
     // The state owns one agent factory (and the named provider directory inside it), shared with
@@ -193,6 +195,7 @@ async fn main() -> StartupResult<()> {
         .with_persona_store(persona_store)
         .with_milky_adapter(milky_adapter)
         .with_onebot_adapter(onebot_adapter)
+        .with_qqofficial_adapter(qqofficial_adapter)
         .with_observability(observability.clone())
         .with_ingress(ingress.clone())
         .with_instances(instances.clone())
@@ -449,6 +452,29 @@ async fn register_onebot_adapter(
         platform = %adapter.identity(),
         enabled = adapter.config().enabled,
         "OneBot v11 adapter registered"
+    );
+    Ok(adapter)
+}
+
+/// Registers QQ Official from its `data/system.json` section, disabled when none is saved.
+async fn register_qqofficial_adapter(
+    supervisor: &Arc<Supervisor>,
+) -> StartupResult<Arc<QqOfficialAdapter>> {
+    let store = SystemConfigStore::default();
+    let config = store
+        .load_qqofficial()
+        .map_err(|err| {
+            format!(
+                "Failed to load QQ Official configuration from {}: {err}",
+                store.path().display()
+            )
+        })?
+        .unwrap_or_default();
+    let adapter = Arc::new(QqOfficialAdapter::new(config)?);
+    supervisor.adapters().register(adapter.clone()).await?;
+    tracing::info!(
+        enabled = adapter.config().enabled,
+        "QQ Official adapter registered"
     );
     Ok(adapter)
 }

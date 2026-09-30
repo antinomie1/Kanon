@@ -17,6 +17,10 @@
 //! | `GET` | `/api/v1/adapters/milky/config` | Milky adapter configuration and live status |
 //! | `PUT` | `/api/v1/adapters/milky/config` | Validate, persist and hot-apply the Milky adapter |
 //! | `POST` | `/api/v1/adapters/milky/config/test` | Probe a Milky endpoint without saving |
+//! | `GET` | `/api/v1/adapters/qqofficial/config` | QQ Official configuration and live status |
+//! | `PUT` | `/api/v1/adapters/qqofficial/config` | Validate, hot-apply and persist QQ Official |
+//! | `POST` | `/api/v1/adapters/qqofficial/login/qr` | Start a QQ Official QR credential binding |
+//! | `POST` | `/api/v1/adapters/qqofficial/login/poll` | Poll it; bound credentials are applied and saved |
 //! | `GET` | `/api/v1/instances` | Bot instances gating and partitioning inbound traffic |
 //! | `POST` | `/api/v1/instances` | Create a bot instance |
 //! | `PUT` | `/api/v1/instances/{id}` | Update a bot instance (adapters, persona, model) |
@@ -66,6 +70,7 @@ pub mod onebot;
 pub mod personas;
 pub mod plugins;
 pub mod providers;
+pub mod qqofficial;
 pub mod sessions;
 pub mod skills;
 pub mod system;
@@ -84,6 +89,7 @@ pub fn api_router() -> Router<ApiState> {
         .merge(adapters::routes())
         .merge(milky::routes())
         .merge(onebot::routes())
+        .merge(qqofficial::routes())
         .merge(instances::routes())
         .merge(plugins::routes())
         .merge(sessions::routes())

@@ -766,13 +766,49 @@ export interface QQOfficialQrLoginResponse {
   poll_interval_seconds: number;
 }
 
+/** On `created` the node has already applied and saved the credentials; the secret stays there. */
 export interface QQOfficialPollLoginResponse {
-  status: 'pending' | 'created' | 'expired' | 'error';
-  qr_status: number;
+  status: 'pending' | 'created' | 'expired';
+  qr_status?: number;
   appid?: string;
+}
+
+/** Gateway session lifecycle of the built-in QQ Official adapter. */
+export type QqOfficialConnectionState =
+  | 'disabled'
+  | 'connecting'
+  | 'connected'
+  | 'disconnected'
+  | 'stopped';
+
+/** Stored QQ Official configuration with the write-only AppSecret removed. */
+export interface QqOfficialConfig {
+  enabled: boolean;
+  app_id: string;
+  sandbox: boolean;
+  markdown: boolean;
+}
+
+/** Live QQ Official gateway status returned by the node. */
+export interface QqOfficialStatus {
+  platform: string;
+  enabled: boolean;
+  connected: boolean;
+  connection_state: QqOfficialConnectionState;
+  secret_configured: boolean;
+  bot_name: string | null;
+  last_error: string | null;
+}
+
+/** Configuration and status shown by the console. */
+export interface QqOfficialConfigView {
+  config: QqOfficialConfig;
+  status: QqOfficialStatus;
+}
+
+/** An omitted or empty secret keeps the stored one. */
+export interface QqOfficialConfigRequest extends QqOfficialConfig {
   secret?: string;
-  saved?: boolean;
-  message?: string;
 }
 
 export interface CallPluginToolResponse {

@@ -14,6 +14,7 @@ use std::time::Instant;
 
 use kanon_adapter_milky::MilkyAdapter;
 use kanon_adapter_onebot::OneBotAdapter;
+use kanon_adapter_qqofficial::QqOfficialAdapter;
 use kanon_core::{
     ContextPolicyStore, EventIngress, InstanceRegistry, McpConfigStore, McpPool, ReplyPolicyStore,
     SkillStore, Supervisor, ToggleStore,
@@ -87,6 +88,8 @@ struct ApiStateInner {
     milky: Option<Arc<MilkyAdapter>>,
     /// OneBot v11 adapter hosted by this node.
     onebot: Option<Arc<OneBotAdapter>>,
+    /// QQ Official adapter hosted by this node.
+    qqofficial: Option<Arc<QqOfficialAdapter>>,
     /// Real-time log and trace channels plus the metrics registry.
     observability: Arc<Observability>,
     /// Fast-ACK ingest handle driving the inbound data plane, absent when no pipeline is attached.
@@ -378,6 +381,11 @@ impl ApiState {
         self.inner.onebot.as_ref()
     }
 
+    /// QQ Official adapter handle, when this node hosts one.
+    pub fn qqofficial(&self) -> Option<&Arc<QqOfficialAdapter>> {
+        self.inner.qqofficial.as_ref()
+    }
+
     /// Milky platform adapter handle, when this node hosts one.
     pub fn milky(&self) -> Option<&Arc<MilkyAdapter>> {
         self.inner.milky.as_ref()
@@ -422,6 +430,8 @@ pub struct ApiStateBuilder {
     milky: Option<Arc<MilkyAdapter>>,
     /// OneBot v11 adapter hosted by this node.
     onebot: Option<Arc<OneBotAdapter>>,
+    /// QQ Official adapter hosted by this node.
+    qqofficial: Option<Arc<QqOfficialAdapter>>,
     config_base_dir: Option<PathBuf>,
     observability: Option<Arc<Observability>>,
     ingress: Option<EventIngress>,
@@ -459,6 +469,7 @@ impl ApiStateBuilder {
             node_settings: None,
             milky: None,
             onebot: None,
+            qqofficial: None,
             config_base_dir: None,
             observability: None,
             ingress: None,
@@ -614,6 +625,12 @@ impl ApiStateBuilder {
         self
     }
 
+    /// Shares the QQ Official adapter registered by the composition root.
+    pub fn with_qqofficial_adapter(mut self, adapter: Arc<QqOfficialAdapter>) -> Self {
+        self.qqofficial = Some(adapter);
+        self
+    }
+
     /// Shares the Milky platform adapter this node registered.
     ///
     /// The gateway never constructs the adapter itself: registration must happen before
@@ -761,6 +778,7 @@ impl ApiStateBuilder {
                 node_settings: Arc::new(RwLock::new(node_settings)),
                 milky: self.milky,
                 onebot: self.onebot,
+                qqofficial: self.qqofficial,
                 observability,
                 ingress: self.ingress,
                 plugins_dir,

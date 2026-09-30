@@ -404,7 +404,6 @@ $effect(() => {
 <PluginConfigDrawer
   pluginId={selectedPluginId}
   onclose={() => (selectedPluginId = null)}
-  onrefresh={() => void loadData()}
 />
 
 <!-- Install Plugin Modal -->

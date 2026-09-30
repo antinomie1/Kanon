@@ -597,7 +597,7 @@ Rust 核心全权主导 LLM 的生命周期与推理编排，确保高并发下�
 ### 8.3 工具与"管理动作"的边界 (Tools vs. Management Actions)
 
 - **`tools`（LLM 可见）**：注册进 `ToolMeta` 的能力会被聚合后交给模型做 function calling。**适配器插件禁止声明任何 tool**——适配器的职责是平台收发，若其把"扫码绑定/凭证轮换"等运维能力注册为 tool，模型就会在闲聊中尝试调用它们。
-- **`actions`（仅控制台可见）**：运维操作通过 `PluginHostService.InvokeAction` 暴露（Python SDK 用 `@action(...)` 声明，不会出现在 `Plugin.meta()` 中）。控制台走 `POST /api/v1/plugins/{id}/actions/{action}`，核心内部流程（如 QQ 扫码绑定）同样走该 RPC，因此这类能力永远不会进入模型的函数列表。
+- **`actions`（仅控制台可见）**：运维操作通过 `PluginHostService.InvokeAction` 暴露（Python SDK 用 `@action(...)` 声明，不会出现在 `Plugin.meta()` 中）。控制台走 `POST /api/v1/plugins/{id}/actions/{action}`，因此这类能力永远不会进入模型的函数列表。
 - 判定规则：**模型可以主动调用的 → tool；只能由人/控制台触发的 → action**。
 
 ### 8.4 扩展能力：MCP 服务器与技能 (MCP & Skills)
