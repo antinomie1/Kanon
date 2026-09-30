@@ -18,7 +18,9 @@ use axum::routing::{get, put};
 use serde::{Deserialize, Serialize};
 
 use kanon_core::instance::{InstanceDraft, InstanceError, sync_instance_personas};
-use kanon_core::{AdapterDescriptor, BotInstance, ContextPolicy, ReplyPolicy};
+use kanon_core::{
+    AdapterDescriptor, BashScope, BotInstance, CommandPolicy, ContextPolicy, ReplyPolicy,
+};
 
 use crate::error::ApiError;
 use crate::state::ApiState;
@@ -76,6 +78,10 @@ pub struct InstanceView {
     pub session_scope: kanon_core::SessionScope,
     /// Whether unanswered group messages reach the model on its next turn.
     pub observe_group: bool,
+    /// Command-permission override; `null` inherits the node-wide policy.
+    pub command_policy: Option<CommandPolicy>,
+    /// Where this instance's administrators may run Bash.
+    pub bash: BashScope,
     /// Per-plugin overrides.
     pub plugins: std::collections::HashMap<String, kanon_core::instance::ItemPolicy>,
     /// Per-skill overrides.
@@ -97,6 +103,10 @@ pub struct InstancesResponse {
     pub node_reply_policy: ReplyPolicy,
     /// Node-wide context-extras policy inherited by instances without an override.
     pub node_context_policy: ContextPolicy,
+    /// Node-wide command policy inherited by instances without an override.
+    pub node_command_policy: CommandPolicy,
+    /// Whether Bash is switched on node-wide; a per-instance scope cannot enable it on its own.
+    pub node_bash_enabled: bool,
     /// The instances themselves.
     pub instances: Vec<InstanceView>,
 }
@@ -144,6 +154,12 @@ pub struct InstanceRequest {
     /// Show unanswered group messages to the model on its next turn.
     #[serde(default)]
     pub observe_group: bool,
+    /// Optional command-permission override; omit or `null` to inherit the node-wide policy.
+    #[serde(default)]
+    pub command_policy: Option<CommandPolicy>,
+    /// `disabled` | `own_context` (default) | `shared_context`.
+    #[serde(default)]
+    pub bash: BashScope,
     /// Per-plugin overrides (`inherit` | `enable` | `disable`).
     #[serde(default)]
     pub plugins: std::collections::HashMap<String, kanon_core::instance::ItemPolicy>,
@@ -168,6 +184,8 @@ impl From<InstanceRequest> for InstanceDraft {
             context_policy: request.context_policy,
             session_scope: request.session_scope,
             observe_group: request.observe_group,
+            command_policy: request.command_policy,
+            bash: request.bash,
             plugins: request.plugins,
             skills: request.skills,
             mcp: request.mcp,
@@ -216,6 +234,8 @@ async fn view(state: &ApiState, instance: &BotInstance) -> InstanceView {
         context_policy: instance.context_policy,
         session_scope: instance.session_scope,
         observe_group: instance.observe_group,
+        command_policy: instance.command_policy.clone(),
+        bash: instance.bash,
         plugins: instance.plugins.clone(),
         skills: instance.skills.clone(),
         mcp: instance.mcp.clone(),
@@ -277,6 +297,8 @@ async fn list_instances(State(state): State<ApiState>) -> Json<InstancesResponse
         enabled,
         node_reply_policy: state.reply_policy().get(),
         node_context_policy: state.context_policy().get(),
+        node_command_policy: state.command_policy().get(),
+        node_bash_enabled: state.bash_policy().get().enabled,
         instances: views,
     })
 }

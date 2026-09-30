@@ -163,10 +163,10 @@ export const dictionaries = {
     'bash.image': 'Prepared sandbox image',
     'bash.processes': 'process/thread limit',
     'bash.hint':
-      'Access follows the current sender. Optional AI review helps catch accidental harm in local mode.',
+      'Node-wide switch and execution backend. Each instance chooses where its administrators may use it (Instances → edit → Bash tool). Optional AI review helps catch accidental harm in local mode.',
     'bash.enabled': 'Let administrators ask the AI to run Bash',
     'bash.identity_hint':
-      'Only bot administrators listed by ID under System Settings → Command permissions may use it; group owners and admins do not count. It is never available to notices, group sessions shared by the whole group, groups the bot observes, or console chat.',
+      "Only administrators listed by ID in the serving instance's command permissions (the node's, when it inherits) may use it; group owners and admins do not count. Never available to notices or console chat; in shared or observed group chats only where the instance allows it.",
     'bash.saved': 'Bash settings saved.',
     'tools.subtitle':
       'Every tool the model can call right now, and who provides it',
@@ -312,7 +312,7 @@ export const dictionaries = {
       'Otherwise invitations wait for a human on the platform.',
     'commands.title': 'Command permissions',
     'commands.hint':
-      "Some commands change what other people get: /model switches the whole bot's model, /new in a shared group session clears everyone's context. Choose who may run them.",
+      "Some commands change what other people get: /model switches the whole bot's model, /new in a shared group session clears everyone's context. Choose who may run them. An instance can override this with its own.",
     'commands.admins': 'Bot administrators',
     'commands.level_admins': 'Administrators only',
     'commands.admins_hint':
@@ -682,6 +682,27 @@ export const dictionaries = {
     'instances.section_plugins': 'Plugins',
     'instances.section_skills': 'Skills',
     'instances.section_mcp': 'MCP servers',
+    'instances.own_commands': 'Own command permissions',
+    'instances.commands_hint':
+      "Who this bot's administrators are and which commands only they may run. An override replaces the node's policy completely, administrator list included, and those administrators are also the only ones who may use Bash through this bot.",
+    'instances.commands_inherit_hint': 'Node administrators: {admins}',
+    'instances.bash_hint':
+      'Where administrators of this bot may ask the AI to run Bash. Bash must also be switched on under System Settings → Bash tool.',
+    'instances.bash_disabled': 'Off for this bot',
+    'instances.bash_disabled_hint':
+      'Nobody can run Bash through this bot, whatever the node-wide switch says.',
+    'instances.bash_own': "Administrators' own conversations only",
+    'instances.bash_own_hint':
+      'Private chats, and group chats where each member has their own session and the group is not observed.',
+    'instances.bash_shared': 'Also shared and observed group chats',
+    'instances.bash_shared_hint':
+      'Administrators can also use Bash where the whole group shares one session, or where the bot observes the group.',
+    'instances.bash_shared_warning':
+      "Other members' messages are part of that context and can steer what the AI runs when an administrator asks it for something. Only allow this in groups you trust.",
+    'instances.bash_groups_excluded':
+      'This bot shares or observes group sessions, so administrators can use Bash only in private chats.',
+    'instances.bash_node_off':
+      'Bash is currently switched off node-wide (System Settings → Bash tool).',
     'instances.policy_inherit': 'Inherit',
     'instances.policy_enable': 'Enable',
     'instances.policy_disable': 'Disable',
@@ -766,6 +787,27 @@ export const dictionaries = {
     'instances.section_plugins': '插件',
     'instances.section_skills': '技能',
     'instances.section_mcp': 'MCP 服务器',
+    'instances.own_commands': '独立命令权限',
+    'instances.commands_hint':
+      '这个机器人的管理员是谁、哪些命令仅限管理员使用。自定义后将完整替换节点策略（包括管理员列表），并且只有这里的管理员能通过此机器人使用 Bash。',
+    'instances.commands_inherit_hint': '节点管理员：{admins}',
+    'instances.bash_hint':
+      '此机器人的管理员可以在哪些对话中让 AI 执行 Bash。还需要在“系统配置 → Bash 工具”中开启总开关。',
+    'instances.bash_disabled': '此机器人不可用',
+    'instances.bash_disabled_hint':
+      '无论节点总开关如何，都无法通过此机器人执行 Bash。',
+    'instances.bash_own': '仅限管理员自己的对话',
+    'instances.bash_own_hint':
+      '私聊，以及每个成员各自一个会话、且未开启旁听的群聊。',
+    'instances.bash_shared': '也包括全群共享会话和旁听的群',
+    'instances.bash_shared_hint':
+      '管理员在全群共享一个会话、或开启旁听的群里也可以使用 Bash。',
+    'instances.bash_shared_warning':
+      '这类对话的上下文包含其他成员的消息，管理员提出请求时，这些消息可能影响 AI 实际执行的命令。仅在可信的群里开启。',
+    'instances.bash_groups_excluded':
+      '此机器人使用全群共享会话或旁听群聊，因此管理员只能在私聊中使用 Bash。',
+    'instances.bash_node_off':
+      'Bash 目前在节点层面处于关闭状态（系统配置 → Bash 工具）。',
     'instances.policy_inherit': '继承',
     'instances.policy_enable': '启用',
     'instances.policy_disable': '禁用',
@@ -946,10 +988,10 @@ export const dictionaries = {
     'bash.image': '已准备的沙箱镜像',
     'bash.processes': '进程/线程上限',
     'bash.hint':
-      '只按本轮发送者判断权限；本机模式可开启 AI 审查，帮助发现误操作。',
+      '节点级总开关与执行后端。每个实例可在“实例 → 编辑 → Bash 工具”中决定其管理员在哪些对话中可用；本机模式可开启 AI 审查，帮助发现误操作。',
     'bash.enabled': '允许管理员让 AI 执行 Bash',
     'bash.identity_hint':
-      '仅限在“系统配置 → 命令权限”中按 ID 列出的机器人管理员使用，群主和群管理员不算。平台通知、全群共享会话、开启旁听的群以及控制台聊天中始终不可用。',
+      '仅限按 ID 列在所属实例命令权限中（继承时为节点命令权限）的管理员使用，群主和群管理员不算。平台通知和控制台聊天中始终不可用；全群共享会话和旁听的群仅在实例允许时可用。',
     'bash.saved': 'Bash 设置已保存。',
     'tools.subtitle': '模型当前可以调用的全部工具及其提供方',
     'tools.total': '工具总数',
@@ -1081,7 +1123,7 @@ export const dictionaries = {
     'events.accept_invites_hint': '关闭时邀请留在平台上等人工处理。',
     'commands.title': '命令权限',
     'commands.hint':
-      '有些命令会影响别人：/model 切换整个机器人的模型，共享群会话里的 /new 会清空全群的上下文。在这里决定谁能使用它们。',
+      '有些命令会影响别人：/model 切换整个机器人的模型，共享群会话里的 /new 会清空全群的上下文。在这里决定谁能使用它们；每个实例也可以设置自己的命令权限。',
     'commands.admins': '机器人管理员',
     'commands.level_admins': '仅管理员',
     'commands.admins_hint':

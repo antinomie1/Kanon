@@ -1,35 +1,117 @@
 //! Who may run Bash, and the operator settings that choose how it runs.
 //!
-//! Bash is granted to the node's explicitly listed administrators — the same `<platform>:<user id>`
-//! entries of [`CommandPolicy::admins`] that unlock restricted commands. Group owners and admins as
-//! reported by a platform never qualify: they are chosen by the group, not by the operator, and a
-//! shell on the node is not something a group may hand out. The identity comes from the inbound
-//! event, never from model arguments, message text or a session name.
+//! Bash is granted to explicitly listed administrators — the same `<platform>:<user id>` entries
+//! of [`CommandPolicy::admins`](crate::access::CommandPolicy::admins) that unlock restricted
+//! commands, taken from the command policy of the instance serving the turn (its own override, or
+//! the node's). Group owners and admins as reported by a platform never qualify: they are chosen
+//! by the group, not by the operator, and a shell on the node is not something a group may hand
+//! out. The identity comes from the inbound event, never from model arguments, message text or a
+//! session name.
+//!
+//! Every decision goes through [`Gate::check`], so the availability hint, the first check of a
+//! call and the rechecks after queueing or review can never disagree.
 
 use std::future::Future;
-use std::sync::RwLock;
+use std::sync::{Arc, RwLock};
 
 use serde::{Deserialize, Serialize};
 
-use crate::access::CommandPolicy;
+use crate::access::CommandPolicyStore;
+use crate::instance::{BashScope, InstanceRegistry};
 
 tokio::task_local! {
     // Task scope keeps overlapping turns in one group from borrowing each other's rights. `None`
     // explicitly shadows any outer scope for turns that have no individual sender.
-    static CALLER: Option<String>;
+    static CALLER: Option<BashCaller>;
 }
 
-/// Runs one turn with its verified caller (`<platform>:<user id>`), or explicitly without one.
+/// The verified sender of one turn, as the pipeline established it before the model ran.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BashCaller {
+    /// `<platform>:<user id>` exactly as the adapter reported the sender.
+    pub id: String,
+    /// Instance serving the turn. Its command policy lists the administrators and its
+    /// [`BashScope`] decides where they may run Bash; `None` uses the node-wide command policy.
+    pub instance: Option<String>,
+    /// The turn's context also carries other group members' words (a shared or observed group
+    /// session), so only an instance that explicitly allows it lets the turn run Bash.
+    pub shared_context: bool,
+}
+
+impl BashCaller {
+    /// A caller in its own conversation, governed by the node-wide command policy.
+    pub fn new(id: impl Into<String>) -> Self {
+        Self {
+            id: id.into(),
+            instance: None,
+            shared_context: false,
+        }
+    }
+}
+
+/// Runs one turn with its verified caller, or explicitly without one.
 ///
-/// A turn without a caller can never run Bash; that is what a notice or a group session carrying
-/// other members' words gets.
-pub async fn with_bash_caller<F: Future>(caller: Option<String>, turn: F) -> F::Output {
+/// A turn without a caller can never run Bash; that is what a notice or the console chat gets.
+pub async fn with_bash_caller<F: Future>(caller: Option<BashCaller>, turn: F) -> F::Output {
     CALLER.scope(caller, turn).await
 }
 
 /// Returns the caller of the current turn, when it has one.
-pub(super) fn current_caller() -> Option<String> {
+pub(super) fn current_caller() -> Option<BashCaller> {
     CALLER.try_with(Clone::clone).ok().flatten()
+}
+
+/// The live stores that together decide whether a caller may run Bash.
+pub(super) struct Gate {
+    /// Node-wide switch and execution backend.
+    pub policy: Arc<BashPolicyStore>,
+    /// Node-wide command policy, used by instances without their own.
+    pub commands: Arc<CommandPolicyStore>,
+    /// Instance catalog holding per-instance command policies and Bash scopes.
+    pub instances: Arc<InstanceRegistry>,
+}
+
+impl Gate {
+    /// Why `caller` may not run Bash right now; `Ok` when it may.
+    ///
+    /// The reason is phrased for the model (it ends up in the availability hint and in tool
+    /// errors), so it names the setting that decides instead of a generic refusal.
+    pub async fn check(&self, caller: Option<&BashCaller>) -> Result<(), String> {
+        if !self.policy.get().enabled {
+            return Err("disabled by the operator".into());
+        }
+        let Some(caller) = caller else {
+            return Err("this turn has no single verified sender".into());
+        };
+        let commands = match &caller.instance {
+            None => self.commands.get(),
+            Some(id) => {
+                // A deleted instance fails closed: its administrators are no longer defined.
+                let instance = self
+                    .instances
+                    .get(id)
+                    .await
+                    .ok_or("the bot instance serving this conversation no longer exists")?;
+                match instance.bash {
+                    BashScope::Disabled => {
+                        return Err("disabled for this bot instance".into());
+                    }
+                    BashScope::OwnContext if caller.shared_context => {
+                        return Err("this group conversation also carries other members' \
+                            messages (shared or observed group session), and this bot instance \
+                            allows Bash only in an administrator's own conversation"
+                            .into());
+                    }
+                    _ => {}
+                }
+                instance.effective_command_policy(self.commands.get())
+            }
+        };
+        if !commands.admins.iter().any(|admin| *admin == caller.id) {
+            return Err("the current sender is not an authorized administrator of this bot".into());
+        }
+        Ok(())
+    }
 }
 
 /// Operator-selected execution backend. Tool arguments cannot change it.
@@ -96,13 +178,6 @@ impl BashPolicy {
             return Err("Bash review model must use <provider>/<model-id>".into());
         }
         Ok(())
-    }
-
-    /// Whether `caller` may run Bash: the tool is enabled and the caller is an explicitly listed
-    /// administrator. A turn without a caller is always denied.
-    pub fn allows(&self, caller: Option<&str>, commands: &CommandPolicy) -> bool {
-        self.enabled
-            && caller.is_some_and(|caller| commands.admins.iter().any(|admin| admin == caller))
     }
 }
 

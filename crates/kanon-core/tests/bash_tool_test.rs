@@ -6,10 +6,11 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use kanon_core::Supervisor;
+use kanon_core::instance::InstanceRegistry;
 use kanon_core::pipeline::PipelineEngine;
 use kanon_core::{
-    BashAvailabilityHook, BashPolicy, BashPolicyStore, BashTool, CommandPolicy, CommandPolicyStore,
-    with_bash_caller,
+    BashAvailabilityHook, BashCaller, BashPolicy, BashPolicyStore, BashTool, CommandPolicy,
+    CommandPolicyStore, with_bash_caller,
 };
 use kanon_llm::tool_router::ToolRouter;
 use kanon_llm::{
@@ -19,8 +20,8 @@ use kanon_llm::{
 use kanon_proto::v1::PipelineEventRequest;
 use serde_json::{Value, json};
 
-fn caller(id: &str) -> Option<String> {
-    Some(format!("onebot:{id}"))
+fn caller(id: &str) -> Option<BashCaller> {
+    Some(BashCaller::new(format!("onebot:{id}")))
 }
 
 fn permitted() -> Arc<BashPolicyStore> {
@@ -39,7 +40,13 @@ fn admins() -> Arc<CommandPolicyStore> {
 }
 
 fn bash(root: &std::path::Path, policy: Arc<BashPolicyStore>) -> BashTool {
-    BashTool::new(root, policy, admins()).unwrap()
+    BashTool::new(
+        root,
+        policy,
+        admins(),
+        Arc::new(InstanceRegistry::in_memory()),
+    )
+    .unwrap()
 }
 
 async fn run(tool: &BashTool, args: Value) -> Result<String, String> {
@@ -252,7 +259,7 @@ async fn caller_permissions_cannot_be_forged_or_shared_between_group_turns() {
     );
     assert!(
         with_bash_caller(
-            Some("other:alice".into()),
+            Some(BashCaller::new("other:alice")),
             tool.call("group", json!({"command":"true"}))
         )
         .await
@@ -479,7 +486,7 @@ async fn availability_keeps_multimodal_history_and_compaction_prefix_intact() {
             .content
             .as_deref()
             .unwrap()
-            .contains("not a Kanon administrator")
+            .contains("not an authorized administrator")
     );
     assert!(agent.compact_session("group", &[]).await.unwrap());
     let requests = model.requests.lock().unwrap().clone();

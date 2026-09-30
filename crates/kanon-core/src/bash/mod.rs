@@ -11,7 +11,7 @@ pub use review::{BashReviewDecision, BashReviewRequest, BashReviewer, ModelBashR
 pub use sandbox::{BashSandboxConfig, DEFAULT_BASH_WORKSPACE};
 
 pub use access::{
-    BashExecutionMode, BashLocalConfig, BashPolicy, BashPolicyStore, with_bash_caller,
+    BashCaller, BashExecutionMode, BashLocalConfig, BashPolicy, BashPolicyStore, with_bash_caller,
 };
 
 use std::path::{Path, PathBuf};
@@ -22,6 +22,7 @@ use kanon_llm::{AgentError, AgentHook, AgentTool, ChatMessage, ToolDefinition};
 use serde::Deserialize;
 
 use crate::access::CommandPolicyStore;
+use crate::instance::InstanceRegistry;
 
 /// Maximum retained bytes per output stream; excess output is drained rather than accumulated.
 pub const MAX_BASH_OUTPUT_BYTES: usize = 64 * 1024;
@@ -30,9 +31,8 @@ pub const MAX_BASH_OUTPUT_BYTES: usize = 64 * 1024;
 /// model-controlled.
 pub struct BashTool {
     root: PathBuf,
-    policy: Arc<BashPolicyStore>,
-    /// The command policy whose explicit administrator list decides who may run Bash.
-    commands: Arc<CommandPolicyStore>,
+    /// Settings, node-wide administrators and per-instance overrides that decide who may run Bash.
+    gate: Arc<access::Gate>,
     slots: Arc<tokio::sync::Semaphore>,
     sandbox: sandbox::SandboxRuntime,
     reviewer: RwLock<Option<Arc<dyn BashReviewer>>>,
@@ -40,10 +40,14 @@ pub struct BashTool {
 
 impl BashTool {
     /// Creates or resolves a dedicated sandbox workspace; invalid paths stop assembly explicitly.
+    ///
+    /// `commands` is the node-wide command policy and `instances` the catalog whose per-instance
+    /// command policies and Bash scopes override it; the pipeline enforces the same stores.
     pub fn new(
         root: impl AsRef<Path>,
         policy: Arc<BashPolicyStore>,
         commands: Arc<CommandPolicyStore>,
+        instances: Arc<InstanceRegistry>,
     ) -> std::io::Result<Self> {
         let requested = root.as_ref();
         let created = !requested.exists();
@@ -72,8 +76,11 @@ impl BashTool {
         }
         Ok(Self {
             root,
-            policy,
-            commands,
+            gate: Arc::new(access::Gate {
+                policy,
+                commands,
+                instances,
+            }),
             slots: Arc::new(tokio::sync::Semaphore::new(4)),
             sandbox: sandbox::SandboxRuntime::default(),
             reviewer: RwLock::new(None),
@@ -89,23 +96,19 @@ impl BashTool {
 
     /// Shared operator policy used by both execution and management endpoints.
     pub fn policy(&self) -> &Arc<BashPolicyStore> {
-        &self.policy
+        &self.gate.policy
     }
 
-    /// Command policy whose administrators may run Bash; the pipeline enforces the same store.
+    /// Node-wide command policy whose administrators may run Bash in instances without their own;
+    /// the pipeline enforces the same store.
     pub fn command_policy(&self) -> &Arc<CommandPolicyStore> {
-        &self.commands
-    }
-
-    /// Whether `caller` may run Bash under the current settings and administrator list.
-    fn allows(&self, caller: Option<&str>) -> bool {
-        self.policy.get().allows(caller, &self.commands.get())
+        &self.gate.commands
     }
 
     /// Explicitly discards the persistent container while preserving workspace files.
     pub async fn reset_sandbox(&self) -> Result<(), String> {
         self.sandbox
-            .reset(&self.root, &self.policy.get().sandbox)
+            .reset(&self.root, &self.policy().get().sandbox)
             .await
     }
 
@@ -115,11 +118,11 @@ impl BashTool {
         &self,
         next: &BashPolicy,
     ) -> Result<Option<tokio::sync::OwnedMutexGuard<()>>, String> {
-        if self.policy.get().sandbox.endpoint == next.sandbox.endpoint {
+        if self.policy().get().sandbox.endpoint == next.sandbox.endpoint {
             return Ok(None);
         }
         let guard = self.sandbox.lock_policy_update()?;
-        let current = self.policy.get();
+        let current = self.policy().get();
         if current.sandbox.endpoint != next.sandbox.endpoint {
             self.sandbox
                 .require_reset_before_endpoint_change(&self.root, &current.sandbox)
@@ -130,16 +133,10 @@ impl BashTool {
 
     /// Returns the runtime status used only in the newly arriving user message.
     pub async fn availability(&self) -> String {
-        let policy = self.policy.get();
-        if !policy.enabled {
-            return "unavailable: disabled by the operator".into();
+        if let Err(reason) = self.gate.check(access::current_caller().as_ref()).await {
+            return format!("unavailable: {reason}");
         }
-        let Some(caller) = access::current_caller() else {
-            return "unavailable in this conversation: it has no single verified sender".into();
-        };
-        if !policy.allows(Some(&caller), &self.commands.get()) {
-            return "unavailable: the current sender is not a Kanon administrator".into();
-        }
+        let policy = self.policy().get();
         match policy.execution_mode {
             BashExecutionMode::Sandbox => match sandbox::probe(&policy.sandbox).await {
                 Ok(_) => format!(
@@ -219,11 +216,13 @@ impl AgentTool for BashTool {
         arguments: serde_json::Value,
     ) -> Result<String, String> {
         // Never infer authorization from a session name, message text or tool arguments.
-        let caller = access::current_caller()
-            .filter(|caller| self.allows(Some(caller)))
-            .ok_or(
-                "Bash execution denied: Bash is disabled or the current sender is not an authorized administrator",
-            )?;
+        let caller = access::current_caller();
+        self.gate
+            .check(caller.as_ref())
+            .await
+            .map_err(|reason| format!("Bash execution denied: {reason}"))?;
+        // `check` refuses a turn without a caller, so this only unwraps what it already accepted.
+        let caller = caller.ok_or("Bash execution denied: this turn has no verified sender")?;
         let args: Arguments = serde_json::from_value(arguments)
             .map_err(|err| format!("Invalid Bash arguments: {err}"))?;
         if !(1..=120).contains(&args.timeout_seconds) {
@@ -239,7 +238,7 @@ impl AgentTool for BashTool {
         if Path::new(&args.cwd).is_absolute() {
             return Err("cwd must be relative to the node workspace".into());
         }
-        let selected = self.policy.get();
+        let selected = self.policy().get();
         let root = match selected.execution_mode {
             BashExecutionMode::Sandbox => self.root.clone(),
             BashExecutionMode::Local => Path::new(&selected.local.working_dir)
@@ -260,10 +259,12 @@ impl AgentTool for BashTool {
             .await
             .map_err(|err| err.to_string())?;
         // Recheck after waiting: a policy edit may have revoked this sender's access in the queue.
-        if !self.allows(Some(&caller)) {
-            return Err("Bash execution denied: permission was revoked".into());
+        if let Err(reason) = self.gate.check(Some(&caller)).await {
+            return Err(format!(
+                "Bash execution denied: permission was revoked: {reason}"
+            ));
         }
-        if self.policy.get() != selected {
+        if self.policy().get() != selected {
             return Err("Bash configuration changed; retry the command".into());
         }
         match selected.execution_mode {
@@ -275,8 +276,7 @@ impl AgentTool for BashTool {
                             cwd,
                             command,
                             seconds: args.timeout_seconds,
-                            policy: self.policy.clone(),
-                            commands: self.commands.clone(),
+                            gate: self.gate.clone(),
                             caller,
                             expected: selected,
                         },
@@ -316,7 +316,8 @@ impl AgentTool for BashTool {
                         ));
                     }
                 }
-                if !self.allows(Some(&caller)) || self.policy.get() != selected {
+                if self.gate.check(Some(&caller)).await.is_err() || self.policy().get() != selected
+                {
                     return Err(
                         "Local execution denied: permission or configuration changed during review"
                             .into(),

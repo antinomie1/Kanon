@@ -132,7 +132,7 @@ export interface EventPolicy {
 /** Who may run a command. */
 export type CommandAccess = 'everyone' | 'admins_in_groups' | 'admins';
 
-/** Node-wide command permissions and bot administrators. */
+/** Command permissions and bot administrators, node-wide or as an instance override. */
 export interface CommandPolicy {
   /** Administrators as `<platform>:<user id>`. */
   admins: string[];
@@ -149,6 +149,15 @@ export interface CommandPolicyResponse {
 
 /** Whether group members each have a session with the bot or share one. */
 export type SessionScope = 'user' | 'group';
+
+/**
+ * Where an instance lets its administrators run Bash; the node-wide Bash switch still wins.
+ *
+ * `own_context` covers private chats and per-member group sessions of a group the instance does
+ * not observe. `shared_context` also allows shared or observed group sessions, whose other
+ * members' words can steer the commands the model runs.
+ */
+export type BashScope = 'disabled' | 'own_context' | 'shared_context';
 
 /** Response of `GET`/`PUT /api/v1/system/event-policy`. */
 export interface EventPolicyResponse {
@@ -199,6 +208,9 @@ export interface BotInstanceView {
   context_policy: ContextPolicy | null;
   session_scope: SessionScope;
   observe_group: boolean;
+  /** Command-permission override; `null` inherits the node-wide policy. */
+  command_policy: CommandPolicy | null;
+  bash: BashScope;
   plugins: Record<string, ItemPolicy>;
   skills: Record<string, ItemPolicy>;
   mcp: Record<string, ItemPolicy>;
@@ -212,6 +224,10 @@ export interface InstancesResponse {
   node_reply_policy: ReplyPolicy;
   /** Node-wide context-extras policy inherited by instances without an override. */
   node_context_policy: ContextPolicy;
+  /** Node-wide command policy inherited by instances without an override. */
+  node_command_policy: CommandPolicy;
+  /** Whether Bash is switched on node-wide; an instance scope cannot enable it on its own. */
+  node_bash_enabled: boolean;
   instances: BotInstanceView[];
 }
 
@@ -228,6 +244,9 @@ export interface InstanceRequest {
   context_policy?: ContextPolicy | null;
   session_scope?: SessionScope;
   observe_group?: boolean;
+  /** `null` (or omitted) inherits the node-wide command policy. */
+  command_policy?: CommandPolicy | null;
+  bash?: BashScope;
   plugins?: Record<string, ItemPolicy>;
   skills?: Record<string, ItemPolicy>;
   mcp?: Record<string, ItemPolicy>;

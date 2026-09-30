@@ -107,22 +107,29 @@ stickers, files) into the model's context.
 
 ## Bash tool: persistent container or local host
 
-The operator chooses the execution mode under **Plugins & Adapters → Tools**:
+The operator switches Bash on and chooses the execution mode under **System Settings → Bash
+tool**:
 
 - **Persistent container** (default): reuse one managed container for the workspace across tool
   calls and node restarts. Normal completion leaves it running, including background processes.
 - **Local host**: run native Bash with the Kanon account's host permissions. Docker is unnecessary.
   Optional **AI review before execution** is enabled by default for this mode.
 
-Bash is off until the operator enables it, and then only the bot administrators listed by ID in
-the command policy (**System Settings → Command permissions**, `command_policy.admins` as
-`<platform>:<user id>`) may use it. Group owners and admins reported by a platform never qualify:
-a shell on the node is granted by the operator, not by a group. Identity comes from the original
-inbound event, never model arguments, message text or a session name. A turn has no Bash caller
-when it is a notice (a join or poke is not a request), when the instance shares one session with
-the whole group, or when it observes group chat — in those cases other members' words are in the
-turn's context and must not steer an administrator's shell. Console chat and plugin-originated LLM
-requests have no verified sender either. Permissions are rechecked after queueing and after review.
+Bash is off until the operator enables it, and then only the administrators listed by ID in the
+serving instance's command policy may use it: the instance's own override (**Instances → edit →
+Command permissions**), or the node's (**System Settings → Command permissions**,
+`command_policy.admins` as `<platform>:<user id>`). Group owners and admins reported by a platform
+never qualify: a shell on the node is granted by the operator, not by a group. Identity comes from
+the original inbound event, never model arguments, message text or a session name. A notice (a
+join or poke is not a request), console chat and plugin-originated LLM requests have no verified
+sender and never run Bash. Permissions are rechecked after queueing and after review.
+
+Each instance also chooses where its administrators may use Bash (**Instances → edit → Bash
+tool**, `bash` in `data/instances.json`): `disabled`, `own_context` (default: private chats and
+per-member group sessions of groups it does not observe) or `shared_context`. A shared or observed
+group session carries other members' words, which could steer an administrator's shell, so it
+needs the explicit `shared_context` opt-in; otherwise the model is told exactly which setting
+refuses the turn.
 
 The tool definition remains fixed for every sender. Availability and selected execution mode are
 appended once inside the originating user message, before persistence, preserving multimodal parts

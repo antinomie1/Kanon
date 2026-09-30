@@ -2,10 +2,11 @@
 #![cfg(unix)]
 
 use async_trait::async_trait;
+use kanon_core::instance::InstanceRegistry;
 use kanon_core::{
-    BashExecutionMode, BashLocalConfig, BashPolicy, BashPolicyStore, BashReviewDecision,
-    BashReviewRequest, BashReviewer, BashTool, CommandPolicy, CommandPolicyStore,
-    ModelBashReviewer, with_bash_caller,
+    BashCaller, BashExecutionMode, BashLocalConfig, BashPolicy, BashPolicyStore,
+    BashReviewDecision, BashReviewRequest, BashReviewer, BashTool, CommandPolicy,
+    CommandPolicyStore, ModelBashReviewer, with_bash_caller,
 };
 use kanon_llm::{
     AgentConfig, AgentFactory, AgentSlot, AgentTool, ChatMessage, ChatRequest, ChatResponse,
@@ -37,11 +38,17 @@ fn policy(root: &std::path::Path, review: bool) -> Arc<BashPolicyStore> {
     }))
 }
 fn tool(root: &std::path::Path, policy: Arc<BashPolicyStore>) -> BashTool {
-    BashTool::new(root.join("sandbox"), policy, admins()).unwrap()
+    BashTool::new(
+        root.join("sandbox"),
+        policy,
+        admins(),
+        Arc::new(InstanceRegistry::in_memory()),
+    )
+    .unwrap()
 }
 async fn call(tool: &BashTool, command: &str) -> Result<String, String> {
     with_bash_caller(
-        Some(ADMIN.into()),
+        Some(BashCaller::new(ADMIN)),
         tool.call("test", json!({"command":command})),
     )
     .await
@@ -70,17 +77,17 @@ async fn local_mode_runs_without_docker_and_keeps_sender_authorization() {
     );
     // No caller, a caller who is not an administrator, and an administrator while Bash is
     // switched off are all refused before anything starts.
-    for caller in [None, Some("test:stranger".to_string())] {
+    for (caller, reason) in [
+        (None, "no single verified sender"),
+        (Some("test:stranger"), "not an authorized administrator"),
+    ] {
         let denied = with_bash_caller(
-            caller,
+            caller.map(BashCaller::new),
             tool.call("test", json!({"command":"touch forbidden"})),
         )
         .await
         .unwrap_err();
-        assert!(
-            denied.contains("not an authorized administrator"),
-            "{denied}"
-        );
+        assert!(denied.contains(reason), "{denied}");
     }
     assert!(
         tool.call("test", json!({"command":"touch forbidden"}))
@@ -107,7 +114,7 @@ async fn group_roles_never_grant_bash_and_only_listed_admins_see_it_available() 
     tool.command_policy().set(commands);
     assert!(
         with_bash_caller(
-            Some("test:group-owner".into()),
+            Some(BashCaller::new("test:group-owner")),
             tool.call("test", json!({"command":"true"}))
         )
         .await
@@ -115,13 +122,13 @@ async fn group_roles_never_grant_bash_and_only_listed_admins_see_it_available() 
     );
     for (caller, expected) in [
         (None, "no single verified sender"),
-        (Some(ADMIN), "not a Kanon administrator"),
+        (Some(ADMIN), "not an authorized administrator"),
     ] {
-        let status = with_bash_caller(caller.map(str::to_string), tool.availability()).await;
+        let status = with_bash_caller(caller.map(BashCaller::new), tool.availability()).await;
         assert!(status.contains(expected), "{status}");
     }
     tool.command_policy().set(admins().get());
-    let status = with_bash_caller(Some(ADMIN.into()), tool.availability()).await;
+    let status = with_bash_caller(Some(BashCaller::new(ADMIN)), tool.availability()).await;
     assert!(status.starts_with("available locally"), "{status}");
 }
 

@@ -841,9 +841,9 @@ sequenceDiagram
 
 **适配器能力声明 (Capabilities)**：凡依赖平台差异的功能都走上面的通用契约（元数据键、回复段、`acknowledge()`、`accept_request()`），每个适配器用 `Capability` 声明自己实现了哪些：`sender_name`、`sender_role`、`group_messages`、`quote_reply`、`forward_content`、`acknowledge`、`member_join`、`bot_join`、`friend_add`、`poke`、`recall`、`friend_requests`、`group_invites`。内置适配器实现 `PlatformAdapter::capabilities()`，插件在 `plugin.toml` 的 `[adapter] capabilities` 中声明（需要回调的 `acknowledge` / `friend_requests` / `group_invites` 仅内置适配器可用，插件声明即清单错误）。`GET /api/v1/adapters` 返回每个适配器的能力，控制台在每个相关设置旁列出支持它的适配器——新适配器只需如实声明，无需改动控制台。
 
-**命令权限**：节点级 `command_policy`（`/api/v1/system/command-policy`）列出管理员（`<平台>:<用户 ID>`），可选把群主/群管理员（`kanon.sender_role`）视为管理员，并按命令名设定 `everyone` / `admins_in_groups` / `admins`；默认 `/new` 为「群聊仅管理员」、`/model` 为「仅管理员」，未列出的命令（含插件命令）所有人可用。被拒绝时回复发送者 ID，方便运维加入管理员列表。
+**命令权限**：节点级 `command_policy`（`/api/v1/system/command-policy`）列出管理员（`<平台>:<用户 ID>`），可选把群主/群管理员（`kanon.sender_role`）视为管理员，并按命令名设定 `everyone` / `admins_in_groups` / `admins`；默认 `/new` 为「群聊仅管理员」、`/model` 为「仅管理员」，未列出的命令（含插件命令）所有人可用。被拒绝时回复发送者 ID，方便运维加入管理员列表。实例可设置自己的 `command_policy` 覆盖（为 `null` 时继承节点策略），覆盖时整体替换节点策略，包括管理员列表。
 
-**Bash 工具**：`bash_policy.enabled` 打开后，仅 `command_policy.admins` 中按 ID 显式列出的管理员可用，群主/群管理员不算。调用者取自适配器的原始事件；通知、全群共享会话与旁听群的回合没有调用者，模型即使调用也会被拒绝。执行后端（持久化容器，或本机加可选 AI 审查）只由运维选择。
+**Bash 工具**：`bash_policy.enabled` 打开后，仅所属实例生效命令权限（实例覆盖或节点策略）中 `admins` 按 ID 显式列出的管理员可用，群主/群管理员不算。调用者（`BashCaller`：发送者、实例、是否共享上下文）取自适配器的原始事件；通知与控制台聊天没有调用者。实例级 `bash` 决定可用范围：`disabled`、`own_context`（默认，仅私聊和未旁听的按人会话）、`shared_context`（全群共享会话与旁听群也可用——其他成员的消息会进入上下文，需运维显式开启）。可用性提示、首次校验以及排队/审查后的复核都经过同一个 `Gate::check`，拒绝时会告诉模型具体是哪项设置。执行后端（持久化容器，或本机加可选 AI 审查）只由运维选择。
 
 **群聊上下文**（实例级）：`session_scope` 为 `user`（默认，群内每人一个会话）或 `group`（全群共享一个会话，每条消息以 `kanon.sender_name` 标注说话人）；`observe_group` 开启时，未被回复的群消息与机器人自己的回复进入有界缓冲（30 条 / 30 分钟），在该会话下次被回答时作为 `[群聊记录]` 放在当前轮开头，并按会话记录已读位置——每行只进入一次历史，请求前缀保持仅追加（`group_context_test` 验证）。旁听依赖 `group_messages` 能力。
 
