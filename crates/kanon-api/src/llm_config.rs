@@ -33,7 +33,8 @@ use std::path::{Path, PathBuf};
 
 use kanon_adapter_milky::MilkyConfig;
 use kanon_adapter_onebot::OneBotConfig;
-use kanon_core::{BashPolicy, ContextPolicy, ReplyPolicy};
+use kanon_adapter_qqofficial::QqOfficialConfig;
+use kanon_core::{BashPolicy, ContextPolicy, EventPolicy, ReplyPolicy};
 use kanon_llm::{ModelRef, ModelSpec, ProviderEntry};
 use serde::{Deserialize, Serialize};
 
@@ -130,6 +131,8 @@ pub struct NodeSettings {
     pub context_policy: ContextPolicy,
     /// Bash-only sender allowlist/denylist, independent of the static tool definition.
     pub bash_policy: BashPolicy,
+    /// Node-wide notice policy: which joins, pokes and recalls the bot reacts to.
+    pub event_policy: EventPolicy,
 }
 
 impl NodeSettings {
@@ -256,12 +259,18 @@ struct SystemConfigDocument {
     /// Caller permission for the guarded native Bash tool.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     bash_policy: Option<BashPolicy>,
+    /// Node-wide notice policy.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    event_policy: Option<EventPolicy>,
     /// Milky platform adapter configuration, when one was saved.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     milky: Option<MilkyConfig>,
     /// OneBot v11 adapter configuration, when saved.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     onebot: Option<OneBotConfig>,
+    /// QQ Official adapter configuration, when saved.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    qqofficial: Option<QqOfficialConfig>,
     /// Startup settings; carried through every write, never changed by the console.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     startup: Option<StartupConfig>,
@@ -403,6 +412,20 @@ impl SystemConfigStore {
         self.write_document(&document)
     }
 
+    /// Loads the persisted QQ Official adapter configuration.
+    pub fn load_qqofficial(&self) -> Result<Option<QqOfficialConfig>, String> {
+        Ok(self
+            .read_document()?
+            .and_then(|document| document.qqofficial))
+    }
+
+    /// Saves QQ Official settings, preserving every other section.
+    pub fn save_qqofficial(&self, config: &QqOfficialConfig) -> Result<(), String> {
+        let mut document = self.read_document()?.unwrap_or_default();
+        document.qqofficial = Some(config.clone());
+        self.write_document(&document)
+    }
+
     /// Loads the persisted Milky adapter configuration, if the document carries one.
     pub fn load_milky(&self) -> Result<Option<MilkyConfig>, String> {
         Ok(self.read_document()?.and_then(|document| document.milky))
@@ -430,6 +453,7 @@ impl SystemConfigStore {
             reply_policy: document.reply_policy.unwrap_or_default(),
             context_policy: document.context_policy.unwrap_or_default(),
             bash_policy: document.bash_policy.unwrap_or_default(),
+            event_policy: document.event_policy.unwrap_or_default(),
             models: document.models.unwrap_or_default(),
             ..NodeSettings::default()
         };
@@ -482,6 +506,7 @@ impl SystemConfigStore {
         document.reply_policy = Some(settings.reply_policy);
         document.context_policy = Some(settings.context_policy);
         document.bash_policy = Some(settings.bash_policy.clone());
+        document.event_policy = Some(settings.event_policy);
 
         self.write_document(&document)
     }

@@ -597,7 +597,7 @@ Rust 核心全权主导 LLM 的生命周期与推理编排，确保高并发下�
 ### 8.3 工具与"管理动作"的边界 (Tools vs. Management Actions)
 
 - **`tools`（LLM 可见）**：注册进 `ToolMeta` 的能力会被聚合后交给模型做 function calling。**适配器插件禁止声明任何 tool**——适配器的职责是平台收发，若其把"扫码绑定/凭证轮换"等运维能力注册为 tool，模型就会在闲聊中尝试调用它们。
-- **`actions`（仅控制台可见）**：运维操作通过 `PluginHostService.InvokeAction` 暴露（Python SDK 用 `@action(...)` 声明，不会出现在 `Plugin.meta()` 中）。控制台走 `POST /api/v1/plugins/{id}/actions/{action}`，核心内部流程（如 QQ 扫码绑定）同样走该 RPC，因此这类能力永远不会进入模型的函数列表。
+- **`actions`（仅控制台可见）**：运维操作通过 `PluginHostService.InvokeAction` 暴露（Python SDK 用 `@action(...)` 声明，不会出现在 `Plugin.meta()` 中）。控制台走 `POST /api/v1/plugins/{id}/actions/{action}`，因此这类能力永远不会进入模型的函数列表。
 - 判定规则：**模型可以主动调用的 → tool；只能由人/控制台触发的 → action**。
 
 ### 8.4 扩展能力：MCP 服务器与技能 (MCP & Skills)
@@ -775,7 +775,7 @@ sequenceDiagram
 
 | 文件 | 内容 |
 | :--- | :--- |
-| `system.json` | 提供商端点（含密钥，权限 `0600`）、模型目录、**全局默认模型**、回复与上下文策略、适配器配置 |
+| `system.json` | 提供商端点（含密钥，权限 `0600`）、模型目录、**全局默认模型**、回复/上下文/事件策略、适配器配置 |
 | `instances.json` | Bot 实例目录（适配器归属、人设/模型/策略覆盖、`/new` 会话代数） |
 | `personas.json` | 运营者自建人设（基础助手内置，不落盘） |
 | `sessions.db` | 对话历史、压缩摘要与会话记录（SQLite WAL，见 8.8）；启动时无法打开即启动失败 |
@@ -829,6 +829,13 @@ sequenceDiagram
 
 **插件侧能力**：声明 `[adapter]` 但未实现出站钩子的插件会收到明确的失败响应（`success=false` + 原因），
 核心据此记录投递失败 —— 契约不允许「假成功」。三语言 SDK 的默认 `on_deliver_message` / `onDeliverMessage` 均已改为显式拒绝。
+
+**通知、合并转发与回复体验**（适配器只报告事实，措辞与策略归核心）：
+- **通知事件**：进群、机器人被拉群/加好友、戳一戳、撤回以普通 `PipelineEventRequest` 入站，元数据带 `kanon.notice`（`member_join` / `bot_join` / `friend_add` / `poke` / `recall`）、可选 `kanon.notice_actor`（显示名）与 `kanon.notice_target`（被撤回消息入站时的 `event_id`）。是否回应由节点级事件策略（`system.json` 的 `event_policy`，`/api/v1/system/event-policy`）决定；被启用的通知跳过指令与回复策略，以一行 `[事件] …` 交给模型。
+- **撤回提示**：只有模型看过的消息被撤回时，才在该会话下一轮的当前用户消息前加 `[通知] …`；模型没看过的内容绝不因撤回而被透露。提示只进入当前轮，不改变请求前缀。
+- **合并转发**：适配器取回内容写入转发段载荷 `messages: [{sender, text, images}]`；上下文策略 `expand_forward`（默认开）决定是否逐条展开并为识图模型附带图片（有条数与图片上限）。
+- **引用回复**：回复策略 `quote_message` 开启时，群聊/频道中的模型回复首段为指向原事件的 `Reply` 段，由各适配器转换为原生引用。
+- **处理中反馈**：流水线决定用模型回答后，非阻塞调用内置适配器的 `acknowledge()`（默认无操作）；QQ 官方私聊可显示「正在输入」，Milky 群聊可对原消息点赞，均由各自适配器配置开启。
 
 ---
 

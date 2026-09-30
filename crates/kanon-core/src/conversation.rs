@@ -120,6 +120,12 @@ pub struct ReplyPolicy {
     /// Probability used by [`ReplyMode::Probability`], in `0.0..=1.0`.
     #[serde(default = "default_probability")]
     pub probability: f32,
+    /// Whether a model reply in a group or channel quotes the message it answers.
+    ///
+    /// Off by default. In a busy group the quote shows who the bot is answering; in a quiet one
+    /// it is only noise, so it is an operator choice. Private conversations are never quoted.
+    #[serde(default)]
+    pub quote_message: bool,
 }
 
 /// Default reply probability for [`ReplyMode::Probability`].
@@ -134,6 +140,7 @@ impl Default for ReplyPolicy {
         Self {
             mode: ReplyMode::Always,
             probability: default_probability(),
+            quote_message: false,
         }
     }
 }
@@ -238,13 +245,16 @@ pub const META_TIMESTAMP: &str = "kanon.timestamp";
 /// Metadata key carrying an adapter-formatted timestamp string, preferred over [`META_TIMESTAMP`].
 pub const META_TIMESTAMP_TEXT: &str = "kanon.timestamp_text";
 
-/// Whether identifying or contextual extras are prepended to the model prompt.
+/// Whether identifying or contextual extras are included in the model prompt.
 ///
-/// All default to `false`: a sender id and a group number are personal data, and a wall-clock time
-/// is not part of what the user said, so including any of them is an explicit operator decision —
-/// which is why the switches exist at all. Each is independent so an operator can, for example,
-/// add the time without ever exposing who wrote the message.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+/// The identity and time switches default to `false`: a sender id and a group number are personal
+/// data, and a wall-clock time is not part of what the user said, so including any of them is an
+/// explicit operator decision. Each is independent so an operator can, for example, add the time
+/// without ever exposing who wrote the message.
+///
+/// Forward expansion defaults to `true`: the user sent that content to the bot on purpose, and a
+/// bare "[merged forward]" marker leaves the model guessing what it is being asked about.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ContextPolicy {
     /// Whether the conversation id (group number, channel id, …) is included in the prompt.
     #[serde(default)]
@@ -255,6 +265,26 @@ pub struct ContextPolicy {
     /// Whether the message timestamp is included in the prompt.
     #[serde(default)]
     pub include_timestamp: bool,
+    /// Whether a merged-forward message is expanded into the messages it carries (text, and its
+    /// pictures for a vision model) instead of being shown as a title only.
+    #[serde(default = "default_true")]
+    pub expand_forward: bool,
+}
+
+impl Default for ContextPolicy {
+    fn default() -> Self {
+        Self {
+            include_channel_id: false,
+            include_sender_id: false,
+            include_timestamp: false,
+            expand_forward: true,
+        }
+    }
+}
+
+/// Serde default for switches that are on unless an operator turns them off.
+pub(crate) fn default_true() -> bool {
+    true
 }
 
 /// Hot-swappable node-wide context policy, mirroring [`ReplyPolicyStore`].

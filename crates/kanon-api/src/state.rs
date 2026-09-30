@@ -14,10 +14,11 @@ use std::time::Instant;
 
 use kanon_adapter_milky::MilkyAdapter;
 use kanon_adapter_onebot::OneBotAdapter;
+use kanon_adapter_qqofficial::QqOfficialAdapter;
 use kanon_core::{
     BashAvailabilityHook, BashPolicyStore, BashTool, ContextPolicyStore, EventIngress,
-    InstanceRegistry, McpConfigStore, McpPool, ModelBashReviewer, ReplyPolicyStore, SkillStore,
-    Supervisor, ToggleStore,
+    EventPolicyStore, InstanceRegistry, McpConfigStore, McpPool, ModelBashReviewer,
+    ReplyPolicyStore, SkillStore, Supervisor, ToggleStore,
 };
 use kanon_llm::{
     Agent, AgentConfig, AgentFactory, AgentSlot, InMemory, LlmProvider, Memory, PersonaRegistry,
@@ -79,6 +80,8 @@ struct ApiStateInner {
     bash_policy: Arc<BashPolicyStore>,
     /// Typed tool handle for explicit persistent-container reset.
     bash_tool: Option<Arc<BashTool>>,
+    /// Node-wide notice policy, shared with the pipeline worker.
+    event_policy: Arc<EventPolicyStore>,
     /// In-memory view of the persisted model-routing settings.
     ///
     /// Kept alongside the store so a read (listing providers, resolving a model) never touches the
@@ -92,6 +95,8 @@ struct ApiStateInner {
     milky: Option<Arc<MilkyAdapter>>,
     /// OneBot v11 adapter hosted by this node.
     onebot: Option<Arc<OneBotAdapter>>,
+    /// QQ Official adapter hosted by this node.
+    qqofficial: Option<Arc<QqOfficialAdapter>>,
     /// Real-time log and trace channels plus the metrics registry.
     observability: Arc<Observability>,
     /// Fast-ACK ingest handle driving the inbound data plane, absent when no pipeline is attached.
@@ -246,6 +251,11 @@ impl ApiState {
         self.inner.bash_tool.as_ref()
     }
 
+    /// Node-wide notice policy shared with the pipeline worker.
+    pub fn event_policy(&self) -> &Arc<EventPolicyStore> {
+        &self.inner.event_policy
+    }
+
     /// Snapshot of the persisted model-routing settings.
     pub fn node_settings(&self) -> NodeSettings {
         self.inner
@@ -276,6 +286,7 @@ impl ApiState {
         self.inner.reply_policy.set(settings.reply_policy);
         self.inner.context_policy.set(settings.context_policy);
         self.inner.bash_policy.set(settings.bash_policy.clone());
+        self.inner.event_policy.set(settings.event_policy);
         *self
             .inner
             .node_settings
@@ -394,6 +405,11 @@ impl ApiState {
         self.inner.onebot.as_ref()
     }
 
+    /// QQ Official adapter handle, when this node hosts one.
+    pub fn qqofficial(&self) -> Option<&Arc<QqOfficialAdapter>> {
+        self.inner.qqofficial.as_ref()
+    }
+
     /// Milky platform adapter handle, when this node hosts one.
     pub fn milky(&self) -> Option<&Arc<MilkyAdapter>> {
         self.inner.milky.as_ref()
@@ -440,6 +456,8 @@ pub struct ApiStateBuilder {
     milky: Option<Arc<MilkyAdapter>>,
     /// OneBot v11 adapter hosted by this node.
     onebot: Option<Arc<OneBotAdapter>>,
+    /// QQ Official adapter hosted by this node.
+    qqofficial: Option<Arc<QqOfficialAdapter>>,
     config_base_dir: Option<PathBuf>,
     observability: Option<Arc<Observability>>,
     ingress: Option<EventIngress>,
@@ -479,6 +497,7 @@ impl ApiStateBuilder {
             bash_tool: None,
             milky: None,
             onebot: None,
+            qqofficial: None,
             config_base_dir: None,
             observability: None,
             ingress: None,
@@ -649,6 +668,12 @@ impl ApiStateBuilder {
         self
     }
 
+    /// Shares the QQ Official adapter registered by the composition root.
+    pub fn with_qqofficial_adapter(mut self, adapter: Arc<QqOfficialAdapter>) -> Self {
+        self.qqofficial = Some(adapter);
+        self
+    }
+
     /// Shares the Milky platform adapter this node registered.
     ///
     /// The gateway never constructs the adapter itself: registration must happen before
@@ -763,6 +788,7 @@ impl ApiStateBuilder {
             .or(self.bash_policy)
             .unwrap_or_default();
         bash_policy.set(node_settings.bash_policy.clone());
+        let event_policy = Arc::new(EventPolicyStore::new(node_settings.event_policy));
 
         let instances = self.instances.unwrap_or_default();
         let plugin_state = self.plugin_state.unwrap_or_default();
@@ -805,9 +831,11 @@ impl ApiStateBuilder {
                 context_policy,
                 bash_policy,
                 bash_tool: self.bash_tool,
+                event_policy,
                 node_settings: Arc::new(RwLock::new(node_settings)),
                 milky: self.milky,
                 onebot: self.onebot,
+                qqofficial: self.qqofficial,
                 observability,
                 ingress: self.ingress,
                 plugins_dir,

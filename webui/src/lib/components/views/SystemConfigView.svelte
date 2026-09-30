@@ -9,6 +9,7 @@ import {
   Server,
 } from 'lucide-svelte';
 import { contextPolicyStore } from '../../stores/contextPolicy.svelte';
+import { eventPolicyStore } from '../../stores/eventPolicy.svelte';
 import { i18n, t } from '../../stores/i18n.svelte';
 import { nodeStore } from '../../stores/node.svelte';
 import { providersStore } from '../../stores/providers.svelte';
@@ -16,13 +17,19 @@ import {
   describeReplyPolicy,
   replyPolicyStore,
 } from '../../stores/replyPolicy.svelte';
-import type { ContextPolicy, ReplyMode, ReplyPolicy } from '../../types';
+import type {
+  ContextPolicy,
+  EventPolicy,
+  ReplyMode,
+  ReplyPolicy,
+} from '../../types';
 
 let copiedSnippet = $state(false);
 
 /** Reply-policy draft, seeded from the node once its policy has been read. */
 let policyMode = $state<ReplyMode>('always');
 let policyProbability = $state(0.5);
+let policyQuote = $state(false);
 let policyRequested = false;
 let policySeeded = false;
 
@@ -45,6 +52,7 @@ $effect(() => {
   if (policy && !policySeeded) {
     policyMode = policy.mode;
     policyProbability = policy.probability;
+    policyQuote = policy.quote_message;
     policySeeded = true;
   }
 });
@@ -53,6 +61,7 @@ let contextDraft = $state<ContextPolicy>({
   include_channel_id: false,
   include_sender_id: false,
   include_timestamp: false,
+  expand_forward: true,
 });
 let contextRequested = false;
 let contextSeeded = false;
@@ -70,6 +79,62 @@ $effect(() => {
   }
 });
 
+/** Event-policy draft; every switch applies immediately, like the context switches. */
+let eventDraft = $state<EventPolicy>({
+  welcome_members: false,
+  greet_on_join: false,
+  reply_to_poke: false,
+  note_recalls: true,
+});
+let eventRequested = false;
+let eventSeeded = false;
+
+$effect(() => {
+  if (!eventRequested) {
+    eventRequested = true;
+    void eventPolicyStore.load();
+  }
+  const policy = eventPolicyStore.policy;
+  if (policy && !eventSeeded) {
+    eventDraft = { ...policy };
+    eventSeeded = true;
+  }
+});
+
+/** The event switches, in the order the card renders them. */
+const eventSwitches: {
+  key: keyof EventPolicy;
+  labelKey: string;
+  hintKey: string;
+}[] = [
+  {
+    key: 'welcome_members',
+    labelKey: 'events.welcome',
+    hintKey: 'events.welcome_hint',
+  },
+  {
+    key: 'greet_on_join',
+    labelKey: 'events.greet',
+    hintKey: 'events.greet_hint',
+  },
+  {
+    key: 'reply_to_poke',
+    labelKey: 'events.poke',
+    hintKey: 'events.poke_hint',
+  },
+  {
+    key: 'note_recalls',
+    labelKey: 'events.recall',
+    hintKey: 'events.recall_hint',
+  },
+];
+
+/** Flips one event switch and persists the result immediately. */
+async function saveEventPolicy(next: EventPolicy) {
+  eventDraft = next;
+  await eventPolicyStore.save(next);
+}
+
 /** Flips one context switch and persists the result immediately. */
 async function saveContextPolicy(next: ContextPolicy) {
   contextDraft = next;
@@ -81,6 +146,7 @@ async function saveReplyPolicy() {
   const policy: ReplyPolicy = {
     mode: policyMode,
     probability: policyProbability,
+    quote_message: policyQuote,
   };
   await replyPolicyStore.save(policy);
 }
@@ -229,6 +295,18 @@ function copySocketPath(path: string) {
       {/if}
     </div>
 
+    <label class="mt-5 flex items-start justify-between gap-4 cursor-pointer select-none">
+      <span>
+        <span class="block text-sm font-medium text-zinc-800 dark:text-zinc-200">{t('reply.quote')}</span>
+        <span class="block text-xs text-zinc-500 mt-0.5">{t('reply.quote_hint')}</span>
+      </span>
+      <input
+        type="checkbox"
+        bind:checked={policyQuote}
+        class="mt-1 rounded text-indigo-600 focus:ring-0 w-4 h-4 shrink-0"
+      />
+    </label>
+
     {#if replyPolicyStore.error}
       <p class="text-xs text-rose-500 mt-4 font-mono">{replyPolicyStore.error}</p>
     {/if}
@@ -304,6 +382,23 @@ function copySocketPath(path: string) {
           class="mt-1 rounded text-indigo-600 focus:ring-0 w-4 h-4 shrink-0"
         />
       </label>
+
+      <label class="flex items-start justify-between gap-4 cursor-pointer select-none">
+        <span>
+          <span class="block text-sm font-medium text-zinc-800 dark:text-zinc-200">{t('context.expand_forward')}</span>
+          <span class="block text-xs text-zinc-500 mt-0.5">{t('context.expand_forward_hint')}</span>
+        </span>
+        <input
+          type="checkbox"
+          checked={contextDraft.expand_forward}
+          onchange={(e) =>
+            saveContextPolicy({
+              ...contextDraft,
+              expand_forward: e.currentTarget.checked,
+            })}
+          class="mt-1 rounded text-indigo-600 focus:ring-0 w-4 h-4 shrink-0"
+        />
+      </label>
     </div>
 
     {#if contextPolicyStore.error}
@@ -311,6 +406,38 @@ function copySocketPath(path: string) {
     {/if}
     {#if contextPolicyStore.notice}
       <p class="text-xs text-emerald-500 mt-4 font-mono">{t('context.updated')}</p>
+    {/if}
+  </div>
+  <!-- Platform notices: which joins, pokes and recalls the bot reacts to. -->
+  <div class="bg-white dark:bg-zinc-900 border border-zinc-200 dark:border-zinc-800 rounded-xl p-6 shadow-xs">
+    <div class="pb-4 border-b border-zinc-100 dark:border-zinc-800">
+      <h3 class="text-base font-semibold text-zinc-900 dark:text-zinc-100">{t('events.title')}</h3>
+      <p class="text-xs text-zinc-500 mt-0.5">{t('events.hint')}</p>
+    </div>
+
+    <div class="mt-5 space-y-4">
+      {#each eventSwitches as item (item.key)}
+        <label class="flex items-start justify-between gap-4 cursor-pointer select-none">
+          <span>
+            <span class="block text-sm font-medium text-zinc-800 dark:text-zinc-200">{t(item.labelKey)}</span>
+            <span class="block text-xs text-zinc-500 mt-0.5">{t(item.hintKey)}</span>
+          </span>
+          <input
+            type="checkbox"
+            checked={eventDraft[item.key]}
+            onchange={(e) =>
+              saveEventPolicy({ ...eventDraft, [item.key]: e.currentTarget.checked })}
+            class="mt-1 rounded text-indigo-600 focus:ring-0 w-4 h-4 shrink-0"
+          />
+        </label>
+      {/each}
+    </div>
+
+    {#if eventPolicyStore.error}
+      <p class="text-xs text-rose-500 mt-4 font-mono">{eventPolicyStore.error}</p>
+    {/if}
+    {#if eventPolicyStore.notice}
+      <p class="text-xs text-emerald-500 mt-4 font-mono">{t('events.updated')}</p>
     {/if}
   </div>
 </div>

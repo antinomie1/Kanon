@@ -322,3 +322,40 @@ async fn the_context_policy_round_trips_and_instances_override_it() {
         json!(false)
     );
 }
+
+#[tokio::test]
+async fn the_event_policy_is_applied_and_persisted() {
+    let dir = tempfile::tempdir().expect("config dir");
+    let state = isolated_state(dir.path().to_path_buf());
+    let app = kanon_api::app(state.clone());
+
+    let (status, body) =
+        common::send_json(&app, Method::GET, "/api/v1/system/event-policy", None).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["policy"]["reply_to_poke"], json!(false));
+    assert_eq!(
+        body["policy"]["note_recalls"],
+        json!(true),
+        "recall notes default on"
+    );
+
+    let (status, body) = common::send_json(
+        &app,
+        Method::PUT,
+        "/api/v1/system/event-policy",
+        Some(json!({ "welcome_members": true, "reply_to_poke": true })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "unexpected body: {body}");
+    assert!(state.event_policy().get().reply_to_poke);
+    assert!(
+        state.event_policy().get().note_recalls,
+        "an omitted switch keeps its default"
+    );
+
+    let restored = state
+        .system_config()
+        .load_node_settings()
+        .expect("settings reload");
+    assert!(restored.event_policy.welcome_members);
+}

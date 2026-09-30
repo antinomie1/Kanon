@@ -16,6 +16,9 @@ export const dictionaries = {
     'nav.system': 'System Settings',
 
     // Titles & Subtitles
+    'title.instances': 'Bot Instances',
+    'subtitle.instances':
+      'Which bots answer on which platforms, with their persona, model and policies',
     'title.overview': 'Node Overview & Health',
     'subtitle.overview':
       'Microkernel node runtime, process supervisor, and Prometheus exposition',
@@ -256,15 +259,60 @@ export const dictionaries = {
     'adapters.qq_qr_copy_link': 'Copy Auth URL',
     'adapters.qq_qr_copied': 'Copied to clipboard!',
     'adapters.qq_qr_retry': 'Regenerate QR Code',
-    'adapters.qq_visual_config': 'QQ Official Settings',
+    'adapters.qq_title': 'QQ Official Bot Adapter',
+    'adapters.qq_enabled': 'Enable QQ Official adapter',
+    'adapters.qq_enabled_hint':
+      'Saving connects to or disconnects from the QQ gateway; no restart needed.',
+    'adapters.qq_unsaved': 'Unsaved change (press Save & apply)',
     'adapters.qq_appid': 'Bot AppID',
     'adapters.qq_secret': 'Bot AppSecret',
-    'adapters.qq_sandbox': 'Sandbox Mode',
-    'adapters.qq_group_c2c': 'Group & Private (C2C) Messages',
-    'adapters.qq_guild_dm': 'Guild Direct Messages',
-    'adapters.qq_use_markdown': 'Native Markdown Support',
-    'adapters.qq_md_template': 'Markdown Template ID',
-    'adapters.qq_md_param': 'Template Parameter Key',
+    'adapters.qq_secret_keep': 'Leave empty to keep the stored secret',
+    'adapters.qq_secret_none': 'No secret configured',
+    'adapters.qq_sandbox': 'Sandbox environment',
+    'adapters.qq_use_markdown':
+      'Send native Markdown (needs the Markdown permission)',
+    'adapters.qq_save': 'Save & apply',
+    'adapters.qq_saving': 'Saving...',
+    'adapters.qq_saved':
+      'Saved and applied; see the status below for the connection result',
+    'adapters.qq_bot': 'Bot',
+    'adapters.qq_state_disabled': 'Disabled',
+    'adapters.qq_state_connecting': 'Connecting',
+    'adapters.qq_state_connected': 'Connected',
+    'adapters.qq_state_disconnected': 'Disconnected',
+    'adapters.qq_state_stopped': 'Stopped',
+    'adapters.qq_not_hosted':
+      'This node does not host the QQ Official adapter.',
+
+    'reply.quote': 'Quote the message being answered',
+    'reply.quote_hint':
+      "In groups and channels, the bot's reply quotes the message it answers so everyone sees who it is talking to. Private chats are never quoted.",
+    'context.expand_forward': 'Expand merged forwards',
+    'context.expand_forward_hint':
+      'Show the model the messages inside a forwarded chat log (with their pictures for vision models) instead of only its title.',
+    'events.title': 'Event responses',
+    'events.updated': 'Event responses updated',
+    'events.hint':
+      'Platform events that are not messages. The bot only reacts to the ones switched on here, and then regardless of the reply policy.',
+    'events.welcome': 'Welcome new group members',
+    'events.welcome_hint':
+      'When someone joins a group, the bot greets them in its own persona.',
+    'events.greet': 'Say hello when added',
+    'events.greet_hint':
+      'When the bot is added to a group or as a friend, it introduces itself.',
+    'events.poke': 'Respond to pokes',
+    'events.poke_hint': 'When someone pokes (nudges) the bot, it answers.',
+    'events.recall': 'Tell the model about recalls',
+    'events.recall_hint':
+      'When a message the model already saw is recalled, its next turn in that conversation says so, so it stops referring to it. Recalled messages it never saw are not revealed.',
+    'adapters.automation': 'Automation',
+    'adapters.auto_accept_friends': 'Accept friend requests automatically',
+    'adapters.auto_accept_group_invites':
+      'Accept group invitations automatically',
+    'adapters.reaction_ack':
+      'React with 👍 to a group message the bot is about to answer',
+    'adapters.qq_typing':
+      'Show "typing…" in private chats while the model works (uses one of QQ\'s passive-reply slots)',
 
     // OneBot v11 adapter
     'adapters.onebot_title': 'OneBot v11 Adapter',
@@ -536,7 +584,7 @@ export const dictionaries = {
     // Reply policy (shared by the instance form and the node settings)
     'context.title': 'Context extras',
     'context.hint':
-      'Choose what the node adds to every prompt besides the message itself. All are off by default: ids are personal data and a wall-clock time is not part of what the user said.',
+      'Choose what the node adds to every prompt besides the message itself. Ids and the time are off by default: ids are personal data and a wall-clock time is not part of what the user said. Merged forwards are expanded by default.',
     'context.channel_id': 'Group / channel id',
     'context.channel_id_hint':
       'Prepend the conversation id (group number / channel id).',
@@ -714,6 +762,9 @@ export const dictionaries = {
     'nav.system': '系统配置',
 
     // 标题与副标题
+    'title.instances': '机器人实例',
+    'subtitle.instances':
+      '哪些机器人在哪些平台上回复，以及各自的人设、模型与策略',
     'title.overview': '微内核概览与健康状态',
     'subtitle.overview':
       '微内核运行时、进程监管 Supervisor 与 Prometheus 指标导出',
@@ -942,15 +993,52 @@ export const dictionaries = {
     'adapters.qq_qr_copy_link': '复制授权链接',
     'adapters.qq_qr_copied': '已复制到剪贴板！',
     'adapters.qq_qr_retry': '重新获取二维码',
-    'adapters.qq_visual_config': 'QQ 官方机器人配置',
+    'adapters.qq_title': 'QQ 官方机器人适配器',
+    'adapters.qq_enabled': '启用 QQ 官方机器人适配器',
+    'adapters.qq_enabled_hint': '保存后连接或断开 QQ 网关，无需重启。',
+    'adapters.qq_unsaved': '有未保存的改动（请点“保存并生效”）',
     'adapters.qq_appid': '机器人 AppID',
     'adapters.qq_secret': '机器人 AppSecret',
+    'adapters.qq_secret_keep': '留空表示保留已保存的密钥',
+    'adapters.qq_secret_none': '尚未配置密钥',
     'adapters.qq_sandbox': '沙箱测试环境',
-    'adapters.qq_group_c2c': '启用群聊与单聊私信 (C2C)',
-    'adapters.qq_guild_dm': '启用频道私信支持',
-    'adapters.qq_use_markdown': '启用原生 Markdown',
-    'adapters.qq_md_template': 'Markdown 模板 ID (可选)',
-    'adapters.qq_md_param': '模板变量 Key (默认: text)',
+    'adapters.qq_use_markdown': '发送原生 Markdown（需要 Markdown 权限）',
+    'adapters.qq_save': '保存并生效',
+    'adapters.qq_saving': '保存中...',
+    'adapters.qq_saved': '设置已保存并应用，连接结果请查看下方状态',
+    'adapters.qq_bot': '机器人',
+    'adapters.qq_state_disabled': '未启用',
+    'adapters.qq_state_connecting': '连接中',
+    'adapters.qq_state_connected': '已连接',
+    'adapters.qq_state_disconnected': '已断开',
+    'adapters.qq_state_stopped': '已停止',
+    'adapters.qq_not_hosted': '本节点未注册 QQ 官方机器人适配器。',
+
+    'reply.quote': '回复时引用原消息',
+    'reply.quote_hint':
+      '在群聊和频道中，机器人的回复会引用它所回答的那条消息，大家能看清它在回答谁。私聊不会引用。',
+    'context.expand_forward': '展开合并转发',
+    'context.expand_forward_hint':
+      '把合并转发里的每条消息（以及其中的图片，供识图模型查看）交给模型，而不是只给一个标题。',
+    'events.title': '事件响应',
+    'events.updated': '事件响应已更新',
+    'events.hint':
+      '非消息类的平台事件。机器人只对这里开启的事件作出回应，且不受回复策略限制。',
+    'events.welcome': '欢迎新成员',
+    'events.welcome_hint': '有人进群时，机器人以自己的人设打招呼欢迎。',
+    'events.greet': '被添加时打招呼',
+    'events.greet_hint': '机器人被拉进群或被加为好友时，主动做个自我介绍。',
+    'events.poke': '回应戳一戳',
+    'events.poke_hint': '有人戳了戳机器人时，机器人会回应。',
+    'events.recall': '撤回提示',
+    'events.recall_hint':
+      '模型看过的消息被撤回后，在该会话的下一轮告诉模型，避免它继续引用。模型没看过的消息不会因此被透露。',
+    'adapters.automation': '自动化',
+    'adapters.auto_accept_friends': '自动同意好友申请',
+    'adapters.auto_accept_group_invites': '自动同意入群邀请',
+    'adapters.reaction_ack': '准备回复群消息时先给它点个 👍',
+    'adapters.qq_typing':
+      '私聊中模型思考时显示「对方正在输入」（会占用一次 QQ 被动回复额度）',
 
     // OneBot v11 adapter
     'adapters.onebot_title': 'OneBot v11 适配器',
@@ -1211,7 +1299,7 @@ export const dictionaries = {
     // 回复策略（实例表单与节点设置共用）
     'context.title': '上下文附加信息',
     'context.hint':
-      '选择节点在消息本身之外额外加入提示词的内容。三项默认关闭：各种 ID 属于个人数据，时间也不是用户说的话。',
+      '选择节点在消息本身之外额外加入提示词的内容。ID 与时间默认关闭：各种 ID 属于个人数据，时间也不是用户说的话；合并转发默认展开。',
     'context.channel_id': '群号 / 频道 ID',
     'context.channel_id_hint': '在提示词中加入会话 ID（群号 / 频道 ID）。',
     'context.sender_id': '发送者 ID',

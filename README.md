@@ -100,6 +100,11 @@ OneBot v11 can also be configured under **Plugins & Adapters → OneBot v11** in
 Both forward and reverse universal WebSockets are supported. See [the OneBot setup guide](docs/ONEBOT.md)
 for connection examples, account binding, message support and the typed client covering 29 common APIs.
 
+The QQ Official Bot adapter is built in as well: open **Plugins & Adapters → QQ 官方机器人** and either
+scan the QR code with mobile QQ or enter the AppID and AppSecret. It answers group @-messages, C2C
+chats, guild @-messages and guild DMs, and brings quoted messages (text, images, voice transcripts,
+stickers, files) into the model's context.
+
 ## Bash tool: persistent container or local host
 
 The operator chooses the execution mode under **Plugins & Adapters → Tools**:
@@ -231,6 +236,7 @@ cargo build --workspace                           # everything, including the fi
 | `crates/kanon-proto` | Protobuf/gRPC contract and generated stubs |
 | `crates/kanon-adapter-milky` | Milky protocol platform adapter |
 | `crates/kanon-adapter-onebot` | OneBot v11 forward/reverse WebSocket platform adapter |
+| `crates/kanon-adapter-qqofficial` | QQ Official Bot (QQ Open Platform) platform adapter |
 | `crates/kanon-dev` | developer CLI |
 | `sdks/{rust,python,typescript}` | plugin SDKs and language hosts |
 | `webui` | independent web console |

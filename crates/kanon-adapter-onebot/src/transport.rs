@@ -178,10 +178,11 @@ where
     S: AsyncRead + AsyncWrite + Unpin,
 {
     let (sender, mut commands) = mpsc::channel::<Command>(64);
-    // Quote lookups call `get_msg` through this same session, so they run beside the loop that
-    // answers them. The set is owned by the session: a disconnect drops every pending lookup.
+    // Lookups (quotes, forwards, member names) and request answers call the API through this same
+    // session, so they run beside the loop that answers them. The set is owned by the session: a
+    // disconnect drops every pending lookup. Each task yields the event to ingest, if any.
     let api = sender.clone();
-    let mut quotes = JoinSet::new();
+    let mut lookups: JoinSet<Option<PipelineEventRequest>> = JoinSet::new();
     {
         let mut state = state.write().expect("OneBot state poisoned");
         state.sender = Some(sender);
@@ -220,19 +221,29 @@ where
                         self_id = Some(id.clone());
                         state.write().expect("OneBot state poisoned").status.self_id = Some(id);
                     }
-                    match mapping::map_event(&config.platform, value) {
-                        Ok(Some(event)) => match mapping::reply_target(&event) {
-                            Some(message_id) => {
-                                let api = api.clone();
-                                quotes.spawn(async move {
-                                    let quoted = OneBotClient::call_on::<_, Value>(api, "get_msg", &json!({"message_id": message_id})).await;
-                                    (event, quoted)
-                                });
+                    match value["post_type"].as_str() {
+                        Some("notice") => match mapping::map_notice(&config.platform, &value) {
+                            Ok(Some(notice)) => {
+                                lookups.spawn(name_notice(api.clone(), notice));
                             }
-                            None => ingest(state, config, ingress, event),
+                            Ok(None) => {}
+                            Err(err) => record_error(state, format!("OneBot notice mapping failed: {err}")),
                         },
-                        Ok(None) => {},
-                        Err(err) => record_error(state, format!("OneBot message mapping failed: {err}")),
+                        Some("request") => {
+                            if let Some(answer) = auto_accept(config, &value) {
+                                lookups.spawn(answer_request(api.clone(), answer));
+                            }
+                        }
+                        _ => match mapping::map_event(&config.platform, value) {
+                            // Plain messages go straight in, keeping their order; only a message
+                            // that needs a lookup waits for it.
+                            Ok(Some(event)) if mapping::needs_lookup(&event) => {
+                                lookups.spawn(enrich(api.clone(), event));
+                            }
+                            Ok(Some(event)) => ingest(state, config, ingress, event),
+                            Ok(None) => {}
+                            Err(err) => record_error(state, format!("OneBot message mapping failed: {err}")),
+                        },
                     }
                 } else if let Some(echo) = value.get("echo").and_then(Value::as_str) {
                     if let Some(command) = pending.remove(echo) {
@@ -241,13 +252,10 @@ where
                     }
                 }
             }
-            Some(joined) = quotes.join_next() => {
-                let (mut event, quoted) = joined.map_err(|_| "OneBot quote lookup task failed")?;
-                // A recalled or expired quote must not drop the message that quoted it.
-                if let Err(err) = quoted.map_err(|e| e.to_string()).and_then(|data| mapping::attach_quote(&mut event, &data["message"])) {
-                    tracing::warn!(error = %err, "OneBot quoted message unavailable");
+            Some(joined) = lookups.join_next() => {
+                if let Some(event) = joined.map_err(|_| "OneBot lookup task failed")? {
+                    ingest(state, config, ingress, event);
                 }
-                ingest(state, config, ingress, event);
             }
             command = commands.recv() => {
                 let Some(command) = command else { return Ok(()); };
@@ -343,4 +351,116 @@ fn safe_ws_error(error: &tokio_tungstenite::tungstenite::Error) -> String {
         }
         _ => "WebSocket protocol or TLS error".into(),
     }
+}
+
+/// Completes a message with what OneBot does not push: the quoted message, the content of merged
+/// forwards and the names behind @-mentions.
+///
+/// Every lookup is best-effort. A recalled quote, an expired forward or a member who left must not
+/// drop the message that referenced them, so failures are logged and the event goes on as is.
+async fn enrich(
+    api: mpsc::Sender<Command>,
+    mut event: PipelineEventRequest,
+) -> Option<PipelineEventRequest> {
+    if let Some(message_id) = mapping::reply_target(&event) {
+        let quoted = OneBotClient::call_on::<_, Value>(
+            api.clone(),
+            "get_msg",
+            &json!({"message_id": message_id}),
+        )
+        .await;
+        if let Err(err) = quoted
+            .map_err(|e| e.to_string())
+            .and_then(|data| mapping::attach_quote(&mut event, &data["message"]))
+        {
+            tracing::warn!(error = %err, "OneBot quoted message unavailable");
+        }
+    }
+    for forward_id in mapping::forward_ids(&event) {
+        // The standard names the parameter `id`; NapCat and LLOneBot read `message_id`.
+        let params = json!({"id": forward_id, "message_id": forward_id});
+        let fetched =
+            OneBotClient::call_on::<_, Value>(api.clone(), "get_forward_msg", &params).await;
+        if let Err(err) = fetched
+            .map_err(|e| e.to_string())
+            .and_then(|data| mapping::attach_forward(&mut event, &forward_id, &data))
+        {
+            tracing::warn!(error = %err, "OneBot merged forward unavailable");
+        }
+    }
+    if let Some(group_id) = mapping::group_of(&event) {
+        for user_id in mapping::unnamed_mentions(&event) {
+            if let Some(name) = display_name(&api, Some(group_id), user_id).await {
+                mapping::name_mention(&mut event, user_id, &name);
+            }
+        }
+    }
+    Some(event)
+}
+
+/// Puts a name on a notice's actor; the QQ number stands in when no name can be read.
+async fn name_notice(
+    api: mpsc::Sender<Command>,
+    notice: mapping::Notice,
+) -> Option<PipelineEventRequest> {
+    let mut event = notice.event;
+    if let Some(actor) = notice.actor_id {
+        let name = display_name(&api, notice.group_id, actor)
+            .await
+            .unwrap_or_else(|| actor.to_string());
+        mapping::set_notice_actor(&mut event, &name);
+    }
+    Some(event)
+}
+
+/// Group card, else nickname, of an account; `None` when the implementation cannot tell.
+async fn display_name(
+    api: &mpsc::Sender<Command>,
+    group_id: Option<i64>,
+    user_id: i64,
+) -> Option<String> {
+    let data = match group_id {
+        Some(group_id) => {
+            let params = json!({"group_id": group_id, "user_id": user_id, "no_cache": false});
+            OneBotClient::call_on::<_, Value>(api.clone(), "get_group_member_info", &params).await
+        }
+        None => {
+            let params = json!({"user_id": user_id, "no_cache": false});
+            OneBotClient::call_on::<_, Value>(api.clone(), "get_stranger_info", &params).await
+        }
+    }
+    .ok()?;
+    ["card", "nickname"]
+        .into_iter()
+        .filter_map(|key| data[key].as_str())
+        .map(str::trim)
+        .find(|name| !name.is_empty())
+        .map(str::to_owned)
+}
+
+/// The API call that accepts a request, when the configuration says to.
+fn auto_accept(config: &OneBotConfig, value: &Value) -> Option<(&'static str, Value)> {
+    match mapping::map_request(value)? {
+        mapping::Request::Friend { flag } if config.auto_accept_friends => Some((
+            "set_friend_add_request",
+            json!({"flag": flag, "approve": true}),
+        )),
+        mapping::Request::GroupInvite { flag } if config.auto_accept_group_invites => Some((
+            "set_group_add_request",
+            json!({"flag": flag, "sub_type": "invite", "approve": true}),
+        )),
+        _ => None,
+    }
+}
+
+/// Answers a request; nothing is ingested.
+async fn answer_request(
+    api: mpsc::Sender<Command>,
+    (action, params): (&'static str, Value),
+) -> Option<PipelineEventRequest> {
+    match OneBotClient::request(api, action, &params).await {
+        Ok(_) => tracing::info!(action, "OneBot request accepted automatically"),
+        Err(err) => tracing::warn!(action, error = %err, "OneBot request could not be accepted"),
+    }
+    None
 }

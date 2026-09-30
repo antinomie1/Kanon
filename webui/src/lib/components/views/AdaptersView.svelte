@@ -1,15 +1,15 @@
 <script lang="ts">
-import { QrCode, Radio, RefreshCw, Settings } from 'lucide-svelte';
+import { Radio, RefreshCw, Settings } from 'lucide-svelte';
 import { api } from '../../api/client';
 import { t } from '../../stores/i18n.svelte';
 import { milkyStore } from '../../stores/milky.svelte';
 import { onebotStore } from '../../stores/onebot.svelte';
+import { qqofficialStore } from '../../stores/qqofficial.svelte';
 import type { AdapterItem } from '../../types';
-import QqOfficialQrModal from '../adapters/QqOfficialQrModal.svelte';
-import PluginConfigDrawer from '../plugins/PluginConfigDrawer.svelte';
 import Switch from '../ui/Switch.svelte';
 import MilkyAdapterPanel from './MilkyAdapterPanel.svelte';
 import OneBotAdapterPanel from './OneBotAdapterPanel.svelte';
+import QqOfficialAdapterPanel from './QqOfficialAdapterPanel.svelte';
 
 /**
  * Platform adapters tab.
@@ -17,8 +17,8 @@ import OneBotAdapterPanel from './OneBotAdapterPanel.svelte';
  * Adapters are the node's platform boundary: every message that enters or leaves the microkernel
  * passes one of them. They answer a different question than the plugins tab — "which platforms can
  * this node talk to, and are they healthy?" against "what does the bot do" — so they get their own
- * tab beside tools, MCP servers and skills. Both tabs render the same plugin configuration drawer,
- * so a QQ Official adapter is configured identically from either one.
+ * tab beside tools, MCP servers and skills. Built-in adapters (Milky, OneBot v11, QQ Official) each
+ * open their own configuration drawer from here.
  */
 
 let adapters = $state<AdapterItem[]>([]);
@@ -29,10 +29,8 @@ let error = $state<string | null>(null);
 let milkyConfigOpen = $state(false);
 /** OneBot v11 connection settings drawer. */
 let onebotConfigOpen = $state(false);
-/** Plugin configuration drawer, used by adapters that are implemented as plugins. */
-let configPluginId = $state<string | null>(null);
-/** QQ Official QR binding dialog. */
-let qrModalOpen = $state(false);
+/** QQ Official credentials drawer. */
+let qqConfigOpen = $state(false);
 
 /** Loads the adapter catalog and keeps the Milky store in step with it. */
 async function load() {
@@ -41,7 +39,11 @@ async function load() {
   try {
     const res = await api.getAdapters();
     adapters = res.adapters;
-    await Promise.all([milkyStore.ensureLoaded(), onebotStore.ensureLoaded()]);
+    await Promise.all([
+      milkyStore.ensureLoaded(),
+      onebotStore.ensureLoaded(),
+      qqofficialStore.ensureLoaded(),
+    ]);
   } catch (e) {
     error = e instanceof Error ? e.message : String(e);
   } finally {
@@ -59,6 +61,12 @@ function openMilkyConfig() {
 function openOneBotConfig() {
   onebotConfigOpen = true;
   void onebotStore.load();
+}
+
+/** Opens QQ Official settings with the current saved values. */
+function openQqConfig() {
+  qqConfigOpen = true;
+  void qqofficialStore.load();
 }
 
 $effect(() => {
@@ -120,6 +128,18 @@ $effect(() => {
               >
                 {t(milkyStore.stateLabelKey)}
               </span>
+            {:else if adapter.platform === qqofficialStore.platformId && qqofficialStore.status}
+              <span
+                class="px-2 py-0.5 rounded text-xs font-mono border {qqofficialStore.stateTone === 'ok'
+                  ? 'bg-emerald-500/10 text-emerald-600 border-emerald-500/20'
+                  : qqofficialStore.stateTone === 'warn'
+                    ? 'bg-amber-500/10 text-amber-600 border-amber-500/20'
+                    : qqofficialStore.stateTone === 'bad'
+                      ? 'bg-rose-500/10 text-rose-600 border-rose-500/20'
+                      : 'bg-zinc-500/10 text-zinc-500 border-zinc-500/20'}"
+              >
+                {t(qqofficialStore.stateLabelKey)}
+              </span>
             {:else if adapter.platform === onebotStore.platformId && onebotStore.status}
               <!-- The OneBot adapter's own state is more precise than "connected or not": it
                    distinguishes disabled, connecting and failed, which need different reactions. -->
@@ -146,17 +166,15 @@ $effect(() => {
           </div>
 
           <div class="flex items-center gap-2 self-end sm:self-auto">
-            {#if adapter.platform === 'qqofficial'}
+            {#if adapter.platform === qqofficialStore.platformId}
+              <Switch
+                checked={qqofficialStore.status?.enabled ?? false}
+                disabled={qqofficialStore.loading || qqofficialStore.applyingEnabled}
+                onchange={(next) => void qqofficialStore.setEnabled(next)}
+                label={t('adapters.qq_enabled')}
+              />
               <button
-                onclick={() => (qrModalOpen = true)}
-                class="px-2.5 py-1 text-xs font-medium text-emerald-600 dark:text-emerald-400 bg-emerald-500/10 hover:bg-emerald-500/20 border border-emerald-500/20 rounded-md transition cursor-pointer flex items-center gap-1 shadow-2xs"
-                title={t('adapters.qq_qr_title')}
-              >
-                <QrCode class="w-3.5 h-3.5" />
-                <span>{t('adapters.qq_qr_btn')}</span>
-              </button>
-              <button
-                onclick={() => (configPluginId = 'org.kanon.adapter.qqofficial')}
+                onclick={openQqConfig}
                 class="px-2.5 py-1 text-xs font-medium text-zinc-600 dark:text-zinc-400 hover:text-zinc-900 dark:hover:text-zinc-100 hover:bg-zinc-100 dark:hover:bg-zinc-800 border border-zinc-200 dark:border-zinc-700 rounded-md transition cursor-pointer flex items-center gap-1"
               >
                 <Settings class="w-3.5 h-3.5" />
@@ -207,6 +225,13 @@ $effect(() => {
         {milkyStore.error}
       </div>
     {/if}
+    {#if qqofficialStore.error && !qqConfigOpen}
+      <div
+        class="p-3 rounded-lg bg-rose-500/10 border border-rose-500/20 text-xs text-rose-700 dark:text-rose-300 font-mono break-all"
+      >
+        {qqofficialStore.error}
+      </div>
+    {/if}
     {#if onebotStore.error && !onebotConfigOpen}
       <div
         class="p-3 rounded-lg bg-rose-500/10 border border-rose-500/20 text-xs text-rose-700 dark:text-rose-300 font-mono break-all"
@@ -218,8 +243,8 @@ $effect(() => {
 
 </div>
 
-<!-- Milky adapter configuration drawer: the built-in adapter's second-level view, mirroring how
-     the QQ Official plugin exposes its own settings from the adapter list. -->
+<!-- Milky adapter configuration drawer: the built-in adapter's second-level view, opened from the
+     adapter list. -->
 {#if milkyConfigOpen}
   <!-- svelte-ignore a11y_click_events_have_key_events -->
   <div
@@ -254,8 +279,8 @@ $effect(() => {
   </div>
 {/if}
 
-<!-- OneBot adapter configuration drawer: the built-in adapter's second-level view, mirroring how
-     the QQ Official plugin exposes its own settings from the adapter list. -->
+<!-- OneBot adapter configuration drawer: the built-in adapter's second-level view, opened from the
+     adapter list. -->
 {#if onebotConfigOpen}
   <!-- svelte-ignore a11y_click_events_have_key_events -->
   <div
@@ -290,14 +315,37 @@ $effect(() => {
   </div>
 {/if}
 
-<QqOfficialQrModal
-  open={qrModalOpen}
-  onclose={() => (qrModalOpen = false)}
-  onbound={() => void load()}
-/>
+<!-- QQ Official configuration drawer: credentials, delivery options and QR binding. -->
+{#if qqConfigOpen}
+  <!-- svelte-ignore a11y_click_events_have_key_events -->
+  <div
+    class="fixed inset-0 bg-black/40 backdrop-blur-xs z-50 flex items-center justify-center p-4"
+    onclick={() => (qqConfigOpen = false)}
+    role="button"
+    tabindex="-1"
+  >
+    <!-- svelte-ignore a11y_click_events_have_key_events -->
+    <div
+      class="w-full max-w-3xl max-h-[85vh] overflow-y-auto bg-white dark:bg-zinc-900 border border-zinc-200 dark:border-zinc-800 rounded-xl shadow-2xl p-6 space-y-4"
+      onclick={(e) => e.stopPropagation()}
+      role="dialog"
+      tabindex="-1"
+    >
+      <div
+        class="flex items-center justify-between border-b border-zinc-200 dark:border-zinc-800 pb-3"
+      >
+        <h3 class="text-base font-semibold text-zinc-900 dark:text-zinc-100">
+          {t('adapters.qq_title')}
+        </h3>
+        <button
+          onclick={() => (qqConfigOpen = false)}
+          class="text-zinc-400 hover:text-zinc-600 dark:hover:text-zinc-200 text-xs sm:text-sm font-mono cursor-pointer"
+        >
+          {t('common.close')}
+        </button>
+      </div>
 
-<PluginConfigDrawer
-  pluginId={configPluginId}
-  onclose={() => (configPluginId = null)}
-  onrefresh={() => void load()}
-/>
+      <QqOfficialAdapterPanel />
+    </div>
+  </div>
+{/if}

@@ -16,6 +16,7 @@ pub mod instance;
 pub mod ipc;
 pub mod manifest;
 pub mod mcp;
+pub mod notice;
 pub mod pipeline;
 pub mod shutdown;
 pub mod skill;
@@ -50,6 +51,10 @@ pub use mcp::{
     ATTACHMENT_RETENTION, DEFAULT_ATTACHMENT_DIR, DEFAULT_MCP_CONFIG, MCP_WATCHDOG_INTERVAL,
     McpConfigStore, McpError, McpHealth, McpPool, McpServer, McpServerConfig, McpTransport,
     prune_attachments,
+};
+pub use notice::{
+    EventPolicy, EventPolicyStore, META_NOTICE, META_NOTICE_ACTOR, META_NOTICE_TARGET, NoticeKind,
+    RecallLedger,
 };
 pub use pipeline::{
     CommandRouter, DEFAULT_OUTBOUND_QUEUE_CAPACITY, DeliveryOutcome, HELP_COMMAND, INFO_COMMAND,

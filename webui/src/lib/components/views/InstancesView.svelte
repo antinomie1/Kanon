@@ -428,6 +428,17 @@ $effect(() => {
               </div>
             {/if}
 
+            {#if instancesStore.formReplyPolicyMode !== 'inherit'}
+              <label class="flex items-center justify-between gap-4 text-sm text-zinc-700 dark:text-zinc-300 cursor-pointer select-none">
+                <span>{t('reply.quote')}</span>
+                <input
+                  type="checkbox"
+                  bind:checked={instancesStore.formReplyQuote}
+                  class="rounded text-indigo-600 focus:ring-0 w-4 h-4"
+                />
+              </label>
+            {/if}
+
             {#if instancesStore.formReplyPolicyMode === 'inherit'}
               <p class="text-xs text-zinc-400">
                 {t('instances.reply_inherit_hint')}
@@ -482,6 +493,14 @@ $effect(() => {
                 <input
                   type="checkbox"
                   bind:checked={instancesStore.formIncludeTimestamp}
+                  class="rounded text-indigo-600 focus:ring-0 w-4 h-4"
+                />
+              </label>
+              <label class="flex items-center justify-between gap-4 text-sm text-zinc-700 dark:text-zinc-300 cursor-pointer select-none">
+                <span>{t('context.expand_forward')}</span>
+                <input
+                  type="checkbox"
+                  bind:checked={instancesStore.formExpandForward}
                   class="rounded text-indigo-600 focus:ring-0 w-4 h-4"
                 />
               </label>

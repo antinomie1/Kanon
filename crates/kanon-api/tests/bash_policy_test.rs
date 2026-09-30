@@ -77,6 +77,62 @@ async fn bash_policy_round_trips_and_reloads_without_changing_the_tool_catalog()
 }
 
 #[tokio::test]
+async fn bash_and_notice_updates_preserve_each_other_and_adapter_settings() {
+    let dir = tempfile::tempdir().unwrap();
+    let config = Arc::new(SystemConfigStore::new(dir.path().join("system.json")));
+    let adapter = kanon_adapter_qqofficial::QqOfficialConfig {
+        app_id: "test-app".into(),
+        secret: Some("test-secret".into()),
+        ..Default::default()
+    };
+    config.save_qqofficial(&adapter).unwrap();
+    let state = ApiState::builder(Arc::new(Supervisor::new(
+        Some(dir.path().join("run")),
+        None,
+    )))
+    .with_system_config(config.clone())
+    .build();
+    let app = kanon_api::app(state.clone());
+    let notice = json!({"welcome_members":true, "reply_to_poke":true, "note_recalls":false});
+    let bash = json!({
+        "allowlist":[{"platform":"qqofficial", "user_id":"owner"}],
+        "execution_mode":"local",
+        "local":{"working_dir":".", "auto_review":true}
+    });
+    // Exercise both update orders: each endpoint writes the same system.json document.
+    for (route, body) in [
+        ("/api/v1/system/event-policy", notice.clone()),
+        ("/api/v1/tools/bash/policy", bash),
+        ("/api/v1/system/event-policy", notice),
+    ] {
+        let (status, response) = common::send_json(&app, Method::PUT, route, Some(body)).await;
+        assert_eq!(status, StatusCode::OK, "{response}");
+    }
+    let restored = config.load_node_settings().unwrap();
+    assert_eq!(restored.bash_policy, state.bash_policy().get());
+    assert_eq!(restored.event_policy, state.event_policy().get());
+    assert!(restored.event_policy.welcome_members);
+    assert!(!restored.event_policy.note_recalls);
+    assert_eq!(config.load_qqofficial().unwrap(), Some(adapter));
+
+    // Startup must repopulate both live stores from the merged persisted settings.
+    let restarted = ApiState::builder(Arc::new(Supervisor::new(
+        Some(dir.path().join("run")),
+        None,
+    )))
+    .with_system_config(config)
+    .with_node_settings(restored)
+    .build();
+    assert_eq!(restarted.event_policy().get(), state.event_policy().get());
+    assert_eq!(restarted.bash_policy().get(), state.bash_policy().get());
+    assert!(restarted.bash_policy().get().allows(Some(&BashPrincipal {
+        platform: "qqofficial".into(),
+        user_id: "owner".into(),
+    })));
+    assert!(!restarted.bash_policy().get().allows(None));
+}
+
+#[tokio::test]
 async fn failed_policy_persistence_does_not_open_the_execution_gate() {
     let dir = tempfile::tempdir().unwrap();
     let state = ApiState::builder(Arc::new(Supervisor::new(

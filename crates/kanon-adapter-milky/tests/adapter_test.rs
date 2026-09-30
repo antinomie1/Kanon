@@ -211,9 +211,10 @@ async fn disabled_adapter_opens_no_connection_and_rejects_delivery() {
     assert!(!status.enabled);
 }
 
-/// Non-conversational events are counted and reported, never ingested as chat.
+/// A recall reaches the core as a notice naming the recalled message, never as chat; an event
+/// Kanon has no use for is only counted.
 #[tokio::test]
-async fn non_message_events_are_counted_but_not_ingested() {
+async fn recalls_become_notices_and_other_events_are_only_counted() {
     let fake = FakeMilky::start(Transport::Sse).await;
     let adapter = MilkyAdapter::new(config_for(&fake, true)).expect("adapter should build");
 
@@ -224,6 +225,12 @@ async fn non_message_events_are_counted_but_not_ingested() {
         .expect("adapter should start");
 
     fake.wait_for_subscription(0).await;
+    fake.push_event(json!({
+        "time": 1_700_000_000_i64,
+        "self_id": 10001,
+        "event_type": "group_name_change",
+        "data": {"group_id": 30003, "new_group_name": "新群名", "operator_id": 20002}
+    }));
     fake.push_event(json!({
         "time": 1_700_000_000_i64,
         "self_id": 10001,
@@ -238,10 +245,30 @@ async fn non_message_events_are_counted_but_not_ingested() {
         }
     }));
 
-    wait_until(|| adapter.status().events_received > 0).await;
-    let status = adapter.status();
-    assert_eq!(status.messages_ingested, 0);
-    assert!(receiver.try_recv().is_err(), "a recall is not a message");
+    let notice = tokio::time::timeout(Duration::from_secs(5), receiver.recv())
+        .await
+        .expect("the recall should be ingested")
+        .expect("channel open")
+        .event
+        .expect("event present");
+    let field = |key: &str| {
+        notice.metadata.as_ref().unwrap().fields[key]
+            .kind
+            .clone()
+            .unwrap()
+    };
+    use kanon_proto::prost_types::value::Kind;
+    assert_eq!(field("kanon.notice"), Kind::StringValue("recall".into()));
+    assert_eq!(
+        field("kanon.notice_target"),
+        Kind::StringValue("milky:10001:group:30003:20002:5".into())
+    );
+    assert!(
+        notice.segments.is_empty(),
+        "a recall carries no chat content"
+    );
+    assert!(receiver.try_recv().is_err(), "the rename is not ingested");
+    assert_eq!(adapter.status().events_received, 2);
 }
 
 /// A dropped connection is re-established and inbound delivery resumes.

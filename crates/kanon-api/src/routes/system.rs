@@ -1,5 +1,6 @@
-//! Node system configuration inspection (`GET /api/v1/system/config`) and the node-wide reply and
-//! context policies (`/api/v1/system/reply-policy`, `/api/v1/system/context-policy`).
+//! Node system configuration inspection (`GET /api/v1/system/config`) and the node-wide reply,
+//! context and notice policies (`/api/v1/system/reply-policy`, `/api/v1/system/context-policy`,
+//! `/api/v1/system/event-policy`).
 
 use axum::Json;
 use axum::Router;
@@ -7,7 +8,7 @@ use axum::extract::State;
 use axum::routing::{get, post};
 use serde::Serialize;
 
-use kanon_core::{BashPolicy, ContextPolicy, ReplyPolicy};
+use kanon_core::{BashPolicy, ContextPolicy, EventPolicy, ReplyPolicy};
 
 use crate::error::ApiError;
 use crate::state::ApiState;
@@ -28,6 +29,10 @@ pub fn routes() -> Router<ApiState> {
         .route(
             "/api/v1/system/context-policy",
             get(get_context_policy).put(put_context_policy),
+        )
+        .route(
+            "/api/v1/system/event-policy",
+            get(get_event_policy).put(put_event_policy),
         )
 }
 
@@ -101,6 +106,8 @@ pub struct SystemConfigResponse {
     pub reply_policy: ReplyPolicy,
     /// Node-wide context-extras policy inherited by instances without an override.
     pub context_policy: ContextPolicy,
+    /// Node-wide notice policy.
+    pub event_policy: EventPolicy,
     /// Host operating system and architecture.
     pub environment: EnvironmentSection,
 }
@@ -179,6 +186,7 @@ async fn system_config(State(state): State<ApiState>) -> Json<SystemConfigRespon
         llm,
         reply_policy: state.reply_policy().get(),
         context_policy: state.context_policy().get(),
+        event_policy: state.event_policy().get(),
         environment: EnvironmentSection {
             os: std::env::consts::OS,
             arch: std::env::consts::ARCH,
@@ -254,4 +262,35 @@ async fn put_context_policy(
         "Node-wide context policy updated"
     );
     Ok(get_context_policy(State(state)).await)
+}
+
+/// Response describing the node-wide notice policy.
+#[derive(Debug, Serialize)]
+pub struct EventPolicyResponse {
+    /// The effective policy.
+    pub policy: EventPolicy,
+}
+
+/// Handler for `GET /api/v1/system/event-policy`.
+async fn get_event_policy(State(state): State<ApiState>) -> Json<EventPolicyResponse> {
+    Json(EventPolicyResponse {
+        policy: state.event_policy().get(),
+    })
+}
+
+/// Handler for `PUT /api/v1/system/event-policy`.
+///
+/// Applied and persisted through the node settings path, like the reply and context policies.
+async fn put_event_policy(
+    State(state): State<ApiState>,
+    Json(policy): Json<EventPolicy>,
+) -> Result<Json<EventPolicyResponse>, ApiError> {
+    let mut settings = state.node_settings();
+    settings.event_policy = policy;
+    state
+        .apply_node_settings(settings)
+        .map_err(ApiError::BadRequest)?;
+
+    tracing::info!(?policy, "Node-wide event policy updated");
+    Ok(get_event_policy(State(state)).await)
 }

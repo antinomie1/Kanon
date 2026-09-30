@@ -11,6 +11,8 @@ import type {
   DeleteProviderRequest,
   DiscoverModelsRequest,
   DiscoverModelsResponse,
+  EventPolicy,
+  EventPolicyResponse,
   FetchModelsRequest,
   FetchModelsResponse,
   InstallPluginResponse,
@@ -37,6 +39,8 @@ import type {
   ProvidersCatalog,
   QQOfficialPollLoginResponse,
   QQOfficialQrLoginResponse,
+  QqOfficialConfigRequest,
+  QqOfficialConfigView,
   ReplyPolicy,
   ReplyPolicyResponse,
   SessionsResponse,
@@ -135,6 +139,13 @@ export const api = {
     request<ContextPolicyResponse>('/api/v1/system/context-policy'),
   setContextPolicy: (policy: ContextPolicy) =>
     request<ContextPolicyResponse>('/api/v1/system/context-policy', {
+      method: 'PUT',
+      body: JSON.stringify(policy),
+    }),
+  getEventPolicy: () =>
+    request<EventPolicyResponse>('/api/v1/system/event-policy'),
+  setEventPolicy: (policy: EventPolicy) =>
+    request<EventPolicyResponse>('/api/v1/system/event-policy', {
       method: 'PUT',
       body: JSON.stringify(policy),
     }),
@@ -357,27 +368,25 @@ export const api = {
       method: 'POST',
       body: JSON.stringify(req),
     }),
-  requestQQOfficialLoginQr: (bindHost?: string) =>
+  // QQ Official is built in: the configuration is validated, hot-applied and saved in one call,
+  // and a QR binding applies and saves the credentials itself.
+  getQqOfficialConfig: () =>
+    request<QqOfficialConfigView>('/api/v1/adapters/qqofficial/config'),
+  updateQqOfficialConfig: (req: QqOfficialConfigRequest) =>
+    request<QqOfficialConfigView>('/api/v1/adapters/qqofficial/config', {
+      method: 'PUT',
+      body: JSON.stringify(req),
+    }),
+  requestQQOfficialLoginQr: () =>
     request<QQOfficialQrLoginResponse>('/api/v1/adapters/qqofficial/login/qr', {
       method: 'POST',
-      body: JSON.stringify({ bind_host: bindHost }),
     }),
-  pollQQOfficialLogin: (
-    taskId: string,
-    bindKey: string,
-    bindHost?: string,
-    autoSave = true,
-  ) =>
+  pollQQOfficialLogin: (taskId: string, bindKey: string) =>
     request<QQOfficialPollLoginResponse>(
       '/api/v1/adapters/qqofficial/login/poll',
       {
         method: 'POST',
-        body: JSON.stringify({
-          task_id: taskId,
-          bind_key: bindKey,
-          bind_host: bindHost,
-          auto_save: autoSave,
-        }),
+        body: JSON.stringify({ task_id: taskId, bind_key: bindKey }),
       },
     ),
 

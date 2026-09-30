@@ -12,6 +12,7 @@ members = [
     "crates/kanon-core",
     "crates/kanon-adapter-milky",
     "crates/kanon-adapter-onebot",
+    "crates/kanon-adapter-qqofficial",
     "crates/kanon-api",
     "crates/kanon-dev",
     "sdks/rust/kanon-sdk",

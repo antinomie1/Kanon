@@ -16,10 +16,9 @@ import { t } from '../../stores/i18n.svelte';
 /**
  * QR-code binding flow for the QQ Official adapter.
  *
- * The modal is a self-contained flow: it requests a login task, polls it until the operator
- * authorizes (or it expires) and reports the credentials back to its caller. It is rendered by
- * both the platform-adapters page and the plugin configuration drawer, so it owns no state that
- * either caller needs to reason about — only `open`, `onclose` and the bind result.
+ * The modal is a self-contained flow: it requests a login task and polls it until the operator
+ * authorizes (or it expires). On success the node has already applied and saved the credentials,
+ * so the caller is only told the bound AppID and reloads its view.
  */
 let {
   open = false,
@@ -28,11 +27,8 @@ let {
 }: {
   open?: boolean;
   onclose: () => void;
-  /** Called after a successful authorization so the caller can adopt the credentials. */
-  onbound?: (credentials: {
-    appid: string | null;
-    secret: string | null;
-  }) => void;
+  /** Called after a successful binding, once the node runs with the new credentials. */
+  onbound?: (appid: string | null) => void;
 } = $props();
 
 let qrTaskId = $state<string | null>(null);
@@ -80,20 +76,17 @@ async function startLogin() {
           stopQrPolling();
           qrStatus = 'success';
           qrBoundAppId = pollRes.appid ?? '';
-          onbound?.({
-            appid: pollRes.appid ?? null,
-            secret: pollRes.secret ?? null,
-          });
+          onbound?.(pollRes.appid ?? null);
         } else if (pollRes.status === 'expired') {
           stopQrPolling();
           qrStatus = 'expired';
-        } else if (pollRes.status === 'error') {
-          stopQrPolling();
-          qrStatus = 'error';
-          qrStatusMsg = pollRes.message || 'Error polling authorization status';
         }
-      } catch {
-        // Keep polling on transient network glitch
+      } catch (e) {
+        // A failed poll (binding service error, undecryptable secret, save failure) is shown with
+        // the retry button rather than retried silently forever.
+        stopQrPolling();
+        qrStatus = 'error';
+        qrStatusMsg = e instanceof Error ? e.message : String(e);
       }
     }, intervalMs);
   } catch (e) {

@@ -256,10 +256,12 @@ async fn probability_mode_is_deterministic_at_the_extremes() {
     let always = ReplyPolicy {
         mode: ReplyMode::Probability,
         probability: 1.0,
+        ..Default::default()
     };
     let never = ReplyPolicy {
         mode: ReplyMode::Probability,
         probability: 0.0,
+        ..Default::default()
     };
 
     let registry = Arc::new(InstanceRegistry::in_memory());
@@ -463,10 +465,57 @@ async fn info_reports_host_time_model_and_adapter() {
         PipelineResult::BuiltinReplied { command, replies } => {
             assert_eq!(command, "info");
             let text = reply_text(&replies);
+            #[cfg(target_os = "macos")]
+            assert!(text.starts_with("System: macOS "), "{text}");
+            #[cfg(not(target_os = "macos"))]
             assert!(text.contains("系统:"), "{text}");
             assert!(text.contains("时间:"), "{text}");
             assert!(text.contains("模型: local/test-model"), "{text}");
             assert!(text.contains("适配器: policy"), "{text}");
+        }
+        other => panic!("unexpected result: {other:?}"),
+    }
+}
+
+/// Checks the macOS reply against the OS tools rather than the implementation's APIs.
+#[cfg(target_os = "macos")]
+#[tokio::test]
+async fn info_reports_macos_product_and_kernel_versions() {
+    let read_version = |command: &str, argument: &str| {
+        let output = std::process::Command::new(command)
+            .arg(argument)
+            .output()
+            .expect("run macOS version command");
+        assert!(output.status.success(), "{command}: {output:?}");
+        let version = String::from_utf8(output.stdout)
+            .expect("UTF-8 version")
+            .trim()
+            .to_string();
+        assert!(!version.is_empty(), "{command} returned an empty version");
+        version
+    };
+    let product_version = read_version("sw_vers", "-productVersion");
+    let kernel_version = read_version("uname", "-r");
+    let registry = Arc::new(InstanceRegistry::in_memory());
+    instance(&registry, None).await;
+    let engine = factory_harness(registry);
+
+    match engine
+        .process_event(event("i2", "/info", "private", false))
+        .await
+    {
+        PipelineResult::BuiltinReplied { command, replies } => {
+            assert_eq!(command, "info");
+            let text = reply_text(&replies);
+            let architecture = match std::env::consts::ARCH {
+                "aarch64" => "ARM64 (aarch64)",
+                "x86_64" => "x86-64 (x86_64)",
+                architecture => architecture,
+            };
+            let expected = format!(
+                "System: macOS {product_version} | Kernel: Darwin {kernel_version} | Arch: {architecture}"
+            );
+            assert_eq!(text.lines().next(), Some(expected.as_str()));
         }
         other => panic!("unexpected result: {other:?}"),
     }
@@ -578,6 +627,7 @@ async fn the_node_context_policy_is_applied_from_the_first_event() {
             include_channel_id: true,
             include_sender_id: false,
             include_timestamp: false,
+            ..Default::default()
         },
     );
 
@@ -604,6 +654,7 @@ async fn the_instance_context_policy_overrides_the_node_one() {
             include_channel_id: false,
             include_sender_id: true,
             include_timestamp: false,
+            ..Default::default()
         }),
     )
     .await;
@@ -614,6 +665,7 @@ async fn the_instance_context_policy_overrides_the_node_one() {
             include_channel_id: true,
             include_sender_id: false,
             include_timestamp: false,
+            ..Default::default()
         },
     );
 

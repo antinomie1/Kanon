@@ -12,6 +12,7 @@ path = "src/main.rs"
 [dependencies]
 kanon-adapter-milky = { path = "../kanon-adapter-milky" }
 kanon-adapter-onebot = { path = "../kanon-adapter-onebot" }
+kanon-adapter-qqofficial = { path = "../kanon-adapter-qqofficial" }
 kanon-api = { path = "../kanon-api" }
 kanon-core = { path = "../kanon-core" }
 tokio = { version = "1.40", features = ["full"] }
