@@ -192,7 +192,8 @@ impl OpenAiResponsesProvider {
             api_key: api_key.into(),
             endpoint: "https://api.openai.com/v1/responses".to_string(),
             client: reqwest::Client::builder()
-                .timeout(Duration::from_secs(60))
+                .connect_timeout(super::CONNECT_TIMEOUT)
+                .timeout(super::REQUEST_TIMEOUT)
                 .build()
                 .unwrap_or_default(),
             custom_headers: Vec::new(),

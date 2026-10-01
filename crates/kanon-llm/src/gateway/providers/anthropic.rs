@@ -16,7 +16,6 @@
 //! model's minimum cacheable length ignore the markers, so they are harmless there.
 
 use async_trait::async_trait;
-use std::time::Duration;
 use tokio_stream::StreamExt;
 
 use crate::error::GatewayError;
@@ -221,7 +220,8 @@ impl AnthropicMessagesProvider {
         };
 
         let client = reqwest::Client::builder()
-            .timeout(Duration::from_secs(60))
+            .connect_timeout(super::CONNECT_TIMEOUT)
+            .timeout(super::REQUEST_TIMEOUT)
             .pool_max_idle_per_host(10)
             .build()
             .unwrap_or_default();

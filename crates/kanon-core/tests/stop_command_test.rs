@@ -158,14 +158,19 @@ async fn an_admins_stop_ends_the_running_turn_and_the_chat_goes_on() {
         .iter()
         .map(|message| message.content.as_deref())
         .collect();
-    assert_eq!(texts.len(), 3, "{texts:?}");
+    assert_eq!(texts.len(), 4, "{texts:?}");
     assert!(
         texts[0].is_some_and(|text| text.contains("work")),
         "{texts:?}"
     );
+    // The stopped turn is closed, so the model answering `hello` does not take `work` up again.
     assert!(
-        texts[1].is_some_and(|text| text.contains("hello")),
+        texts[1].is_some_and(|text| text.contains("stopped by the user")),
         "{texts:?}"
     );
-    assert_eq!(texts[2], Some("done"));
+    assert!(
+        texts[2].is_some_and(|text| text.contains("hello")),
+        "{texts:?}"
+    );
+    assert_eq!(texts[3], Some("done"));
 }

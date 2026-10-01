@@ -19,7 +19,7 @@ use std::sync::Arc;
 use kanon_proto::v1::{ToolCallRequest, tool_call_request, tool_call_response};
 
 use crate::compaction::{COMPACTION_INSTRUCTION, CompactionPolicy, ends_cleanly, summary_block};
-use crate::error::AgentError;
+use crate::error::{AgentError, GatewayError, MemoryError};
 use crate::gateway::types::{
     ChatMessage, ChatRequest, ChatResponse, ContentPart, Role, TokenUsage, ToolCall, ToolDefinition,
 };
@@ -40,6 +40,10 @@ use tokio_stream::StreamExt;
 /// turn was stopped, not because the tool failed.
 pub const STOPPED_TOOL_RESULT: &str =
     "Not completed: the turn was stopped before this tool call finished.";
+
+/// Result recorded for a tool call left without one when its turn failed.
+pub const FAILED_TOOL_RESULT: &str =
+    "Not completed: the turn failed before this tool call finished.";
 
 /// Configuration parameters for agent reasoning and execution.
 #[derive(Debug, Clone)]
@@ -639,6 +643,23 @@ impl Agent {
         let media = message.parts.take();
         self.memory.push_message(session_id, message).await?;
 
+        // From here on the turn is part of history. However it ends, the next turn has to find a
+        // conversation the provider accepts, and one that does not ask the model to redo the work
+        // that just failed.
+        match self.answer(session_id, &user_input, media, hosts).await {
+            Ok(output) => Ok(output),
+            Err(err) => Err(self.close_failed_turn(session_id, err).await),
+        }
+    }
+
+    /// The reasoning and tool loop of [`Agent::run_message`], run once the user message is stored.
+    async fn answer(
+        &self,
+        session_id: &str,
+        user_input: &str,
+        media: Option<Vec<ContentPart>>,
+        hosts: &[Arc<dyn ToolHost>],
+    ) -> Result<AgentOutput, AgentError> {
         // 2. Dynamically aggregate tools from both native tools and active plugin hosts
         let tools = self.collect_tools(hosts);
 
@@ -654,11 +675,9 @@ impl Agent {
             let mut request = self.build_request(session_id, &tools).await?;
             attach_turn_media(&mut request, media.as_ref());
 
-            // Stopping here leaves history ending in the user message or in tool results, both of
-            // which a later turn continues validly.
             let Some(response) = unless_stopped(stop.as_ref(), self.provider.chat(&request)).await
             else {
-                return Err(self.stopped(session_id, &[]).await);
+                return Err(AgentError::Stopped);
             };
             let mut response = response?;
             response.separate_reasoning();
@@ -762,13 +781,11 @@ impl Agent {
                 .push_message(session_id, response.assistant_message())
                 .await?;
 
-            // Every call of the round, so a stop can answer the ones that have no result yet.
-            let call_ids: Vec<String> = response.tool_calls.iter().map(|c| c.id.clone()).collect();
-
-            // Execute each requested tool call
-            for (index, call) in response.tool_calls.into_iter().enumerate() {
+            // Execute each requested tool call. A turn that ends inside the round leaves the calls
+            // after it unanswered; `close_failed_turn` gives each of them a result.
+            for call in response.tool_calls {
                 if stop.as_ref().is_some_and(StopSignal::is_stopped) {
-                    return Err(self.stopped(session_id, &call_ids[index..]).await);
+                    return Err(AgentError::Stopped);
                 }
 
                 // Hook: tool call permission / safety check
@@ -807,7 +824,7 @@ impl Agent {
                     )
                     .await
                     else {
-                        return Err(self.stopped(session_id, &call_ids[index..]).await);
+                        return Err(AgentError::Stopped);
                     };
                     let (result_str, is_success) = match result {
                         Ok(output) => {
@@ -906,7 +923,7 @@ impl Agent {
                 let Some(result) =
                     unless_stopped(stop.as_ref(), target_host.call_tool(tool_req)).await
                 else {
-                    return Err(self.stopped(session_id, &call_ids[index..]).await);
+                    return Err(AgentError::Stopped);
                 };
                 match result {
                     Ok(resp) => {
@@ -1000,32 +1017,60 @@ impl Agent {
         }
     }
 
-    /// Records the end of a stopped turn and returns the error the turn ends with.
+    /// Closes a turn that ended without an answer and returns the error it ended with.
     ///
-    /// `unanswered` are the calls of the current round that have no result yet. Each gets one
-    /// saying it was stopped: providers reject a conversation in which a tool call has no result,
-    /// so leaving them open would fail every later request of the session. A memory failure while
-    /// recording them is returned instead, since the session is then not known to be valid.
-    async fn stopped(&self, session_id: &str, unanswered: &[String]) -> AgentError {
-        for id in unanswered {
-            if let Err(err) = self
-                .memory
-                .push_message(
-                    session_id,
-                    ChatMessage::tool_response(id, STOPPED_TOOL_RESULT),
-                )
-                .await
-            {
-                return err.into();
-            }
+    /// Two things would otherwise break the session's later turns. A tool call without a result
+    /// makes providers reject every later request of the session, so each open call of the last
+    /// round gets one. And a turn that just ends leaves the user's request open at the end of
+    /// history: the next turn's model sees it unanswered and sets out to do that work again, so
+    /// work that failed once (a long program the model could not finish writing in time) fails the
+    /// same way on every message that follows. A closing note in the assistant's place records
+    /// that the turn ended and was not retried; the next message is answered on its own, and
+    /// whether to try again is the user's call.
+    ///
+    /// Failing to record the closing is logged and does not replace the turn's own error, which is
+    /// what the caller acts on.
+    async fn close_failed_turn(&self, session_id: &str, err: AgentError) -> AgentError {
+        let tool_result = match err {
+            AgentError::Stopped => STOPPED_TOOL_RESULT,
+            _ => FAILED_TOOL_RESULT,
+        };
+        if let Err(close_err) = self
+            .record_closing(session_id, tool_result, closing_note(&err))
+            .await
+        {
+            tracing::error!(
+                agent = %self.name,
+                session_id = %session_id,
+                error = %close_err,
+                "Could not record the end of an unanswered turn; the session's next request may fail"
+            );
         }
         tracing::info!(
             agent = %self.name,
             session_id = %session_id,
-            unanswered_tool_calls = unanswered.len(),
-            "Turn stopped before it finished"
+            error = %err,
+            "Turn ended without an answer; closed in history and not retried"
         );
-        AgentError::Stopped
+        err
+    }
+
+    /// Answers the open tool calls of the last round and appends the closing note.
+    async fn record_closing(
+        &self,
+        session_id: &str,
+        tool_result: &str,
+        note: String,
+    ) -> Result<(), MemoryError> {
+        let history = self.memory.get_messages(session_id).await?;
+        for id in unanswered_tool_calls(&history) {
+            self.memory
+                .push_message(session_id, ChatMessage::tool_response(id, tool_result))
+                .await?;
+        }
+        self.memory
+            .push_message(session_id, ChatMessage::assistant(note))
+            .await
     }
 
     /// Executes the agent reasoning loop in standalone streaming mode, returning incremental chunks
@@ -1343,6 +1388,62 @@ fn attach_turn_media(request: &mut ChatRequest, media: Option<&Vec<ContentPart>>
     {
         message.parts = Some(media.clone());
     }
+}
+
+/// Ids of the tool calls in the last tool-calling round of `history` that have no result yet.
+fn unanswered_tool_calls(history: &[ChatMessage]) -> Vec<String> {
+    let Some(round) = history.iter().rposition(|message| {
+        message.role == Role::Assistant
+            && message
+                .tool_calls
+                .as_ref()
+                .is_some_and(|calls| !calls.is_empty())
+    }) else {
+        return Vec::new();
+    };
+    let answered: std::collections::HashSet<&str> = history[round + 1..]
+        .iter()
+        .filter(|message| message.role == Role::Tool)
+        .filter_map(|message| message.tool_call_id.as_deref())
+        .collect();
+    history[round]
+        .tool_calls
+        .iter()
+        .flatten()
+        .filter(|call| !answered.contains(call.id.as_str()))
+        .map(|call| call.id.clone())
+        .collect()
+}
+
+/// The note that closes an unanswered turn in history, written for the model that reads it on
+/// the next turn: what happened, that nothing retried it, and that the user decides about retrying.
+///
+/// It names the kind of failure rather than quoting the error, whose provider body can be long
+/// and would sit in every later request of the session.
+fn closing_note(err: &AgentError) -> String {
+    let what = match err {
+        AgentError::Stopped => "was stopped by the user before it finished".to_string(),
+        AgentError::Gateway(GatewayError::Http(http)) if http.is_timeout() => {
+            "failed: the model request timed out".to_string()
+        }
+        AgentError::Gateway(GatewayError::Http(_)) => {
+            "failed: the model service could not be reached".to_string()
+        }
+        AgentError::Gateway(GatewayError::ApiStatus { status, .. }) => {
+            format!("failed: the model service answered HTTP {status}")
+        }
+        AgentError::Gateway(GatewayError::Json(_) | GatewayError::InvalidResponse(_)) => {
+            "failed: the model's answer could not be read".to_string()
+        }
+        AgentError::Rpc(_) => "failed: a plugin tool call failed".to_string(),
+        AgentError::ToolNotFound(name) => format!("failed: the tool '{name}' does not exist"),
+        AgentError::Memory(_) => "failed: conversation storage failed".to_string(),
+        AgentError::Compaction(_) => "failed: conversation compaction failed".to_string(),
+    };
+    format!(
+        "[This turn {what}. It was not retried. Answer the next message on its own, and redo this \
+         request only if the user asks for it again.]"
+    )
 }
 
 /// Recovers tool calls from a completion whose model emitted markup instead of a structured array.
