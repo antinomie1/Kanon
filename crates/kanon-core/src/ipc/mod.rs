@@ -360,42 +360,18 @@ impl BotApiService for CoreApiService {
             ));
         };
 
-        let mut messages = Vec::new();
-        let mut temperature = None;
-        let mut max_tokens = None;
-
-        if let Some(ref params) = req.parameters {
-            if let Some(kanon_proto::prost_types::value::Kind::StringValue(s)) = params
-                .fields
-                .get("system_prompt")
-                .and_then(|v| v.kind.as_ref())
-            {
-                messages.push(ChatMessage::system(s));
-            }
-            if let Some(kanon_proto::prost_types::value::Kind::NumberValue(n)) = params
-                .fields
-                .get("temperature")
-                .and_then(|v| v.kind.as_ref())
-            {
-                temperature = Some(*n as f32);
-            }
-            if let Some(kanon_proto::prost_types::value::Kind::NumberValue(n)) = params
-                .fields
-                .get("max_tokens")
-                .and_then(|v| v.kind.as_ref())
-            {
-                max_tokens = Some(*n as u32);
-            }
+        let mut messages = Vec::with_capacity(req.messages.len() + 1);
+        if !req.system_prompt.is_empty() {
+            messages.push(ChatMessage::system(req.system_prompt));
         }
-
-        messages.push(ChatMessage::user(req.prompt));
+        messages.extend(llm_messages(req.messages)?);
 
         let chat_req = ChatRequest {
             model: req.model,
             messages,
             tools: Vec::new(),
-            temperature,
-            max_tokens,
+            temperature: req.temperature,
+            max_tokens: req.max_tokens,
         };
 
         let stream = gateway
@@ -519,4 +495,48 @@ impl CoreIpcServer {
 
         Ok(())
     }
+}
+
+/// Converts a plugin's `RequestLLM` turns into gateway messages, rejecting what a provider could
+/// not represent instead of silently dropping it.
+#[allow(clippy::result_large_err)]
+fn llm_messages(turns: Vec<kanon_proto::v1::LlmMessage>) -> Result<Vec<ChatMessage>, Status> {
+    use kanon_llm::gateway::types::ContentPart;
+    use kanon_proto::v1::LlmRole;
+    use kanon_proto::v1::image_segment::Source;
+
+    if turns.is_empty() {
+        return Err(Status::invalid_argument(
+            "RequestLLM needs at least one message",
+        ));
+    }
+    turns
+        .into_iter()
+        .enumerate()
+        .map(|(index, turn)| match turn.role() {
+            LlmRole::User => {
+                let mut parts = Vec::with_capacity(turn.images.len());
+                for image in turn.images {
+                    let mime_type = image.mime_type.clone();
+                    parts.push(match image.source {
+                        Some(Source::Url(url)) => ContentPart::image_url(url, mime_type),
+                        Some(Source::FilePath(path)) => ContentPart::image_file(path, mime_type),
+                        Some(Source::RawBytes(_)) | None => {
+                            return Err(Status::invalid_argument(format!(
+                                "message {index}: images must be a URL or a file path"
+                            )));
+                        }
+                    });
+                }
+                Ok(ChatMessage::user_multimodal(turn.text, parts))
+            }
+            LlmRole::Assistant if turn.images.is_empty() => Ok(ChatMessage::assistant(turn.text)),
+            LlmRole::Assistant => Err(Status::invalid_argument(format!(
+                "message {index}: only user messages may carry images"
+            ))),
+            LlmRole::Unspecified => Err(Status::invalid_argument(format!(
+                "message {index} has no role"
+            ))),
+        })
+        .collect()
 }
