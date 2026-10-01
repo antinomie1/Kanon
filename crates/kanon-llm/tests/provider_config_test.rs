@@ -138,3 +138,14 @@ fn agent_slot_with_agent_is_configured_immediately() {
         "seeded"
     );
 }
+
+#[test]
+fn old_provider_settings_default_to_replay_without_changing_explicit_preferences() {
+    let old = serde_json::json!({"name":"fixture", "protocol":"openai", "base_url":"https://example.invalid/v1"});
+    let mut entry: kanon_llm::ProviderEntry = serde_json::from_value(old).unwrap();
+    assert!(entry.replay_reasoning);
+    entry.replay_reasoning = false;
+    let loaded: kanon_llm::ProviderEntry =
+        serde_json::from_str(&serde_json::to_string(&entry).unwrap()).unwrap();
+    assert!(!loaded.replay_reasoning);
+}

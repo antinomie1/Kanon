@@ -31,7 +31,7 @@ async fn server(app: Router) -> String {
 }
 
 #[tokio::test]
-async fn only_current_turn_tool_rounds_replay_reasoning_after_restart() {
+async fn all_retained_tool_rounds_replay_reasoning_after_restart() {
     let received = Arc::new(Mutex::new(Vec::<Value>::new()));
     let captured = received.clone();
     let url = server(Router::new().route("/v1/chat/completions", post(move |Json(body): Json<Value>| {
@@ -125,13 +125,7 @@ async fn only_current_turn_tool_rounds_replay_reasoning_after_restart() {
             .collect();
         assert_eq!(assistants.len(), turn);
         for (index, msg) in assistants.iter().enumerate() {
-            // Only the in-progress turn's tool rounds replay reasoning; the second user turn
-            // (request 3) must not resend reasoning from the completed first turn.
-            if turn < 3 {
-                assert_eq!(msg["reasoning_content"], format!("private-{index}"));
-            } else {
-                assert!(msg.get("reasoning_content").is_none(), "{msg}");
-            }
+            assert_eq!(msg["reasoning_content"], format!("private-{index}"));
             assert!(
                 !msg["content"]
                     .as_str()
@@ -155,11 +149,8 @@ async fn only_current_turn_tool_rounds_replay_reasoning_after_restart() {
             earlier
         );
     }
-    // A later turn keeps the same prefix apart from the dropped prior-turn reasoning.
-    let mut earlier = requests[2]["messages"].as_array().unwrap().clone();
-    for msg in &mut earlier {
-        msg.as_object_mut().unwrap().remove("reasoning_content");
-    }
+    // A later user turn preserves the entire earlier prefix, including reasoning.
+    let earlier = requests[2]["messages"].as_array().unwrap().clone();
     assert_eq!(
         &requests[3]["messages"].as_array().unwrap()[..earlier.len()],
         earlier.as_slice()
@@ -844,4 +835,127 @@ async fn responses_refusal_content_is_retained_in_non_streaming_replies() {
     assert_eq!(messages.len(), 2);
     assert_eq!(messages[1].content.as_deref(), Some("synthetic refusal"));
     assert!(messages[1].reasoning_content.is_none());
+}
+
+#[tokio::test]
+async fn replay_toggle_preserves_history_and_new_reasoning_across_restarts() {
+    use axum::response::IntoResponse;
+    use kanon_llm::{ModelRef, ProviderEntry, ProviderRegistry};
+
+    for streaming in [false, true] {
+        for protocol in ["openai", "openai_reasoning"] {
+            let received = Arc::new(Mutex::new(Vec::<Value>::new()));
+            let captured = received.clone();
+            let url = server(Router::new().route("/v1/chat/completions", post(move |Json(body): Json<Value>| {
+                let captured = captured.clone();
+                async move {
+                    let n = {
+                        let mut requests = captured.lock().unwrap();
+                        let n = requests.len();
+                        requests.push(body.clone());
+                        n
+                    };
+                    let reasoning = format!("new-private-{n}");
+                    if body["stream"] == true {
+                        let delta = json!({"choices":[{"index":0,"delta":{"content":"answer","reasoning_content":reasoning},"finish_reason":"stop"}]});
+                        ([("content-type", "text/event-stream")], format!("data: {delta}\n\ndata: [DONE]\n\n")).into_response()
+                    } else {
+                        Json(json!({"choices":[{"index":0,"message":{"role":"assistant","content":"answer","reasoning_content":reasoning},"finish_reason":"stop"}]})).into_response()
+                    }
+                }
+            }))).await;
+            let dir = tempfile::tempdir().unwrap();
+            let path = dir.path().join("sessions.db");
+            let mut old = ChatMessage::assistant("previous answer");
+            old.reasoning_content = Some("old-private".into());
+            {
+                let memory = SqliteMemory::open(&path).unwrap();
+                memory
+                    .push_message("s", ChatMessage::user("previous question"))
+                    .await
+                    .unwrap();
+                memory.push_message("s", old).await.unwrap();
+            }
+            let registry = ProviderRegistry::new();
+            // Every iteration recreates memory and the agent, exercising real disk reloads.
+            for (round, enabled) in [true, false, true].into_iter().enumerate() {
+                let mut entry = ProviderEntry::new("fixture", protocol, &url);
+                entry.replay_reasoning = enabled;
+                // The persisted provider setting must survive serialization and hot replacement.
+                let entry = serde_json::from_str(&serde_json::to_string(&entry).unwrap()).unwrap();
+                registry.replace(vec![entry]).unwrap();
+                let provider = registry
+                    .resolve(&ModelRef::parse("fixture/model"))
+                    .unwrap()
+                    .provider;
+                let memory = Arc::new(SqliteMemory::open(&path).unwrap());
+                let before = memory.get_messages("s").await.unwrap();
+                let agent = Agent::builder("fixture", provider)
+                    .memory(memory.clone())
+                    .compaction(None)
+                    .build();
+                if streaming {
+                    let mut stream = agent
+                        .run_standalone_stream("s", "next question")
+                        .await
+                        .unwrap();
+                    while let Some(chunk) = stream.next().await {
+                        chunk.unwrap();
+                    }
+                } else {
+                    agent.run_standalone("s", "next question").await.unwrap();
+                }
+                let after = memory.get_messages("s").await.unwrap();
+                assert_eq!(&after[..before.len()], before.as_slice());
+                assert_eq!(
+                    after.last().unwrap().reasoning_content.as_deref(),
+                    Some(format!("new-private-{round}").as_str())
+                );
+                let requests = received.lock().unwrap();
+                let assistants: Vec<_> = requests[round]["messages"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .filter(|m| m["role"] == "assistant")
+                    .collect();
+                assert_eq!(assistants.len(), round + 1);
+                for (index, message) in assistants.iter().enumerate() {
+                    if enabled && protocol == "openai_reasoning" {
+                        let expected = if index == 0 {
+                            "old-private".into()
+                        } else {
+                            format!("new-private-{}", index - 1)
+                        };
+                        assert_eq!(message["reasoning_content"], expected);
+                    } else {
+                        assert!(message.get("reasoning_content").is_none());
+                    }
+                }
+            }
+        }
+    }
+}
+
+#[tokio::test]
+async fn request_mapping_never_mutates_caller_messages() {
+    let url = server(Router::new().route("/v1/chat/completions", post(|| async {
+        Json(json!({"choices":[{"index":0,"message":{"role":"assistant","content":"answer"},"finish_reason":"stop"}]}))
+    }))).await;
+    let mut assistant = ChatMessage::assistant("answer");
+    assistant.reasoning_content = Some("private".into());
+    let req = request(vec![
+        ChatMessage::user("first"),
+        assistant,
+        ChatMessage::user("second"),
+    ]);
+    let before = req.messages.clone();
+    for enabled in [false, true] {
+        OpenAiChatProvider::new(&url, None, "fixture")
+            .with_reasoning_content(true)
+            .with_reasoning_replay(enabled)
+            .chat(&req)
+            .await
+            .unwrap();
+        assert_eq!(req.messages, before);
+    }
 }

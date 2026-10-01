@@ -175,6 +175,8 @@ pub struct OpenAiChatProvider {
     custom_headers: Vec<(String, String)>,
     /// Whether assistant history may include the non-standard `reasoning_content` field.
     replay_reasoning_content: bool,
+    /// Operator preference, independent of endpoint support.
+    replay_reasoning: bool,
 }
 
 /// Backward-compatible type alias.
@@ -222,6 +224,7 @@ impl OpenAiChatProvider {
             default_model: default_model.into(),
             custom_headers: Vec::new(),
             replay_reasoning_content,
+            replay_reasoning: true,
         }
     }
 
@@ -234,9 +237,15 @@ impl OpenAiChatProvider {
         self
     }
 
+    /// Controls history replay without changing endpoint capability or stored messages.
+    pub fn with_reasoning_replay(mut self, enabled: bool) -> Self {
+        self.replay_reasoning = enabled;
+        self
+    }
+
     /// Whether this endpoint is configured to replay the separate reasoning field.
     pub fn replays_reasoning_content(&self) -> bool {
-        self.replay_reasoning_content
+        self.replay_reasoning_content && self.replay_reasoning
     }
 
     /// Appends a custom HTTP header to all outbound requests (useful for proxies or custom auth).
@@ -247,23 +256,13 @@ impl OpenAiChatProvider {
 
     /// Converts request history into wire messages.
     ///
-    /// Reasoning is replayed only for assistant messages after the latest user message, i.e. the
-    /// tool-call sub-rounds of the turn still in progress. That is the documented DeepSeek
-    /// thinking-mode contract: earlier turns' reasoning is discarded by the server-side template,
-    /// so resending it only inflates the payload while leaving the rendered (cached) prompt
-    /// unchanged. Durable history keeps every reasoning block; only this request omits them.
+    /// Replay all retained assistant reasoning when both the endpoint and operator allow it.
+    /// The mapping only reads history; disabling replay never erases durable reasoning.
     fn map_messages_to_wire(&self, messages: &[ChatMessage]) -> Vec<wire::OpenAiMessageWire> {
-        let current_turn_start = messages
-            .iter()
-            .rposition(|msg| msg.role == Role::User)
-            .map_or(0, |index| index + 1);
+        let replay = self.replays_reasoning_content();
         messages
             .iter()
-            .enumerate()
-            .filter_map(|(index, msg)| {
-                let replay = self.replay_reasoning_content && index >= current_turn_start;
-                self.map_message_to_wire(msg, replay)
-            })
+            .filter_map(|msg| self.map_message_to_wire(msg, replay))
             .collect()
     }
 

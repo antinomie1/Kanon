@@ -89,6 +89,18 @@ it for `https://api.deepseek.com` (including `/v1`) so existing official DeepSee
 keep working. This only controls history replay; it does not disable thinking or discard stored
 reasoning. Choose the extension only when the endpoint documents support for it.
 
+In **Models → provider settings → Replay historical reasoning**, `replay_reasoning` controls
+whether compatible endpoints receive all assistant reasoning in the retained context, across user
+turns. It defaults to `true` for new and older configurations to preserve supported-endpoint replay
+(including DeepSeek thinking + tools). Ordinary OpenAI endpoints still omit the non-standard field.
+Set `providers[].replay_reasoning` in `data/system.json`, or send it to `POST /api/v1/providers`;
+omitting it from an update preserves the saved preference. Changes apply to the next conversation
+request. Turning it off only changes temporary API messages: old reasoning and newly generated
+reasoning stay in `sessions.db`, survive restart and can be replayed after re-enabling. Existing
+history compaction and clearing policies still apply. This is independent of `send_reasoning`,
+which controls display on chat platforms. Disabling replay can cause thinking-mode tool requests
+to fail on endpoints that require it; see the [DeepSeek thinking-mode contract](https://api-docs.deepseek.com/zh-cn/guides/thinking_mode/).
+
 ## Console
 
 The WebUI (`webui/`, built with Svelte 5 and served by the node) manages everything above:

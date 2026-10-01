@@ -303,6 +303,7 @@ impl LlmProviderConfig {
             api_key: self.api_key.clone(),
             temperature: self.temperature,
             max_tokens: self.max_tokens,
+            replay_reasoning: true,
         };
         NodeSettings {
             providers: vec![provider],

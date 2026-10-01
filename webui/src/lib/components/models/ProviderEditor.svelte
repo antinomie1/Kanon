@@ -13,6 +13,7 @@ import type {
 import SecretInput from '../ui/SecretInput.svelte';
 import Section from '../ui/Section.svelte';
 import Select from '../ui/Select.svelte';
+import Switch from '../ui/Switch.svelte';
 import { optionalNumber } from './modelFormat';
 
 /**
@@ -41,6 +42,7 @@ let apiKey = $state('');
 let clearKey = $state(false);
 let temperature = $state('');
 let maxTokens = $state('');
+let replayReasoning = $state(true);
 let formError = $state<string | null>(null);
 
 /** Upstream model id used by the probe (no provider prefix). */
@@ -49,6 +51,7 @@ let showAdvanced = $state(false);
 
 /** Puts the draft back to what the node has stored. */
 function reset() {
+  replayReasoning = provider.replay_reasoning ?? true;
   protocol = provider.protocol;
   baseUrl = provider.base_url;
   apiKey = '';
@@ -79,6 +82,7 @@ const upstreamModels = $derived(
 
 const changeCount = $derived(
   [
+    replayReasoning !== (provider.replay_reasoning ?? true),
     protocol !== provider.protocol,
     baseUrl.trim() !== provider.base_url,
     apiKey.trim() !== '' || clearKey,
@@ -118,6 +122,7 @@ async function save() {
     base_url: url,
     temperature: temp,
     max_tokens: tokens,
+    replay_reasoning: replayReasoning,
   };
   if (apiKey.trim()) req.api_key = apiKey.trim();
   if (clearKey) req.clear_api_key = true;
@@ -240,6 +245,10 @@ async function remove() {
           <p class="m-0 mt-2 hint">{t('llm.key_hint')}</p>
         {/if}
       </div>
+    </Section>
+
+    <Section title={t('llm.replay_reasoning')} hint={t('llm.replay_reasoning_hint')}>
+      <Switch checked={replayReasoning} label={t('llm.replay_reasoning')} onchange={(next) => (replayReasoning = next)} />
     </Section>
 
     <Section title={t('llm.sec_test')} hint={t('llm.sec_test_hint')}>

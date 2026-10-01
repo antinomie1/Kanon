@@ -21,7 +21,7 @@ use std::sync::{Arc, RwLock};
 
 use serde::{Deserialize, Serialize};
 
-use crate::gateway::{LlmProvider, build_provider};
+use crate::gateway::{LlmProvider, build_provider, build_provider_with_reasoning_replay};
 use crate::model::ModelRef;
 
 /// One named model-provider endpoint.
@@ -42,6 +42,13 @@ pub struct ProviderEntry {
     /// Default generation ceiling for models served by this endpoint.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_tokens: Option<u32>,
+    /// Replay retained reasoning to compatible endpoints; never controls storage or display.
+    #[serde(default = "default_replay_reasoning")]
+    pub replay_reasoning: bool,
+}
+
+fn default_replay_reasoning() -> bool {
+    true
 }
 
 impl ProviderEntry {
@@ -58,6 +65,7 @@ impl ProviderEntry {
             api_key: None,
             temperature: None,
             max_tokens: None,
+            replay_reasoning: true,
         }
     }
 
@@ -248,11 +256,12 @@ impl ProviderRegistry {
             .get(name)
             .ok_or_else(|| format!("provider '{name}' is not configured"))?;
 
-        let client = build_provider(
+        let client = build_provider_with_reasoning_replay(
             &entry.protocol,
             entry.base_url.clone(),
             entry.api_key.clone(),
             String::new(),
+            entry.replay_reasoning,
         )?;
 
         self.clients

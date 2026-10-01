@@ -156,6 +156,18 @@ pub fn build_provider(
     api_key: Option<String>,
     model: impl Into<String>,
 ) -> Result<Arc<dyn LlmProvider>, String> {
+    build_provider_with_reasoning_replay(protocol, base_url, api_key, model, true)
+}
+
+/// Builds a provider with an independent history-replay preference.
+/// Unsupported protocols never acquire reasoning-field support from this preference.
+pub fn build_provider_with_reasoning_replay(
+    protocol: &str,
+    base_url: impl Into<String>,
+    api_key: Option<String>,
+    model: impl Into<String>,
+    replay_reasoning: bool,
+) -> Result<Arc<dyn LlmProvider>, String> {
     let base_url = base_url.into();
     let base_url = base_url.trim().to_string();
     if base_url.is_empty() {
@@ -166,10 +178,15 @@ pub fn build_provider(
     let model = model.into();
 
     let provider: Arc<dyn LlmProvider> = match protocol {
-        "openai" | "openai_chat" => Arc::new(OpenAiChatProvider::new(base_url, api_key, model)),
-        "openai_reasoning" => {
-            Arc::new(OpenAiChatProvider::new(base_url, api_key, model).with_reasoning_content(true))
-        }
+        "openai" | "openai_chat" => Arc::new(
+            OpenAiChatProvider::new(base_url, api_key, model)
+                .with_reasoning_replay(replay_reasoning),
+        ),
+        "openai_reasoning" => Arc::new(
+            OpenAiChatProvider::new(base_url, api_key, model)
+                .with_reasoning_content(true)
+                .with_reasoning_replay(replay_reasoning),
+        ),
         // The Responses API carries the credential in its own constructor, so the key is
         // required here rather than optional.
         "openai_responses" => Arc::new(

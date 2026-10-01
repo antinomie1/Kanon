@@ -69,6 +69,8 @@ pub struct ProviderInfo {
     pub temperature: Option<f32>,
     /// Default generation ceiling for this endpoint.
     pub max_tokens: Option<u32>,
+    /// Whether retained reasoning is replayed to compatible endpoints.
+    pub replay_reasoning: bool,
 }
 
 impl ProviderInfo {
@@ -81,6 +83,7 @@ impl ProviderInfo {
             api_key_configured: entry.has_api_key(),
             temperature: entry.temperature,
             max_tokens: entry.max_tokens,
+            replay_reasoning: entry.replay_reasoning,
         }
     }
 }
@@ -107,6 +110,9 @@ pub struct UpsertProviderRequest {
     /// Default generation ceiling for models on this endpoint.
     #[serde(default)]
     pub max_tokens: Option<u32>,
+    /// Omission preserves an existing preference; new endpoints default to replay enabled.
+    #[serde(default)]
+    pub replay_reasoning: Option<bool>,
 }
 
 /// Request payload for `POST /api/v1/providers/delete`.
@@ -285,6 +291,9 @@ async fn upsert_provider(
         api_key,
         temperature: payload.temperature,
         max_tokens: payload.max_tokens,
+        replay_reasoning: payload
+            .replay_reasoning
+            .unwrap_or_else(|| existing.as_ref().is_none_or(|entry| entry.replay_reasoning)),
     };
 
     settings.providers.retain(|entry| entry.name != name);
@@ -514,6 +523,7 @@ async fn fetch_models(
         api_key: payload.api_key,
         temperature: None,
         max_tokens: None,
+        replay_reasoning: true,
     };
 
     let candidates = crate::model_discovery::discover_models(&entry)
