@@ -42,6 +42,24 @@ pub struct PluginSection {
     pub isolated: Option<bool>,
     /// Execution priority for pipeline scheduling (1..=1000, lower executes first, default 500).
     pub priority: Option<i32>,
+    /// Node versions the plugin works with, as a semver requirement (e.g. `>=0.1, <0.3`).
+    ///
+    /// Checked when the plugin is installed and started; a node outside the range refuses the
+    /// plugin with an explicit error instead of running it against a protocol it was not built for.
+    #[serde(default)]
+    pub kanon_version: Option<String>,
+    /// Platforms the plugin is meant for (e.g. `["qq", "telegram"]`); empty means every platform.
+    ///
+    /// Informational: shown in the console and the plugin market so operators can tell which
+    /// chats a plugin was written for. Per-command restrictions stay on the commands themselves.
+    #[serde(default)]
+    pub platforms: Vec<String>,
+    /// Project homepage, shown in the console and the plugin market.
+    #[serde(default)]
+    pub homepage: Option<String>,
+    /// Source repository (a Git URL the console can install from).
+    #[serde(default)]
+    pub repository: Option<String>,
 }
 
 /// Command metadata declared under `[[commands]]` in `plugin.toml`.
