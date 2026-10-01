@@ -360,6 +360,44 @@ impl PlatformAdapter for QqOfficialAdapter {
         CAPABILITIES
     }
 
+    fn reply_message_limit(&self, request: &DeliverMessageRequest) -> usize {
+        // QQ permits five passive replies per C2C/group message. Each attachment is sent as
+        // another native message. Reserve a C2C typing reply even if its asynchronous call has
+        // not finished yet; consulting completed calls here would race the acknowledgement.
+        // https://github.com/tencent-connect/bot-docs/blob/main/docs/develop/api-v2/server-inter/message/send-receive/send.md
+        let budget: usize = if request.event_id.is_empty() {
+            1
+        } else if request.channel_id.starts_with("group:") {
+            5
+        } else if request.channel_id.starts_with("c2c:") {
+            if request.event_id.starts_with(mapping::EVENT_ID_PREFIX) {
+                5
+            } else {
+                4
+            }
+        } else {
+            // Guild channels have a per-second limit instead. Keep their existing single text
+            // delivery rather than creating an unpaced burst; guild DMs remain conservative too.
+            1
+        };
+        let media = request
+            .segments
+            .iter()
+            .filter(|segment| {
+                matches!(
+                    segment.segment.as_ref(),
+                    Some(
+                        Segment::Image(_)
+                            | Segment::Audio(_)
+                            | Segment::Video(_)
+                            | Segment::File(_)
+                    ),
+                )
+            })
+            .count();
+        budget.saturating_sub(media).max(1)
+    }
+
     /// Shows "typing…" in a C2C chat; QQ has no indicator for other chats.
     ///
     /// QQ counts the indicator as one of the few passive replies a message allows, which is why
@@ -517,7 +555,14 @@ impl PlatformAdapter for QqOfficialAdapter {
                 None => return Err(self.delivery_error("message contains an empty segment")),
             }
         }
-        let text = text.trim().to_owned();
+        // Strip only surrounding blank lines. Spaces and tabs are content: a split reply line
+        // may be indented code, and trimming them would flatten it.
+        let text = text.trim_matches(['\r', '\n']).to_owned();
+        let text = if text.trim().is_empty() {
+            String::new()
+        } else {
+            text
+        };
         if text.is_empty() && media.is_empty() {
             return Err(self.delivery_error("cannot send an empty QQ Official message"));
         }

@@ -814,6 +814,9 @@ export const dictionaries = {
     'reply.describe_never': 'Never reply in groups',
     'reply.describe_probability': 'Reply with probability {percent}%',
     'reply.quote': 'Quote the message being answered',
+    'reply.split_lines': 'Send each line separately',
+    'reply.split_lines_hint':
+      'Send each nonblank line of a model answer as a separate message, including code lines. Blank lines are skipped. QQ Official merges excess lines to fit its reply limits.',
     'reply.acknowledge': "Show that it's working before it answers",
     'reply.quote_hint':
       "In groups and channels the reply quotes the message it answers, so everyone can see who it's answering. Never in private chats.",
@@ -1694,6 +1697,9 @@ export const dictionaries = {
     'reply.describe_never': '群聊中从不回复',
     'reply.describe_probability': '以 {percent}% 的概率回复',
     'reply.quote': '回复时引用原消息',
+    'reply.split_lines': '按换行分条发送',
+    'reply.split_lines_hint':
+      '模型回答的每个非空行单独发送，代码行也会拆分；空白行跳过。QQ 官方机器人会按回复限制合并超出的行。',
     'reply.acknowledge': '回答前先显示正在处理',
     'reply.quote_hint':
       '在群和频道里，回复会引用它回答的那条消息，大家能看清它在回答谁。私聊不会引用。',

@@ -94,6 +94,8 @@ export interface ReplyPolicy {
   quote_message: boolean;
   /** Show progress feedback (typing, a reaction) before the model answers. */
   acknowledge: boolean;
+  /** Send each nonblank line of a model answer as a separate platform message. */
+  split_lines: boolean;
   /** Send the model's reasoning, as plain text, ahead of its answer. */
   send_reasoning: boolean;
 }

@@ -16,6 +16,7 @@ pub mod group_log;
 pub mod hooks;
 pub mod observer;
 pub mod pre_filter;
+mod reply;
 
 pub use capture::{Capture, CaptureRegistry, MAX_CAPTURE};
 pub use command::{

@@ -42,6 +42,7 @@ use crate::pipeline::group_log::GroupLog;
 use crate::pipeline::hooks;
 use crate::pipeline::observer::{PipelineObserver, PipelineStage};
 use crate::pipeline::pre_filter::{PreFilterChain, PreFilterOutcome};
+use crate::pipeline::reply::split_reply_lines;
 use crate::supervisor::circuit_breaker::{CircuitBreaker, CircuitState};
 use crate::supervisor::{AdapterRoute, Supervisor};
 use crate::toggle::{PLUGIN_SECTION, ToggleStore};
@@ -107,7 +108,7 @@ async fn delivery_deadline_passed(phase: &mut watch::Receiver<ShutdownPhase>) {
     }
 }
 
-/// One queued delivery, optionally carrying a single-use completion receipt.
+/// One queued reply, optionally split into deliveries and carrying a completion receipt.
 ///
 /// Keeping the receipt with the request preserves FIFO ordering and makes queue
 /// drops explicit without a second registry of messages to reconcile.
@@ -115,6 +116,8 @@ async fn delivery_deadline_passed(phase: &mut watch::Receiver<ShutdownPhase>) {
 pub struct OutboundMessage {
     /// Original platform event and reply segments, unchanged by queueing.
     pub request: DeliverMessageRequest,
+    /// Split this model reply only after dequeueing, so all its lines share one queue slot.
+    pub split_lines: bool,
     /// Resolved only after platform delivery or an explicit dispatch failure.
     pub receipt: Option<oneshot::Sender<DeliverMessageResponse>>,
 }
@@ -123,6 +126,7 @@ impl From<DeliverMessageRequest> for OutboundMessage {
     fn from(request: DeliverMessageRequest) -> Self {
         Self {
             request,
+            split_lines: false,
             receipt: None,
         }
     }
@@ -162,6 +166,8 @@ pub enum PipelineResult {
         content: String,
         /// Outbound reply segments generated for the conversational response.
         replies: Vec<MessageSegment>,
+        /// Delivery-only formatting captured from the effective policy for this event.
+        split_lines: bool,
     },
     /// The built-in `/new` command rotated the session of one conversation.
     SessionRotated {
@@ -973,22 +979,62 @@ impl PipelineEngine {
                         {
                             continue;
                         }
-                        // During shutdown a delivery may run only until the drain deadline. The
-                        // deadline branch is polled first so a reply is never started after it.
-                        let request = message.request;
-                        let response = tokio::select! {
-                            biased;
-                            () = delivery_deadline_passed(&mut phase) => {
-                                engine
-                                    .dead_letter_reply(
-                                        &request,
-                                        "node shut down before the reply was delivered; the platform may or may not have received it",
-                                    )
-                                    .await
-                            }
-                            response = engine
-                                .dispatch_outbound_request_with_breaker(request.clone(), &breaker) => response,
+                        // A complete answer occupies one queue slot. Expand it here, then finish
+                        // all its parts before taking another answer to preserve platform FIFO.
+                        let mut request = message.request;
+                        let messages = if message.split_lines {
+                            let limit = match engine.supervisor.adapters().get(&platform).await {
+                                Some(adapter) => adapter.reply_message_limit(&request),
+                                None => usize::MAX,
+                            };
+                            split_reply_lines(&std::mem::take(&mut request.segments), limit)
+                        } else {
+                            vec![std::mem::take(&mut request.segments)]
                         };
+                        let mut messages = messages.into_iter();
+                        let mut response = DeliverMessageResponse {
+                            success: true,
+                            ..Default::default()
+                        };
+                        while let Some(segments) = messages.next() {
+                            let part = DeliverMessageRequest {
+                                segments,
+                                ..request.clone()
+                            };
+                            // Poll the deadline first for every part, including within a batch.
+                            response = tokio::select! {
+                                biased;
+                                () = delivery_deadline_passed(&mut phase) => {
+                                    engine.dead_letter_reply(
+                                        &part,
+                                        "node shut down before the reply was delivered; the platform may or may not have received it",
+                                    ).await
+                                }
+                                response = engine.dispatch_outbound_request_with_breaker(
+                                    part.clone(), &breaker,
+                                ) => response,
+                            };
+                            if !response.success {
+                                // The attempted part was already recorded. Persist only the
+                                // unsent suffix: replaying the original batch duplicates its prefix.
+                                let reason = format!(
+                                    "preceding part of this reply failed: {}",
+                                    response.error_message,
+                                );
+                                for segments in messages {
+                                    engine
+                                        .dead_letter_reply(
+                                            &DeliverMessageRequest {
+                                                segments,
+                                                ..request.clone()
+                                            },
+                                            &reason,
+                                        )
+                                        .await;
+                                }
+                                break;
+                            }
+                        }
                         if let Some(receipt) = message.receipt {
                             let _ = receipt.send(response);
                         }
@@ -1988,6 +2034,7 @@ impl PipelineEngine {
                     return PipelineResult::LlmReplied {
                         content: answer.to_string(),
                         replies,
+                        split_lines: reply_policy.split_lines,
                     };
                 }
                 Err(e) => {
@@ -2110,13 +2157,16 @@ impl PipelineEngine {
                     // The handler's own replies go out first, through the same FIFO the model's
                     // answer will take, so they arrive in the order they were produced.
                     if !replies.is_empty() {
-                        self.enqueue_reply(DeliverMessageRequest {
-                            platform: event.platform.clone(),
-                            channel_id: event.channel_id.clone(),
-                            recipient_id: event.sender_id.clone(),
-                            segments: replies,
-                            event_id: event.event_id.clone(),
-                        });
+                        self.enqueue_reply(
+                            DeliverMessageRequest {
+                                platform: event.platform.clone(),
+                                channel_id: event.channel_id.clone(),
+                                recipient_id: event.sender_id.clone(),
+                                segments: replies,
+                                event_id: event.event_id.clone(),
+                            },
+                            false,
+                        );
                     }
                     let mut event = event.clone();
                     if let Some(text) = response.model_text {
@@ -2691,14 +2741,25 @@ impl PipelineEngine {
             _ => &[][..],
         };
 
+        let split_lines = matches!(
+            &result,
+            PipelineResult::LlmReplied {
+                split_lines: true,
+                ..
+            }
+        );
+
         if !replies.is_empty() {
-            self.enqueue_reply(DeliverMessageRequest {
-                platform,
-                channel_id,
-                recipient_id,
-                segments: replies.to_vec(),
-                event_id,
-            });
+            self.enqueue_reply(
+                DeliverMessageRequest {
+                    platform,
+                    channel_id,
+                    recipient_id,
+                    segments: replies.to_vec(),
+                    event_id,
+                },
+                split_lines,
+            );
         }
     }
 
@@ -2706,14 +2767,18 @@ impl PipelineEngine {
     ///
     /// The pipeline worker must never await platform I/O; a full or closed queue sends the reply
     /// to the dead-letter log instead, written off the worker.
-    fn enqueue_reply(&self, deliver_req: DeliverMessageRequest) {
+    fn enqueue_reply(&self, deliver_req: DeliverMessageRequest, split_lines: bool) {
         let event_id = deliver_req.event_id.clone();
         let platform = deliver_req.platform.clone();
         let channel_id = deliver_req.channel_id.clone();
         let segment_count = deliver_req.segments.len();
 
         // Non-blocking hand-off: the pipeline worker must never await platform I/O.
-        match self.outbound_sender.try_send(deliver_req.into()) {
+        match self.outbound_sender.try_send(OutboundMessage {
+            request: deliver_req,
+            split_lines,
+            receipt: None,
+        }) {
             Ok(()) => {
                 self.observe(PipelineStage::OutboundQueued {
                     event_id,

@@ -269,6 +269,7 @@ impl BotApiService for CoreApiService {
         sender
             .try_send(OutboundMessage {
                 request,
+                split_lines: false,
                 receipt: Some(receipt),
             })
             .map_err(|error| match error {

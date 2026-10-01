@@ -290,8 +290,9 @@ async fn decorators_rewrite_model_and_command_replies_and_failures_keep_the_repl
     };
     assert_eq!(texts(&replies), ["hello", "~cmd"]);
 
-    let PipelineResult::LlmReplied { content, replies } =
-        engine.process_event(event("e2", "你好", None)).await
+    let PipelineResult::LlmReplied {
+        content, replies, ..
+    } = engine.process_event(event("e2", "你好", None)).await
     else {
         panic!("the model answers");
     };

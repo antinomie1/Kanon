@@ -70,6 +70,13 @@ async function save() {
   <Section title={t('settings.reply_how')} hint={t('settings.reply_how_hint')}>
     <div class="flex items-start gap-3 text-[14.5px]">
       <span class="min-w-0 flex-1">
+        <span class="block font-medium">{t('reply.split_lines')}</span>
+        <span class="block hint">{t('reply.split_lines_hint')}</span>
+      </span>
+      <Switch checked={draft.split_lines} label={t('reply.split_lines')} onchange={(next) => draft && (draft.split_lines = next)} />
+    </div>
+    <div class="flex items-start gap-3 text-[14.5px]">
+      <span class="min-w-0 flex-1">
         <span class="block font-medium">{t('reply.quote')}</span>
         <span class="block hint">{t('reply.quote_hint')}</span>
         <SupportBadge capabilities={['quote_reply']} />

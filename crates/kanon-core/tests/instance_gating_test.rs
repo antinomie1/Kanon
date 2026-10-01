@@ -196,7 +196,9 @@ async fn an_enabled_instance_answers_and_namespaces_the_session() {
         .await;
 
     match result {
-        PipelineResult::LlmReplied { content, replies } => {
+        PipelineResult::LlmReplied {
+            content, replies, ..
+        } => {
             assert_eq!(content, "模型回复");
             assert_eq!(replies.len(), 1);
         }

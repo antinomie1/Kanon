@@ -294,7 +294,9 @@ async fn check_attachment(
     assert_eq!(invoked_by.channel_id, "group:1");
 
     let replies = match result {
-        PipelineResult::LlmReplied { content, replies } => {
+        PipelineResult::LlmReplied {
+            content, replies, ..
+        } => {
             assert_eq!(content, expected_text);
             replies
         }

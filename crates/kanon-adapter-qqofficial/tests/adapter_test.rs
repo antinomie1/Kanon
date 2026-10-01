@@ -498,3 +498,37 @@ async fn typing_quotes_files_and_join_greetings() {
     assert_eq!(body["event_id"], "GROUP_ADD_ROBOT:abc");
     assert!(body.get("msg_id").is_none());
 }
+
+/// A split reply line keeps its indentation; only surrounding blank lines are dropped.
+#[tokio::test]
+async fn delivery_preserves_line_indentation() {
+    let (mock, mut accepted) = start_mock().await;
+    let (adapter, _socket, _ingest) = connected(&mock, &mut accepted).await;
+
+    adapter
+        .deliver(DeliverMessageRequest {
+            platform: "qqofficial".into(),
+            channel_id: "c2c:U1".into(),
+            event_id: "C1".into(),
+            segments: vec![text_segment("\n    let x = 1;  \r\n")],
+            ..Default::default()
+        })
+        .await
+        .expect("delivery");
+    let calls = mock.calls.lock().unwrap();
+    let (path, body) = calls.last().unwrap();
+    assert_eq!(path, "/v2/users/U1/messages");
+    assert_eq!(body["content"], "    let x = 1;  ");
+
+    drop(calls);
+    let blank = adapter
+        .deliver(DeliverMessageRequest {
+            platform: "qqofficial".into(),
+            channel_id: "c2c:U1".into(),
+            event_id: "C1".into(),
+            segments: vec![text_segment(" \n\t ")],
+            ..Default::default()
+        })
+        .await;
+    assert!(blank.is_err(), "whitespace-only text must not be sent");
+}

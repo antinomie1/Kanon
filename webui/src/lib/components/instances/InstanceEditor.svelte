@@ -73,6 +73,7 @@ function setReplyInherit(inherit: boolean) {
   store.formReplyProbability = node?.probability ?? 0.5;
   store.formReplyQuote = node?.quote_message ?? false;
   store.formReplyAck = node?.acknowledge ?? false;
+  store.formReplySplitLines = node?.split_lines ?? false;
   store.formReplyReasoning = node?.send_reasoning ?? false;
 }
 
@@ -334,6 +335,17 @@ function testChat() {
             checked={store.formReplyQuote}
             label={t('reply.quote')}
             onchange={(next) => (store.formReplyQuote = next)}
+          />
+        </div>
+        <div class="flex items-start gap-3 text-[14.5px]">
+          <span class="min-w-0 flex-1">
+            <span class="block">{t('reply.split_lines')}</span>
+            <span class="block hint">{t('reply.split_lines_hint')}</span>
+          </span>
+          <Switch
+            checked={store.formReplySplitLines}
+            label={t('reply.split_lines')}
+            onchange={(next) => (store.formReplySplitLines = next)}
           />
         </div>
         <div class="flex items-center gap-3 text-[14.5px]">
