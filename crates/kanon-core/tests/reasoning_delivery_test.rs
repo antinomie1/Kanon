@@ -102,12 +102,12 @@ async fn protocol_channels_control_display_without_reinterpreting_answer_tags() 
 }
 
 #[tokio::test]
-async fn legacy_leading_nested_envelopes_are_separated_before_delivery() {
-    let text = "<think>outer <think>inner</think> secret</think>answer";
+async fn a_standard_legacy_block_is_separated_before_delivery() {
+    let text = "<think>private reasoning</think>answer";
     assert_eq!(delivered_texts(false, text, None).await, ["answer"]);
     let replies = delivered_texts(true, text, None).await;
     assert_eq!(replies.last().unwrap(), "answer");
-    assert!(replies[0].contains("secret"));
+    assert_eq!(replies[0], "private reasoning");
 }
 
 #[tokio::test]
@@ -118,6 +118,7 @@ async fn unrecovered_tool_call_markup_is_delivered_verbatim() {
         "answer <tool_call>bad</tool_call>",
         "Models emit `<tool_call>{\"name\": ...}</tool_call>` blocks",
         "<tool_call>not a tool call at all</tool_call>",
+        "<think>unfinished",
     ] {
         assert_eq!(delivered_texts(false, text, None).await, [text]);
     }

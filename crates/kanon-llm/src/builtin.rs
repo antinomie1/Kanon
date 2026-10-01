@@ -217,7 +217,7 @@ impl BuiltinAgent {
             .as_deref()
             .map(crate::gateway::strip_reasoning_tags)
             .map(str::trim)
-            .filter(|text| !text.is_empty());
+            .filter(|text| !text.is_empty() && !text.starts_with("<think>"));
         let Some(summary) = summary.filter(|_| response.tool_calls.is_empty()) else {
             return Err(AgentError::Compaction(
                 "the model returned no summary (empty answer or a tool call)".to_string(),
