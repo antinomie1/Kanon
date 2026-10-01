@@ -107,8 +107,17 @@ async fn legacy_leading_nested_envelopes_are_separated_before_delivery() {
     let replies = delivered_texts(true, text, None).await;
     assert_eq!(replies.last().unwrap(), "answer");
     assert!(replies[0].contains("secret"));
-    assert_eq!(
-        delivered_texts(false, "answer <tool_call>bad</tool_call>", None).await,
-        ["answer"]
-    );
+}
+
+#[tokio::test]
+async fn unrecovered_tool_call_markup_is_delivered_verbatim() {
+    // Markup the agent could not parse as a call stays text, so a markup-only answer still
+    // produces a reply instead of nothing.
+    for text in [
+        "answer <tool_call>bad</tool_call>",
+        "Models emit `<tool_call>{\"name\": ...}</tool_call>` blocks",
+        "<tool_call>not a tool call at all</tool_call>",
+    ] {
+        assert_eq!(delivered_texts(false, text, None).await, [text]);
+    }
 }

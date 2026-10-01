@@ -1867,8 +1867,9 @@ impl PipelineEngine {
             .await
             {
                 Ok(output) => {
-                    // Reasoning already has its own channel. Delimiters in answer text can be
-                    // literal examples, so delivery must not reinterpret them as reasoning.
+                    // Reasoning already has its own channel and parsed tool calls were removed by
+                    // the agent. Delimiters or tool markup left in answer text are literal
+                    // content, so delivery must not reinterpret them.
                     let answer = visible_reply(&output.content);
                     let answer = answer.as_str();
                     let mut replies = Vec::new();

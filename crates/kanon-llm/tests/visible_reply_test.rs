@@ -20,8 +20,16 @@ fn answer_channel_preserves_reasoning_delimiters_and_examples() {
 }
 
 #[test]
-fn tool_call_markup_is_dropped_even_when_unparsable_or_truncated() {
-    let text = "ok <tool_calls><tool_call>{bad</tool_call></tool_calls> then \
-                <function=x><parameter=a>1</parameter></function> end <tool_call>{\"name\":";
-    assert_eq!(visible_reply(text), "ok  then  end");
+fn unrecovered_tool_call_markup_is_answer_text() {
+    // The agent already removed every block it could parse, so anything left is an example or a
+    // malformed block; dropping it would mutilate the answer or leave nothing to send.
+    for text in [
+        "Models emit `<tool_call>{\"name\": ...}</tool_call>` blocks",
+        "```xml\n<tool_calls><tool_call>{bad</tool_call></tool_calls>\n```",
+        "<function=x><parameter=a>1</parameter></function>",
+        "<tool_call>not a tool call at all</tool_call>",
+        "truncated <tool_call>{\"name\":",
+    ] {
+        assert_eq!(visible_reply(text), text);
+    }
 }
