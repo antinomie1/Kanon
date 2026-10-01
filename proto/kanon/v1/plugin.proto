@@ -38,8 +38,12 @@ service MessagePipelineService {
   rpc OnPreFilter (PipelineEventRequest) returns (PreFilterResult);
   rpc OnExecuteCommand (CommandExecuteRequest) returns (CommandExecuteResponse);
   rpc OnCallTool (ToolCallRequest) returns (ToolCallResponse);
+  // Fire-and-forget lifecycle events, sent only for the kinds a plugin lists in `PluginMeta.events`.
   rpc OnEvent (EventNotification) returns (EventAck);
   rpc OnDeliverMessage (DeliverMessageRequest) returns (DeliverMessageResponse);
+  // Rewrites a reply before it is delivered; called only for plugins with
+  // `PluginMeta.decorates_replies`, in host priority order, each seeing the previous result.
+  rpc OnDecorateReply (DecorateReplyRequest) returns (DecorateReplyResult);
 }
 
 // 3. 核心 API 服务 (运行在 Core 端，监听 core.sock / loopback，Host 主动连接调用)
@@ -152,6 +156,10 @@ message PluginMeta {
   repeated CommandMeta commands = 6;
   repeated ToolMeta tools = 7;
   repeated TriggerMeta triggers = 8;
+  // Lifecycle events this plugin wants through `OnEvent`; nothing is sent for unlisted kinds.
+  repeated EventKind events = 9;
+  // Whether `OnDecorateReply` should be called for this plugin.
+  bool decorates_replies = 10;
 }
 
 message GetPluginMetaResponse {
@@ -297,9 +305,65 @@ message ToolAttachment {
   optional string url = 3;
 }
 
+// Lifecycle events a plugin can subscribe to.
+enum EventKind {
+  EVENT_KIND_UNSPECIFIED = 0;
+  // The bot delivered a message (any source: model, command, plugin `SendMessage`).
+  EVENT_KIND_MESSAGE_SENT = 1;
+  // A platform notice (join, poke, recall, friend request, ...) arrived.
+  EVENT_KIND_NOTICE = 2;
+  // The model answered a conversational message.
+  EVENT_KIND_LLM_RESPONSE = 3;
+}
+
+// One lifecycle event, addressed to one subscribing plugin. The set `detail` is the event kind.
 message EventNotification {
-  string event_type = 1;
-  google.protobuf.Struct payload = 2;
+  reserved 1, 2;
+  reserved "event_type", "payload";
+  string plugin_id = 3;
+  oneof detail {
+    MessageSentEvent message_sent = 4;
+    // The notice exactly as the adapter reported it (kind in `metadata`, see `META_NOTICE`).
+    PipelineEventRequest notice = 5;
+    LlmResponseEvent llm_response = 6;
+  }
+}
+
+message MessageSentEvent {
+  DeliverMessageRequest message = 1;
+  // Platform message id reported by the adapter, empty when it reports none.
+  string message_id = 2;
+}
+
+message LlmResponseEvent {
+  // The message the model answered.
+  PipelineEventRequest context = 1;
+  // The model's final text, before reply decoration.
+  string content = 2;
+}
+
+// Where a decorated reply came from.
+enum ReplySource {
+  REPLY_SOURCE_UNSPECIFIED = 0;
+  REPLY_SOURCE_LLM = 1;
+  REPLY_SOURCE_COMMAND = 2;
+}
+
+message DecorateReplyRequest {
+  string plugin_id = 1;
+  // The inbound message being answered.
+  PipelineEventRequest context = 2;
+  repeated MessageSegment segments = 3;
+  ReplySource source = 4;
+  // Command or trigger name for `REPLY_SOURCE_COMMAND`, empty otherwise.
+  string command = 5;
+}
+
+message DecorateReplyResult {
+  // When false the reply is left untouched and `segments` is ignored. When true `segments`
+  // replaces the reply; an empty list suppresses it.
+  bool modified = 1;
+  repeated MessageSegment segments = 2;
 }
 
 message EventAck {

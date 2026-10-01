@@ -17,10 +17,11 @@ use kanon_proto::v1::message_pipeline_service_server::{
 };
 use kanon_proto::v1::plugin_host_service_server::{PluginHostService, PluginHostServiceServer};
 use kanon_proto::v1::{
-    CommandExecuteRequest, CommandExecuteResponse, DeliverMessageRequest, DeliverMessageResponse,
-    EventAck, EventNotification, GetPluginMetaRequest, GetPluginMetaResponse, PipelineEventRequest,
-    PreFilterResult, RegisterHostRequest, ReloadPluginConfigRequest, ReloadPluginConfigResponse,
-    ToolCallRequest, ToolCallResponse,
+    CommandExecuteRequest, CommandExecuteResponse, DecorateReplyRequest, DecorateReplyResult,
+    DeliverMessageRequest, DeliverMessageResponse, EventAck, EventNotification,
+    GetPluginMetaRequest, GetPluginMetaResponse, PipelineEventRequest, PreFilterResult,
+    RegisterHostRequest, ReloadPluginConfigRequest, ReloadPluginConfigResponse, ToolCallRequest,
+    ToolCallResponse,
 };
 use kanon_transport::{IpcListener, connect_ipc};
 
@@ -447,9 +448,31 @@ impl<P: Plugin> MessagePipelineService for PipelineServiceImpl<P> {
 
     async fn on_event(
         &self,
-        _request: Request<EventNotification>,
+        request: Request<EventNotification>,
     ) -> Result<Response<EventAck>, Status> {
+        let plugin = self.plugin.read().await;
+        // Events are fire-and-forget for the core, so a handler failure is only logged here.
+        if let Err(err) = plugin.on_event(request.into_inner()).await {
+            tracing::warn!(error = %err, "Plugin event handler failed");
+        }
         Ok(Response::new(EventAck { received: true }))
+    }
+
+    async fn on_decorate_reply(
+        &self,
+        request: Request<DecorateReplyRequest>,
+    ) -> Result<Response<DecorateReplyResult>, Status> {
+        let plugin = self.plugin.read().await;
+        match plugin.on_decorate_reply(request.into_inner()).await {
+            Ok(Some(segments)) => Ok(Response::new(DecorateReplyResult {
+                modified: true,
+                segments,
+            })),
+            Ok(None) => Ok(Response::new(DecorateReplyResult::default())),
+            // A failed decorator must not eat the reply: report an error and the core keeps the
+            // reply as it was.
+            Err(err) => Err(Status::internal(err.to_string())),
+        }
     }
 
     async fn on_deliver_message(

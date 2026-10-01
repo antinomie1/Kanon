@@ -19,9 +19,10 @@ use crate::toggle::{PLUGIN_SECTION, ToggleStore};
 use kanon_proto::v1::message_pipeline_service_client::MessagePipelineServiceClient;
 use kanon_proto::v1::plugin_host_service_client::PluginHostServiceClient;
 use kanon_proto::v1::{
-    CommandExecuteRequest, CommandExecuteResponse, DeliverMessageRequest, DeliverMessageResponse,
-    GetPluginMetaRequest, PipelineEventRequest, PluginMeta, PreFilterResult,
-    ReloadPluginConfigRequest, ReloadPluginConfigResponse, ToolCallRequest, ToolCallResponse,
+    CommandExecuteRequest, CommandExecuteResponse, DecorateReplyRequest, DecorateReplyResult,
+    DeliverMessageRequest, DeliverMessageResponse, EventNotification, GetPluginMetaRequest,
+    PipelineEventRequest, PluginMeta, PreFilterResult, ReloadPluginConfigRequest,
+    ReloadPluginConfigResponse, ToolCallRequest, ToolCallResponse,
 };
 use kanon_transport::{connect_ipc, core_socket_path, default_run_dir, host_socket_path};
 
@@ -351,6 +352,25 @@ impl ManagedHost {
                 Err(status)
             }
         }
+    }
+
+    /// Delivers a lifecycle event to one of this host's plugins.
+    ///
+    /// Not counted by the circuit breaker: events are optional notifications, and a plugin that
+    /// ignores them must not get its commands and tools fast-failed.
+    pub async fn notify_event(&self, req: EventNotification) -> Result<(), tonic::Status> {
+        let mut client = self.pipeline_client.clone();
+        client.on_event(req).await?;
+        Ok(())
+    }
+
+    /// Asks one of this host's plugins to rewrite a reply.
+    pub async fn decorate_reply(
+        &self,
+        req: DecorateReplyRequest,
+    ) -> Result<DecorateReplyResult, tonic::Status> {
+        let mut client = self.pipeline_client.clone();
+        Ok(client.on_decorate_reply(req).await?.into_inner())
     }
 
     /// Queries the host for fresh plugin metadata.
@@ -1445,6 +1465,8 @@ impl Supervisor {
                         commands: vec![],
                         tools: vec![],
                         triggers: vec![],
+                        events: vec![],
+                        decorates_replies: false,
                     })
                     .collect()
             }

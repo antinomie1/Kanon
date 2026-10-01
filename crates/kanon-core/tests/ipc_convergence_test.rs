@@ -153,6 +153,15 @@ impl MessagePipelineService for MockHostService {
         Ok(tonic::Response::new(EventAck { received: true }))
     }
 
+    async fn on_decorate_reply(
+        &self,
+        _request: tonic::Request<kanon_proto::v1::DecorateReplyRequest>,
+    ) -> Result<tonic::Response<kanon_proto::v1::DecorateReplyResult>, tonic::Status> {
+        Ok(tonic::Response::new(
+            kanon_proto::v1::DecorateReplyResult::default(),
+        ))
+    }
+
     async fn on_deliver_message(
         &self,
         _request: tonic::Request<DeliverMessageRequest>,

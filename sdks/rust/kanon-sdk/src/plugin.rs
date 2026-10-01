@@ -6,8 +6,9 @@
 use crate::context::PluginContext;
 use async_trait::async_trait;
 use kanon_proto::v1::{
-    CommandExecuteRequest, CommandExecuteResponse, DeliverMessageRequest, DeliverMessageResponse,
-    PipelineEventRequest, PluginMeta, PreFilterResult, ToolCallRequest, ToolCallResponse,
+    CommandExecuteRequest, CommandExecuteResponse, DecorateReplyRequest, DeliverMessageRequest,
+    DeliverMessageResponse, EventNotification, MessageSegment, PipelineEventRequest, PluginMeta,
+    PreFilterResult, ToolCallRequest, ToolCallResponse,
 };
 
 /// Result alias for plugin operations.
@@ -92,5 +93,24 @@ pub trait Plugin: Send + Sync + 'static {
                 req.platform
             ),
         })
+    }
+
+    /// Receives a lifecycle event this plugin subscribed to through `PluginMeta.events`.
+    ///
+    /// Events are fire-and-forget: the core does not wait for the outcome, and an error is only
+    /// logged by the host.
+    async fn on_event(&self, _event: EventNotification) -> PluginResult<()> {
+        Ok(())
+    }
+
+    /// Rewrites a reply before delivery; called only when `PluginMeta.decorates_replies` is set.
+    ///
+    /// Return `Ok(None)` to leave the reply untouched, or `Ok(Some(segments))` to replace it (an
+    /// empty list suppresses it). An error leaves the reply untouched.
+    async fn on_decorate_reply(
+        &self,
+        _req: DecorateReplyRequest,
+    ) -> PluginResult<Option<Vec<MessageSegment>>> {
+        Ok(None)
     }
 }

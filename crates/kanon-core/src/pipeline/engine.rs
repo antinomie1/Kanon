@@ -20,10 +20,11 @@ use kanon_llm::tool_router::ToolRouter;
 use kanon_llm::{
     AgentFactory, AgentSlot, ModelCapabilities, ModelRef, ModelSpec, strip_reasoning_tags,
 };
+use kanon_proto::v1::event_notification::Detail;
 use kanon_proto::v1::message_segment::Segment;
 use kanon_proto::v1::{
-    DeliverMessageRequest, DeliverMessageResponse, IngestEventRequest, MessageSegment,
-    PipelineEventRequest,
+    DeliverMessageRequest, DeliverMessageResponse, EventKind, IngestEventRequest, LlmResponseEvent,
+    MessageSegment, MessageSentEvent, PipelineEventRequest, ReplySource,
 };
 
 use crate::access::{CommandAccess, CommandPolicyStore, META_SENDER_NAME};
@@ -40,6 +41,7 @@ use crate::pipeline::command::{CommandRouter, TriggerMatcher};
 use crate::pipeline::context::build_user_message;
 use crate::pipeline::dead_letter::DeadLetterWriter;
 use crate::pipeline::group_log::GroupLog;
+use crate::pipeline::hooks;
 use crate::pipeline::observer::{PipelineObserver, PipelineStage};
 use crate::pipeline::pre_filter::{PreFilterChain, PreFilterOutcome};
 use crate::supervisor::circuit_breaker::{CircuitBreaker, CircuitState};
@@ -667,6 +669,66 @@ impl PipelineEngine {
         }
     }
 
+    /// The hosts whose plugins `instance` runs, by its plugin policy and the global toggles.
+    ///
+    /// Without a toggle store or an instance every host is kept, as the node behaved before
+    /// instances existed.
+    async fn instance_hosts(
+        &self,
+        instance: Option<&crate::instance::BotInstance>,
+        hosts: Vec<Arc<crate::supervisor::ManagedHost>>,
+    ) -> Vec<Arc<crate::supervisor::ManagedHost>> {
+        let (Some(toggles), Some(instance)) = (&self.toggles, instance) else {
+            return hosts;
+        };
+        let mut allowed = Vec::with_capacity(hosts.len());
+        for host in hosts {
+            let plugin_id = host.primary_plugin_id().unwrap_or_default();
+            let globally_enabled = toggles.is_enabled(PLUGIN_SECTION, &plugin_id).await;
+            if instance.allows_plugin(&plugin_id, globally_enabled) {
+                allowed.push(host);
+            } else {
+                tracing::debug!(
+                    instance_id = %instance.id,
+                    plugin_id = %plugin_id,
+                    "Plugin skipped for this instance by its plugin policy"
+                );
+            }
+        }
+        allowed
+    }
+
+    /// Tells subscribed plugins that the bot sent a message on `request.platform`.
+    ///
+    /// The plugins are those of the instance serving the platform, as for inbound events; with
+    /// an instance registry but no instance claiming the platform nobody is told.
+    async fn emit_message_sent(&self, request: &DeliverMessageRequest, message_id: &str) {
+        let hosts = self.supervisor.get_all_hosts().await;
+        if !hosts.iter().any(|host| {
+            host.metas()
+                .iter()
+                .any(|plugin| plugin.events().any(|kind| kind == EventKind::MessageSent))
+        }) {
+            return;
+        }
+        let instance = match &self.instances {
+            Some(registry) => match registry.resolve_by_platform(&request.platform).await {
+                Ok(Some(instance)) => Some(instance),
+                _ => return,
+            },
+            None => None,
+        };
+        let hosts = self.instance_hosts(instance.as_ref(), hosts).await;
+        hooks::emit_event(
+            &hosts,
+            EventKind::MessageSent,
+            Detail::MessageSent(MessageSentEvent {
+                message: Some(request.clone()),
+                message_id: message_id.to_string(),
+            }),
+        );
+    }
+
     /// Delivers one outbound message to the adapter owning its platform.
     ///
     /// Routing order is built-in adapter first, then plugin host. Every failure path is explicit:
@@ -784,6 +846,7 @@ impl PipelineEngine {
                     error_message: String::new(),
                 };
                 breaker.record_success(start.elapsed());
+                self.emit_message_sent(&request, &outcome.message_id).await;
                 tracing::info!(
                     platform = %outcome.platform,
                     channel_id = %channel_id,
@@ -1110,6 +1173,14 @@ impl PipelineEngine {
             None => None,
         };
 
+        // Phase 0b: Per-instance plugin policy.
+        //
+        // Filtering here (rather than inside each later phase) means a plugin this instance
+        // disabled cannot pre-filter, answer commands, offer tools or observe events — one
+        // decision covers the whole pipeline. It runs before notices so a notice reaches only
+        // the plugins this instance runs.
+        let hosts = self.instance_hosts(instance.as_ref(), hosts).await;
+
         // Phase 0a: Notices.
         //
         // A join, poke or recall is not a message. Only the node's event policy decides whether the
@@ -1122,6 +1193,8 @@ impl PipelineEngine {
         let bash_sender = (notice.is_none() && !event.sender_id.trim().is_empty())
             .then(|| format!("{platform}:{}", event.sender_id));
         if let Some(kind) = notice {
+            // Subscribers observe every notice, whether or not the bot itself reacts to it.
+            hooks::emit_event(&hosts, EventKind::Notice, Detail::Notice(event.clone()));
             let policy = self
                 .event_policy
                 .as_ref()
@@ -1176,33 +1249,6 @@ impl PipelineEngine {
                 };
             }
         }
-
-        // Phase 0b: Per-instance plugin policy.
-        //
-        // Filtering here (rather than inside each later phase) means a plugin this instance
-        // disabled cannot pre-filter, answer commands or offer tools — one decision covers the
-        // whole pipeline. Without a toggle store or an instance the node behaves as before.
-        let hosts: Vec<Arc<crate::supervisor::ManagedHost>> =
-            match (&self.toggles, instance.as_ref()) {
-                (Some(toggles), Some(instance)) => {
-                    let mut allowed = Vec::with_capacity(hosts.len());
-                    for host in hosts {
-                        let plugin_id = host.primary_plugin_id().unwrap_or_default();
-                        let globally_enabled = toggles.is_enabled(PLUGIN_SECTION, &plugin_id).await;
-                        if instance.allows_plugin(&plugin_id, globally_enabled) {
-                            allowed.push(host);
-                        } else {
-                            tracing::debug!(
-                                instance_id = %instance.id,
-                                plugin_id = %plugin_id,
-                                "Plugin skipped for this instance by its plugin policy"
-                            );
-                        }
-                    }
-                    allowed
-                }
-                _ => hosts,
-            };
 
         // Phase 1: PreFilter Interception Chain
         self.observe(PipelineStage::PreFilterStarted {
@@ -1310,13 +1356,16 @@ impl PipelineEngine {
                         filtered_event.clone(),
                     )
                     .await;
-                    return self.command_result(
-                        capture.command,
-                        &capture.plugin_id,
-                        host,
-                        &filtered_event,
-                        outcome,
-                    );
+                    return self
+                        .command_result(
+                            &hosts,
+                            capture.command,
+                            &capture.plugin_id,
+                            host,
+                            &filtered_event,
+                            outcome,
+                        )
+                        .await;
                 }
                 None => tracing::warn!(
                     plugin_id = %capture.plugin_id,
@@ -1405,13 +1454,16 @@ impl PipelineEngine {
                 host_id: target.host.host_id.clone(),
             });
             let outcome = CommandRouter::dispatch(&target, parsed, filtered_event.clone()).await;
-            return self.command_result(
-                command,
-                &target.plugin_id,
-                &target.host,
-                &filtered_event,
-                outcome,
-            );
+            return self
+                .command_result(
+                    &hosts,
+                    command,
+                    &target.plugin_id,
+                    &target.host,
+                    &filtered_event,
+                    outcome,
+                )
+                .await;
         }
 
         // Phase 2b: Plugin triggers.
@@ -1450,13 +1502,16 @@ impl PipelineEngine {
                 filtered_event.clone(),
             )
             .await;
-            return self.command_result(
-                trigger,
-                &target.plugin_id,
-                &target.host,
-                &filtered_event,
-                outcome,
-            );
+            return self
+                .command_result(
+                    &hosts,
+                    trigger,
+                    &target.plugin_id,
+                    &target.host,
+                    &filtered_event,
+                    outcome,
+                )
+                .await;
         }
 
         // Phase 2c: Reply policy gate.
@@ -1778,8 +1833,28 @@ impl PipelineEngine {
                         self.group_log.mark_seen(&group_key, &ledger_key, seq);
                     }
 
-                    // The platform adapter turns this into its native quote of the triggering message.
-                    if quote_reply {
+                    hooks::emit_event(
+                        &hosts,
+                        EventKind::LlmResponse,
+                        Detail::LlmResponse(LlmResponseEvent {
+                            context: Some(filtered_event.clone()),
+                            content: answer.to_string(),
+                        }),
+                    );
+                    // Decoration changes only what is delivered; memory keeps the model's own
+                    // words, so the conversation the model sees stays exactly what it said.
+                    let mut replies = hooks::decorate_reply(
+                        &hosts,
+                        &filtered_event,
+                        ReplySource::Llm,
+                        "",
+                        replies,
+                    )
+                    .await;
+
+                    // The platform adapter turns this into its native quote of the triggering
+                    // message; a reply a decorator suppressed gets no lone quote.
+                    if quote_reply && !replies.is_empty() {
                         replies.insert(
                             0,
                             MessageSegment {
@@ -1819,8 +1894,9 @@ impl PipelineEngine {
     ///
     /// A transport failure is logged and reported as an unsuccessful execution without replies:
     /// the plugin never answered, so there is nothing truthful to send on its behalf.
-    fn command_result(
+    async fn command_result(
         &self,
+        hosts: &[Arc<crate::supervisor::ManagedHost>],
         command: String,
         plugin_id: &str,
         host: &Arc<crate::supervisor::ManagedHost>,
@@ -1844,12 +1920,20 @@ impl PipelineEngine {
                         "Plugin asked to capture a conversation whose event names no sender; ignored"
                     );
                 }
+                let replies = hooks::decorate_reply(
+                    hosts,
+                    event,
+                    ReplySource::Command,
+                    &command,
+                    response.replies,
+                )
+                .await;
                 PipelineResult::CommandExecuted {
                     command,
                     plugin_id: plugin_id.to_string(),
                     host_id: host.host_id.clone(),
                     success: response.success,
-                    replies: response.replies,
+                    replies,
                 }
             }
             Err(status) => {

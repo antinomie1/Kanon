@@ -89,6 +89,15 @@ impl MessagePipelineService for RecordingHost {
         Ok(tonic::Response::new(EventAck { received: true }))
     }
 
+    async fn on_decorate_reply(
+        &self,
+        _request: tonic::Request<kanon_proto::v1::DecorateReplyRequest>,
+    ) -> Result<tonic::Response<kanon_proto::v1::DecorateReplyResult>, tonic::Status> {
+        Ok(tonic::Response::new(
+            kanon_proto::v1::DecorateReplyResult::default(),
+        ))
+    }
+
     async fn on_deliver_message(
         &self,
         request: tonic::Request<DeliverMessageRequest>,
@@ -174,6 +183,15 @@ impl MessagePipelineService for RecordingHostServer {
         request: tonic::Request<EventNotification>,
     ) -> Result<tonic::Response<EventAck>, tonic::Status> {
         self.inner.on_event(request).await
+    }
+
+    async fn on_decorate_reply(
+        &self,
+        _request: tonic::Request<kanon_proto::v1::DecorateReplyRequest>,
+    ) -> Result<tonic::Response<kanon_proto::v1::DecorateReplyResult>, tonic::Status> {
+        Ok(tonic::Response::new(
+            kanon_proto::v1::DecorateReplyResult::default(),
+        ))
     }
 
     async fn on_deliver_message(

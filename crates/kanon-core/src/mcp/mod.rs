@@ -652,6 +652,8 @@ impl McpServer {
             commands: Vec::new(),
             tools: metas,
             triggers: Vec::new(),
+            events: Vec::new(),
+            decorates_replies: false,
         }];
 
         Ok(())
