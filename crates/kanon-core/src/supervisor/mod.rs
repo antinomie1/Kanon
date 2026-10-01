@@ -1364,7 +1364,14 @@ impl Supervisor {
         // itself is already applied, which is why a failed refresh is reported, not rolled back:
         // the previous metadata stays in effect until the next reload or restart.
         match host.get_plugin_meta().await {
-            Ok(metas) => host.set_metas(metas),
+            Ok(metas) if metas.iter().any(|meta| meta.id == plugin_id) => host.set_metas(metas),
+            // A host that stops declaring the plugin it just reconfigured is inconsistent;
+            // adopting that answer would make the plugin vanish from routing and the console.
+            Ok(_) => tracing::warn!(
+                plugin_id = %plugin_id,
+                host_id = %host.host_id,
+                "Refreshed metadata no longer declares the reloaded plugin; keeping the previous commands and tools"
+            ),
             Err(status) => tracing::warn!(
                 plugin_id = %plugin_id,
                 host_id = %host.host_id,
