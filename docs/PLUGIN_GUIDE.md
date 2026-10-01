@@ -39,7 +39,7 @@ kanon-dev test ./my_plugin --command /hello   # 离线沙盒：执行命令或�
 kanon-dev pack ./my_plugin                     # 打包为 .kpk（附 SHA-256 校验）
 ```
 
-把插件目录放进节点的 `./plugins/` 下（最多嵌套两层子目录），节点启动时扫描 `plugin.toml` 并按 `priority` 排序加载。
+把插件目录放进节点的 `./plugins/` 下（最多嵌套两层子目录），节点启动时扫描 `plugin.toml` 并按 `priority` 排序加载。节点运行期间不会自动扫描该目录：新放进去的插件要在控制台「扩展 → 插件」点「刷新」（即 `POST /api/v1/plugins/rescan`）后才会出现，再从那里启用；通过控制台安装的插件则会立即出现。
 
 ### 2.2 依赖安装
 

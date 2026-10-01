@@ -280,6 +280,8 @@ function split(turn: ChatTurn): { reasoning: string; content: string } {
         </div>
       {/if}
       <div class="flex items-end gap-2.5">
+        <!-- 11px + one 24px line + 11px = 46px, the send button's height: a single line fills the
+             content box exactly, so it sits centred, and every extra line adds one line height. -->
         <textarea
           bind:this={composer}
           bind:value={draft}
@@ -288,7 +290,7 @@ function split(turn: ChatTurn): { reasoning: string; content: string } {
           placeholder={t('chat.placeholder', { name: speaker })}
           oninput={fit}
           onkeydown={onKeydown}
-          class="input h-[46px] min-h-[46px] resize-none rounded-[23px] px-5 py-[11px] leading-[1.5] shadow-none focus:shadow-[inset_0_0_0_2px_var(--k-accent)]"
+          class="input h-[46px] min-h-[46px] resize-none rounded-[23px] px-5 py-[11px] leading-6 shadow-none focus:shadow-[inset_0_0_0_2px_var(--k-accent)]"
         ></textarea>
         {#if chat.streaming}
           <Button

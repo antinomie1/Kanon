@@ -392,7 +392,8 @@ function testChat() {
         </Button>
         <Button
           type="button"
-          variant="filled" size="sm"
+          variant="inverse-filled"
+          size="sm"
           disabled={store.saving || !store.formName.trim()}
           onclick={save}
         >

@@ -425,7 +425,8 @@ sequenceDiagram
 | Method | Endpoint | Description |
 | :--- | :--- | :--- |
 | `GET` | `/api/v1/health` | 核心健康状态与基础运行指标 (Memory, Uptime, 插件与会话计数) |
-| `GET` | `/api/v1/plugins` | 查询所有已发现插件清单、运行状态与静态元数据 |
+| `GET` | `/api/v1/plugins` | 查询插件清单、运行状态与静态元数据；目录部分来自最近一次扫描（启动时或手动重新扫描），读取清单本身不扫描磁盘 |
+| `POST` | `/api/v1/plugins/rescan` | 重新扫描 `./plugins` 并返回刷新后的清单；手动放进目录的插件只有经过这一步才会被节点识别 |
 | `GET` | `/api/v1/plugins/{id}/config` | 获取指定插件的配置项当前值、JSON Schema 及当前单调递增版本号 `version` |
 | `PUT` | `/api/v1/plugins/{id}/config` | 校验配置 → 检查 CAS 乐观锁版本向量 → 触发跨进程热重载 → 原子持久化（版本冲突返回 409，宿主拒绝则不落盘） |
 | `POST` | `/api/v1/plugins/{id}/restart` | 重启指定插件所在的宿主进程（依赖 Supervisor 记录的启动配方） |

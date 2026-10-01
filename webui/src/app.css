@@ -566,15 +566,20 @@
     );
   }
   /* Buttons sitting on the inverse surface (snackbars and the unsaved-changes bars): the accent
-     there is `inverse-primary`, and the plain flavour is `inverse-on-surface` text. */
+     there is `inverse-primary` (a filled button's container, a text button's label), and the plain
+     flavour is `inverse-on-surface` text. A disabled button is drawn from `on-surface` at 10% and
+     38%, which is the page's dark text and vanishes into the bar, so `on-surface` becomes the bar's
+     own text colour too — a disabled button then dims against the bar the way it does on the page. */
   md-gb-button.kanon-inverse {
     --md-sys-color-primary: var(--k-bar-accent);
     --md-sys-color-on-primary: var(--k-bar);
+    --md-sys-color-on-surface: var(--k-on-bar);
   }
   md-gb-button.kanon-inverse-plain {
     --md-sys-color-primary: var(--k-on-bar);
     --md-sys-color-on-primary: var(--k-bar);
     --md-sys-color-on-surface-variant: var(--k-on-bar);
+    --md-sys-color-on-surface: var(--k-on-bar);
   }
 
   /* Geometry the console needs beyond Google's sizes. The element exposes the inner button as
@@ -606,6 +611,21 @@
     width: var(--container-height);
   }
 
+  /* Graphite's switch check mark. Google's switch draws the "on" handle in `on-primary` and the
+     icon on it in `on-primary-container`, which a tonal-spot scheme makes light and dark. The
+     monochrome scheme behind graphite puts the primary container at the far end of the grey ramp,
+     so `on-primary-container` lands on the same side as `on-primary`: a white check on a light-grey
+     handle in light mode, black on near-black in dark. Under the pointer the handle turns
+     `primary-container`, where the stock icon colour is right, so only the resting handle changes,
+     to `primary` (the track's colour: black in light mode, white in dark). Disabled switches keep
+     Google's dimmed icon. The colour goes through `--md-icon-color` because Google's `.md-icon` rule
+     sets `color` from it in a cascade layer declared after this one. */
+  :root:not([data-accent])
+    md-gb-switch:not([disabled], :hover)
+    > [slot="on-icon"] {
+    --md-icon-color: var(--md-sys-color-primary);
+  }
+
   /* Google's filled text field at the console's density: Material's field is 56px (8px + a 16px
      label line + 24px input + 8px); the console has no floating labels — it puts a `.label` above
      the field — so the same 24px input line with 12px of space above and below gives 48px, and the
@@ -623,12 +643,18 @@
     --md-filled-text-field-input-text-size: 13.5px;
   }
   /* The console's search boxes are pills. The field takes one token per corner, so all four are set
-     rather than a single radius. */
+     rather than a single radius. A pill is Material's search bar, which has no active indicator:
+     the filled field's underline would cut straight across the rounded ends, so it is removed in
+     every state. */
   md-filled-text-field.kanon-field-pill {
     --md-filled-text-field-container-shape-start-start: 9999px;
     --md-filled-text-field-container-shape-start-end: 9999px;
     --md-filled-text-field-container-shape-end-start: 9999px;
     --md-filled-text-field-container-shape-end-end: 9999px;
+    --md-filled-text-field-active-indicator-height: 0px;
+    --md-filled-text-field-hover-active-indicator-height: 0px;
+    --md-filled-text-field-focus-active-indicator-height: 0px;
+    --md-filled-text-field-disabled-active-indicator-height: 0px;
   }
 
   /* The console's own field styling, kept for what Google's field cannot do: the resizable

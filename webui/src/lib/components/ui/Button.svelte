@@ -10,8 +10,8 @@ import type { HTMLButtonAttributes } from 'svelte/elements';
  * coming from the same package. The wrapper keeps the console's vocabulary — a variant and a size,
  * the way the old `.btn` classes read — and carries what the element has no variant for:
  *
- *   - `danger`, `danger-filled`, `warn` and the two inverse-surface flavours, which remap Google's
- *     own colour roles on the host (the `.kanon-*` rules in `app.css`) rather than reaching into
+ *   - `danger`, `danger-filled`, `warn` and the three inverse-surface flavours, which remap
+ *     Google's own colour roles on the host (the `.kanon-*` rules in `app.css`) rather than reaching into
  *     the shadow root;
  *   - the console's geometry: circular icon buttons, the 28px `xs` size (Google's smallest is
  *     32px), the 46px composer button and flush padding, all set through the exposed `btn` part;
@@ -30,10 +30,11 @@ export type ButtonVariant =
   | 'danger-filled'
   | 'warn'
   | 'inverse'
+  | 'inverse-filled'
   | 'inverse-plain';
 export type ButtonSize = 'md' | 'sm' | 'xs';
 
-/** Variants that only recolour a text button; `danger-filled` is the filled one. */
+/** Variants that recolour a text button, or a filled one for `danger-filled` and `inverse-filled`. */
 const COLORED: Partial<
   Record<ButtonVariant, { klass: string; color: string }>
 > = {
@@ -41,6 +42,7 @@ const COLORED: Partial<
   'danger-filled': { klass: 'kanon-danger', color: 'filled' },
   warn: { klass: 'kanon-warn', color: 'text' },
   inverse: { klass: 'kanon-inverse', color: 'text' },
+  'inverse-filled': { klass: 'kanon-inverse', color: 'filled' },
   'inverse-plain': { klass: 'kanon-inverse-plain', color: 'text' },
 };
 

@@ -354,7 +354,8 @@ async function remove() {
         </Button>
         <Button
           type="button"
-          variant="filled" size="sm"
+          variant="inverse-filled"
+          size="sm"
           disabled={providersStore.pending}
           onclick={() => void save()}
         >

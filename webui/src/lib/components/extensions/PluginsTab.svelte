@@ -37,11 +37,16 @@ let busy = $state<Record<string, boolean>>({});
 let installOpen = $state(false);
 let configFor = $state<string | null>(null);
 
-async function load() {
+/**
+ * Loads the catalog. Only the refresh button passes `rescan`: the node reads its plugin directory
+ * on request alone, so opening the tab or finishing an action shows the last scan, and a plugin
+ * copied into the directory by hand appears once the operator refreshes.
+ */
+async function load(rescan = false) {
   loading = true;
   error = null;
   try {
-    const res = await api.getPlugins();
+    const res = await (rescan ? api.rescanPlugins() : api.getPlugins());
     const hosted = res.hosts.flatMap((host) =>
       host.plugins.map((plugin) => ({ plugin, host })),
     );
@@ -155,7 +160,7 @@ async function restart(row: Row) {
 <div class="flex flex-wrap items-center justify-between gap-3 px-1">
   <p class="m-0 max-w-[68ch] hint">{t('extensions.plugins_hint')}</p>
   <div class="flex flex-wrap gap-2.5">
-    <Button type="button" disabled={loading} onclick={() => void load()}>
+    <Button type="button" disabled={loading} onclick={() => void load(true)}>
       <RefreshCw size={16} strokeWidth={2} class={loading ? 'animate-spin' : ''} />
       {t('platforms.refresh')}
     </Button>

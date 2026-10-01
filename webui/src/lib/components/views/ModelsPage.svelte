@@ -130,6 +130,7 @@ function onDeleted() {
   <DefaultModelCard />
 
   <div class="grid items-start gap-4 lg:grid-cols-[264px_minmax(0,1fr)]">
+    <!-- Drawn like the Settings navigation: pills with Material's 8% hover layer, on a card. -->
     <nav class="card flex flex-col gap-0.5 p-2" aria-label={t('llm.providers')}>
       {#each providers as provider (provider.name)}
         {@const on = provider.name === openedName}
@@ -141,9 +142,9 @@ function onDeleted() {
             e.preventDefault();
             if (!on) router.navigate('models', provider.name);
           }}
-          class="flex flex-col rounded-xl px-3 py-2.5 leading-[1.35] text-fg no-underline {on
+          class="flex flex-col rounded-full px-5 py-2.5 leading-[1.35] text-fg no-underline transition-colors {on
             ? 'bg-accent-tint'
-            : 'hover:bg-sunk'}"
+            : 'hover:bg-fg/8'}"
         >
           <span class="flex min-w-0 items-center gap-2">
             <span class="truncate text-[15px] font-semibold {on ? 'text-accent-fg' : ''}">{provider.name}</span>

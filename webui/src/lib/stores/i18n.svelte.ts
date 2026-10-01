@@ -940,9 +940,9 @@ export const dictionaries = {
     'shell.open_menu': '打开菜单',
     'shell.node_running': '运行中，已 {time}',
     'shell.node_connecting': '正在连接节点',
-    'shell.node_unreachable': '连不上节点',
+    'shell.node_unreachable': '无法连接节点',
     'shell.platform_trouble': '有实例在用的平台没有连上',
-    'shell.offline_title': '连不上 Kanon 节点。',
+    'shell.offline_title': '无法连接 Kanon 节点。',
     'shell.offline_text': '{error}。每 5 秒自动重试。',
     // Shared words
     'common.search': '搜索...',
@@ -963,7 +963,7 @@ export const dictionaries = {
     'home.alert_model_title': '还没有设置模型',
     'home.alert_model_text': '实例需要一个默认模型才能回答。',
     'home.alert_model_action': '设置模型',
-    'home.alert_offline_title': '{name} 连不上 {platform}',
+    'home.alert_offline_title': '{name} 无法连接 {platform}',
     'home.alert_offline_text':
       '这个平台现在收不到消息，{name} 在上面不会回答。',
     'home.alert_unknown_title': '没有叫 {platform} 的平台',
