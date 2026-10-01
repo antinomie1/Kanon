@@ -83,7 +83,35 @@ pub fn extract_textual_tool_calls(content: &str) -> (Vec<ToolCall>, String) {
     }
 
     cleaned.push_str(&content[cursor..]);
-    (calls, cleaned.trim().to_string())
+    (calls, drop_emptied_wrappers(&cleaned).trim().to_string())
+}
+
+/// Removes `<tool_calls>` wrappers left empty once the calls inside them were recovered.
+///
+/// The wrapper is part of the recovered markup, so it goes with its calls. A wrapper that still
+/// holds text kept a block that did not parse; it stays so that block remains readable in context.
+fn drop_emptied_wrappers(text: &str) -> String {
+    const OPEN: &str = "<tool_calls>";
+    const CLOSE: &str = "</tool_calls>";
+    let mut out = String::with_capacity(text.len());
+    let mut cursor = 0usize;
+
+    while let Some(relative) = text[cursor..].find(OPEN) {
+        let start = cursor + relative;
+        let body_start = start + OPEN.len();
+        let Some(close) = text[body_start..].find(CLOSE) else {
+            break;
+        };
+        let end = body_start + close + CLOSE.len();
+        out.push_str(&text[cursor..start]);
+        if !text[body_start..body_start + close].trim().is_empty() {
+            out.push_str(&text[start..end]);
+        }
+        cursor = end;
+    }
+
+    out.push_str(&text[cursor..]);
+    out
 }
 
 /// Why this module returns `(calls, cleaned)`:

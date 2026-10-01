@@ -80,6 +80,24 @@ fn recovers_several_blocks_from_one_message() {
 }
 
 #[test]
+fn a_tool_calls_wrapper_goes_with_the_calls_it_held() {
+    let content = "<tool_calls>\n<tool_call>{\"name\": \"a\"}</tool_call>\n</tool_calls> done";
+    let (calls, cleaned) = extract_textual_tool_calls(content);
+    assert_eq!(calls.len(), 1);
+    assert_eq!(cleaned, "done");
+
+    // A wrapper that still holds an unparsable block stays around it.
+    let content = "<tool_calls><tool_call>{\"name\": \"a\"}</tool_call>\
+<tool_call>bad</tool_call></tool_calls>";
+    let (calls, cleaned) = extract_textual_tool_calls(content);
+    assert_eq!(calls.len(), 1);
+    assert_eq!(
+        cleaned,
+        "<tool_calls><tool_call>bad</tool_call></tool_calls>"
+    );
+}
+
+#[test]
 fn malformed_markup_is_preserved_instead_of_silently_dropped() {
     let content = "<tool_call>not a tool call at all</tool_call>";
 

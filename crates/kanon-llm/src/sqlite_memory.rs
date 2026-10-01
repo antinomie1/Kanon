@@ -137,6 +137,7 @@ impl SqliteMemory {
                  session_key TEXT NOT NULL,
                  role TEXT NOT NULL,
                  content TEXT,
+                 reasoning_content TEXT,
                  parts TEXT,
                  tool_calls TEXT,
                  tool_call_id TEXT,
@@ -152,9 +153,11 @@ impl SqliteMemory {
         // explicitly instead of failing the query, which keeps an operator's history usable across
         // the upgrade:
         // - `messages.parts` (multimodal messages);
+        // - `messages.reasoning_content` (separate private reasoning);
         // - `sessions.summary` (compaction). The former `sessions.system_prompt` column is left
         //   in place and ignored: the persona is composed per request, never stored per session.
         Self::ensure_column(&conn, "messages", "parts")?;
+        Self::ensure_column(&conn, "messages", "reasoning_content")?;
         Self::ensure_column(&conn, "sessions", "summary")?;
 
         Ok(Self {
@@ -241,7 +244,7 @@ impl SqliteMemory {
 
             // Query historical messages ordered chronologically
             let mut msg_stmt = conn.prepare(
-                "SELECT role, content, parts, tool_calls, tool_call_id, name
+                "SELECT role, content, parts, tool_calls, tool_call_id, name, reasoning_content
                  FROM messages
                  WHERE session_key = ?1
                  ORDER BY id ASC",
@@ -277,14 +280,18 @@ impl SqliteMemory {
                     }
                 });
 
-                loaded_messages.push(ChatMessage {
+                let mut message = ChatMessage {
                     role,
                     content,
+                    reasoning_content: row.get(6)?,
                     parts,
                     tool_calls,
                     tool_call_id,
                     name,
-                });
+                };
+                // Decode in memory only: upgrades never rewrite or delete old conversation rows.
+                message.separate_reasoning();
+                loaded_messages.push(message);
             }
 
             (summary, loaded_messages)
@@ -333,8 +340,8 @@ fn insert_message(
         .and_then(|parts| serde_json::to_string(parts).ok());
 
     tx.execute(
-        "INSERT INTO messages (session_key, role, content, parts, tool_calls, tool_call_id, name, created_at)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+        "INSERT INTO messages (session_key, role, content, parts, tool_calls, tool_call_id, name, created_at, reasoning_content)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
         params![
             session_key,
             role_name(message.role),
@@ -344,6 +351,7 @@ fn insert_message(
             message.tool_call_id,
             message.name,
             now,
+            message.reasoning_content,
         ],
     )?;
     Ok(())

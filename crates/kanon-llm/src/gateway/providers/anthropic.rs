@@ -320,6 +320,8 @@ impl AnthropicMessagesProvider {
         let mut messages: Vec<wire::AnthropicMessageWire> = Vec::new();
 
         for msg in &request.messages {
+            let mut msg = msg.clone();
+            msg.separate_reasoning();
             match msg.role {
                 Role::System => {
                     if let Some(ref text) = msg.content {
@@ -333,7 +335,7 @@ impl AnthropicMessagesProvider {
                     }
                 }
                 Role::User => {
-                    let blocks = Self::user_blocks(msg);
+                    let blocks = Self::user_blocks(&msg);
                     if !blocks.is_empty() {
                         messages.push(wire::AnthropicMessageWire {
                             role: "user".to_string(),
@@ -518,12 +520,15 @@ impl LlmProvider for AnthropicMessagesProvider {
             }
         });
 
-        Ok(ChatResponse {
+        let mut response = ChatResponse {
+            reasoning_content: None,
             content,
             tool_calls,
             finish_reason,
             usage,
-        })
+        };
+        response.separate_reasoning();
+        Ok(response)
     }
 
     async fn chat_stream(&self, request: &ChatRequest) -> Result<ChatChunkStream, GatewayError> {
@@ -576,6 +581,8 @@ impl LlmProvider for AnthropicMessagesProvider {
             let _ = tx.send(Ok(ChatChunk::done(finish_reason))).await;
         });
 
-        Ok(Box::pin(tokio_stream::wrappers::ReceiverStream::new(rx)))
+        Ok(crate::gateway::reasoning::separate_stream(Box::pin(
+            tokio_stream::wrappers::ReceiverStream::new(rx),
+        )))
     }
 }

@@ -90,6 +90,35 @@ files under `./data/`:
 
 To deploy a preconfigured node (a container image, CI), ship a prepared `data/system.json`.
 
+For custom OpenAI-compatible endpoints that require `reasoning_content` in assistant history,
+select **OpenAI Compatible + reasoning_content replay** (`protocol: "openai_reasoning"`).
+The default `openai` mode omits this extension for other endpoints, while automatically retaining
+it for `https://api.deepseek.com` (including `/v1`) so existing official DeepSeek configurations
+keep working. This only controls history replay; it does not disable thinking or discard stored
+reasoning. Choose the extension only when the endpoint documents support for it.
+
+In **Models → provider settings → Replay historical reasoning**, `replay_reasoning` controls
+whether compatible endpoints receive all assistant reasoning in the retained context, across user
+turns. It defaults to `true` for new and older configurations to preserve supported-endpoint replay
+(including DeepSeek thinking + tools). Ordinary OpenAI endpoints still omit the non-standard field.
+Set `providers[].replay_reasoning` in `data/system.json`, or send it to `POST /api/v1/providers`;
+omitting it from an update preserves the saved preference. Changes apply to the next conversation
+request. Turning it off only changes temporary API messages: old reasoning and newly generated
+reasoning stay in `sessions.db`, survive restart and can be replayed after re-enabling. Existing
+history compaction and clearing policies still apply. This is independent of `send_reasoning`,
+which controls display on chat platforms. Disabling replay can cause thinking-mode tool requests
+to fail on endpoints that require it; see the [DeepSeek thinking-mode contract](https://api-docs.deepseek.com/zh-cn/guides/thinking_mode/).
+
+Reasoning and answer text are distinguished by their source, following AstrBot's separate
+[reasoning/text channels](https://github.com/AstrBotDevs/AstrBot/blob/9d4f523464644554e0e8e50fa2a65f146e320cd1/astrbot/core/agent/runners/tool_loop_agent_runner.py#L180-L200). An explicit `reasoning_content` (including an empty string or null) is authoritative:
+`content` remains answer text, even if it prints `<think>` delimiters. Native streaming deltas follow
+the same rule. Without an explicit channel, only a leading exact `<think>…</think>` envelope is
+recognized for legacy compatibility; nested/consecutive leading blocks and truncated envelopes are
+handled there. Inline prose, Markdown code, lone closing tags and whitespace variants such as
+`<think >` / `</think >` are not reclassified at platform delivery. A bare leading standard envelope
+without a separate channel is inherently ambiguous; quote or fence a literal example in that case.
+This display boundary never deletes stored reasoning or changes the replay preference.
+
 ## Console
 
 The WebUI (`webui/`, built with Svelte 5 and served by the node) manages everything above:

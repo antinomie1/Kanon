@@ -180,6 +180,7 @@ impl LlmProvider for Recorder {
         *self.last_user.lock().unwrap() = user;
         Ok(ChatResponse {
             content: Some("<think>hmm</think>好的".to_string()),
+            reasoning_content: None,
             tool_calls: Vec::new(),
             finish_reason: Some("stop".to_string()),
             usage: None,

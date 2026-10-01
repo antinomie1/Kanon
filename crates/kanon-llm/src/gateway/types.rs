@@ -127,6 +127,10 @@ pub struct ChatMessage {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub content: Option<String>,
 
+    /// Private model reasoning, never part of user-visible content.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reasoning_content: Option<String>,
+
     /// Multimodal parts of a user message, present only when the inbound event referenced media.
     ///
     /// `content` always carries the textual projection, so a provider (or a model without vision)
@@ -153,6 +157,7 @@ impl ChatMessage {
         Self {
             role: Role::System,
             content: Some(content.into()),
+            reasoning_content: None,
             parts: None,
             tool_calls: None,
             tool_call_id: None,
@@ -165,6 +170,7 @@ impl ChatMessage {
         Self {
             role: Role::User,
             content: Some(content.into()),
+            reasoning_content: None,
             parts: None,
             tool_calls: None,
             tool_call_id: None,
@@ -181,6 +187,7 @@ impl ChatMessage {
         Self {
             role: Role::User,
             content: Some(content),
+            reasoning_content: None,
             parts: if parts.is_empty() { None } else { Some(parts) },
             tool_calls: None,
             tool_call_id: None,
@@ -193,6 +200,7 @@ impl ChatMessage {
         Self {
             role: Role::Assistant,
             content: Some(content.into()),
+            reasoning_content: None,
             parts: None,
             tool_calls: None,
             tool_call_id: None,
@@ -205,6 +213,7 @@ impl ChatMessage {
         Self {
             role: Role::Assistant,
             content,
+            reasoning_content: None,
             parts: None,
             tool_calls: Some(tool_calls),
             tool_call_id: None,
@@ -217,10 +226,18 @@ impl ChatMessage {
         Self {
             role: Role::Tool,
             content: Some(content.into()),
+            reasoning_content: None,
             parts: None,
             tool_calls: None,
             tool_call_id: Some(tool_call_id.into()),
             name: None,
+        }
+    }
+
+    /// Separates old assistant envelopes without changing user/tool text or message order.
+    pub fn separate_reasoning(&mut self) {
+        if self.role == Role::Assistant {
+            super::reasoning::separate(&mut self.content, &mut self.reasoning_content);
         }
     }
 
@@ -292,12 +309,51 @@ pub struct TokenUsage {
 pub struct ChatResponse {
     /// Generated text content, if any.
     pub content: Option<String>,
+
+    /// Private model reasoning, never part of user-visible content.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reasoning_content: Option<String>,
     /// List of tool calls requested by the model.
     pub tool_calls: Vec<ToolCall>,
     /// Termination reason (e.g. `stop`, `tool_calls`, `length`).
     pub finish_reason: Option<String>,
     /// Token usage metrics for this inference step.
     pub usage: Option<TokenUsage>,
+}
+
+impl ChatResponse {
+    /// Whether this response contains an assistant payload worth retaining in history.
+    ///
+    /// Empty optional strings are not data. Tool calls and reasoning-only replies are data even
+    /// without a visible answer; whitespace is retained verbatim rather than normalized here.
+    pub fn has_assistant_payload(&self) -> bool {
+        !self.tool_calls.is_empty()
+            || self.content.as_ref().is_some_and(|text| !text.is_empty())
+            || self
+                .reasoning_content
+                .as_ref()
+                .is_some_and(|text| !text.is_empty())
+    }
+
+    /// Separates legacy envelopes before tool recovery, persistence, or delivery.
+    pub fn separate_reasoning(&mut self) {
+        super::reasoning::separate(&mut self.content, &mut self.reasoning_content);
+    }
+
+    /// Builds the complete assistant turn for durable history and protocol replay.
+    pub fn assistant_message(&self) -> ChatMessage {
+        let mut message = ChatMessage {
+            role: Role::Assistant,
+            content: self.content.clone(),
+            reasoning_content: self.reasoning_content.clone(),
+            parts: None,
+            tool_calls: (!self.tool_calls.is_empty()).then(|| self.tool_calls.clone()),
+            tool_call_id: None,
+            name: None,
+        };
+        message.separate_reasoning();
+        message
+    }
 }
 
 /// A streaming chunk emitted during model generation.

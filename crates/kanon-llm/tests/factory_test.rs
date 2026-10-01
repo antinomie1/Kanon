@@ -15,6 +15,7 @@ struct StubProvider;
 impl LlmProvider for StubProvider {
     async fn chat(&self, _request: &ChatRequest) -> Result<ChatResponse, GatewayError> {
         Ok(ChatResponse {
+            reasoning_content: None,
             content: Some("stub".to_string()),
             tool_calls: Vec::new(),
             finish_reason: Some("stop".to_string()),

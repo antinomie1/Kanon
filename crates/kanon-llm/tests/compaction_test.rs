@@ -35,6 +35,8 @@ struct ScriptedProvider {
     requests: Mutex<Vec<ChatRequest>>,
     /// Prompt size reported for ordinary turns.
     reported_prompt_tokens: u32,
+    /// Overrides an ordinary reply to exercise missing usage and reasoning-heavy completions.
+    reply: Option<ChatResponse>,
     summary: SummaryMode,
     /// When set, a summarization request waits here, so a test can act while it is in flight.
     gate: Option<Arc<Notify>>,
@@ -45,6 +47,7 @@ impl ScriptedProvider {
         Self {
             requests: Mutex::new(Vec::new()),
             reported_prompt_tokens,
+            reply: None,
             summary,
             gate: None,
         }
@@ -82,6 +85,9 @@ impl LlmProvider for ScriptedProvider {
         };
 
         if !is_compaction(request) {
+            if let Some(reply) = &self.reply {
+                return Ok(reply.clone());
+            }
             return Ok(ChatResponse {
                 content: Some(format!("reply {turn}")),
                 finish_reason: Some("stop".to_string()),
@@ -152,6 +158,101 @@ async fn wait_for_summary(memory: &InMemory, session: &str) {
         tokio::time::sleep(Duration::from_millis(10)).await;
     }
     panic!("the session was never compacted");
+}
+
+/// A reply whose reasoning alone exceeds the test window's compaction threshold.
+fn reasoning_reply(at_limit: bool, usage: Option<TokenUsage>) -> ChatResponse {
+    ChatResponse {
+        content: Some("answer".into()),
+        reasoning_content: Some("synthetic-private ".repeat(256)),
+        tool_calls: if at_limit {
+            vec![ToolCall {
+                id: "pending-call".into(),
+                name: "noop".into(),
+                arguments: serde_json::json!({}),
+            }]
+        } else {
+            vec![]
+        },
+        usage,
+        ..ChatResponse::default()
+    }
+}
+
+#[tokio::test]
+async fn fallback_session_tokens_include_reasoning_but_reported_usage_remains_authoritative() {
+    for (at_limit, usage) in [
+        (false, None),
+        (true, None),
+        (
+            false,
+            Some(TokenUsage {
+                total_tokens: 37,
+                ..TokenUsage::default()
+            }),
+        ),
+    ] {
+        let reported = usage.as_ref().map(|usage| usage.total_tokens as usize);
+        let provider = Arc::new(ScriptedProvider {
+            reply: Some(reasoning_reply(at_limit, usage)),
+            ..ScriptedProvider::new(0, SummaryMode::Empty)
+        });
+        let memory = Arc::new(InMemory::new());
+        let sessions = Arc::new(SessionManager::new(memory.clone()));
+        let agent = Agent::builder("accounting", provider)
+            .memory(memory.clone())
+            .session_manager(sessions.clone())
+            .max_iterations(0)
+            .compaction(None)
+            .build();
+        let output = agent.run("s", "question", &[]).await.unwrap();
+        assert_eq!(output.content, "answer");
+        let messages = Memory::get_messages(memory.as_ref(), "s").await.unwrap();
+        assert_eq!(messages.len(), 2);
+        assert!(messages[1].reasoning_content.is_some());
+        // Count exactly what was retained, including reasoning in the iteration-limit fallback.
+        let expected = reported.unwrap_or_else(|| {
+            kanon_llm::token::estimate_text_tokens("question")
+                + kanon_llm::token::estimate_message_tokens(&messages[1])
+        });
+        let metadata = sessions.get_metadata("s").unwrap();
+        assert_eq!(metadata.turn_count, 1);
+        assert_eq!(metadata.total_tokens_used, expected, "at_limit={at_limit}");
+    }
+}
+
+#[tokio::test]
+async fn reasoning_triggers_compaction_when_completion_usage_is_missing_or_zero() {
+    for at_limit in [false, true] {
+        for usage in [None, Some(TokenUsage::default())] {
+            let reply = reasoning_reply(at_limit, usage);
+            let reasoning = reply.reasoning_content.clone();
+            let provider = Arc::new(ScriptedProvider {
+                reply: Some(reply),
+                ..ScriptedProvider::new(0, SummaryMode::Summary("SUMMARY-TEXT"))
+            });
+            let memory = Arc::new(InMemory::new());
+            let agent = Agent::builder("accounting", provider.clone())
+                .memory(memory.clone())
+                .max_iterations(0)
+                .context_length(Some(1_000))
+                .compaction(Some(CompactionPolicy {
+                    min_messages: 2,
+                    ..CompactionPolicy::default()
+                }))
+                .build();
+            agent.run("s", "question", &[]).await.unwrap();
+            let first = provider.requests()[0].clone();
+            assert!(kanon_llm::token::estimate_request_tokens(&first) + 10 < 700);
+            wait_for_summary(&memory, "s").await;
+            let requests = provider.compaction_requests();
+            assert_eq!(requests.len(), 1);
+            // The compactor sees the same large reasoning payload that triggered its budget.
+            let assistant = &requests[0].messages[requests[0].messages.len() - 2];
+            assert_eq!(assistant.reasoning_content, reasoning);
+            assert_eq!(assistant.content.as_deref(), Some("answer"));
+        }
+    }
 }
 
 #[test]
@@ -327,6 +428,14 @@ async fn compaction_can_be_switched_off() {
 async fn a_summary_that_is_not_one_leaves_the_history_exactly_as_it_was() {
     for (mode, expected) in [
         (SummaryMode::Empty, "no summary"),
+        (
+            SummaryMode::Summary("<think>private-a</think><think>private-b</think>"),
+            "no summary",
+        ),
+        (
+            SummaryMode::Summary("<think>private-a</think><think>unfinished"),
+            "no summary",
+        ),
         (SummaryMode::ToolCall, "no summary"),
         (SummaryMode::Fail, "boom"),
     ] {

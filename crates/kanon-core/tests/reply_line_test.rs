@@ -104,6 +104,7 @@ impl LlmProvider for MultilineProvider {
     async fn chat(&self, _request: &ChatRequest) -> Result<ChatResponse, GatewayError> {
         Ok(ChatResponse {
             content: Some(self.0.clone()),
+            reasoning_content: Some("private thought\n\n  draft".to_string()),
             tool_calls: Vec::new(),
             finish_reason: Some("stop".to_string()),
             usage: None,
@@ -112,7 +113,11 @@ impl LlmProvider for MultilineProvider {
 }
 
 /// Runs the real inbound worker and outbound dispatcher over an in-memory provider/adapter.
-async fn delivered_lines(node_split: bool, instance_split: Option<bool>) -> Vec<String> {
+async fn delivered_lines(
+    node_split: bool,
+    instance_split: Option<bool>,
+    send_reasoning: bool,
+) -> Vec<String> {
     let dir = tempfile::tempdir().expect("temp dir");
     let supervisor = Arc::new(Supervisor::new(Some(dir.path().to_path_buf()), None));
     let (delivered_tx, mut delivered_rx) = mpsc::channel(8);
@@ -152,6 +157,7 @@ async fn delivered_lines(node_split: bool, instance_split: Option<bool>) -> Vec<
             .with_instances(registry)
             .with_reply_policy(Arc::new(ReplyPolicyStore::new(ReplyPolicy {
                 split_lines: node_split,
+                send_reasoning,
                 ..Default::default()
             })))
             .with_tool_router(Arc::new(ToolRouter::from_arc(agent))),
@@ -192,6 +198,10 @@ async fn delivered_lines(node_split: bool, instance_split: Option<bool>) -> Vec<
         history[1].content.as_deref(),
         Some("first\r\n\r\n \t\n  second\nlast")
     );
+    assert_eq!(
+        history[1].reasoning_content.as_deref(),
+        Some("private thought\n\n  draft")
+    );
     let mut lines = Vec::new();
     while let Ok(delivery) = delivered_rx.try_recv() {
         assert_eq!(delivery.event_id, "source-event");
@@ -210,7 +220,7 @@ async fn delivered_lines(node_split: bool, instance_split: Option<bool>) -> Vec<
 #[tokio::test]
 async fn enabled_node_setting_delivers_nonblank_lines_in_order() {
     assert_eq!(
-        delivered_lines(true, None).await,
+        delivered_lines(true, None, false).await,
         ["first", "  second", "last"]
     );
 }
@@ -218,11 +228,19 @@ async fn enabled_node_setting_delivers_nonblank_lines_in_order() {
 #[tokio::test]
 async fn disabled_setting_keeps_one_message_and_instance_overrides_work_both_ways() {
     let original = ["first\r\n\r\n \t\n  second\nlast"];
-    assert_eq!(delivered_lines(false, None).await, original);
-    assert_eq!(delivered_lines(true, Some(false)).await, original);
+    assert_eq!(delivered_lines(false, None, false).await, original);
+    assert_eq!(delivered_lines(true, Some(false), false).await, original);
     assert_eq!(
-        delivered_lines(false, Some(true)).await,
+        delivered_lines(false, Some(true), false).await,
         ["first", "  second", "last"],
+    );
+}
+
+#[tokio::test]
+async fn opted_in_reasoning_is_split_before_the_answer_without_blank_messages() {
+    assert_eq!(
+        delivered_lines(true, None, true).await,
+        ["private thought", "  draft", "first", "  second", "last"],
     );
 }
 

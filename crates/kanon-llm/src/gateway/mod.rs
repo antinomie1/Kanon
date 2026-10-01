@@ -4,6 +4,7 @@
 //! and protocol implementations in [`providers`].
 
 pub mod providers;
+pub mod reasoning;
 pub mod types;
 
 use async_trait::async_trait;
@@ -38,14 +39,15 @@ pub trait LlmProvider: Send + Sync {
     ///
     /// Default implementation wraps a non-streaming [`chat`] call into a two-chunk stream.
     async fn chat_stream(&self, request: &ChatRequest) -> Result<ChatChunkStream, GatewayError> {
-        let resp = self.chat(request).await?;
+        let mut resp = self.chat(request).await?;
+        resp.separate_reasoning();
         let (tx, rx) = tokio::sync::mpsc::channel(2);
         tokio::spawn(async move {
-            if let Some(text) = resp.content {
+            if resp.content.is_some() || resp.reasoning_content.is_some() {
                 let _ = tx
                     .send(Ok(ChatChunk {
-                        delta_text: text,
-                        reasoning_text: None,
+                        delta_text: resp.content.unwrap_or_default(),
+                        reasoning_text: resp.reasoning_content,
                         is_finished: false,
                         finish_reason: None,
                         tool_calls: resp.tool_calls.clone(),
@@ -107,7 +109,9 @@ impl LlmGateway {
         if req.model.is_empty() {
             req.model = self.default_model.clone();
         }
-        self.provider.chat(&req).await
+        let mut response = self.provider.chat(&req).await?;
+        response.separate_reasoning();
+        Ok(response)
     }
 
     /// Dispatches a streaming chat completion request to the active provider.
@@ -119,7 +123,9 @@ impl LlmGateway {
         if req.model.is_empty() {
             req.model = self.default_model.clone();
         }
-        self.provider.chat_stream(&req).await
+        Ok(reasoning::separate_stream(
+            self.provider.chat_stream(&req).await?,
+        ))
     }
 }
 
@@ -127,7 +133,12 @@ impl LlmGateway {
 pub type ProviderSetup = (Arc<dyn LlmProvider>, String);
 
 /// Protocol identifiers accepted by [`build_provider`].
-pub const SUPPORTED_PROTOCOLS: [&str; 3] = ["openai", "openai_responses", "anthropic"];
+pub const SUPPORTED_PROTOCOLS: [&str; 4] = [
+    "openai",
+    "openai_reasoning",
+    "openai_responses",
+    "anthropic",
+];
 
 /// Instantiates the wire client for one provider configuration.
 ///
@@ -135,13 +146,27 @@ pub const SUPPORTED_PROTOCOLS: [&str; 3] = ["openai", "openai_responses", "anthr
 /// saved directory or from the console, goes through here, so a protocol accepted in one path can
 /// never be rejected by another.
 ///
-/// `protocol` accepts `openai` (alias `openai_chat`), `openai_responses` and `anthropic`;
-/// any other value is rejected explicitly instead of silently falling back to a default.
+/// `protocol` accepts `openai` (alias `openai_chat`), `openai_reasoning`, `openai_responses`
+/// and `anthropic`. `openai_reasoning` explicitly enables the `reasoning_content` request
+/// extension for compatible custom endpoints; `openai` only enables it for known endpoints.
+/// Any other value is rejected explicitly instead of silently falling back to a default.
 pub fn build_provider(
     protocol: &str,
     base_url: impl Into<String>,
     api_key: Option<String>,
     model: impl Into<String>,
+) -> Result<Arc<dyn LlmProvider>, String> {
+    build_provider_with_reasoning_replay(protocol, base_url, api_key, model, true)
+}
+
+/// Builds a provider with an independent history-replay preference.
+/// Unsupported protocols never acquire reasoning-field support from this preference.
+pub fn build_provider_with_reasoning_replay(
+    protocol: &str,
+    base_url: impl Into<String>,
+    api_key: Option<String>,
+    model: impl Into<String>,
+    replay_reasoning: bool,
 ) -> Result<Arc<dyn LlmProvider>, String> {
     let base_url = base_url.into();
     let base_url = base_url.trim().to_string();
@@ -153,7 +178,15 @@ pub fn build_provider(
     let model = model.into();
 
     let provider: Arc<dyn LlmProvider> = match protocol {
-        "openai" | "openai_chat" => Arc::new(OpenAiChatProvider::new(base_url, api_key, model)),
+        "openai" | "openai_chat" => Arc::new(
+            OpenAiChatProvider::new(base_url, api_key, model)
+                .with_reasoning_replay(replay_reasoning),
+        ),
+        "openai_reasoning" => Arc::new(
+            OpenAiChatProvider::new(base_url, api_key, model)
+                .with_reasoning_content(true)
+                .with_reasoning_replay(replay_reasoning),
+        ),
         // The Responses API carries the credential in its own constructor, so the key is
         // required here rather than optional.
         "openai_responses" => Arc::new(
@@ -171,24 +204,8 @@ pub fn build_provider(
     Ok(provider)
 }
 
-/// Returns the part of a model response that may be shown to an end user.
-///
-/// OpenAI-compatible backends that expose a reasoning channel (DeepSeek `reasoning_content`,
-/// and compatible gateways) have that channel folded into the response text by
-/// [`providers::OpenAiChatProvider`] as a leading `<think>…</think>` block, so the management
-/// console can render reasoning separately from the answer. That encoding is a *display*
-/// convention: anything sent to a chat platform must be stripped first, otherwise users read
-/// the model's internal chain of thought. This function is the single decoder for that
-/// convention; text without a block is returned unchanged and borrows the input.
+/// Returns user-visible text, decoding only leading legacy reasoning envelopes.
+/// See [`reasoning::split_reasoning_tags`] for the compatibility contract.
 pub fn strip_reasoning_tags(text: &str) -> &str {
-    let trimmed = text.trim_start();
-    let Some(rest) = trimmed.strip_prefix("<think>") else {
-        return text;
-    };
-    // A truncated block (stream cut off before `</think>`) carries no user-visible answer at
-    // all, so it collapses to an empty reply rather than leaking the partial reasoning.
-    match rest.split_once("</think>") {
-        Some((_, answer)) => answer.trim_start(),
-        None => "",
-    }
+    reasoning::split_reasoning_tags(text).0
 }

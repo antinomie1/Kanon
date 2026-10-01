@@ -472,6 +472,9 @@ export const dictionaries = {
     'llm.url_required': "Enter the provider's address.",
     'llm.bad_number':
       'Numbers only: temperature, token and context fields take a number or stay blank.',
+    'llm.replay_reasoning': 'Replay historical reasoning',
+    'llm.replay_reasoning_hint':
+      'Send all retained reasoning to supported endpoints (DeepSeek or the reasoning-compatible protocol). Turning this off only omits it from API requests: old and new reasoning stays saved for re-enabling. Independent of sending reasoning to chat platforms. Disabling may break thinking + tool calls that require reasoning.',
     'llm.sec_test': 'Test',
     'llm.sec_test_hint':
       'Sends one short message to check the address and key. Works before saving too.',
@@ -803,6 +806,9 @@ export const dictionaries = {
     // Reply policy
     'reply.acknowledge_hint':
       "While the model works, the platform shows that an answer is coming — a typing indicator in QQ private chats (uses one of QQ's passive-reply slots), a 👍 on the group message in Milky.",
+    'reply.reasoning': 'Send reasoning',
+    'reply.reasoning_hint':
+      'Send the separate reasoning channel before the answer. Literal tags and code in the answer are preserved.',
     'reply.describe_always': 'Always reply',
     'reply.describe_mention': 'Reply only when mentioned',
     'reply.describe_never': 'Never reply in groups',
@@ -1364,6 +1370,9 @@ export const dictionaries = {
     'llm.key_hint': '密钥保存在节点上，之后不会再显示。本地服务通常不需要。',
     'llm.url_required': '请填写提供商的地址。',
     'llm.bad_number': '温度、Token 数和上下文长度只能填数字，或者留空。',
+    'llm.replay_reasoning': '回传历史 reasoning',
+    'llm.replay_reasoning_hint':
+      '向支持的端点（DeepSeek 或 reasoning 兼容协议）回传保留上下文中的全部推理。关闭仅在 API 请求中省略，新旧推理仍会保存，重新开启后可继续回传。与向聊天平台发送思考内容独立。关闭可能导致要求回传推理的思考模式工具调用失败。',
     'llm.sec_test': '测试',
     'llm.sec_test_hint':
       '发送一条简短消息，检查地址和密钥是否可用。保存前也可以测试。',
@@ -1680,6 +1689,9 @@ export const dictionaries = {
     // Reply policy
     'reply.acknowledge_hint':
       '模型思考时，让平台显示「正在回复」——QQ 私聊显示「对方正在输入」（会占用一次 QQ 被动回复额度），Milky 群聊给原消息点个 👍。',
+    'reply.reasoning': '发送思考内容',
+    'reply.reasoning_hint':
+      '在回答前发送独立推理通道的内容。正文中的字面标签和代码示例保持不变。',
     'reply.describe_always': '总是回复',
     'reply.describe_mention': '仅在被 @ 时回复',
     'reply.describe_never': '群聊中从不回复',

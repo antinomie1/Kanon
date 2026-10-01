@@ -96,6 +96,8 @@ export interface ReplyPolicy {
   acknowledge: boolean;
   /** Send each nonblank line of a model answer as a separate platform message. */
   split_lines: boolean;
+  /** Send the model's reasoning, as plain text, ahead of its answer. */
+  send_reasoning: boolean;
 }
 
 /**
@@ -334,6 +336,7 @@ export interface ProviderInfo {
   api_key_configured: boolean;
   temperature: number | null;
   max_tokens: number | null;
+  replay_reasoning: boolean;
 }
 
 export interface ProtocolDescriptor {
@@ -367,6 +370,7 @@ export interface UpsertProviderRequest {
   clear_api_key?: boolean;
   temperature?: number;
   max_tokens?: number;
+  replay_reasoning?: boolean;
 }
 
 /** Request body of `PUT /api/v1/models/default`; `null` clears the global default model. */

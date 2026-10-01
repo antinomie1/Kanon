@@ -135,6 +135,12 @@ pub struct ReplyPolicy {
     /// Formatting is applied only at delivery; the model history keeps the complete answer.
     #[serde(default)]
     pub split_lines: bool,
+    /// Whether the model's reasoning is sent ahead of its answer, as plain text.
+    ///
+    /// Off by default: reasoning is a working draft, not part of the reply. When enabled only the
+    /// reasoning content is sent — never `<think>` tags or any other markup.
+    #[serde(default)]
+    pub send_reasoning: bool,
 }
 
 /// Default reply probability for [`ReplyMode::Probability`].
@@ -152,6 +158,7 @@ impl Default for ReplyPolicy {
             quote_message: false,
             acknowledge: false,
             split_lines: false,
+            send_reasoning: false,
         }
     }
 }

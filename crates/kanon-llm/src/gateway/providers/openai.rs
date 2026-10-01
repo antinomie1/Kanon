@@ -4,8 +4,9 @@
 //! specification. Compatible with any provider or local engine adhering to this wire format
 //! (e.g. OpenAI, DeepSeek, Ollama, vLLM, Groq, Mistral, Moonshot, Qwen).
 //!
-//! This module avoids hardcoding vendor names, domains, or proprietary endpoints.
-//! All configuration is protocol-level: base URL, auth token/headers, model, and parameters.
+//! Requests use standard fields unless reasoning replay is explicitly enabled. The official
+//! DeepSeek HTTPS endpoint enables that extension by default for existing configurations.
+//! Reading reasoning from responses is independent of whether an endpoint accepts it as input.
 
 use async_trait::async_trait;
 use std::time::Duration;
@@ -22,6 +23,16 @@ use crate::gateway::{ChatChunk, ChatChunkStream, LlmProvider};
 #[allow(dead_code)]
 mod wire {
     use serde::{Deserialize, Serialize};
+
+    /// Distinguish an absent channel from a present but empty/null channel.
+    /// Presence tells the compatibility parser that content is already answer text.
+    fn reasoning_channel<'de, D: serde::Deserializer<'de>>(
+        deserializer: D,
+    ) -> Result<Option<String>, D::Error> {
+        Ok(Some(
+            Option::<String>::deserialize(deserializer)?.unwrap_or_default(),
+        ))
+    }
 
     #[derive(Debug, Serialize)]
     pub struct OpenAiChatRequest<'a> {
@@ -43,6 +54,8 @@ mod wire {
         /// Plain text for a classic message, or an array of content parts for a multimodal one.
         #[serde(skip_serializing_if = "Option::is_none")]
         pub content: Option<serde_json::Value>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        pub reasoning_content: Option<String>,
         #[serde(skip_serializing_if = "Option::is_none")]
         pub tool_calls: Option<Vec<OpenAiToolCallWire>>,
         #[serde(skip_serializing_if = "Option::is_none")]
@@ -95,7 +108,7 @@ mod wire {
     pub struct OpenAiResponseMessageWire {
         pub role: String,
         pub content: Option<String>,
-        #[serde(default)]
+        #[serde(default, deserialize_with = "reasoning_channel")]
         pub reasoning_content: Option<String>,
         #[serde(default)]
         pub tool_calls: Option<Vec<OpenAiToolCallWire>>,
@@ -138,7 +151,7 @@ mod wire {
         pub role: Option<String>,
         #[serde(default)]
         pub content: Option<String>,
-        #[serde(default)]
+        #[serde(default, deserialize_with = "reasoning_channel")]
         pub reasoning_content: Option<String>,
         #[serde(default)]
         pub tool_calls: Option<Vec<OpenAiToolCallChunkWire>>,
@@ -170,6 +183,10 @@ pub struct OpenAiChatProvider {
     api_key: Option<String>,
     default_model: String,
     custom_headers: Vec<(String, String)>,
+    /// Whether assistant history may include the non-standard `reasoning_content` field.
+    replay_reasoning_content: bool,
+    /// Operator preference, independent of endpoint support.
+    replay_reasoning: bool,
 }
 
 /// Backward-compatible type alias.
@@ -196,6 +213,14 @@ impl OpenAiChatProvider {
             format!("{trimmed}/chat/completions")
         };
 
+        // Only a documented endpoint is opted in automatically. A model name, URL substring or
+        // reasoning returned by a different provider does not establish request compatibility.
+        let replay_reasoning_content = reqwest::Url::parse(&endpoint).is_ok_and(|url| {
+            url.scheme() == "https"
+                && url.host_str() == Some("api.deepseek.com")
+                && url.port_or_known_default() == Some(443)
+        });
+
         let client = reqwest::Client::builder()
             .timeout(Duration::from_secs(60))
             .pool_max_idle_per_host(10)
@@ -208,7 +233,29 @@ impl OpenAiChatProvider {
             api_key,
             default_model: default_model.into(),
             custom_headers: Vec::new(),
+            replay_reasoning_content,
+            replay_reasoning: true,
         }
+    }
+
+    /// Enables or disables the `reasoning_content` request extension for this endpoint.
+    ///
+    /// Enable it only for endpoints whose contract accepts this field (including compatible
+    /// proxies). This affects history replay, never model thinking, response parsing or storage.
+    pub fn with_reasoning_content(mut self, enabled: bool) -> Self {
+        self.replay_reasoning_content = enabled;
+        self
+    }
+
+    /// Controls history replay without changing endpoint capability or stored messages.
+    pub fn with_reasoning_replay(mut self, enabled: bool) -> Self {
+        self.replay_reasoning = enabled;
+        self
+    }
+
+    /// Whether this endpoint is configured to replay the separate reasoning field.
+    pub fn replays_reasoning_content(&self) -> bool {
+        self.replay_reasoning_content && self.replay_reasoning
     }
 
     /// Appends a custom HTTP header to all outbound requests (useful for proxies or custom auth).
@@ -217,8 +264,38 @@ impl OpenAiChatProvider {
         self
     }
 
+    /// Converts request history into wire messages.
+    ///
+    /// Replay all retained assistant reasoning when both the endpoint and operator allow it.
+    /// The mapping only reads history; disabling replay never erases durable reasoning.
+    fn map_messages_to_wire(&self, messages: &[ChatMessage]) -> Vec<wire::OpenAiMessageWire> {
+        let replay = self.replays_reasoning_content();
+        messages
+            .iter()
+            .filter_map(|msg| self.map_message_to_wire(msg, replay))
+            .collect()
+    }
+
     /// Converts an internal domain `ChatMessage` into the wire format `OpenAiMessageWire`.
-    fn map_message_to_wire(msg: &ChatMessage) -> wire::OpenAiMessageWire {
+    ///
+    /// `replay_reasoning` decides whether this assistant message carries `reasoning_content`.
+    fn map_message_to_wire(
+        &self,
+        msg: &ChatMessage,
+        replay_reasoning: bool,
+    ) -> Option<wire::OpenAiMessageWire> {
+        let mut msg = msg.clone();
+        msg.separate_reasoning();
+        // A reasoning-only turn has no valid assistant payload in the standard wire schema.
+        // Omit it from this request only; shared durable history and tool-call turns stay intact.
+        if !replay_reasoning
+            && msg.role == Role::Assistant
+            && msg.content.as_deref().is_none_or(str::is_empty)
+            && !msg.has_parts()
+            && msg.tool_calls.as_ref().is_none_or(Vec::is_empty)
+        {
+            return None;
+        }
         let role = match msg.role {
             Role::System => "system",
             Role::User => "user",
@@ -241,12 +318,17 @@ impl OpenAiChatProvider {
                 .collect()
         });
 
-        wire::OpenAiMessageWire {
+        Some(wire::OpenAiMessageWire {
             role,
-            content: message_content(msg),
+            content: message_content(&msg),
+            reasoning_content: if replay_reasoning && msg.role == Role::Assistant {
+                msg.reasoning_content
+            } else {
+                None
+            },
             tool_calls,
             tool_call_id: msg.tool_call_id.clone(),
-        }
+        })
     }
 }
 
@@ -295,11 +377,7 @@ impl LlmProvider for OpenAiChatProvider {
             &self.default_model
         };
 
-        let messages: Vec<wire::OpenAiMessageWire> = request
-            .messages
-            .iter()
-            .map(Self::map_message_to_wire)
-            .collect();
+        let messages = self.map_messages_to_wire(&request.messages);
 
         let tools = if request.tools.is_empty() {
             None
@@ -384,22 +462,15 @@ impl LlmProvider for OpenAiChatProvider {
             total_tokens: u.total_tokens,
         });
 
-        let content = match (
-            choice.message.content.filter(|c| !c.is_empty()),
-            choice.message.reasoning_content.filter(|r| !r.is_empty()),
-        ) {
-            (Some(c), Some(r)) => Some(format!("<think>\n{r}\n</think>\n\n{c}")),
-            (Some(c), None) => Some(c),
-            (None, Some(r)) => Some(format!("<think>\n{r}\n</think>")),
-            (None, None) => None,
-        };
-
-        Ok(ChatResponse {
-            content,
+        let mut response = ChatResponse {
+            content: choice.message.content,
+            reasoning_content: choice.message.reasoning_content,
             tool_calls,
             finish_reason: choice.finish_reason,
             usage,
-        })
+        };
+        response.separate_reasoning();
+        Ok(response)
     }
 
     async fn chat_stream(&self, request: &ChatRequest) -> Result<ChatChunkStream, GatewayError> {
@@ -409,11 +480,7 @@ impl LlmProvider for OpenAiChatProvider {
             &self.default_model
         };
 
-        let messages: Vec<wire::OpenAiMessageWire> = request
-            .messages
-            .iter()
-            .map(Self::map_message_to_wire)
-            .collect();
+        let messages = self.map_messages_to_wire(&request.messages);
 
         let tools = if request.tools.is_empty() {
             None
@@ -500,8 +567,7 @@ impl LlmProvider for OpenAiChatProvider {
                             }
 
                             let delta_text = choice.delta.content.unwrap_or_default();
-                            let reasoning_text =
-                                choice.delta.reasoning_content.filter(|r| !r.is_empty());
+                            let reasoning_text = choice.delta.reasoning_content;
 
                             let tool_calls: Vec<ToolCall> = choice
                                 .delta
@@ -558,6 +624,8 @@ impl LlmProvider for OpenAiChatProvider {
             }
         });
 
-        Ok(Box::pin(tokio_stream::wrappers::ReceiverStream::new(rx)))
+        Ok(crate::gateway::reasoning::separate_stream(Box::pin(
+            tokio_stream::wrappers::ReceiverStream::new(rx),
+        )))
     }
 }

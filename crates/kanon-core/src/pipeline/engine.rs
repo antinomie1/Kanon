@@ -17,9 +17,7 @@ use tokio::sync::{Mutex, RwLock, mpsc, oneshot, watch};
 use tokio::task::JoinHandle;
 
 use kanon_llm::tool_router::ToolRouter;
-use kanon_llm::{
-    AgentFactory, AgentSlot, ModelCapabilities, ModelRef, ModelSpec, strip_reasoning_tags,
-};
+use kanon_llm::{AgentFactory, AgentSlot, ModelCapabilities, ModelRef, ModelSpec, visible_reply};
 use kanon_proto::v1::event_notification::Detail;
 use kanon_proto::v1::message_segment::Segment;
 use kanon_proto::v1::{
@@ -1915,20 +1913,19 @@ impl PipelineEngine {
             .await
             {
                 Ok(output) => {
-                    // The model's reasoning channel arrives folded into the completion text as a
-                    // `<think>` block (a console display convention). Chat platforms must never
-                    // receive it, so the delivered answer is stripped to the visible part only.
-                    let answer = strip_reasoning_tags(&output.content);
-                    if answer.is_empty() {
-                        tracing::debug!("LLM produced no user-visible answer; passing downstream");
-                        return PipelineResult::Passed(filtered_event);
+                    // Reasoning already has its own channel and parsed tool calls were removed by
+                    // the agent. Delimiters or tool markup left in answer text are literal
+                    // content, so delivery must not reinterpret them.
+                    let answer = visible_reply(&output.content);
+                    let answer = answer.as_str();
+                    let mut replies = Vec::new();
+                    if !answer.is_empty() {
+                        replies.push(MessageSegment {
+                            segment: Some(Segment::Text(kanon_proto::v1::TextSegment {
+                                content: answer.to_string(),
+                            })),
+                        });
                     }
-
-                    let mut replies = vec![MessageSegment {
-                        segment: Some(Segment::Text(kanon_proto::v1::TextSegment {
-                            content: answer.to_string(),
-                        })),
-                    }];
 
                     // Rich media produced by a tool (an MCP server drawing a B50 card, for example)
                     // travels as its own segment: the platform then shows the picture instead of a
@@ -1957,6 +1954,36 @@ impl PipelineEngine {
                                 filename: None,
                             })),
                         });
+                    }
+
+                    // Tool media is a complete reply even when the model produced only reasoning.
+                    if replies.is_empty() {
+                        tracing::debug!(
+                            "LLM produced no user-visible answer or attachment; passing downstream"
+                        );
+                        return PipelineResult::Passed(filtered_event);
+                    }
+
+                    // Opt-in: the reasoning goes first as its own plain-text segment, content only.
+                    // It is checked after the empty-reply gate so reasoning never becomes a reply
+                    // on its own.
+                    if reply_policy.send_reasoning {
+                        let reasoning = output
+                            .reasoning
+                            .as_deref()
+                            .unwrap_or_default()
+                            .trim()
+                            .to_string();
+                        if !reasoning.is_empty() {
+                            replies.insert(
+                                0,
+                                MessageSegment {
+                                    segment: Some(Segment::Text(kanon_proto::v1::TextSegment {
+                                        content: reasoning,
+                                    })),
+                                },
+                            );
+                        }
                     }
 
                     // The bot's own words belong to the group's record too, and this session has

@@ -7,7 +7,8 @@
  * things need bridging:
  *
  *   - The element reports changes with an `input` event that is composed, so it reaches this host
- *     (unlike the switch, whose `change` event never crosses the shadow boundary). Listening here
+ *     after the element has already moved `checked` (unlike the switch, whose composed `input`
+ *     comes before `selected` moves, so it listens for `change` instead). Listening here
  *     and writing the value back keeps the `checked` prop the single source of truth.
  *   - The console wraps every checkbox in a `<label>` whose text acts as the label. A label's
  *     activation only forwards a click to the *labelled control* — this host element — and a click

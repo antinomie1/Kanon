@@ -195,6 +195,7 @@ async fn test_agent_run_standalone_stream() {
     impl LlmProvider for MockAgentStreamProvider {
         async fn chat(&self, _request: &ChatRequest) -> Result<ChatResponse, GatewayError> {
             Ok(ChatResponse {
+                reasoning_content: None,
                 content: Some("Full content".to_string()),
                 tool_calls: vec![],
                 finish_reason: Some("stop".to_string()),

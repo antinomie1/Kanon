@@ -94,14 +94,11 @@ fn videos_and_files_reserve_native_messages_including_mixed_attachments() {
     ] {
         for (scene, budget) in [("group", 5), ("c2c", 4)] {
             let mut request = reply(scene, "message-id", 0);
-            request.segments.extend(
-                attachments
-                    .iter()
-                    .cloned()
-                    .map(|segment| MessageSegment {
-                        segment: Some(segment),
-                    }),
-            );
+            request
+                .segments
+                .extend(attachments.iter().cloned().map(|segment| MessageSegment {
+                    segment: Some(segment),
+                }));
             assert_eq!(
                 adapter.reply_message_limit(&request),
                 budget - attachments.len(),

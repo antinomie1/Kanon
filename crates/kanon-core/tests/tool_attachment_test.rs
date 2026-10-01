@@ -2,7 +2,7 @@
 //!
 //! A tool that draws a picture is only useful on a chat platform if the picture is delivered, so
 //! this test follows one attachment across every boundary it must cross: an out-of-process tool
-//! host (a real gRPC server over a UDS), the reasoning loop, and the pipeline that turns the result
+//! host (a real gRPC server over loopback TCP), the reasoning loop, and the pipeline that turns the result
 //! into the message segments an adapter sends.
 
 use std::path::PathBuf;
@@ -22,11 +22,13 @@ use kanon_proto::v1::{
     EventAck, EventNotification, PipelineEventRequest, PluginMeta, PreFilterResult, ToolAttachment,
     ToolCallRequest, ToolCallResponse, ToolMeta, tool_call_response,
 };
-use kanon_transport::connect_ipc;
 use tempfile::tempdir;
 
 /// Provider that asks for the drawing tool once and then reports the tool's text.
-struct DrawingProvider;
+struct DrawingProvider {
+    final_text: &'static str,
+    final_reasoning: Option<&'static str>,
+}
 
 #[async_trait]
 impl LlmProvider for DrawingProvider {
@@ -40,7 +42,8 @@ impl LlmProvider for DrawingProvider {
 
         if has_tool_result {
             return Ok(ChatResponse {
-                content: Some("这是你的 B50 图。".to_string()),
+                reasoning_content: self.final_reasoning.map(str::to_string),
+                content: Some(self.final_text.to_string()),
                 tool_calls: Vec::new(),
                 finish_reason: Some("stop".to_string()),
                 usage: None,
@@ -48,6 +51,7 @@ impl LlmProvider for DrawingProvider {
         }
 
         Ok(ChatResponse {
+            reasoning_content: Some("native-private".into()),
             content: None,
             tool_calls: vec![ToolCall {
                 id: "call-draw".to_string(),
@@ -147,18 +151,14 @@ impl kanon_proto::v1::message_pipeline_service_server::MessagePipelineService fo
     }
 }
 
-/// Starts the drawing host on a temporary socket and registers it with the supervisor.
+/// Starts the drawing fixture over loopback and captures the invoking event.
 async fn register_drawing_host(
     supervisor: &Supervisor,
     socket_path: PathBuf,
     image_path: String,
 ) -> Arc<std::sync::Mutex<Option<PipelineEventRequest>>> {
-    if socket_path.exists() {
-        let _ = std::fs::remove_file(&socket_path);
-    }
-
-    let listener = kanon_transport::IpcListener::bind(&socket_path).expect("host socket binds");
-    let incoming = listener.incoming();
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
     let caller = Arc::new(std::sync::Mutex::new(None));
     let service = DrawingHost {
         image_path,
@@ -166,25 +166,17 @@ async fn register_drawing_host(
     };
 
     tokio::spawn(async move {
-        let _ = tonic::transport::Server::builder()
+        tonic::transport::Server::builder()
             .add_service(MessagePipelineServiceServer::new(service))
-            .serve_with_incoming(incoming)
-            .await;
+            .serve_with_incoming(tokio_stream::wrappers::TcpListenerStream::new(listener))
+            .await
+            .unwrap();
     });
-
-    // The socket file appears before the server is accepting connections; retry briefly so the
-    // test does not race its own fixture.
-    let mut channel = None;
-    for _ in 0..50 {
-        match connect_ipc(&socket_path).await {
-            Ok(candidate) => {
-                channel = Some(candidate);
-                break;
-            }
-            Err(_) => tokio::time::sleep(std::time::Duration::from_millis(20)).await,
-        }
-    }
-    let channel = channel.expect("fixture host reachable");
+    let channel = tonic::transport::Endpoint::from_shared(format!("http://{address}"))
+        .unwrap()
+        .connect()
+        .await
+        .unwrap();
 
     supervisor
         .register_managed_host(Arc::new(ManagedHost::new(
@@ -222,6 +214,44 @@ fn event(text: &str) -> PipelineEventRequest {
 
 #[tokio::test]
 async fn a_tool_attachment_is_delivered_as_an_image_segment() {
+    check_attachment(
+        "这是你的 B50 图。",
+        "这是你的 B50 图。",
+        "qqofficial",
+        Some("native-private"),
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn a_tool_attachment_survives_empty_reasoning_only_and_truncated_answers() {
+    for text in [
+        "",
+        "<think>private-a</think><think>private-b</think>",
+        "<think>private-a</think><think>unfinished",
+    ] {
+        for platform in ["qqofficial", "onebot"] {
+            check_attachment(
+                text,
+                "",
+                platform,
+                if text.is_empty() {
+                    Some("native-private")
+                } else {
+                    None
+                },
+            )
+            .await;
+        }
+    }
+}
+
+async fn check_attachment(
+    final_text: &'static str,
+    expected_text: &str,
+    platform: &str,
+    final_reasoning: Option<&'static str>,
+) {
     let dir = tempdir().expect("temp dir");
     let image = dir.path().join("card.png");
     std::fs::write(&image, b"png-bytes").expect("fixture image");
@@ -236,15 +266,23 @@ async fn a_tool_attachment_is_delivered_as_an_image_segment() {
 
     let memory: Arc<dyn Memory> = Arc::new(InMemory::new());
     let agent = Arc::new(
-        Agent::builder("attachment-test", Arc::new(DrawingProvider))
-            .memory(memory)
-            .model("test-model")
-            .build(),
+        Agent::builder(
+            "attachment-test",
+            Arc::new(DrawingProvider {
+                final_text,
+                final_reasoning,
+            }),
+        )
+        .memory(memory)
+        .model("test-model")
+        .build(),
     );
     let engine =
         PipelineEngine::new(supervisor).with_tool_router(Arc::new(ToolRouter::from_arc(agent)));
 
-    let result = engine.process_event(event("画一张 B50")).await;
+    let mut incoming = event("画一张 B50");
+    incoming.platform = platform.to_string();
+    let result = engine.process_event(incoming).await;
 
     // The tool learns which platform event invoked it, without the model passing it along.
     let invoked_by = caller
@@ -259,22 +297,20 @@ async fn a_tool_attachment_is_delivered_as_an_image_segment() {
         PipelineResult::LlmReplied {
             content, replies, ..
         } => {
-            assert_eq!(content, "这是你的 B50 图。");
+            assert_eq!(content, expected_text);
             replies
         }
         other => panic!("expected an LLM reply, got {other:?}"),
     };
 
-    assert_eq!(
-        replies.len(),
-        2,
-        "the text and the picture are separate segments: {replies:?}"
-    );
-    match &replies[0].segment {
-        Some(Segment::Text(text)) => assert_eq!(text.content, "这是你的 B50 图。"),
-        other => panic!("expected the text first, got {other:?}"),
+    assert_eq!(replies.len(), if expected_text.is_empty() { 1 } else { 2 });
+    if !expected_text.is_empty() {
+        match &replies[0].segment {
+            Some(Segment::Text(text)) => assert_eq!(text.content, expected_text),
+            other => panic!("expected text first, got {other:?}"),
+        }
     }
-    match &replies[1].segment {
+    match &replies.last().unwrap().segment {
         Some(Segment::Image(image_segment)) => {
             assert_eq!(image_segment.mime_type.as_deref(), Some("image/png"));
             match image_segment.source.as_ref() {

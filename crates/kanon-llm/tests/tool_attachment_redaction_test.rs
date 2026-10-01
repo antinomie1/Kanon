@@ -93,6 +93,7 @@ async fn the_generated_file_is_delivered_but_its_path_never_reaches_the_model() 
         responses: Mutex::new(
             vec![
                 ChatResponse {
+                    reasoning_content: None,
                     content: None,
                     tool_calls: vec![ToolCall {
                         id: "call_1".to_string(),
@@ -103,6 +104,7 @@ async fn the_generated_file_is_delivered_but_its_path_never_reaches_the_model() 
                     usage: None,
                 },
                 ChatResponse {
+                    reasoning_content: None,
                     content: Some("画好了".to_string()),
                     tool_calls: Vec::new(),
                     finish_reason: Some("stop".to_string()),

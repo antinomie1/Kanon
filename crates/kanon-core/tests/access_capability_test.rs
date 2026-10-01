@@ -67,6 +67,7 @@ struct Echo;
 impl LlmProvider for Echo {
     async fn chat(&self, _request: &ChatRequest) -> Result<ChatResponse, GatewayError> {
         Ok(ChatResponse {
+            reasoning_content: None,
             content: Some("好的".to_string()),
             tool_calls: Vec::new(),
             finish_reason: Some("stop".to_string()),

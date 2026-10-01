@@ -125,6 +125,9 @@ mod wire {
     pub enum ResponsesOutputContentPart {
         #[serde(rename = "output_text")]
         OutputText { text: String },
+        /// A user-visible refusal is final answer content, not private reasoning.
+        #[serde(rename = "refusal")]
+        Refusal { refusal: String },
         #[serde(other)]
         Other,
     }
@@ -249,6 +252,8 @@ impl LlmProvider for OpenAiResponsesProvider {
 
         // 1. Map messages into Responses API input items and extract system instructions
         for msg in &req.messages {
+            let mut msg = msg.clone();
+            msg.separate_reasoning();
             match msg.role {
                 Role::System => {
                     if let Some(ref text) = msg.content {
@@ -258,7 +263,7 @@ impl LlmProvider for OpenAiResponsesProvider {
                 Role::User => {
                     input.push(wire::ResponsesInputItem::Message {
                         role: "user".to_string(),
-                        content: user_content(msg),
+                        content: user_content(&msg),
                     });
                 }
                 Role::Assistant => {
@@ -370,7 +375,8 @@ impl LlmProvider for OpenAiResponsesProvider {
                 wire::ResponsesOutputWire::Message { content, .. } => {
                     for part in content {
                         match part {
-                            wire::ResponsesOutputContentPart::OutputText { text } => {
+                            wire::ResponsesOutputContentPart::OutputText { text }
+                            | wire::ResponsesOutputContentPart::Refusal { refusal: text } => {
                                 final_content.push_str(&text);
                             }
                             wire::ResponsesOutputContentPart::Other => {}
@@ -424,7 +430,8 @@ impl LlmProvider for OpenAiResponsesProvider {
                 .unwrap_or_else(|| u.input_tokens.unwrap_or(0) + u.output_tokens.unwrap_or(0)),
         });
 
-        Ok(ChatResponse {
+        let mut response = ChatResponse {
+            reasoning_content: None,
             content: if final_content.is_empty() {
                 None
             } else {
@@ -433,7 +440,9 @@ impl LlmProvider for OpenAiResponsesProvider {
             tool_calls,
             usage,
             finish_reason,
-        })
+        };
+        response.separate_reasoning();
+        Ok(response)
     }
 
     async fn chat_stream(&self, req: &ChatRequest) -> Result<ChatChunkStream, GatewayError> {
@@ -441,6 +450,8 @@ impl LlmProvider for OpenAiResponsesProvider {
         let mut input = Vec::new();
 
         for msg in &req.messages {
+            let mut msg = msg.clone();
+            msg.separate_reasoning();
             match msg.role {
                 Role::System => {
                     if let Some(ref text) = msg.content {
@@ -450,7 +461,7 @@ impl LlmProvider for OpenAiResponsesProvider {
                 Role::User => {
                     input.push(wire::ResponsesInputItem::Message {
                         role: "user".to_string(),
-                        content: user_content(msg),
+                        content: user_content(&msg),
                     });
                 }
                 Role::Assistant => {
@@ -567,7 +578,9 @@ impl LlmProvider for OpenAiResponsesProvider {
                     if let Ok(val) = serde_json::from_str::<serde_json::Value>(&ev.data) {
                         let event_type = ev.event.as_deref().or_else(|| val["type"].as_str());
 
-                        if let Some("response.output_text.delta") = event_type {
+                        if let Some("response.output_text.delta" | "response.refusal.delta") =
+                            event_type
+                        {
                             if let Some(delta) = val["delta"].as_str()
                                 && tx.send(Ok(ChatChunk::delta(delta))).await.is_err()
                             {
@@ -578,11 +591,16 @@ impl LlmProvider for OpenAiResponsesProvider {
                                 .send(Ok(ChatChunk::done(Some("completed".to_string()))))
                                 .await;
                             return;
-                        } else if let Some(delta) = val.get("delta").and_then(|d| d.as_str())
-                            && tx.send(Ok(ChatChunk::delta(delta))).await.is_err()
+                        } else if let Some(
+                            "response.reasoning_summary_text.delta"
+                            | "response.reasoning_text.delta",
+                        ) = event_type
+                            && let Some(delta) = val.get("delta").and_then(|d| d.as_str())
+                            && tx.send(Ok(ChatChunk::reasoning(delta))).await.is_err()
                         {
                             return;
                         }
+                        // Unknown delta events (arguments, signatures, metadata) are not answer text.
                     }
                 }
             }
@@ -590,6 +608,8 @@ impl LlmProvider for OpenAiResponsesProvider {
             let _ = tx.send(Ok(ChatChunk::done(None))).await;
         });
 
-        Ok(Box::pin(tokio_stream::wrappers::ReceiverStream::new(rx)))
+        Ok(crate::gateway::reasoning::separate_stream(Box::pin(
+            tokio_stream::wrappers::ReceiverStream::new(rx),
+        )))
     }
 }
