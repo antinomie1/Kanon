@@ -191,6 +191,9 @@ message MessageSegment {
     MentionSegment mention = 4;
     ReplySegment reply = 5;
     RawCustomSegment custom = 6;
+    VideoSegment video = 7;
+    FileSegment file = 8;
+    FaceSegment face = 9;
   }
 }
 
@@ -215,6 +218,34 @@ message AudioSegment {
     bytes raw_bytes = 3;
   }
   optional int32 duration_seconds = 4;
+}
+
+// Video, file and face segments are how plugins *send* these kinds on any platform. Received
+// ones keep the platform's own custom segment (e.g. `milky.video`), which carries ids a URL
+// cannot replace.
+message VideoSegment {
+  oneof source {
+    string url = 1;
+    string file_path = 2;
+    bytes raw_bytes = 3;
+  }
+  optional string mime_type = 4;
+  optional string filename = 5;
+}
+
+message FileSegment {
+  oneof source {
+    string url = 1;
+    string file_path = 2;
+    bytes raw_bytes = 3;
+  }
+  // Name shown to the recipient; required.
+  string name = 4;
+}
+
+// A platform's built-in emoji (QQ face id).
+message FaceSegment {
+  string id = 1;
 }
 
 message MentionSegment {

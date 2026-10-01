@@ -18,7 +18,7 @@ use kanon_proto::prost_types;
 use kanon_proto::v1::message_segment::Segment;
 use kanon_proto::v1::{
     CommandExecuteRequest, CommandExecuteResponse, ToolCallRequest, ToolCallResponse,
-    audio_segment, image_segment, tool_call_request, tool_call_response,
+    audio_segment, image_segment, tool_call_request, tool_call_response, video_segment,
 };
 
 use crate::lint::{LintError, find_manifest_path};
@@ -95,6 +95,18 @@ fn format_segments(segments: &[kanon_proto::v1::MessageSegment]) -> String {
                     }
                     None => out.push("[Audio]".to_string()),
                 },
+                Segment::Video(v) => match &v.source {
+                    Some(video_segment::Source::Url(u)) => out.push(format!("[Video URL: {}]", u)),
+                    Some(video_segment::Source::FilePath(p)) => {
+                        out.push(format!("[Video File: {}]", p))
+                    }
+                    Some(video_segment::Source::RawBytes(b)) => {
+                        out.push(format!("[Video Bytes: {}B]", b.len()))
+                    }
+                    None => out.push("[Video]".to_string()),
+                },
+                Segment::File(f) => out.push(format!("[File: {}]", f.name)),
+                Segment::Face(f) => out.push(format!("[Face: {}]", f.id)),
                 Segment::Mention(m) => out.push(format!("@{}", m.target_user_id)),
                 Segment::Reply(r) => {
                     out.push(format!("[Reply to {}: {}]", r.target_message_id, r.snippet))

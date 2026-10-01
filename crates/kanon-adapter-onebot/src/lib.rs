@@ -16,7 +16,7 @@ use async_trait::async_trait;
 use kanon_core::{AdapterError, Capability, EventIngress, PlatformAdapter};
 use kanon_proto::v1::{
     DeliverMessageRequest, DeliverMessageResponse, PipelineEventRequest, audio_segment,
-    image_segment, message_segment::Segment,
+    file_segment, image_segment, message_segment::Segment, video_segment,
 };
 use serde::Serialize;
 use std::sync::{Arc, RwLock};
@@ -394,6 +394,26 @@ impl PlatformAdapter for OneBotAdapter {
                             ))
                         })?;
                         audio.source = Some(audio_segment::Source::RawBytes(bytes));
+                    }
+                }
+                Some(Segment::Video(video)) => {
+                    if let Some(video_segment::Source::FilePath(path)) = video.source.as_ref() {
+                        let bytes = tokio::fs::read(path).await.map_err(|error| {
+                            self.delivery_error(format!(
+                                "cannot read OneBot video attachment: {error}"
+                            ))
+                        })?;
+                        video.source = Some(video_segment::Source::RawBytes(bytes));
+                    }
+                }
+                Some(Segment::File(file)) => {
+                    if let Some(file_segment::Source::FilePath(path)) = file.source.as_ref() {
+                        let bytes = tokio::fs::read(path).await.map_err(|error| {
+                            self.delivery_error(format!(
+                                "cannot read OneBot file attachment: {error}"
+                            ))
+                        })?;
+                        file.source = Some(file_segment::Source::RawBytes(bytes));
                     }
                 }
                 _ => {}

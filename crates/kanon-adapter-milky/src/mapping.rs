@@ -34,7 +34,7 @@ use kanon_proto::prost_types;
 use kanon_proto::v1::message_segment::Segment;
 use kanon_proto::v1::{
     AudioSegment, ImageSegment, MentionSegment, MessageSegment, PipelineEventRequest,
-    RawCustomSegment, ReplySegment, TextSegment, audio_segment, image_segment,
+    RawCustomSegment, ReplySegment, TextSegment, audio_segment, image_segment, video_segment,
 };
 use serde_json::{Map, Value, json};
 use thiserror::Error;
@@ -180,6 +180,9 @@ pub enum MappingError {
         "custom segment '{0}' is not a Milky segment type; custom segments must be named '{CUSTOM_SEGMENT_PREFIX}<type>'"
     )]
     CustomSegment(String),
+    /// The segment kind exists in Kanon but Milky cannot send it inside a message.
+    #[error("Milky cannot send {0} inside a message")]
+    Unsupported(&'static str),
     /// A custom segment's payload does not match its declared Milky type.
     #[error("custom segment '{0}' carries a payload that does not match its Milky type: {1}")]
     CustomPayload(String, String),
@@ -684,6 +687,19 @@ pub fn outbound_segment(segment: &MessageSegment) -> Result<OutgoingSegment, Map
         Some(Segment::Audio(audio)) => {
             Ok(OutgoingSegment::Record(media_uri(audio.source.as_ref())?))
         }
+        Some(Segment::Video(video)) => Ok(OutgoingSegment::Video(OutgoingSegmentVideoData {
+            uri: media_uri(video.source.as_ref())?,
+            thumb_uri: None,
+        })),
+        Some(Segment::Face(face)) => Ok(OutgoingSegment::Face(OutgoingSegmentFaceData {
+            face_id: face.id.clone(),
+            is_large: false,
+        })),
+        // Milky sends files through upload APIs, not as message segments; failing names the
+        // problem instead of delivering the message without its file.
+        Some(Segment::File(_)) => Err(MappingError::Unsupported(
+            "files (they are uploaded with upload_group_file / upload_private_file)",
+        )),
         Some(Segment::Custom(custom)) => custom_outbound_segment(custom),
         // A segment with no kind set carries nothing to send; surfacing it beats sending an
         // empty segment the implementation would reject with an opaque parameter error.
@@ -718,6 +734,16 @@ impl MediaSource for image_segment::Source {
             image_segment::Source::Url(url) => Ok(url.clone()),
             image_segment::Source::FilePath(path) => Ok(file_uri(path)),
             image_segment::Source::RawBytes(bytes) => Ok(base64_uri(bytes)),
+        }
+    }
+}
+
+impl MediaSource for video_segment::Source {
+    fn to_milky_uri(&self) -> Result<String, MappingError> {
+        match self {
+            video_segment::Source::Url(url) => Ok(url.clone()),
+            video_segment::Source::FilePath(path) => Ok(file_uri(path)),
+            video_segment::Source::RawBytes(bytes) => Ok(base64_uri(bytes)),
         }
     }
 }
