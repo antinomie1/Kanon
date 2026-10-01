@@ -518,7 +518,14 @@ impl PlatformAdapter for QqOfficialAdapter {
                 None => return Err(self.delivery_error("message contains an empty segment")),
             }
         }
-        let text = text.trim().to_owned();
+        // Strip only surrounding blank lines. Spaces and tabs are content: a split reply line
+        // may be indented code, and trimming them would flatten it.
+        let text = text.trim_matches(['\r', '\n']).to_owned();
+        let text = if text.trim().is_empty() {
+            String::new()
+        } else {
+            text
+        };
         if text.is_empty() && media.is_empty() {
             return Err(self.delivery_error("cannot send an empty QQ Official message"));
         }
