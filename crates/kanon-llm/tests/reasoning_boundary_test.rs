@@ -492,7 +492,7 @@ async fn streaming_separates_fragmented_legacy_envelopes_and_persists_both_chann
             true,
         ),
         ("<think>private-a</think><think>unfinished", "", true),
-        ("<thi", "", false),
+        ("<thi", "<thi", false),
         ("Use <think> in examples", "Use <think> in examples", false),
         (
             "```xml\n<think>literal</think>\n```",
@@ -734,14 +734,15 @@ async fn real_sse_separates_legacy_chunks_and_responses_reasoning_events() {
 }
 
 #[test]
-fn native_reasoning_round_trips_verbatim_even_when_content_echoes_a_legacy_envelope() {
+fn native_reasoning_makes_content_authoritative_even_when_it_contains_tags() {
     let mut response = ChatResponse {
         content: Some("<think>echoed-private</think><think>more-echo</think>answer".into()),
         reasoning_content: Some("  native-private\n".into()),
         ..ChatResponse::default()
     };
+    let content = response.content.clone();
     response.separate_reasoning();
-    assert_eq!(response.content.as_deref(), Some("answer"));
+    assert_eq!(response.content, content);
     assert_eq!(
         response.reasoning_content.as_deref(),
         Some("  native-private\n")
@@ -957,5 +958,80 @@ async fn request_mapping_never_mutates_caller_messages() {
             .await
             .unwrap();
         assert_eq!(req.messages, before);
+    }
+}
+
+#[tokio::test]
+async fn protocol_reasoning_keeps_literal_answer_tags_through_streams_and_restart() {
+    for (native, null_field) in [
+        (None, false),
+        (Some(""), false),
+        (Some(""), true),
+        (Some("  native-private\n"), false),
+    ] {
+        for streaming in [false, true] {
+            let content = if native.is_some() {
+                "<think>intentional example <think>nested</think>text</think>\nUse `</think>` literally"
+            } else {
+                "Examples: `<think>outer<think>inner</think>end</think>` and </think >"
+            };
+            let url = server(Router::new().route("/v1/chat/completions", post(move |Json(body): Json<Value>| async move {
+                use axum::response::IntoResponse;
+                if body["stream"] == true {
+                    // Content precedes the native reasoning signal, and tags cross chunk boundaries.
+                    let mut sse = String::new();
+                    for ch in content.chars() {
+                        let delta = json!({"choices":[{"index":0,"delta":{"content":ch.to_string()},"finish_reason":null}]});
+                        sse.push_str(&format!("data: {delta}\n\n"));
+                    }
+                    if let Some(reasoning) = native {
+                        let delta = json!({"choices":[{"index":0,"delta":{"reasoning_content":if null_field { Value::Null } else { json!(reasoning) }},"finish_reason":null}]});
+                        sse.push_str(&format!("data: {delta}\n\n"));
+                    }
+                    sse.push_str("data: [DONE]\n\n");
+                    ([("content-type", "text/event-stream")], sse).into_response()
+                } else {
+                    let mut message = json!({"role":"assistant","content":content});
+                    if let Some(reasoning) = native { message["reasoning_content"] = if null_field { Value::Null } else { json!(reasoning) }; }
+                    Json(json!({"choices":[{"index":0,"message":message,"finish_reason":"stop"}]})).into_response()
+                }
+            }))).await;
+            let dir = tempfile::tempdir().unwrap();
+            let path = dir.path().join("sessions.db");
+            {
+                let memory = Arc::new(SqliteMemory::open(&path).unwrap());
+                let agent = Agent::builder(
+                    "fixture",
+                    Arc::new(OpenAiChatProvider::new(url, None, "fixture")),
+                )
+                .memory(memory.clone())
+                .compaction(None)
+                .build();
+                if streaming {
+                    let mut stream = agent.run_standalone_stream("s", "question").await.unwrap();
+                    let mut answer = String::new();
+                    let mut reasoning = String::new();
+                    while let Some(chunk) = stream.next().await {
+                        let chunk = chunk.unwrap();
+                        answer.push_str(&chunk.delta_text);
+                        reasoning.push_str(chunk.reasoning_text.as_deref().unwrap_or_default());
+                    }
+                    assert_eq!(answer, content);
+                    assert_eq!(reasoning, native.unwrap_or_default());
+                } else {
+                    assert_eq!(
+                        agent.run_standalone("s", "question").await.unwrap().content,
+                        content
+                    );
+                }
+                let messages = memory.get_messages("s").await.unwrap();
+                assert_eq!(messages[1].content.as_deref(), Some(content));
+                assert_eq!(messages[1].reasoning_content.as_deref(), native);
+            }
+            let memory = SqliteMemory::open(&path).unwrap();
+            let messages = memory.get_messages("s").await.unwrap();
+            assert_eq!(messages[1].content.as_deref(), Some(content));
+            assert_eq!(messages[1].reasoning_content.as_deref(), native);
+        }
     }
 }

@@ -38,7 +38,7 @@ fn does_not_strip_a_block_that_is_not_leading() {
 fn consumes_consecutive_nested_and_case_variant_envelopes() {
     for text in [
         "<think>private-a</think><think>private-b</think>answer",
-        " \n<THINK >private-a<think>private-b</think>private-c</THINK >\nanswer",
+        " \n<THINK>private-a<think>private-b</think>private-c</THINK>\nanswer",
         "<think></think>\n<think>private-b</think>answer",
     ] {
         assert_eq!(strip_reasoning_tags(text), "answer");
@@ -48,7 +48,7 @@ fn consumes_consecutive_nested_and_case_variant_envelopes() {
         "<think>a<think>b</think>c",
         "<think>a</think><thi",
         "<thi",
-        "<THINK ",
+        "<THINK",
     ] {
         assert_eq!(strip_reasoning_tags(text), "");
     }
@@ -62,6 +62,9 @@ fn preserves_literal_explanations_and_code_byte_for_byte() {
         "`<think>example</think>`",
         "```xml\n<think>example</think>\n```",
         "<thinking>not an envelope</thinking>",
+        "<think >not a standard envelope</think >",
+        "private draft</think >public answer",
+        "<THINK ",
         "1 < 2",
     ] {
         assert_eq!(strip_reasoning_tags(text), text);

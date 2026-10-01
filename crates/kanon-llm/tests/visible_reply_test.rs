@@ -1,47 +1,27 @@
-//! Tests for the final answer boundary in front of chat platforms.
+//! Platform delivery receives an already normalized answer, not an untyped model completion.
 
 use kanon_llm::visible_reply;
 
 #[test]
-fn plain_answers_pass_through_unchanged() {
-    assert_eq!(
-        visible_reply("  hello\n  world "),
-        ("hello\n  world".into(), None)
-    );
-}
-
-#[test]
-fn reasoning_blocks_anywhere_become_plain_reasoning() {
-    let (answer, reasoning) = visible_reply("<think>a</think>one <THINK >b</think> two");
-    assert_eq!(answer, "one  two");
-    assert_eq!(reasoning.as_deref(), Some("a\n\nb"));
-}
-
-#[test]
-fn a_closing_tag_without_an_opening_one_ends_template_opened_reasoning() {
-    let (answer, reasoning) = visible_reply("draft</think>\n\nfinal");
-    assert_eq!(answer, "final");
-    assert_eq!(reasoning.as_deref(), Some("draft"));
-}
-
-#[test]
-fn an_unclosed_reasoning_block_hides_the_rest() {
-    let (answer, reasoning) = visible_reply("answer <think>still going");
-    assert_eq!(answer, "answer");
-    assert_eq!(reasoning.as_deref(), Some("still going"));
+fn answer_channel_preserves_reasoning_delimiters_and_examples() {
+    for text in [
+        "hello\n  world",
+        "Use `<think>literal</think>` in examples",
+        "```xml\n<think>outer<think>inner</think>end</think>\n```",
+        "Here is <think>outer<think>inner</think>end</think> in prose",
+        "<think>an intentional example in the answer channel</think>",
+        "Explain </think> as a delimiter",
+        "draft</think >answer",
+        "<think >text</think >",
+        "<thinker> and <tool_callback> stay",
+    ] {
+        assert_eq!(visible_reply(text), text);
+    }
 }
 
 #[test]
 fn tool_call_markup_is_dropped_even_when_unparsable_or_truncated() {
     let text = "ok <tool_calls><tool_call>{bad</tool_call></tool_calls> then \
                 <function=x><parameter=a>1</parameter></function> end <tool_call>{\"name\":";
-    let (answer, reasoning) = visible_reply(text);
-    assert_eq!(answer, "ok  then  end");
-    assert_eq!(reasoning, None);
-}
-
-#[test]
-fn similar_tag_names_are_left_alone() {
-    let text = "<thinker> and <tool_callback> stay";
-    assert_eq!(visible_reply(text), (text.to_string(), None));
+    assert_eq!(visible_reply(text), "ok  then  end");
 }

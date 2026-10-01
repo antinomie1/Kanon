@@ -1867,9 +1867,9 @@ impl PipelineEngine {
             .await
             {
                 Ok(output) => {
-                    // Chat platforms receive only the answer: reasoning tags and tool-call markup
-                    // that slipped into the text are removed here whatever the provider did.
-                    let (answer, leaked) = visible_reply(&output.content);
+                    // Reasoning already has its own channel. Delimiters in answer text can be
+                    // literal examples, so delivery must not reinterpret them as reasoning.
+                    let answer = visible_reply(&output.content);
                     let answer = answer.as_str();
                     let mut replies = Vec::new();
                     if !answer.is_empty() {
@@ -1921,13 +1921,12 @@ impl PipelineEngine {
                     // It is checked after the empty-reply gate so reasoning never becomes a reply
                     // on its own.
                     if reply_policy.send_reasoning {
-                        let reasoning = [output.reasoning.as_deref(), leaked.as_deref()]
-                            .into_iter()
-                            .flatten()
-                            .map(|text| visible_reply(text).0)
-                            .filter(|text| !text.is_empty())
-                            .collect::<Vec<_>>()
-                            .join("\n\n");
+                        let reasoning = output
+                            .reasoning
+                            .as_deref()
+                            .unwrap_or_default()
+                            .trim()
+                            .to_string();
                         if !reasoning.is_empty() {
                             replies.insert(
                                 0,

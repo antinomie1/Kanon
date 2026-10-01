@@ -24,6 +24,16 @@ use crate::gateway::{ChatChunk, ChatChunkStream, LlmProvider};
 mod wire {
     use serde::{Deserialize, Serialize};
 
+    /// Distinguish an absent channel from a present but empty/null channel.
+    /// Presence tells the compatibility parser that content is already answer text.
+    fn reasoning_channel<'de, D: serde::Deserializer<'de>>(
+        deserializer: D,
+    ) -> Result<Option<String>, D::Error> {
+        Ok(Some(
+            Option::<String>::deserialize(deserializer)?.unwrap_or_default(),
+        ))
+    }
+
     #[derive(Debug, Serialize)]
     pub struct OpenAiChatRequest<'a> {
         pub model: &'a str,
@@ -98,7 +108,7 @@ mod wire {
     pub struct OpenAiResponseMessageWire {
         pub role: String,
         pub content: Option<String>,
-        #[serde(default)]
+        #[serde(default, deserialize_with = "reasoning_channel")]
         pub reasoning_content: Option<String>,
         #[serde(default)]
         pub tool_calls: Option<Vec<OpenAiToolCallWire>>,
@@ -141,7 +151,7 @@ mod wire {
         pub role: Option<String>,
         #[serde(default)]
         pub content: Option<String>,
-        #[serde(default)]
+        #[serde(default, deserialize_with = "reasoning_channel")]
         pub reasoning_content: Option<String>,
         #[serde(default)]
         pub tool_calls: Option<Vec<OpenAiToolCallChunkWire>>,
@@ -557,8 +567,7 @@ impl LlmProvider for OpenAiChatProvider {
                             }
 
                             let delta_text = choice.delta.content.unwrap_or_default();
-                            let reasoning_text =
-                                choice.delta.reasoning_content.filter(|r| !r.is_empty());
+                            let reasoning_text = choice.delta.reasoning_content;
 
                             let tool_calls: Vec<ToolCall> = choice
                                 .delta

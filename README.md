@@ -101,6 +101,16 @@ history compaction and clearing policies still apply. This is independent of `se
 which controls display on chat platforms. Disabling replay can cause thinking-mode tool requests
 to fail on endpoints that require it; see the [DeepSeek thinking-mode contract](https://api-docs.deepseek.com/zh-cn/guides/thinking_mode/).
 
+Reasoning and answer text are distinguished by their source, following AstrBot's separate
+[reasoning/text channels](https://github.com/AstrBotDevs/AstrBot/blob/9d4f523464644554e0e8e50fa2a65f146e320cd1/astrbot/core/agent/runners/tool_loop_agent_runner.py#L180-L200). An explicit `reasoning_content` (including an empty string or null) is authoritative:
+`content` remains answer text, even if it prints `<think>` delimiters. Native streaming deltas follow
+the same rule. Without an explicit channel, only a leading exact `<think>…</think>` envelope is
+recognized for legacy compatibility; nested/consecutive leading blocks and truncated envelopes are
+handled there. Inline prose, Markdown code, lone closing tags and whitespace variants such as
+`<think >` / `</think >` are not reclassified at platform delivery. A bare leading standard envelope
+without a separate channel is inherently ambiguous; quote or fence a literal example in that case.
+This display boundary never deletes stored reasoning or changes the replay preference.
+
 ## Console
 
 The WebUI (`webui/`, built with Svelte 5 and served by the node) manages everything above:

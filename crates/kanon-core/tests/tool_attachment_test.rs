@@ -27,6 +27,7 @@ use tempfile::tempdir;
 /// Provider that asks for the drawing tool once and then reports the tool's text.
 struct DrawingProvider {
     final_text: &'static str,
+    final_reasoning: Option<&'static str>,
 }
 
 #[async_trait]
@@ -41,7 +42,7 @@ impl LlmProvider for DrawingProvider {
 
         if has_tool_result {
             return Ok(ChatResponse {
-                reasoning_content: Some("native-private".into()),
+                reasoning_content: self.final_reasoning.map(str::to_string),
                 content: Some(self.final_text.to_string()),
                 tool_calls: Vec::new(),
                 finish_reason: Some("stop".to_string()),
@@ -213,7 +214,13 @@ fn event(text: &str) -> PipelineEventRequest {
 
 #[tokio::test]
 async fn a_tool_attachment_is_delivered_as_an_image_segment() {
-    check_attachment("这是你的 B50 图。", "这是你的 B50 图。", "qqofficial").await;
+    check_attachment(
+        "这是你的 B50 图。",
+        "这是你的 B50 图。",
+        "qqofficial",
+        Some("native-private"),
+    )
+    .await;
 }
 
 #[tokio::test]
@@ -224,12 +231,27 @@ async fn a_tool_attachment_survives_empty_reasoning_only_and_truncated_answers()
         "<think>private-a</think><think>unfinished",
     ] {
         for platform in ["qqofficial", "onebot"] {
-            check_attachment(text, "", platform).await;
+            check_attachment(
+                text,
+                "",
+                platform,
+                if text.is_empty() {
+                    Some("native-private")
+                } else {
+                    None
+                },
+            )
+            .await;
         }
     }
 }
 
-async fn check_attachment(final_text: &'static str, expected_text: &str, platform: &str) {
+async fn check_attachment(
+    final_text: &'static str,
+    expected_text: &str,
+    platform: &str,
+    final_reasoning: Option<&'static str>,
+) {
     let dir = tempdir().expect("temp dir");
     let image = dir.path().join("card.png");
     std::fs::write(&image, b"png-bytes").expect("fixture image");
@@ -244,10 +266,16 @@ async fn check_attachment(final_text: &'static str, expected_text: &str, platfor
 
     let memory: Arc<dyn Memory> = Arc::new(InMemory::new());
     let agent = Arc::new(
-        Agent::builder("attachment-test", Arc::new(DrawingProvider { final_text }))
-            .memory(memory)
-            .model("test-model")
-            .build(),
+        Agent::builder(
+            "attachment-test",
+            Arc::new(DrawingProvider {
+                final_text,
+                final_reasoning,
+            }),
+        )
+        .memory(memory)
+        .model("test-model")
+        .build(),
     );
     let engine =
         PipelineEngine::new(supervisor).with_tool_router(Arc::new(ToolRouter::from_arc(agent)));

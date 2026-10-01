@@ -55,44 +55,35 @@ pub fn split_reasoning_tags(text: &str) -> (&str, Option<String>) {
     }
 }
 
-/// Length of a complete case-insensitive tag, accepting whitespace before `>`.
+/// Length of an exact case-insensitive reasoning delimiter; whitespace is not a tag.
 fn tag_len(text: &str, closing: bool) -> Option<usize> {
-    let prefix = if closing { "</think" } else { "<think" };
-    if !text.get(..prefix.len())?.eq_ignore_ascii_case(prefix) {
-        return None;
-    }
-    let tail = &text[prefix.len()..];
-    let trimmed = tail.trim_start();
-    trimmed
-        .starts_with('>')
-        .then_some(text.len() - trimmed.len() + 1)
+    let tag = if closing { "</think>" } else { "<think>" };
+    text.get(..tag.len())?
+        .eq_ignore_ascii_case(tag)
+        .then_some(tag.len())
 }
 
 /// Whether a stream may still complete a leading opening tag.
 fn is_partial_open(text: &str) -> bool {
-    if text.is_empty() {
-        return false;
-    }
-    const PREFIX: &str = "<think";
-    if text.len() <= PREFIX.len() {
-        return PREFIX[..text.len()].eq_ignore_ascii_case(text);
-    }
-    text.get(..PREFIX.len())
-        .is_some_and(|head| head.eq_ignore_ascii_case(PREFIX))
-        && text[PREFIX.len()..].trim().is_empty()
+    const TAG: &str = "<think>";
+    !text.is_empty() && text.len() < TAG.len() && TAG[..text.len()].eq_ignore_ascii_case(text)
 }
 
 /// Moves a legacy envelope out of content, preserving an explicit protocol reasoning field.
 pub(crate) fn separate(content: &mut Option<String>, reasoning: &mut Option<String>) {
+    // An explicit channel is authoritative, even when empty. Its content is an answer, not
+    // a second envelope: models may deliberately explain or print reasoning delimiters there.
+    if reasoning.is_some() {
+        return;
+    }
     let Some(text) = content.as_deref() else {
         return;
     };
     let (answer, legacy) = split_reasoning_tags(text);
     if let Some(legacy) = legacy {
         let answer = answer.to_string();
-        // Native protocol reasoning must round-trip verbatim. Only old messages lacking that
-        // field recover it from the display envelope; echoed envelopes still leave the answer.
-        if reasoning.is_none() && !legacy.is_empty() {
+        // A recovered channel also makes repeated normalization idempotent.
+        if !legacy.is_empty() {
             *reasoning = Some(legacy);
         }
         *content = Some(answer);
@@ -112,7 +103,12 @@ struct ReasoningStream {
 }
 
 impl ReasoningStream {
-    fn push(&mut self, delta: &str) -> String {
+    fn push(&mut self, delta: &str, native: bool) -> String {
+        if native {
+            self.passthrough = true;
+            self.pending.push_str(delta);
+            return std::mem::take(&mut self.pending);
+        }
         if self.passthrough {
             return delta.to_string();
         }
@@ -152,7 +148,7 @@ pub(crate) fn separate_stream(mut stream: super::ChatChunkStream) -> super::Chat
                 }
             };
             has_native_reasoning |= chunk.reasoning_text.is_some();
-            chunk.delta_text = filter.push(&chunk.delta_text);
+            chunk.delta_text = filter.push(&chunk.delta_text, has_native_reasoning);
             let finished = chunk.is_finished;
             if finished {
                 finish_reason = chunk.finish_reason.take();
