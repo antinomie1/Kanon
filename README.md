@@ -66,6 +66,9 @@ To send a model answer one line at a time, enable **Send each line separately** 
 Reply, or override it in an instance's reply settings (`reply_policy.split_lines`). It defaults to
 off. Empty and whitespace-only lines are skipped; code lines are split too. A quote appears only on
 the first message, trailing images stay on the last, and the stored model answer remains intact.
+An answer occupies one outbound queue slot regardless of its line count. QQ Official merges excess
+lines into the last text message to leave room for attachments and a C2C typing acknowledgement;
+guild replies stay in one text message to avoid a burst above the channel rate limit.
 
 | Key | Default | Purpose |
 | :--- | :--- | :--- |

@@ -7,14 +7,37 @@ use kanon_proto::v1::message_segment::Segment;
 ///
 /// A whitespace-only line carries no visible content and must not become a delivery. Preserve
 /// whitespace on nonblank lines (including indentation), and never duplicate an attachment or
-/// emit a quote by itself. Every resulting message still uses the normal outbound FIFO.
-pub(super) fn split_reply_lines(replies: &[MessageSegment]) -> Vec<Vec<MessageSegment>> {
+/// emit a quote by itself. Excess lines are joined in the last message to respect the adapter's
+/// passive-reply budget. All resulting messages are delivered in the same queue slot.
+pub(super) fn split_reply_lines(
+    replies: &[MessageSegment],
+    limit: usize,
+) -> Vec<Vec<MessageSegment>> {
+    let limit = limit.max(1);
     let mut messages: Vec<Vec<MessageSegment>> = Vec::new();
     let mut pending = Vec::new();
 
     for reply in replies {
         if let Some(Segment::Text(text)) = &reply.segment {
             for line in text.content.lines().filter(|line| !line.trim().is_empty()) {
+                if messages.len() == limit {
+                    let last = messages.last_mut().expect("positive reply limit");
+                    last.append(&mut pending);
+                    if let Some(MessageSegment {
+                        segment: Some(Segment::Text(text)),
+                    }) = last.last_mut()
+                    {
+                        text.content.push('\n');
+                        text.content.push_str(line);
+                    } else {
+                        last.push(MessageSegment {
+                            segment: Some(Segment::Text(kanon_proto::v1::TextSegment {
+                                content: line.to_string(),
+                            })),
+                        });
+                    }
+                    continue;
+                }
                 pending.push(MessageSegment {
                     segment: Some(Segment::Text(kanon_proto::v1::TextSegment {
                         content: line.to_string(),

@@ -9,19 +9,22 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use kanon_core::instance::{InstanceDraft, InstanceRegistry};
-use kanon_core::pipeline::PipelineEngine;
+use kanon_core::pipeline::engine::OutboundMessage;
+use kanon_core::pipeline::{
+    DEFAULT_OUTBOUND_QUEUE_CAPACITY, DeadLetterRecord, DeadLetterWriter, PipelineEngine,
+};
 use kanon_core::supervisor::Supervisor;
-use kanon_core::{ReplyPolicy, ReplyPolicyStore};
+use kanon_core::{AdapterError, PlatformAdapter, ReplyPolicy, ReplyPolicyStore};
 use kanon_llm::gateway::types::{ChatRequest, ChatResponse};
 use kanon_llm::memory::{InMemory, Memory};
 use kanon_llm::tool_router::ToolRouter;
 use kanon_llm::{Agent, GatewayError, LlmProvider};
 use kanon_proto::v1::message_segment::Segment;
 use kanon_proto::v1::{
-    ImageSegment, IngestEventRequest, MessageSegment, PipelineEventRequest, ReplySegment,
-    TextSegment,
+    DeliverMessageRequest, DeliverMessageResponse, ImageSegment, IngestEventRequest,
+    MessageSegment, PipelineEventRequest, ReplySegment, TextSegment,
 };
-use tokio::sync::mpsc;
+use tokio::sync::{Semaphore, mpsc};
 
 /// Text segment fixture preserving its bytes.
 fn text(content: &str) -> MessageSegment {
@@ -58,7 +61,10 @@ fn image() -> MessageSegment {
 #[test]
 fn nonblank_lines_preserve_indentation_and_skip_empty_crlf_and_unicode_blank_lines() {
     assert_eq!(
-        reply::split_reply_lines(&[text("\nfirst\r\n\r\n \t\n\u{3000}\n  第二行  \nlast\n")]),
+        reply::split_reply_lines(
+            &[text("\nfirst\r\n\r\n \t\n\u{3000}\n  第二行  \nlast\n")],
+            usize::MAX
+        ),
         vec![
             vec![text("first")],
             vec![text("  第二行  ")],
@@ -70,7 +76,10 @@ fn nonblank_lines_preserve_indentation_and_skip_empty_crlf_and_unicode_blank_lin
 #[test]
 fn quote_is_on_the_first_line_and_images_are_not_duplicated() {
     assert_eq!(
-        reply::split_reply_lines(&[quote(), text("first\n\nlast"), image(), image()]),
+        reply::split_reply_lines(
+            &[quote(), text("first\n\nlast"), image(), image()],
+            usize::MAX
+        ),
         vec![
             vec![quote(), text("first")],
             vec![text("last"), image(), image()]
@@ -80,21 +89,21 @@ fn quote_is_on_the_first_line_and_images_are_not_duplicated() {
 
 #[test]
 fn blank_text_and_quotes_are_not_sent_but_image_only_replies_survive() {
-    assert!(reply::split_reply_lines(&[quote(), text("\n \t\r\n")]).is_empty());
+    assert!(reply::split_reply_lines(&[quote(), text("\n \t\r\n")], usize::MAX).is_empty());
     assert_eq!(
-        reply::split_reply_lines(&[quote(), text("\n \t\r\n"), image()]),
+        reply::split_reply_lines(&[quote(), text("\n \t\r\n"), image()], usize::MAX),
         vec![vec![quote(), image()]],
     );
 }
 
 /// Provider with one synthetic multiline final answer.
-struct MultilineProvider;
+struct MultilineProvider(String);
 
 #[async_trait]
 impl LlmProvider for MultilineProvider {
     async fn chat(&self, _request: &ChatRequest) -> Result<ChatResponse, GatewayError> {
         Ok(ChatResponse {
-            content: Some("first\r\n\r\n \t\n  second\nlast".to_string()),
+            content: Some(self.0.clone()),
             tool_calls: Vec::new(),
             finish_reason: Some("stop".to_string()),
             usage: None,
@@ -128,10 +137,15 @@ async fn delivered_lines(node_split: bool, instance_split: Option<bool>) -> Vec<
         .expect("create instance");
     let memory: Arc<dyn Memory> = Arc::new(InMemory::new());
     let agent = Arc::new(
-        Agent::builder("line-test", Arc::new(MultilineProvider))
-            .memory(memory.clone())
-            .model("test-model")
-            .build(),
+        Agent::builder(
+            "line-test",
+            Arc::new(MultilineProvider(
+                "first\r\n\r\n \t\n  second\nlast".to_string(),
+            )),
+        )
+        .memory(memory.clone())
+        .model("test-model")
+        .build(),
     );
     let engine = Arc::new(
         PipelineEngine::new(supervisor)
@@ -235,4 +249,331 @@ async fn legacy_policies_default_off_and_instance_setting_survives_restart() {
     let reopened = InstanceRegistry::open(&path).await.expect("reopen catalog");
     let restored = reopened.get(&instance.id).await.expect("restored instance");
     assert!(restored.reply_policy.expect("stored policy").split_lines);
+}
+
+#[test]
+fn capped_replies_keep_every_nonblank_line_and_each_attachment_once() {
+    let segments = [
+        quote(),
+        text("first\n\nsecond\r\n  third\n \nlast"),
+        image(),
+    ];
+    assert_eq!(
+        reply::split_reply_lines(&segments, 2),
+        vec![
+            vec![quote(), text("first")],
+            vec![text("second\n  third\nlast"), image()]
+        ],
+    );
+    for limit in [0, 1] {
+        assert_eq!(
+            reply::split_reply_lines(&segments, limit),
+            vec![vec![quote(), text("first\nsecond\n  third\nlast"), image()]],
+        );
+    }
+    assert_eq!(reply::split_reply_lines(&[image()], 1), vec![vec![image()]]);
+    assert!(reply::split_reply_lines(&[quote(), text(" \n\n")], 1).is_empty());
+}
+
+/// Adapter with deterministic backpressure, a split budget, and an optional failed part.
+struct BatchAdapter {
+    attempted: mpsc::UnboundedSender<DeliverMessageRequest>,
+    release: Arc<Semaphore>,
+    limit: usize,
+    fail_on: Option<String>,
+}
+
+#[async_trait]
+impl PlatformAdapter for BatchAdapter {
+    fn platform(&self) -> &str {
+        "line-test"
+    }
+
+    fn reply_message_limit(&self, _: &DeliverMessageRequest) -> usize {
+        self.limit
+    }
+
+    async fn deliver(
+        &self,
+        request: DeliverMessageRequest,
+    ) -> Result<DeliverMessageResponse, AdapterError> {
+        self.attempted
+            .send(request.clone())
+            .expect("attempt receiver open");
+        self.release
+            .acquire()
+            .await
+            .expect("release semaphore open")
+            .forget();
+        if self.fail_on.as_deref() == Some(request_text(&request).as_str()) {
+            return Err(AdapterError::Delivery {
+                platform: self.platform().to_string(),
+                reason: "synthetic delivery failure".to_string(),
+            });
+        }
+        Ok(DeliverMessageResponse {
+            success: true,
+            ..Default::default()
+        })
+    }
+}
+
+/// Reassembles only text segments for assertions about content and order.
+fn request_text(request: &DeliverMessageRequest) -> String {
+    request
+        .segments
+        .iter()
+        .filter_map(|s| match &s.segment {
+            Some(Segment::Text(t)) => Some(t.content.as_str()),
+            _ => None,
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// Reply fixture retaining its source event.
+fn batch_request(content: &str, event_id: &str) -> DeliverMessageRequest {
+    DeliverMessageRequest {
+        platform: "line-test".to_string(),
+        channel_id: "conversation".to_string(),
+        recipient_id: "sender".to_string(),
+        event_id: event_id.to_string(),
+        segments: vec![text(content)],
+    }
+}
+
+/// Builds the real model pipeline with isolated dead-letter storage.
+async fn batch_engine(
+    dir: &std::path::Path,
+    supervisor: Arc<Supervisor>,
+    content: String,
+) -> Arc<PipelineEngine> {
+    let registry = Arc::new(InstanceRegistry::in_memory());
+    registry
+        .create(InstanceDraft {
+            name: "line-test".to_string(),
+            adapters: vec!["line-test".to_string()],
+            enabled: true,
+            ..Default::default()
+        })
+        .await
+        .expect("create instance");
+    let agent = Arc::new(
+        Agent::builder("line-test", Arc::new(MultilineProvider(content)))
+            .model("test-model")
+            .build(),
+    );
+    Arc::new(
+        PipelineEngine::new(supervisor)
+            .with_instances(registry)
+            .with_reply_policy(Arc::new(ReplyPolicyStore::new(ReplyPolicy {
+                split_lines: true,
+                ..Default::default()
+            })))
+            .with_tool_router(Arc::new(ToolRouter::from_arc(agent)))
+            .with_dead_letter(Arc::new(DeadLetterWriter::new(dir.join("dead_letter")))),
+    )
+}
+
+/// Completes one inbound event without requiring the outbound dispatcher to run.
+async fn generate_reply(engine: &Arc<PipelineEngine>) {
+    let (tx, rx) = mpsc::channel(1);
+    tx.send(IngestEventRequest {
+        platform: "line-test".to_string(),
+        event: Some(PipelineEventRequest {
+            event_id: "source-event".to_string(),
+            platform: "line-test".to_string(),
+            channel_id: "conversation".to_string(),
+            sender_id: "sender".to_string(),
+            raw_text: "hello".to_string(),
+            ..Default::default()
+        }),
+    })
+    .await
+    .expect("enqueue event");
+    drop(tx);
+    tokio::time::timeout(Duration::from_secs(3), engine.clone().start_worker(rx))
+        .await
+        .expect("worker finishes")
+        .expect("worker succeeds");
+}
+
+#[tokio::test]
+async fn long_answer_uses_one_queue_slot_and_slow_platform_keeps_the_full_batch_in_order() {
+    let dir = tempfile::tempdir().unwrap();
+    let supervisor = Arc::new(Supervisor::new(Some(dir.path().into()), None));
+    let (attempted_tx, mut attempted_rx) = mpsc::unbounded_channel();
+    let release = Arc::new(Semaphore::new(0));
+    supervisor
+        .adapters()
+        .register(Arc::new(BatchAdapter {
+            attempted: attempted_tx,
+            release: release.clone(),
+            limit: usize::MAX,
+            fail_on: None,
+        }))
+        .await
+        .unwrap();
+    let (other_tx, mut other_rx) = mpsc::channel(1);
+    supervisor
+        .adapters()
+        .register(common::ChannelAdapter::shared("other", other_tx))
+        .await
+        .unwrap();
+    let lines: Vec<_> = (0..DEFAULT_OUTBOUND_QUEUE_CAPACITY + 10)
+        .map(|n| format!("line-{n}"))
+        .collect();
+    let engine = batch_engine(dir.path(), supervisor, lines.join("\n\n")).await;
+    generate_reply(&engine).await;
+    assert_eq!(
+        engine.outbound_sender().capacity(),
+        DEFAULT_OUTBOUND_QUEUE_CAPACITY - 1
+    );
+    let dispatcher = engine.clone().start_outbound_dispatcher();
+    let first = tokio::time::timeout(Duration::from_secs(3), attempted_rx.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(request_text(&first), lines[0]);
+    engine
+        .outbound_sender()
+        .send(batch_request("next-answer", "next-event").into())
+        .await
+        .unwrap();
+    let mut other = batch_request("other-answer", "other-event");
+    other.platform = "other".to_string();
+    engine.outbound_sender().send(other.into()).await.unwrap();
+    assert_eq!(
+        request_text(
+            &tokio::time::timeout(Duration::from_secs(3), other_rx.recv())
+                .await
+                .unwrap()
+                .unwrap()
+        ),
+        "other-answer"
+    );
+    assert!(
+        attempted_rx.try_recv().is_err(),
+        "slow platform is still blocked on the first part"
+    );
+    release.add_permits(lines.len() + 1);
+    for expected in &lines[1..] {
+        let request = tokio::time::timeout(Duration::from_secs(3), attempted_rx.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(request_text(&request), *expected);
+        assert_eq!(request.event_id, "source-event");
+    }
+    let next = tokio::time::timeout(Duration::from_secs(3), attempted_rx.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(request_text(&next), "next-answer");
+    assert_eq!(next.event_id, "next-event");
+    engine.drain(tokio::spawn(async {}), dispatcher).await;
+    assert!(!dir.path().join("dead_letter").exists());
+}
+
+#[tokio::test]
+async fn adapter_budget_is_applied_after_dequeueing() {
+    let dir = tempfile::tempdir().unwrap();
+    let supervisor = Arc::new(Supervisor::new(Some(dir.path().into()), None));
+    let (attempted, mut rx) = mpsc::unbounded_channel();
+    supervisor
+        .adapters()
+        .register(Arc::new(BatchAdapter {
+            attempted,
+            release: Arc::new(Semaphore::new(2)),
+            limit: 2,
+            fail_on: None,
+        }))
+        .await
+        .unwrap();
+    let engine = batch_engine(
+        dir.path(),
+        supervisor,
+        "first\n\nsecond\nthird\nlast".to_string(),
+    )
+    .await;
+    generate_reply(&engine).await;
+    let dispatcher = engine.clone().start_outbound_dispatcher();
+    engine.drain(tokio::spawn(async {}), dispatcher).await;
+    assert_eq!(request_text(&rx.try_recv().unwrap()), "first");
+    assert_eq!(request_text(&rx.try_recv().unwrap()), "second\nthird\nlast");
+    assert!(rx.try_recv().is_err());
+}
+
+/// Reads the durable unsent suffix after the dispatcher has stopped.
+fn dead_letter_parts(dir: &std::path::Path) -> Vec<DeadLetterRecord> {
+    std::fs::read_dir(dir.join("dead_letter"))
+        .unwrap()
+        .flat_map(|entry| {
+            std::fs::read_to_string(entry.unwrap().path())
+                .unwrap()
+                .lines()
+                .map(|line| serde_json::from_str(line).unwrap())
+                .collect::<Vec<DeadLetterRecord>>()
+        })
+        .collect()
+}
+
+#[tokio::test]
+async fn failed_or_shutdown_batch_records_only_the_undelivered_suffix() {
+    for shutdown in [false, true] {
+        let dir = tempfile::tempdir().unwrap();
+        let supervisor = Arc::new(Supervisor::new(Some(dir.path().into()), None));
+        let (attempted, mut rx) = mpsc::unbounded_channel();
+        supervisor
+            .adapters()
+            .register(Arc::new(BatchAdapter {
+                attempted,
+                release: Arc::new(Semaphore::new(if shutdown { 1 } else { 4 })),
+                limit: usize::MAX,
+                fail_on: (!shutdown).then(|| "second".to_string()),
+            }))
+            .await
+            .unwrap();
+        let engine = batch_engine(dir.path(), supervisor, String::new()).await;
+        let dispatcher = engine.clone().start_outbound_dispatcher();
+        let (receipt, result) = tokio::sync::oneshot::channel();
+        engine
+            .outbound_sender()
+            .send(OutboundMessage {
+                request: batch_request("first\nsecond\nthird\nlast", "source-event"),
+                split_lines: true,
+                receipt: Some(receipt),
+            })
+            .await
+            .unwrap();
+        for expected in ["first", "second"] {
+            assert_eq!(
+                request_text(
+                    &tokio::time::timeout(Duration::from_secs(3), rx.recv())
+                        .await
+                        .unwrap()
+                        .unwrap()
+                ),
+                expected
+            );
+        }
+        engine.drain(tokio::spawn(async {}), dispatcher).await;
+        assert!(!result.await.unwrap().success);
+        let records = dead_letter_parts(dir.path());
+        let parts: Vec<_> = records
+            .iter()
+            .map(|r| r.segments[0]["content"].as_str().unwrap())
+            .collect();
+        assert_eq!(parts, ["second", "third", "last"]);
+        assert!(records.iter().all(|r| r.event_id == "source-event"));
+        assert!(
+            rx.try_recv().is_err(),
+            "failed suffix is never attempted or retried"
+        );
+        assert!(records[0].reason.contains(if shutdown {
+            "shut down"
+        } else {
+            "synthetic delivery failure"
+        }));
+    }
 }

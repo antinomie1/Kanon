@@ -260,6 +260,15 @@ pub trait PlatformAdapter: Send + Sync {
         true
     }
 
+    /// Maximum delivery requests into which one model reply may be split.
+    ///
+    /// The adapter must reserve its own native-message costs, including media and any concurrent
+    /// acknowledgement. The core merges excess lines into the last request without discarding
+    /// content. Returning one disables extra deliveries; the default imposes no limit.
+    fn reply_message_limit(&self, _request: &DeliverMessageRequest) -> usize {
+        usize::MAX
+    }
+
     /// Delivers one outbound message to the platform.
     async fn deliver(
         &self,
