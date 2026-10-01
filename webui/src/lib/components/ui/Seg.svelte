@@ -2,15 +2,20 @@
 import type { IconComponent } from '../../types';
 
 /**
- * Segmented control: a small set of mutually exclusive choices shown side by side.
+ * Segmented control, drawn by Google's outlined segmented button set
+ * (`md-outlined-segmented-button-set`): a small set of mutually exclusive choices shown side by
+ * side, so the current choice and the alternatives are visible without opening anything.
  *
- * Used instead of a `<select>` whenever every option fits on one line, so the current choice and
- * the alternatives are visible without opening anything.
+ * The set is light-DOM: each option is one `<md-outlined-segmented-button>` child, which is why the
+ * wrapper renders them itself instead of taking a snippet. Two details the console needs:
  *
- * Drawn as one pill-shaped track holding every option, with the chosen one filled in the accent as
- * a smaller pill inside it, so the group reads as one control rather than a row of separate
- * buttons. Labels never gain or lose an icon on selection, so choosing an option does not shift
- * the row.
+ *   - size. Google's segments are 40px, which is the console's `md`; `sm` sets the set's own
+ *     `--md-outlined-segmented-button-container-height` to 32px.
+ *   - selection. The set owns the selected state (`setButtonSelected(index, selected)`) and reports
+ *     it with a `segmented-button-set-selection` event carrying the index, so the wrapper maps
+ *     `value` to an index and back. A labelled segment gets Google's check mark on selection; an
+ *     icon-only segment keeps its icon instead, because a check would replace the only thing
+ *     identifying it.
  */
 let {
   options,
@@ -28,43 +33,68 @@ let {
   size?: 'sm' | 'md';
   disabled?: boolean;
 } = $props();
+
+let set = $state<(HTMLElement & { updateComplete?: Promise<unknown> }) | null>(
+  null,
+);
+
+/**
+ * Pushes the console's value into the set, which owns the selection.
+ *
+ * The buttons are set directly rather than through `setButtonSelected`, because the set refuses to
+ * select a *disabled* button — which would leave a disabled control showing nothing instead of the
+ * value it stands for. Writing the buttons keeps `value` authoritative in every case; clicks still
+ * go through the set, whose own handler updates the buttons and then reports the index.
+ */
+$effect(() => {
+  const el = set;
+  const index = options.findIndex((option) => option.value === value);
+  if (!el || index < 0) return;
+  void el.updateComplete?.then(() => {
+    const buttons = [
+      ...el.querySelectorAll('md-outlined-segmented-button'),
+    ] as (HTMLElement & {
+      selected?: boolean;
+    })[];
+    buttons.forEach((button, i) => {
+      if (button.selected !== (i === index)) button.selected = i === index;
+    });
+  });
+});
+
+/**
+ * The set reports selection through its own event rather than through the buttons, so the index it
+ * carries is translated back into the option's value. Clicks that re-select the current option are
+ * ignored so `onchange` only ever fires for a real change.
+ */
+function onSelection(event: Event) {
+  const detail = (event as CustomEvent<{ index: number; selected: boolean }>)
+    .detail;
+  if (!detail?.selected) return;
+  const next = options[detail.index]?.value;
+  if (next === undefined || next === value) return;
+  value = next;
+  onchange(next);
+}
 </script>
 
-<!-- The track is 40px (32px small) tall with a 4px (3px) inset, so the chosen pill sits 32px
-     (26px) tall and keeps an even ring of track around it. -->
-<div
-  role="radiogroup"
+<md-outlined-segmented-button-set
+  bind:this={set}
+  class={size === 'sm' ? 'kanon-seg-sm' : ''}
   aria-label={label}
-  class="inline-flex max-w-full rounded-full bg-sunk {size === 'sm' ? 'h-8 p-[3px]' : 'h-10 p-1'} {disabled
-    ? 'opacity-50'
-    : ''}"
+  onsegmented-button-set-selection={onSelection}
 >
   {#each options as option (option.value)}
     {@const Icon = option.icon}
-    {@const on = option.value === value}
-    <button
-      type="button"
-      role="radio"
-      aria-checked={on}
-      aria-label={option.label ? undefined : (option.title ?? option.value)}
+    <md-outlined-segmented-button
+      label={option.label ?? ''}
       title={option.title}
       {disabled}
-      onclick={() => onchange(option.value)}
-      class="inline-flex h-full items-center justify-center gap-1.5 rounded-full font-medium whitespace-nowrap transition-[background-color,color] duration-150 ease-[var(--ease-effects)] {size ===
-      'sm'
-        ? 'text-[12.5px]'
-        : 'text-[14px]'} {option.label
-        ? size === 'sm'
-          ? 'px-2.5'
-          : 'px-3.5'
-        : size === 'sm'
-          ? 'w-[30px]'
-          : 'w-10'} {on
-        ? 'bg-accent text-on-accent'
-        : 'text-fg2 hover:bg-fg/6 hover:text-fg disabled:hover:bg-transparent disabled:hover:text-fg2'}"
+      noCheckmark={!option.label}
     >
-      {#if Icon}<Icon size={size === 'sm' ? 15 : 16} strokeWidth={2} />{/if}
-      {#if option.label}<span>{option.label}</span>{/if}
-    </button>
+      {#if Icon}
+        <span slot="icon"><Icon size={size === 'sm' ? 15 : 16} strokeWidth={2} /></span>
+      {/if}
+    </md-outlined-segmented-button>
   {/each}
-</div>
+</md-outlined-segmented-button-set>

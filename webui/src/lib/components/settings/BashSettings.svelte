@@ -6,9 +6,11 @@ import { confirmDialog } from '../../stores/confirm.svelte';
 import { t } from '../../stores/i18n.svelte';
 import { toasts } from '../../stores/toast.svelte';
 import type { BashPolicy } from '../../types';
+import Button from '../ui/Button.svelte';
 import Section from '../ui/Section.svelte';
 import Seg from '../ui/Seg.svelte';
 import Switch from '../ui/Switch.svelte';
+import TextField from '../ui/TextField.svelte';
 
 /**
  * Node-wide Bash settings. Who may use Bash comes from each instance's command permissions, and
@@ -121,7 +123,7 @@ async function resetSandbox() {
       </div>
       <label class="block">
         <span class="label">{t('bash.local_workdir')}</span>
-        <input bind:value={draft.local.working_dir} disabled={saving} class="input mono" />
+        <TextField bind:value={draft.local.working_dir} disabled={saving} mono />
       </label>
       <div class="flex items-start gap-3 text-[14.5px]">
         <span class="min-w-0 flex-1">
@@ -138,12 +140,12 @@ async function resetSandbox() {
       {#if draft.local.auto_review}
         <label class="block">
           <span class="label">{t('bash.review_model')}</span>
-          <input
+          <TextField
             value={draft.local.review_model ?? ''}
             oninput={(e) => draft && (draft.local.review_model = e.currentTarget.value)}
             disabled={saving}
             placeholder="provider/model"
-            class="input mono"
+            mono
           />
         </label>
       {/if}
@@ -160,7 +162,7 @@ async function resetSandbox() {
       </div>
       <label class="block">
         <span class="label">{t('bash.image')}</span>
-        <input bind:value={draft.sandbox.image} disabled={saving} class="input mono" />
+        <TextField bind:value={draft.sandbox.image} disabled={saving} mono />
       </label>
       <div class="flex flex-wrap items-center justify-between gap-3">
         <span class="text-[13.5px] text-fg2">
@@ -170,24 +172,24 @@ async function resetSandbox() {
             pids: draft.sandbox.pids_limit,
           })}
         </span>
-        <button type="button" class="btn btn-sm btn-danger" disabled={saving} onclick={resetSandbox}>
+        <Button type="button" variant="danger" size="sm" disabled={saving} onclick={resetSandbox}>
           {t('bash.reset')}
-        </button>
+        </Button>
       </div>
     {/if}
   </Section>
 
   <div class="flex justify-end gap-2.5 py-5">
-    <button
+    <Button
       type="button"
-      class="btn"
+     
       disabled={!dirty || saving}
       onclick={() => saved && (draft = structuredClone(saved))}
     >
       {t('instances.discard')}
-    </button>
-    <button type="button" class="btn btn-primary" disabled={!dirty || saving} onclick={save}>
+    </Button>
+    <Button type="button" variant="filled" disabled={!dirty || saving} onclick={save}>
       {saving ? t('instances.saving') : t('instances.save_changes')}
-    </button>
+    </Button>
   </div>
 {/if}

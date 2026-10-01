@@ -2,6 +2,7 @@
 import { Menu, RefreshCw, WifiOff } from 'lucide-svelte';
 import CommandPalette from './lib/components/layout/CommandPalette.svelte';
 import Sidebar from './lib/components/layout/Sidebar.svelte';
+import Button from './lib/components/ui/Button.svelte';
 import ConfirmHost from './lib/components/ui/ConfirmHost.svelte';
 import ToastHost from './lib/components/ui/ToastHost.svelte';
 import ActivityView from './lib/components/views/ActivityView.svelte';
@@ -66,14 +67,14 @@ function handleKeydown(e: KeyboardEvent) {
 
   <div class="flex min-w-0 flex-1 flex-col lg:py-3 lg:pr-3">
     <div class="flex h-14 shrink-0 items-center gap-3 rail px-4 lg:hidden">
-      <button
+      <Button
         type="button"
-        class="btn btn-quiet btn-icon btn-sm -ml-2"
+        variant="text" size="sm" square class="-ml-2"
         aria-label={t('shell.open_menu')}
         onclick={() => (isDrawerOpen = true)}
       >
         <Menu size={20} strokeWidth={2} />
-      </button>
+      </Button>
       <span class="shrink-0 text-[20px] font-bold">Kanon Console</span>
       <span class="truncate text-[14px] text-fg2">{t(`nav.${router.page}`)}</span>
     </div>
@@ -94,14 +95,16 @@ function handleKeydown(e: KeyboardEvent) {
               <b class="font-semibold">{t('shell.offline_title')}</b>
               <span class="ml-1">{t('shell.offline_text', { error: nodeStore.error })}</span>
             </span>
-            <button
+            <Button
               type="button"
-              class="btn btn-sm text-danger-fg shadow-[inset_0_0_0_1px_currentColor]"
+              variant="outlined"
+              size="sm"
+              class="kanon-danger"
               onclick={() => nodeStore.refresh()}
             >
               <RefreshCw size={15} strokeWidth={2} />
               {t('common.retry')}
-            </button>
+            </Button>
           </div>
         {/if}
 

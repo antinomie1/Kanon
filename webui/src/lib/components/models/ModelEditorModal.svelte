@@ -9,7 +9,9 @@ import {
 } from '../../stores/models.svelte';
 import { toasts } from '../../stores/toast.svelte';
 import type { ModelCapabilities, ModelSpec } from '../../types';
+import Button from '../ui/Button.svelte';
 import Modal from '../ui/Modal.svelte';
+import TextField from '../ui/TextField.svelte';
 import { optionalNumber } from './modelFormat';
 
 /**
@@ -115,9 +117,9 @@ async function save() {
     <div class="grid gap-4 sm:grid-cols-2">
       <div>
         <label class="label" for="model-id">{t('llm.model_id')}</label>
-        <input
+        <TextField
           id="model-id"
-          class="input mono"
+          mono
           spellcheck="false"
           placeholder="gpt-4o"
           disabled={spec !== null}
@@ -126,7 +128,7 @@ async function save() {
       </div>
       <div>
         <label class="label" for="model-name">{t('llm.model_name')}</label>
-        <input id="model-name" class="input" placeholder={t('llm.optional')} bind:value={displayName} />
+        <TextField id="model-name" placeholder={t('llm.optional')} bind:value={displayName} />
       </div>
     </div>
     <p class="m-0 -mt-1 hint">{t('llm.model_id_hint', { provider, model: model.trim() || 'gpt-4o' })}</p>
@@ -155,15 +157,15 @@ async function save() {
     <div class="grid gap-4 sm:grid-cols-3">
       <div>
         <label class="label" for="model-context">{t('llm.context_length')}</label>
-        <input id="model-context" class="input" inputmode="numeric" placeholder="128000" bind:value={contextLength} />
+        <TextField id="model-context" inputmode="numeric" placeholder="128000" bind:value={contextLength} />
       </div>
       <div>
         <label class="label" for="model-output">{t('llm.max_output')}</label>
-        <input id="model-output" class="input" inputmode="numeric" placeholder={t('llm.unset')} bind:value={maxOutput} />
+        <TextField id="model-output" inputmode="numeric" placeholder={t('llm.unset')} bind:value={maxOutput} />
       </div>
       <div>
         <label class="label" for="model-temperature">{t('llm.temperature')}</label>
-        <input id="model-temperature" class="input" inputmode="decimal" placeholder={t('llm.unset')} bind:value={temperature} />
+        <TextField id="model-temperature" inputmode="decimal" placeholder={t('llm.unset')} bind:value={temperature} />
       </div>
     </div>
 
@@ -176,11 +178,11 @@ async function save() {
   </form>
 
   {#snippet footer()}
-    <button type="button" class="btn" disabled={modelsStore.saving} onclick={onclose}>
+    <Button type="button" disabled={modelsStore.saving} onclick={onclose}>
       {t('common.cancel')}
-    </button>
-    <button type="submit" form="model-editor" class="btn btn-primary" disabled={!model.trim() || modelsStore.saving}>
+    </Button>
+    <Button type="submit" form="model-editor" variant="filled" disabled={!model.trim() || modelsStore.saving}>
       {modelsStore.saving ? t('instances.saving') : spec ? t('instances.save_changes') : t('llm.model_add')}
-    </button>
+    </Button>
   {/snippet}
 </Modal>

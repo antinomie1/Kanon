@@ -7,7 +7,7 @@
     "dev": "vite",
     "build": "vite build",
     "preview": "vite preview",
-    "check": "svelte-check --tsconfig ./tsconfig.app.json && tsc -p tsconfig.node.json",
+    "check": "svelte-check --tsconfig ./tsconfig.app.json && tsc -p tsconfig.node.json && bun tools/check-md-elements.mjs",
     "lint": "biome check .",
     "format": "biome format --write ."
   },
@@ -15,6 +15,7 @@
     "@biomejs/biome": "^2.5.14",
     "@fontsource-variable/google-sans-code": "^5.3.1",
     "@fontsource-variable/google-sans-flex": "^5.3.1",
+    "@material/material-color-utilities": "0.4.0",
     "@sveltejs/vite-plugin-svelte": "^7.3.0",
     "@tailwindcss/vite": "^4.3.3",
     "@tsconfig/svelte": "^5.0.8",
@@ -27,5 +28,8 @@
     "tailwindcss": "^4.3.3",
     "typescript": "~6.0.2",
     "vite": "^8.3.0"
+  },
+  "dependencies": {
+    "@material/web": "2.5.0"
   }
 }

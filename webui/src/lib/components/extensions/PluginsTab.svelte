@@ -7,6 +7,7 @@ import { confirmDialog } from '../../stores/confirm.svelte';
 import { i18n, t } from '../../stores/i18n.svelte';
 import { toasts } from '../../stores/toast.svelte';
 import type { PluginHost, PluginMeta } from '../../types';
+import Button from '../ui/Button.svelte';
 import EmptyState from '../ui/EmptyState.svelte';
 import Switch from '../ui/Switch.svelte';
 import InstallPluginModal from './InstallPluginModal.svelte';
@@ -154,14 +155,14 @@ async function restart(row: Row) {
 <div class="flex flex-wrap items-center justify-between gap-3 px-1">
   <p class="m-0 max-w-[68ch] hint">{t('extensions.plugins_hint')}</p>
   <div class="flex flex-wrap gap-2.5">
-    <button type="button" class="btn" disabled={loading} onclick={() => void load()}>
+    <Button type="button" disabled={loading} onclick={() => void load()}>
       <RefreshCw size={16} strokeWidth={2} class={loading ? 'animate-spin' : ''} />
       {t('platforms.refresh')}
-    </button>
-    <button type="button" class="btn btn-primary" onclick={() => (installOpen = true)}>
+    </Button>
+    <Button type="button" variant="filled" onclick={() => (installOpen = true)}>
       <Plus size={16} strokeWidth={2.2} />
       {t('extensions.install_plugin')}
-    </button>
+    </Button>
   </div>
 </div>
 
@@ -173,10 +174,10 @@ async function restart(row: Row) {
   <div class="card">
     <EmptyState icon={Puzzle} title={t('extensions.plugins_empty')} text={t('extensions.plugins_empty_text')}>
       {#snippet action()}
-        <button type="button" class="btn btn-primary" onclick={() => (installOpen = true)}>
+        <Button type="button" variant="filled" onclick={() => (installOpen = true)}>
           <Plus size={16} strokeWidth={2.2} />
           {t('extensions.install_plugin')}
-        </button>
+        </Button>
       {/snippet}
     </EmptyState>
   </div>
@@ -205,7 +206,7 @@ async function restart(row: Row) {
                 <span class="flex flex-wrap items-center gap-1.5">
                   <span class="text-fg2">{t('extensions.commands')}</span>
                   {#each plugin.commands as command (command.name)}
-                    <code class="rounded-md bg-sunk px-1.5 py-0.5 text-[12.5px]" title={command.description}>/{command.name}</code>
+                    <code class="rounded-lg bg-sunk px-1.5 py-0.5 text-[12.5px]" title={command.description}>/{command.name}</code>
                   {/each}
                 </span>
               {/if}
@@ -213,7 +214,7 @@ async function restart(row: Row) {
                 <span class="flex flex-wrap items-center gap-1.5">
                   <span class="text-fg2">{t('extensions.tools')}</span>
                   {#each plugin.tools as tool (tool.name)}
-                    <code class="rounded-md bg-sunk px-1.5 py-0.5 text-[12.5px]" title={tool.description}>{tool.name}</code>
+                    <code class="rounded-lg bg-sunk px-1.5 py-0.5 text-[12.5px]" title={tool.description}>{tool.name}</code>
                   {/each}
                 </span>
               {/if}
@@ -243,18 +244,18 @@ async function restart(row: Row) {
 
         <div class="ml-auto flex items-center gap-2.5">
           {#if row.host}
-            <button
+            <Button
               type="button"
-              class="btn btn-sm btn-quiet"
+              variant="text" size="sm"
               disabled={busy[plugin.id]}
               onclick={() => void restart(row)}
             >
               {t('extensions.restart')}
-            </button>
+            </Button>
           {/if}
-          <button type="button" class="btn btn-sm" onclick={() => (configFor = plugin.id)}>
+          <Button type="button" size="sm" onclick={() => (configFor = plugin.id)}>
             {t('platforms.settings')}
-          </button>
+          </Button>
           <Switch
             checked={plugin.enabled}
             disabled={busy[plugin.id]}

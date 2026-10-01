@@ -6,6 +6,7 @@ import { t } from '../../stores/i18n.svelte';
 import { instancesStore } from '../../stores/instances.svelte';
 import { router } from '../../stores/router.svelte';
 import InstanceEditor from '../instances/InstanceEditor.svelte';
+import Button from '../ui/Button.svelte';
 import EmptyState from '../ui/EmptyState.svelte';
 import PageHead from '../ui/PageHead.svelte';
 
@@ -97,10 +98,10 @@ function onDeleted() {
     {/if}
   {/snippet}
   {#snippet actions()}
-    <button type="button" class="btn btn-primary" onclick={() => router.navigate('instances', 'new')}>
+    <Button type="button" variant="filled" onclick={() => router.navigate('instances', 'new')}>
       <Plus size={16} strokeWidth={2.2} />
       {t('instances.new')}
-    </button>
+    </Button>
   {/snippet}
 </PageHead>
 
@@ -114,10 +115,10 @@ function onDeleted() {
   <div class="card">
     <EmptyState icon={Boxes} title={t('home.empty_title')} text={t('home.empty_text')}>
       {#snippet action()}
-        <button type="button" class="btn btn-primary" onclick={() => router.navigate('instances', 'new')}>
+        <Button type="button" variant="filled" onclick={() => router.navigate('instances', 'new')}>
           <Plus size={16} strokeWidth={2.2} />
           {t('instances.new')}
-        </button>
+        </Button>
       {/snippet}
     </EmptyState>
   </div>

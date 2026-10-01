@@ -10,6 +10,7 @@ import {
   ownersByPlatform,
   type TimelineMessage,
 } from '../../timeline';
+import Button from '../ui/Button.svelte';
 import Seg from '../ui/Seg.svelte';
 
 /** Visible time span of the timeline. */
@@ -223,10 +224,10 @@ function ago(ms: number): string {
   {#if pipelineStore.status !== 'connected' && visible.length === 0}
     <div class="flex flex-wrap items-center justify-between gap-3 py-8">
       <p class="m-0 hint">{t('home.timeline_offline')}</p>
-      <button type="button" class="btn btn-sm" onclick={() => pipelineStore.reconnect()}>
+      <Button type="button" size="sm" onclick={() => pipelineStore.reconnect()}>
         <RefreshCw size={15} strokeWidth={2} />
         {t('home.reconnect')}
-      </button>
+      </Button>
     </div>
   {:else if lanes.length === 0}
     <p class="m-0 py-8 hint">{t('home.timeline_no_instances')}</p>

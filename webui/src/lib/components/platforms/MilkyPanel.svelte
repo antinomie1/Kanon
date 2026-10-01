@@ -3,8 +3,10 @@ import { CircleCheck, TriangleAlert } from 'lucide-svelte';
 import { t } from '../../stores/i18n.svelte';
 import { milkyStore as store } from '../../stores/milky.svelte';
 import type { MilkyTransport } from '../../types';
+import Checkbox from '../ui/Checkbox.svelte';
 import SecretInput from '../ui/SecretInput.svelte';
 import Seg from '../ui/Seg.svelte';
+import TextField from '../ui/TextField.svelte';
 
 /**
  * Connection settings of the built-in Milky adapter, shown in the platform drawer.
@@ -25,9 +27,9 @@ function formatTime(millis: number | null): string {
   <div class="flex flex-col gap-4">
     <div>
       <label class="label" for="milky-url">{t('adapters.milky_base_url')}</label>
-      <input
+      <TextField
         id="milky-url"
-        class="input mono"
+        mono
         spellcheck="false"
         placeholder="http://127.0.0.1:3010"
         bind:value={store.formBaseUrl}
@@ -56,7 +58,7 @@ function formatTime(millis: number | null): string {
       />
       {#if store.tokenConfigured}
         <label class="mt-2.5 flex items-center gap-2.5 text-[14px] text-fg2">
-          <input type="checkbox" class="check" bind:checked={store.formClearToken} />
+          <Checkbox bind:checked={store.formClearToken} label={t('adapters.milky_clear_token')} />
           {t('adapters.milky_clear_token')}
         </label>
       {/if}

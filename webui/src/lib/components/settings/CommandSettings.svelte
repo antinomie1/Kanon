@@ -7,6 +7,7 @@ import {
 } from '../../stores/commandPolicy.svelte';
 import { t } from '../../stores/i18n.svelte';
 import { toasts } from '../../stores/toast.svelte';
+import Button from '../ui/Button.svelte';
 import CommandPolicyEditor from '../ui/CommandPolicyEditor.svelte';
 import Section from '../ui/Section.svelte';
 
@@ -51,16 +52,16 @@ async function save() {
 
 {#if draft}
   <div class="flex justify-end gap-2.5 py-5">
-    <button
+    <Button
       type="button"
-      class="btn"
+     
       disabled={!dirty || commandPolicyStore.saving}
       onclick={() => commandPolicyStore.policy && (draft = draftOfCommandPolicy(commandPolicyStore.policy))}
     >
       {t('instances.discard')}
-    </button>
-    <button type="button" class="btn btn-primary" disabled={!dirty || commandPolicyStore.saving} onclick={save}>
+    </Button>
+    <Button type="button" variant="filled" disabled={!dirty || commandPolicyStore.saving} onclick={save}>
       {commandPolicyStore.saving ? t('instances.saving') : t('instances.save_changes')}
-    </button>
+    </Button>
   </div>
 {/if}

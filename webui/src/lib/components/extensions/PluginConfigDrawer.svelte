@@ -5,6 +5,7 @@ import { errorText } from '../../format';
 import { t } from '../../stores/i18n.svelte';
 import { toasts } from '../../stores/toast.svelte';
 import type { PluginConfigResponse } from '../../types';
+import Button from '../ui/Button.svelte';
 import Modal from '../ui/Modal.svelte';
 
 /**
@@ -112,9 +113,9 @@ async function save() {
   {/if}
 
   {#snippet footer()}
-    <button type="button" class="btn" disabled={saving} onclick={onclose}>{t('common.cancel')}</button>
-    <button type="button" class="btn btn-primary" disabled={!current || saving} onclick={() => void save()}>
+    <Button type="button" disabled={saving} onclick={onclose}>{t('common.cancel')}</Button>
+    <Button type="button" variant="filled" disabled={!current || saving} onclick={() => void save()}>
       {saving ? t('platforms.saving') : t('extensions.config_save')}
-    </button>
+    </Button>
   {/snippet}
 </Modal>

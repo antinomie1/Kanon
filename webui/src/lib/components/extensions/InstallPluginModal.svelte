@@ -3,8 +3,10 @@ import { api } from '../../api/client';
 import { errorText } from '../../format';
 import { t } from '../../stores/i18n.svelte';
 import { toasts } from '../../stores/toast.svelte';
+import Button from '../ui/Button.svelte';
 import Modal from '../ui/Modal.svelte';
 import Seg from '../ui/Seg.svelte';
+import TextField from '../ui/TextField.svelte';
 
 /**
  * Installs a plugin from a directory on the node or from an uploaded package.
@@ -87,9 +89,9 @@ async function install() {
     {#if source === 'path'}
       <div>
         <label class="label" for="plugin-path">{t('extensions.path_label')}</label>
-        <input
+        <TextField
           id="plugin-path"
-          class="input mono"
+          mono
           spellcheck="false"
           placeholder="./plugins/demo_weather"
           bind:value={path}
@@ -115,9 +117,9 @@ async function install() {
   </form>
 
   {#snippet footer()}
-    <button type="button" class="btn" disabled={installing} onclick={onclose}>{t('common.cancel')}</button>
-    <button type="submit" form="install-plugin" class="btn btn-primary" disabled={!ready || installing}>
+    <Button type="button" disabled={installing} onclick={onclose}>{t('common.cancel')}</Button>
+    <Button type="submit" form="install-plugin" variant="filled" disabled={!ready || installing}>
       {installing ? t('extensions.installing') : t('extensions.install')}
-    </button>
+    </Button>
   {/snippet}
 </Modal>

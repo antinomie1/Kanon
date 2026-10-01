@@ -9,8 +9,10 @@ import { pipelineStore } from '../../stores/pipeline.svelte';
 import { router } from '../../stores/router.svelte';
 import type { LogLevel, LogRecord, TraceRecord } from '../../types';
 import { describe, STAGE_GROUPS, type StageGroup } from '../activity/describe';
+import Button from '../ui/Button.svelte';
 import PageHead from '../ui/PageHead.svelte';
 import Seg from '../ui/Seg.svelte';
+import TextField from '../ui/TextField.svelte';
 
 /**
  * Live activity of the node: what happened to each message, and the server's own log.
@@ -165,10 +167,10 @@ function fullTime(ms: number): string {
   {/snippet}
   {#snippet actions()}
     {#if !live}
-      <button type="button" class="btn btn-sm" onclick={reconnect}>
+      <Button type="button" size="sm" onclick={reconnect}>
         <RefreshCw size={15} strokeWidth={2} />
         {t('activity.reconnect')}
-      </button>
+      </Button>
     {/if}
     <Seg
       label={t('nav.activity')}
@@ -202,28 +204,33 @@ function fullTime(ms: number): string {
       />
     {/if}
   </div>
-  <div class="relative min-w-[180px] flex-1 basis-[220px] sm:max-w-[320px]">
-    <Search size={16} strokeWidth={2} class="pointer-events-none absolute top-1/2 left-3.5 -translate-y-1/2 text-fg3" />
+  <div class="min-w-[180px] flex-1 basis-[220px] sm:max-w-[320px]">
     {#if tab === 'events'}
-      <input
-        class="input input-search h-8!"
+      <TextField
+        pill
+        small
         type="search"
         aria-label={t('common.search')}
         placeholder={t('activity.search_events')}
         bind:value={pipelineStore.searchQuery}
-      />
+      >
+        {#snippet leading()}<Search size={16} strokeWidth={2} class="text-fg3" />{/snippet}
+      </TextField>
     {:else}
-      <input
-        class="input input-search h-8!"
+      <TextField
+        pill
+        small
         type="search"
         aria-label={t('common.search')}
         placeholder={t('activity.search_logs')}
         bind:value={logStore.searchQuery}
-      />
+      >
+        {#snippet leading()}<Search size={16} strokeWidth={2} class="text-fg3" />{/snippet}
+      </TextField>
     {/if}
   </div>
   <div class="ml-auto flex items-center gap-2">
-    <button type="button" class="btn btn-sm" aria-pressed={paused} onclick={togglePause}>
+    <Button type="button" size="sm" aria-pressed={paused} onclick={togglePause}>
       {#if paused}
         <Play size={15} strokeWidth={2} />
         {waiting > 0 ? t('activity.resume_n', { n: waiting }) : t('activity.resume')}
@@ -231,11 +238,11 @@ function fullTime(ms: number): string {
         <Pause size={15} strokeWidth={2} />
         {t('activity.pause')}
       {/if}
-    </button>
-    <button type="button" class="btn btn-sm btn-quiet" onclick={clearList}>
+    </Button>
+    <Button type="button" variant="text" size="sm" onclick={clearList}>
       <Trash2 size={15} strokeWidth={2} />
       {t('activity.clear')}
-    </button>
+    </Button>
   </div>
 </div>
 
@@ -245,10 +252,10 @@ function fullTime(ms: number): string {
       <div class="flex flex-col items-center gap-3 px-6 py-14 text-center">
         {#if status !== 'connected'}
           <p class="m-0 max-w-[46ch] text-[15px] font-medium">{t('activity.offline')}</p>
-          <button type="button" class="btn btn-sm" onclick={reconnect}>
+          <Button type="button" size="sm" onclick={reconnect}>
             <RefreshCw size={15} strokeWidth={2} />
             {t('activity.reconnect')}
-          </button>
+          </Button>
         {:else if pipelineStore.records.length > 0}
           <p class="m-0 text-[15px] font-medium">{t('activity.no_match')}</p>
         {:else}
@@ -302,10 +309,10 @@ function fullTime(ms: number): string {
     <div class="flex flex-col items-center gap-3 px-6 py-14 text-center">
       {#if status !== 'connected'}
         <p class="m-0 max-w-[46ch] text-[15px] font-medium">{t('activity.offline')}</p>
-        <button type="button" class="btn btn-sm" onclick={reconnect}>
+        <Button type="button" size="sm" onclick={reconnect}>
           <RefreshCw size={15} strokeWidth={2} />
           {t('activity.reconnect')}
-        </button>
+        </Button>
       {:else if logStore.records.length > 0}
         <p class="m-0 text-[15px] font-medium">{t('activity.no_match')}</p>
       {:else}

@@ -2,8 +2,8 @@
 import {
   Activity,
   Boxes,
-  BrainCircuit,
   CornerDownLeft,
+  Cpu,
   Drama,
   House,
   Languages,
@@ -18,6 +18,7 @@ import {
   Settings,
   Sun,
 } from 'lucide-svelte';
+import { faded, popped } from '../../motion';
 import { i18n, t } from '../../stores/i18n.svelte';
 import { instancesStore } from '../../stores/instances.svelte';
 import { nodeStore } from '../../stores/node.svelte';
@@ -46,7 +47,7 @@ const pages: { id: Page; icon: IconComponent }[] = [
   { id: 'sessions', icon: MessagesSquare },
   { id: 'personas', icon: Drama },
   { id: 'platforms', icon: Plug },
-  { id: 'models', icon: BrainCircuit },
+  { id: 'models', icon: Cpu },
   { id: 'extensions', icon: Puzzle },
   { id: 'activity', icon: Activity },
   { id: 'settings', icon: Settings },
@@ -150,12 +151,16 @@ function onkeydown(e: KeyboardEvent) {
       aria-label={t('common.close')}
       tabindex="-1"
       onclick={() => (isOpen = false)}
+      in:faded
+      out:faded={{ duration: 100 }}
     ></button>
     <div
       class="relative flex w-full max-w-lg flex-col overflow-hidden rounded-[28px] bg-card shadow-[var(--k-pop)]"
       role="dialog"
       aria-modal="true"
       aria-label={t('shell.search')}
+      in:popped
+      out:popped={{ duration: 120 }}
     >
       <div class="flex items-center gap-3 border-b border-line px-5">
         <Search size={18} strokeWidth={2} class="shrink-0 text-fg3" />

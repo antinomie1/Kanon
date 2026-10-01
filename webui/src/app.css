@@ -3,6 +3,8 @@
    is what the emphasized type styles vary; the other axes would multiply the download. */
 @import "@fontsource-variable/google-sans-flex";
 @import "@fontsource-variable/google-sans-code";
+/* Bridging tokens for Google's Material 3 Expressive components; see the file's own comments. */
+@import "./lib/theme/md.css";
 
 @custom-variant dark (&:where(.dark, .dark *));
 
@@ -26,28 +28,11 @@
   --text-base: 1.0625rem;
   --text-base--line-height: calc(1.625 / 1.0625);
 
-  /* Material 3 Expressive motion. Shape and position changes ride a spring that overshoots a
-     little (damping ratio 0.6, stiffness 800, sampled into `linear()`; run it for 350ms, the
-     time the spring takes to settle), so a pressed button or a switch thumb visibly settles.
-     Colour and opacity use the non-bouncing effects curve. */
-  --ease-spring: linear(
-    0,
-    0.071 4.2%,
-    0.236 8.3%,
-    0.437 12.5%,
-    0.634 16.7%,
-    0.802 20.8%,
-    0.931 25%,
-    1.018 29.2%,
-    1.07 33.3%,
-    1.093 39.6%,
-    1.064 50%,
-    1.028 58.3%,
-    1.003 66.7%,
-    0.991 79.2%,
-    0.996 95.8%,
-    1
-  );
+  /* Material 3 Expressive motion. The springs themselves live in `src/lib/motion.ts` now: Google's
+     components animate with their own fixed curves, and everything the console still draws
+     (dialogs, drawers, toasts, the command palette) needs an easing *function*, not a CSS curve,
+     so the values would otherwise be stated twice. What remains here is the curve for plain CSS
+     transitions: Material's effects easing, which never bounces. */
   --ease-effects: cubic-bezier(0.2, 0, 0, 1);
 }
 
@@ -129,7 +114,7 @@
        line         outline-variant            dividers and decorative outlines
        outline      outline                    bounds of operable things (fields, outlined buttons)
        fg / fg2     on-surface / on-surface-variant
-       fg3          outline                    placeholders and the quietest metadata
+       fg3          outline, darkened until it passes AA — see the note below
        accent       primary, with on-accent = on-primary
        accent-tint  secondary-container, with accent-fg = on-secondary-container (selected
                     navigation, chosen options, tonal chips)
@@ -146,9 +131,80 @@
      (light) or tone 20 capped at 10 (dark), and text at tone 30 / 88 of the same palette, well
      above 4.5:1.
 
+     The other departure is `fg3`, the quietest text colour. Material's `outline` role is meant for
+     bounds and placeholders, and using it for text lands at 4.05–4.25:1 on the sheet — below AA.
+     The console keeps `line` and `outline` (and therefore `--md-sys-color-outline` for Google's
+     components) at the spec values and raises only this text token, by blending it toward `fg`
+     until it clears 4.5:1 on both the sheet and a card. That is why `fg3` no longer equals
+     `outline`; the generator tool does not check this token for the same reason.
+
      Light and dark use the same roles, so in light mode the sheet is the brightest layer and in
-     dark mode the darkest, and the frame and cards read as raised in both. */
+     dark mode the darkest, and the frame and cards read as raised in both.
+
+     The attribute-less `:root` set is the default accent, graphite; every other accent, violet
+     included, is selected by `data-accent` and must keep both a light and a dark rule so that the
+     two axes (mode, accent) stay independent. */
   :root {
+    --k-page: #f9f9f9;
+    --k-card: #eeeeee;
+    --k-rail: #eeeeee;
+    --k-sunk: #e2e2e2;
+    --k-line: #c6c6c6;
+    --k-outline: #777777;
+    --k-fg: #1b1b1b;
+    --k-fg2: #474747;
+    --k-fg3: #6b6b6b;
+    --k-accent: #000000;
+    --k-on-accent: #e2e2e2;
+    --k-accent-tint: #d4d4d4;
+    --k-accent-fg: #1b1b1b;
+    --k-tertiary-tint: #747474;
+    --k-tertiary-fg: #ffffff;
+    --k-danger: #ba1a1a;
+    --k-on-danger: #ffffff;
+    --k-bar: #303030;
+    --k-on-bar: #f1f1f1;
+    --k-bar-accent: #c6c6c6;
+    --k-danger-tint: #ffe9e6;
+    --k-danger-fg: #93000a;
+    --k-ok: #006c45;
+    --k-ok-tint: #dcf4e2;
+    --k-ok-fg: #005233;
+    --k-warn: #895100;
+    --k-warn-tint: #ffead9;
+    --k-warn-fg: #683c00;
+  }
+  :root.dark {
+    --k-page: #131313;
+    --k-card: #1f1f1f;
+    --k-rail: #1f1f1f;
+    --k-sunk: #353535;
+    --k-line: #474747;
+    --k-outline: #919191;
+    --k-fg: #e2e2e2;
+    --k-fg2: #c6c6c6;
+    --k-fg3: #919191;
+    --k-accent: #ffffff;
+    --k-on-accent: #1b1b1b;
+    --k-accent-tint: #474747;
+    --k-accent-fg: #e2e2e2;
+    --k-tertiary-tint: #919191;
+    --k-tertiary-fg: #000000;
+    --k-danger: #ffb4ab;
+    --k-on-danger: #690005;
+    --k-bar: #e2e2e2;
+    --k-on-bar: #303030;
+    --k-bar-accent: #5e5e5e;
+    --k-danger-tint: #3d2c2a;
+    --k-danger-fg: #ffd3cd;
+    --k-ok: #73daa4;
+    --k-ok-tint: #28332c;
+    --k-ok-fg: #8af1b9;
+    --k-warn: #ffb86c;
+    --k-warn-tint: #3b2e21;
+    --k-warn-fg: #ffd5ae;
+  }
+  :root[data-accent="violet"] {
     --k-page: #fcf8fe;
     --k-card: #f0ecf6;
     --k-rail: #f0ecf6;
@@ -157,7 +213,7 @@
     --k-outline: #7b7984;
     --k-fg: #32313b;
     --k-fg2: #5f5e68;
-    --k-fg3: #7b7984;
+    --k-fg3: #6c6a75;
     --k-accent: #5b5a8b;
     --k-on-accent: #fbf7ff;
     --k-accent-tint: #e3e0f9;
@@ -178,7 +234,7 @@
     --k-warn-tint: #ffeadf;
     --k-warn-fg: #743500;
   }
-  :root.dark {
+  :root.dark[data-accent="violet"] {
     --k-page: #0e0e12;
     --k-card: #191920;
     --k-rail: #191920;
@@ -187,7 +243,7 @@
     --k-outline: #76747f;
     --k-fg: #e7e4f0;
     --k-fg2: #acaab5;
-    --k-fg3: #76747f;
+    --k-fg3: #84818d;
     --k-accent: #c4c2ee;
     --k-on-accent: #3d3d61;
     --k-accent-tint: #3a394d;
@@ -217,7 +273,7 @@
     --k-outline: #787a84;
     --k-fg: #30323a;
     --k-fg2: #5d5f68;
-    --k-fg3: #787a84;
+    --k-fg3: #696b74;
     --k-accent: #4d5e8b;
     --k-on-accent: #f9f8ff;
     --k-accent-tint: #dce2f9;
@@ -247,7 +303,7 @@
     --k-outline: #73757f;
     --k-fg: #e4e5f0;
     --k-fg2: #a9aab5;
-    --k-fg3: #73757f;
+    --k-fg3: #81828d;
     --k-accent: #b9c6ee;
     --k-on-accent: #333f61;
     --k-accent-tint: #353b4d;
@@ -277,7 +333,7 @@
     --k-outline: #727d7a;
     --k-fg: #2a3532;
     --k-fg2: #56615f;
-    --k-fg3: #727d7a;
+    --k-fg3: #626d6a;
     --k-accent: #206a60;
     --k-on-accent: #e2fff8;
     --k-accent-tint: #cce8e2;
@@ -307,7 +363,7 @@
     --k-outline: #6d7875;
     --k-fg: #dde8e4;
     --k-fg2: #a2adaa;
-    --k-fg3: #6d7875;
+    --k-fg3: #7a8582;
     --k-accent: #9cd1c6;
     --k-on-accent: #114841;
     --k-accent-tint: #27403b;
@@ -328,66 +384,6 @@
     --k-warn-tint: #382f20;
     --k-warn-fg: #ffd795;
   }
-  :root[data-accent="coral"] {
-    --k-page: #fff8f6;
-    --k-card: #ffe9e4;
-    --k-rail: #ffe9e4;
-    --k-sunk: #f6ddd7;
-    --k-line: #c3ada7;
-    --k-outline: #8a7671;
-    --k-fg: #3e2f2b;
-    --k-fg2: #6d5b56;
-    --k-fg3: #8a7671;
-    --k-accent: #8c4f3d;
-    --k-on-accent: #fff7f5;
-    --k-accent-tint: #ffdbd1;
-    --k-accent-fg: #694a42;
-    --k-tertiary-tint: #fdd896;
-    --k-tertiary-fg: #634a16;
-    --k-danger: #a83836;
-    --k-on-danger: #fff7f6;
-    --k-bar: #130d0b;
-    --k-on-bar: #a79a97;
-    --k-bar-accent: #faab94;
-    --k-danger-tint: #ffe9e7;
-    --k-danger-fg: #871f21;
-    --k-ok: #246c2d;
-    --k-ok-tint: #e0f3da;
-    --k-ok-fg: #005317;
-    --k-warn: #96490a;
-    --k-warn-tint: #ffeadf;
-    --k-warn-fg: #743500;
-  }
-  :root.dark[data-accent="coral"] {
-    --k-page: #130d0b;
-    --k-card: #221714;
-    --k-rail: #221714;
-    --k-sunk: #30231f;
-    --k-line: #554440;
-    --k-outline: #84716c;
-    --k-fg: #f9e0da;
-    --k-fg2: #bca6a0;
-    --k-fg3: #84716c;
-    --k-accent: #f9b7a4;
-    --k-on-accent: #613427;
-    --k-accent-tint: #50352c;
-    --k-accent-fg: #dfb6ab;
-    --k-tertiary-tint: #fdd896;
-    --k-tertiary-fg: #634a16;
-    --k-danger: #fa746f;
-    --k-on-danger: #490006;
-    --k-bar: #fff8f6;
-    --k-on-bar: #5d5350;
-    --k-bar-accent: #855243;
-    --k-danger-tint: #3d2c2b;
-    --k-danger-fg: #ffd2cf;
-    --k-ok: #8dd88b;
-    --k-ok-tint: #2a3328;
-    --k-ok-fg: #a3efa0;
-    --k-warn: #ffb68a;
-    --k-warn-tint: #3d2d24;
-    --k-warn-fg: #ffd4bc;
-  }
   :root[data-accent="rose"] {
     --k-page: #fff8f8;
     --k-card: #fce9ec;
@@ -397,7 +393,7 @@
     --k-outline: #88767a;
     --k-fg: #3c2f32;
     --k-fg2: #6b5b5e;
-    --k-fg3: #88767a;
+    --k-fg3: #78676b;
     --k-accent: #884d5f;
     --k-on-accent: #fff7f7;
     --k-accent-tint: #ffd9e1;
@@ -427,7 +423,7 @@
     --k-outline: #837175;
     --k-fg: #f6e0e4;
     --k-fg2: #baa6aa;
-    --k-fg3: #837175;
+    --k-fg3: #917e82;
     --k-accent: #f3b6c6;
     --k-on-accent: #5e3340;
     --k-accent-tint: #4e343b;
@@ -447,66 +443,6 @@
     --k-warn: #ffb68a;
     --k-warn-tint: #3d2d24;
     --k-warn-fg: #ffd4bc;
-  }
-  :root[data-accent="graphite"] {
-    --k-page: #f9f9f9;
-    --k-card: #eeeeee;
-    --k-rail: #eeeeee;
-    --k-sunk: #e2e2e2;
-    --k-line: #c6c6c6;
-    --k-outline: #777777;
-    --k-fg: #1b1b1b;
-    --k-fg2: #474747;
-    --k-fg3: #777777;
-    --k-accent: #000000;
-    --k-on-accent: #e2e2e2;
-    --k-accent-tint: #d4d4d4;
-    --k-accent-fg: #1b1b1b;
-    --k-tertiary-tint: #747474;
-    --k-tertiary-fg: #ffffff;
-    --k-danger: #ba1a1a;
-    --k-on-danger: #ffffff;
-    --k-bar: #303030;
-    --k-on-bar: #f1f1f1;
-    --k-bar-accent: #c6c6c6;
-    --k-danger-tint: #ffe9e6;
-    --k-danger-fg: #93000a;
-    --k-ok: #006c45;
-    --k-ok-tint: #dcf4e2;
-    --k-ok-fg: #005233;
-    --k-warn: #895100;
-    --k-warn-tint: #ffead9;
-    --k-warn-fg: #683c00;
-  }
-  :root.dark[data-accent="graphite"] {
-    --k-page: #131313;
-    --k-card: #1f1f1f;
-    --k-rail: #1f1f1f;
-    --k-sunk: #353535;
-    --k-line: #474747;
-    --k-outline: #919191;
-    --k-fg: #e2e2e2;
-    --k-fg2: #c6c6c6;
-    --k-fg3: #919191;
-    --k-accent: #ffffff;
-    --k-on-accent: #1b1b1b;
-    --k-accent-tint: #474747;
-    --k-accent-fg: #e2e2e2;
-    --k-tertiary-tint: #919191;
-    --k-tertiary-fg: #000000;
-    --k-danger: #ffb4ab;
-    --k-on-danger: #690005;
-    --k-bar: #e2e2e2;
-    --k-on-bar: #303030;
-    --k-bar-accent: #5e5e5e;
-    --k-danger-tint: #3d2c2a;
-    --k-danger-fg: #ffd3cd;
-    --k-ok: #73daa4;
-    --k-ok-tint: #28332c;
-    --k-ok-fg: #8af1b9;
-    --k-warn: #ffb86c;
-    --k-warn-tint: #3b2e21;
-    --k-warn-fg: #ffd5ae;
   }
 
   html,
@@ -600,112 +536,111 @@
     }
   }
 
-  /* Buttons are always one line: labels never wrap, they are written short instead. The base
-     button is Material's outlined button; variants below swap the fill and label colour.
+  /* The console's additions to Google's Material 3 Expressive button. Everything else about a
+     button — shape, press animation, ripple, focus ring, state layers, sizes — comes from
+     `md-gb-button` itself.
 
-     Shape is part of the feedback (Material 3 Expressive): a button is a pill at rest and its
-     corners spring in to 8px while pressed. The pill radius is half of `--h` rather than a huge
-     value, because a transition from 999px would only become visible in its last frame. Size
-     variants and one-off sizes set `--h`, never `height`, so the pill stays round. */
-  .btn {
-    --h: 40px;
-    height: var(--h);
-    display: inline-flex;
-    align-items: center;
-    justify-content: center;
-    gap: 8px;
-    padding: 0 20px;
-    border-radius: calc(var(--h) / 2);
-    border: 0;
-    font: inherit;
-    font-size: 14px;
-    font-weight: 500;
-    letter-spacing: 0.01em;
-    white-space: nowrap;
-    flex-shrink: 0;
-    background: transparent;
-    color: var(--k-accent);
-    box-shadow: inset 0 0 0 1px var(--k-outline);
-    transition:
-      border-radius 350ms var(--ease-spring),
-      background-color 150ms var(--ease-effects),
-      box-shadow 150ms var(--ease-effects),
-      opacity 150ms;
+     Colour: the element's own rules only *read* the system colour roles, never redefine them, so
+     remapping them on the host is the supported way to recolour a button. A text button takes its
+     label and state layer from `primary`; a filled one adds `on-primary`; the outlined variant also
+     reads `on-surface-variant` for its label and `outline-variant` for its ring, which is why the
+     two coloured variants remap those as well. No shadow root is reached into. */
+  md-gb-button.kanon-danger {
+    --md-sys-color-primary: var(--k-danger);
+    --md-sys-color-on-primary: var(--k-on-danger);
+    --md-sys-color-on-surface-variant: var(--k-danger);
+    --md-sys-color-outline-variant: color-mix(
+      in oklab,
+      var(--k-danger) 45%,
+      transparent
+    );
   }
-  /* State layers: hover and press lay the label colour over the button at 8% and 12%, so every
-     variant (and every utility recolouring a label, such as `text-warn`) gets a matching hover
-     without its own rule. */
-  .btn:hover:not(:disabled) {
-    background: color-mix(in oklab, currentColor 8%, transparent);
+  md-gb-button.kanon-warn {
+    --md-sys-color-primary: var(--k-warn);
+    --md-sys-color-on-primary: var(--k-on-danger);
+    --md-sys-color-on-surface-variant: var(--k-warn);
+    --md-sys-color-outline-variant: color-mix(
+      in oklab,
+      var(--k-warn) 45%,
+      transparent
+    );
   }
-  .btn:active:not(:disabled) {
-    background: color-mix(in oklab, currentColor 12%, transparent);
-    border-radius: 8px;
+  /* Buttons sitting on the inverse surface (snackbars and the unsaved-changes bars): the accent
+     there is `inverse-primary`, and the plain flavour is `inverse-on-surface` text. */
+  md-gb-button.kanon-inverse {
+    --md-sys-color-primary: var(--k-bar-accent);
+    --md-sys-color-on-primary: var(--k-bar);
   }
-  .btn:disabled {
-    opacity: 0.5;
-  }
-  .btn-primary {
-    background: var(--k-accent);
-    color: var(--k-on-accent);
-    box-shadow: none;
-  }
-  /* A filled container takes the state layer inside its own colour, and lifts one level. */
-  .btn-primary:hover:not(:disabled) {
-    background: color-mix(in oklab, var(--k-accent), var(--k-on-accent) 8%);
-    box-shadow: var(--k-raise);
-  }
-  .btn-primary:active:not(:disabled) {
-    background: color-mix(in oklab, var(--k-accent), var(--k-on-accent) 12%);
-    box-shadow: none;
-  }
-  /* Text and icon buttons: no container until hovered. */
-  .btn-quiet {
-    box-shadow: none;
-    color: var(--k-fg2);
-  }
-  .btn-quiet:hover:not(:disabled) {
-    color: var(--k-fg);
-  }
-  .btn-danger {
-    color: var(--k-danger);
-  }
-  .btn-danger-solid {
-    background: var(--k-danger);
-    color: var(--k-on-danger);
-    box-shadow: none;
-  }
-  .btn-danger-solid:hover:not(:disabled) {
-    background: color-mix(in oklab, var(--k-danger), var(--k-on-danger) 8%);
-    box-shadow: var(--k-raise);
-  }
-  .btn-danger-solid:active:not(:disabled) {
-    background: color-mix(in oklab, var(--k-danger), var(--k-on-danger) 12%);
-    box-shadow: none;
-  }
-  .btn-sm {
-    --h: 32px;
-    padding: 0 14px;
-    font-size: 14px;
-  }
-  .btn-xs {
-    --h: 28px;
-    padding: 0 11px;
-    font-size: 13px;
-    gap: 6px;
-  }
-  .btn-icon {
-    width: var(--h);
-    padding: 0;
+  md-gb-button.kanon-inverse-plain {
+    --md-sys-color-primary: var(--k-on-bar);
+    --md-sys-color-on-primary: var(--k-bar);
+    --md-sys-color-on-surface-variant: var(--k-on-bar);
   }
 
-  /* Material's filled text field: a tonal well with square bottom corners and an active indicator
-     along its bottom edge, which thickens to 2px in the accent on focus. The indicator is an
-     inset shadow rather than a border, so it never shifts the layout. */
+  /* Geometry the console needs beyond Google's sizes. The element exposes the inner button as
+     `part="btn"` and sets the geometry tokens there, so that part is the documented hook. */
+  md-gb-button.kanon-btn-xs::part(btn) {
+    --container-height: 28px;
+    --leading-space: 11px;
+    --trailing-space: 11px;
+  }
+  md-gb-button.kanon-btn-46::part(btn) {
+    --container-height: 46px;
+  }
+  md-gb-button.kanon-btn-flush::part(btn) {
+    --leading-space: 0;
+    --trailing-space: 0;
+  }
+  /* The segmented control's compact size: 32px instead of Google's 40px. */
+  md-outlined-segmented-button-set.kanon-seg-sm {
+    --md-outlined-segmented-button-container-height: 32px;
+  }
+
+  /* Google's `square` only rounds the corners to 12px; the console's icon buttons are circles whose
+     width equals their height, so the width and the full radius are set on the part instead.
+     Listed last so its zero padding wins over the size rules above. */
+  md-gb-button.kanon-icon::part(btn) {
+    --leading-space: 0;
+    --trailing-space: 0;
+    --container-shape: calc(var(--container-height) / 2);
+    width: var(--container-height);
+  }
+
+  /* Google's filled text field at the console's density: Material's field is 56px (8px + a 16px
+     label line + 24px input + 8px); the console has no floating labels — it puts a `.label` above
+     the field — so the same 24px input line with 12px of space above and below gives 48px, and the
+     filter fields use 4px for 32px. Both go through the field's own space tokens. */
+  md-filled-text-field.kanon-field {
+    --md-filled-text-field-top-space: 12px;
+    --md-filled-text-field-bottom-space: 12px;
+  }
+  md-filled-text-field.kanon-field-sm {
+    --md-filled-text-field-top-space: 4px;
+    --md-filled-text-field-bottom-space: 4px;
+  }
+  md-filled-text-field.kanon-field-mono {
+    --md-filled-text-field-input-text-font: var(--font-mono);
+    --md-filled-text-field-input-text-size: 13.5px;
+  }
+  /* The console's search boxes are pills. The field takes one token per corner, so all four are set
+     rather than a single radius. */
+  md-filled-text-field.kanon-field-pill {
+    --md-filled-text-field-container-shape-start-start: 9999px;
+    --md-filled-text-field-container-shape-start-end: 9999px;
+    --md-filled-text-field-container-shape-end-start: 9999px;
+    --md-filled-text-field-container-shape-end-end: 9999px;
+  }
+
+  /* The console's own field styling, kept for what Google's field cannot do: the resizable
+     multi-line editors, the native `<select>` (see Select.svelte for why it is not `md-filled-select`)
+     and the one field that needs a native datalist. Material's filled text field is a tonal well
+     with square bottom corners and an active indicator along its bottom edge, which thickens to 2px
+     in the accent on focus; the indicator is an inset shadow rather than a border, so it never
+     shifts the layout. Height matches the 48px the migrated fields are set to. */
   .input {
     width: 100%;
     min-width: 0;
-    height: 40px;
+    height: 48px;
     padding: 0 14px;
     border: 0;
     border-radius: 4px 4px 0 0;
@@ -723,7 +658,8 @@
     color: var(--k-fg3);
   }
   .input:hover:not(:disabled):not(:focus) {
-    background: color-mix(in oklab, var(--k-sunk), var(--k-fg) 4%);
+    /* Material's hover state layer is 8% of the content colour over the container. */
+    background: color-mix(in oklab, var(--k-sunk), var(--k-fg) 8%);
     box-shadow: inset 0 -1px 0 var(--k-fg);
   }
   .input:focus {
@@ -741,20 +677,6 @@
   .input.mono {
     font-family: var(--font-mono);
     font-size: 13.5px;
-  }
-  /* Filter fields above a list are Material search bars rather than form fields: fully round and
-     without the bottom indicator, so they read as "narrow what is below" and match the sidebar's
-     search. Focus draws a full ring instead, since there is no indicator line to thicken. */
-  .input-search {
-    border-radius: 9999px;
-    padding-left: 40px;
-    box-shadow: none;
-  }
-  .input-search:hover:not(:disabled):not(:focus) {
-    box-shadow: none;
-  }
-  .input-search:focus {
-    box-shadow: inset 0 0 0 2px var(--k-accent);
   }
 
   .label {
@@ -789,7 +711,8 @@
   .chip-sm {
     height: 24px;
     padding: 0 8px;
-    border-radius: 6px;
+    /* One step below the base chip's 8px, so the smaller chip stays on the shape scale. */
+    border-radius: 4px;
     font-size: 12.5px;
   }
   .chip-ok {
@@ -867,12 +790,7 @@
     color: var(--k-fg2);
   }
 
-  .check {
-    width: 18px;
-    height: 18px;
-    accent-color: var(--k-accent);
-    flex-shrink: 0;
-  }
+  /* Sliders are still native; the checkbox that used to be styled here is Google's element now. */
   input[type="range"] {
     accent-color: var(--k-accent);
   }

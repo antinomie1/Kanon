@@ -5,8 +5,10 @@ import { api } from '../../api/client';
 import { errorText } from '../../format';
 import { t } from '../../stores/i18n.svelte';
 import type { ToolCatalog, ToolItem, ToolSource } from '../../types';
+import Button from '../ui/Button.svelte';
 import EmptyState from '../ui/EmptyState.svelte';
 import Seg from '../ui/Seg.svelte';
+import TextField from '../ui/TextField.svelte';
 
 /**
  * Every tool the model can call right now, and who provides it.
@@ -60,10 +62,10 @@ const SOURCE_KEY: Record<ToolSource, string> = {
 
 <div class="flex flex-wrap items-center justify-between gap-3 px-1">
   <p class="m-0 max-w-[68ch] hint">{t('extensions.tools_hint')}</p>
-  <button type="button" class="btn" disabled={loading} onclick={() => void load()}>
+  <Button type="button" disabled={loading} onclick={() => void load()}>
     <RefreshCw size={16} strokeWidth={2} class={loading ? 'animate-spin' : ''} />
     {t('platforms.refresh')}
-  </button>
+  </Button>
 </div>
 
 {#if error}
@@ -89,16 +91,18 @@ const SOURCE_KEY: Record<ToolSource, string> = {
           { value: 'mcp', label: `${t('extensions.source_mcp')} ${catalog.mcp}` },
         ]}
       />
-      <label class="relative ml-auto w-full sm:w-[280px]">
-        <Search size={16} strokeWidth={2} class="pointer-events-none absolute top-1/2 left-3.5 -translate-y-1/2 text-fg3" />
-        <input
-          class="input input-search h-8!"
+      <div class="ml-auto w-full sm:w-[280px]">
+        <TextField
+          pill
+          small
           type="search"
           aria-label={t('extensions.tools_search')}
           placeholder={t('extensions.tools_search')}
           bind:value={search}
-        />
-      </label>
+        >
+          {#snippet leading()}<Search size={16} strokeWidth={2} class="text-fg3" />{/snippet}
+        </TextField>
+      </div>
     </div>
 
     {#if shown.length === 0}
@@ -123,15 +127,15 @@ const SOURCE_KEY: Record<ToolSource, string> = {
                   <p class="m-0 mt-1 max-w-[80ch] text-[13.5px] text-fg2">{tool.description}</p>
                 {/if}
               </div>
-              <button
+              <Button
                 type="button"
-                class="btn btn-quiet btn-xs"
+                variant="text" size="xs"
                 aria-expanded={open}
                 onclick={() => (expanded = { ...expanded, [tool.name]: !open })}
               >
                 {t('extensions.parameters')}
                 <ChevronDown size={14} strokeWidth={2.2} class="transition-transform {open ? 'rotate-180' : ''}" />
-              </button>
+              </Button>
             </div>
             {#if open}
               <pre class="scroll-thin m-0 mt-3 overflow-x-auto rounded-xl bg-sunk p-3.5 text-[12.5px]">{JSON.stringify(tool.parameters, null, 2)}</pre>

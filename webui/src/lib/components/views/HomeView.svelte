@@ -8,6 +8,7 @@ import { describeReplyPolicy } from '../../stores/replyPolicy.svelte';
 import { router } from '../../stores/router.svelte';
 import type { TimelineMessage } from '../../timeline';
 import MessageTimeline from '../home/MessageTimeline.svelte';
+import Button from '../ui/Button.svelte';
 import EmptyState from '../ui/EmptyState.svelte';
 import PageHead from '../ui/PageHead.svelte';
 import Switch from '../ui/Switch.svelte';
@@ -80,10 +81,10 @@ const modelMissing = $derived(nodeStore.health?.llm_configured === false);
     {/if}
   {/snippet}
   {#snippet actions()}
-    <button type="button" class="btn btn-primary" onclick={() => router.navigate('instances', 'new')}>
+    <Button type="button" variant="filled" onclick={() => router.navigate('instances', 'new')}>
       <Plus size={16} strokeWidth={2.2} />
       {t('instances.new')}
-    </button>
+    </Button>
   {/snippet}
 </PageHead>
 
@@ -96,9 +97,9 @@ const modelMissing = $derived(nodeStore.health?.llm_configured === false);
       <b class="mr-2 text-[15px] font-semibold text-fg">{t('home.alert_model_title')}</b>
       {t('home.alert_model_text')}
     </p>
-    <button type="button" class="btn btn-sm shadow-none! text-warn" onclick={() => router.navigate('models')}>
+    <Button type="button" variant="warn" size="sm" onclick={() => router.navigate('models')}>
       {t('home.alert_model_action')}
-    </button>
+    </Button>
   </div>
 {/if}
 
@@ -123,21 +124,23 @@ const modelMissing = $derived(nodeStore.health?.llm_configured === false);
         : t('home.alert_offline_text', { name: problem.instanceName })}
     </p>
     {#if problem.reason === 'unknown'}
-      <button
+      <Button
         type="button"
-        class="btn btn-sm shadow-none! text-warn"
+        variant="warn"
+        size="sm"
         onclick={() => router.navigate('instances', problem.instanceId)}
       >
         {t('home.alert_edit_instance')}
-      </button>
+      </Button>
     {:else}
-      <button
+      <Button
         type="button"
-        class="btn btn-sm shadow-none! text-warn"
+        variant="warn"
+        size="sm"
         onclick={() => router.navigate('platforms', problem.platform)}
       >
         {t('home.alert_check')}
-      </button>
+      </Button>
     {/if}
   </div>
 {/each}
@@ -146,10 +149,10 @@ const modelMissing = $derived(nodeStore.health?.llm_configured === false);
   <div class="card">
     <EmptyState icon={Boxes} title={t('home.empty_title')} text={t('home.empty_text')}>
       {#snippet action()}
-        <button type="button" class="btn btn-primary" onclick={() => router.navigate('instances', 'new')}>
+        <Button type="button" variant="filled" onclick={() => router.navigate('instances', 'new')}>
           <Plus size={16} strokeWidth={2.2} />
           {t('instances.new')}
-        </button>
+        </Button>
       {/snippet}
     </EmptyState>
   </div>

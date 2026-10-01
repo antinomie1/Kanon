@@ -25,7 +25,8 @@
           mode === 'dark' ||
           (mode !== 'light' && matchMedia('(prefers-color-scheme: dark)').matches);
         root.classList.toggle('dark', dark);
-        if (accent && accent !== 'violet') {
+        // Graphite is the base token set and the default accent, so it needs no attribute.
+        if (accent && accent !== 'graphite') {
           root.setAttribute('data-accent', accent);
         }
       })();

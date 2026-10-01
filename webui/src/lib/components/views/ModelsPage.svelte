@@ -10,6 +10,7 @@ import AddProviderModal from '../models/AddProviderModal.svelte';
 import DefaultModelCard from '../models/DefaultModelCard.svelte';
 import ProviderEditor from '../models/ProviderEditor.svelte';
 import ProviderModels from '../models/ProviderModels.svelte';
+import Button from '../ui/Button.svelte';
 import EmptyState from '../ui/EmptyState.svelte';
 import PageHead from '../ui/PageHead.svelte';
 
@@ -101,10 +102,10 @@ function onDeleted() {
     {/if}
   {/snippet}
   {#snippet actions()}
-    <button type="button" class="btn btn-primary" onclick={() => (addOpen = true)}>
+    <Button type="button" variant="filled" onclick={() => (addOpen = true)}>
       <Plus size={16} strokeWidth={2.2} />
       {t('llm.add_provider')}
-    </button>
+    </Button>
   {/snippet}
 </PageHead>
 
@@ -118,10 +119,10 @@ function onDeleted() {
   <div class="card">
     <EmptyState icon={Server} title={t('llm.empty_title')} text={t('llm.empty_text')}>
       {#snippet action()}
-        <button type="button" class="btn btn-primary" onclick={() => (addOpen = true)}>
+        <Button type="button" variant="filled" onclick={() => (addOpen = true)}>
           <Plus size={16} strokeWidth={2.2} />
           {t('llm.add_provider')}
-        </button>
+        </Button>
       {/snippet}
     </EmptyState>
   </div>

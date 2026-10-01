@@ -15,6 +15,7 @@ import type { AdapterItem } from '../../types';
 import MilkyPanel from '../platforms/MilkyPanel.svelte';
 import OneBotPanel from '../platforms/OneBotPanel.svelte';
 import QqOfficialPanel from '../platforms/QqOfficialPanel.svelte';
+import Button from '../ui/Button.svelte';
 import EmptyState from '../ui/EmptyState.svelte';
 import Modal from '../ui/Modal.svelte';
 import PageHead from '../ui/PageHead.svelte';
@@ -211,10 +212,10 @@ async function save() {
     {/if}
   {/snippet}
   {#snippet actions()}
-    <button type="button" class="btn" disabled={loading} onclick={() => void load()}>
+    <Button type="button" disabled={loading} onclick={() => void load()}>
       <RefreshCw size={16} strokeWidth={2} class={loading ? 'animate-spin' : ''} />
       {t('platforms.refresh')}
-    </button>
+    </Button>
   {/snippet}
 </PageHead>
 
@@ -287,9 +288,9 @@ async function save() {
 
         {#if builtin && store}
           <div class="ml-auto flex items-center gap-3">
-            <button type="button" class="btn btn-sm" onclick={() => openSettings(adapter.platform)}>
+            <Button type="button" size="sm" onclick={() => openSettings(adapter.platform)}>
               {t('platforms.settings')}
-            </button>
+            </Button>
             <Switch
               checked={store.status?.enabled ?? false}
               disabled={store.loading || store.applyingEnabled || store.unavailable}
@@ -357,25 +358,25 @@ async function save() {
   {#snippet footer()}
     {#if openStore && !openStore.unavailable}
       {#if openBuiltin === 'milky'}
-        <button
+        <Button
           type="button"
-          class="btn"
+         
           disabled={milkyStore.testing || milkyStore.saving}
           onclick={() => void milkyStore.test()}
         >
           {milkyStore.testing ? t('adapters.milky_testing') : t('adapters.milky_test')}
-        </button>
+        </Button>
       {/if}
-      <button
+      <Button
         type="button"
-        class="btn btn-primary"
+        variant="filled"
         disabled={openStore.saving || openStore.loading}
         onclick={() => void save()}
       >
         {openStore.saving ? t('platforms.saving') : t('platforms.save')}
-      </button>
+      </Button>
     {:else}
-      <button type="button" class="btn" onclick={closeSettings}>{t('common.close')}</button>
+      <Button type="button" onclick={closeSettings}>{t('common.close')}</Button>
     {/if}
   {/snippet}
 </Modal>

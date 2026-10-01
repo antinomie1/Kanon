@@ -7,10 +7,12 @@ import { confirmDialog } from '../../stores/confirm.svelte';
 import { t } from '../../stores/i18n.svelte';
 import { toasts } from '../../stores/toast.svelte';
 import type { SkillItem } from '../../types';
+import Button from '../ui/Button.svelte';
 import EmptyState from '../ui/EmptyState.svelte';
 import Modal from '../ui/Modal.svelte';
 import Seg from '../ui/Seg.svelte';
 import Switch from '../ui/Switch.svelte';
+import TextField from '../ui/TextField.svelte';
 
 /**
  * Skills: instruction bundles the model reads when it decides one is relevant.
@@ -128,14 +130,14 @@ async function remove(skill: SkillItem) {
 <div class="flex flex-wrap items-center justify-between gap-3 px-1">
   <p class="m-0 max-w-[68ch] hint">{t('extensions.skills_hint')}</p>
   <div class="flex flex-wrap gap-2.5">
-    <button type="button" class="btn" disabled={loading} onclick={() => void load()}>
+    <Button type="button" disabled={loading} onclick={() => void load()}>
       <RefreshCw size={16} strokeWidth={2} class={loading ? 'animate-spin' : ''} />
       {t('platforms.refresh')}
-    </button>
-    <button type="button" class="btn btn-primary" onclick={openInstall}>
+    </Button>
+    <Button type="button" variant="filled" onclick={openInstall}>
       <Upload size={16} strokeWidth={2} />
       {t('extensions.skill_install')}
-    </button>
+    </Button>
   </div>
 </div>
 
@@ -147,10 +149,10 @@ async function remove(skill: SkillItem) {
   <div class="card">
     <EmptyState icon={BookOpen} title={t('extensions.skills_empty')} text={t('extensions.skills_empty_text')}>
       {#snippet action()}
-        <button type="button" class="btn btn-primary" onclick={openInstall}>
+        <Button type="button" variant="filled" onclick={openInstall}>
           <Upload size={16} strokeWidth={2} />
           {t('extensions.skill_install')}
-        </button>
+        </Button>
       {/snippet}
     </EmptyState>
   </div>
@@ -166,16 +168,16 @@ async function remove(skill: SkillItem) {
           <p class="m-0 mt-0.5 max-w-[80ch] text-[13.5px] text-fg2">{skill.description}</p>
         </div>
         <div class="ml-auto flex items-center gap-2.5">
-          <button
+          <Button
             type="button"
-            class="btn btn-sm btn-quiet btn-icon"
+            variant="text" size="sm" square
             aria-label={t('extensions.skill_remove_title', { name: skill.name })}
             title={t('extensions.remove')}
             disabled={busy[skill.id]}
             onclick={() => void remove(skill)}
           >
             <Trash2 size={16} strokeWidth={2} />
-          </button>
+          </Button>
           <Switch
             checked={skill.enabled}
             disabled={busy[skill.id]}
@@ -228,13 +230,13 @@ async function remove(skill: SkillItem) {
     {:else}
       <div>
         <label class="label" for="skill-path">{t('extensions.path_label')}</label>
-        <input id="skill-path" class="input mono" spellcheck="false" placeholder="./my-skill" bind:value={path} />
+        <TextField id="skill-path" mono spellcheck="false" placeholder="./my-skill" bind:value={path} />
         <p class="m-0 mt-2 hint">{t('extensions.skill_path_hint')}</p>
       </div>
     {/if}
     <div>
       <label class="label" for="skill-id">{t('extensions.skill_id')}</label>
-      <input id="skill-id" class="input mono" spellcheck="false" placeholder="my-skill" bind:value={customId} />
+      <TextField id="skill-id" mono spellcheck="false" placeholder="my-skill" bind:value={customId} />
       <p class="m-0 mt-2 hint">{t('extensions.skill_id_hint')}</p>
     </div>
     {#if installError}
@@ -243,11 +245,11 @@ async function remove(skill: SkillItem) {
   </form>
 
   {#snippet footer()}
-    <button type="button" class="btn" disabled={installing} onclick={() => (installOpen = false)}>
+    <Button type="button" disabled={installing} onclick={() => (installOpen = false)}>
       {t('common.cancel')}
-    </button>
-    <button type="submit" form="install-skill" class="btn btn-primary" disabled={!ready || installing}>
+    </Button>
+    <Button type="submit" form="install-skill" variant="filled" disabled={!ready || installing}>
       {installing ? t('extensions.installing') : t('extensions.install')}
-    </button>
+    </Button>
   {/snippet}
 </Modal>

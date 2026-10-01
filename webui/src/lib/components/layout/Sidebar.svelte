@@ -2,27 +2,22 @@
 import {
   Activity,
   Boxes,
-  BrainCircuit,
+  Cpu,
   Drama,
   House,
   MessageCircle,
   MessagesSquare,
-  Monitor,
-  Moon,
   Plug,
   Puzzle,
   Search,
   Settings,
-  Sun,
 } from 'lucide-svelte';
 import { formatDuration } from '../../format';
-import { i18n, type Locale, t } from '../../stores/i18n.svelte';
+import { t } from '../../stores/i18n.svelte';
 import { instancesStore } from '../../stores/instances.svelte';
 import { nodeStore } from '../../stores/node.svelte';
 import { type Page, router } from '../../stores/router.svelte';
-import { type ThemeMode, theme } from '../../stores/theme.svelte';
 import type { IconComponent } from '../../types';
-import Seg from '../ui/Seg.svelte';
 
 let { onOpenCommand, onNavigate } = $props<{
   onOpenCommand: () => void;
@@ -44,7 +39,7 @@ const groups: { id: Page; icon: IconComponent }[][] = [
   ],
   [
     { id: 'platforms', icon: Plug },
-    { id: 'models', icon: BrainCircuit },
+    { id: 'models', icon: Cpu },
     { id: 'extensions', icon: Puzzle },
   ],
   [
@@ -121,28 +116,4 @@ function go(page: Page) {
       </div>
     {/each}
   </nav>
-
-  <div class="flex items-center justify-between gap-2">
-    <Seg
-      size="sm"
-      label={t('common.language')}
-      value={i18n.locale}
-      onchange={(next: Locale) => i18n.setLocale(next)}
-      options={[
-        { value: 'zh', label: '中文' },
-        { value: 'en', label: 'EN' },
-      ]}
-    />
-    <Seg
-      size="sm"
-      label={t('settings.theme')}
-      value={theme.currentMode}
-      onchange={(next: ThemeMode) => theme.setMode(next)}
-      options={[
-        { value: 'system', icon: Monitor, title: t('settings.theme_system') },
-        { value: 'light', icon: Sun, title: t('settings.theme_light') },
-        { value: 'dark', icon: Moon, title: t('settings.theme_dark') },
-      ]}
-    />
-  </div>
 </div>

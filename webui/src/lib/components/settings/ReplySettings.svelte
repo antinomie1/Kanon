@@ -6,6 +6,7 @@ import {
 } from '../../stores/replyPolicy.svelte';
 import { toasts } from '../../stores/toast.svelte';
 import type { ReplyMode, ReplyPolicy } from '../../types';
+import Button from '../ui/Button.svelte';
 import Section from '../ui/Section.svelte';
 import Seg from '../ui/Seg.svelte';
 import SupportBadge from '../ui/SupportBadge.svelte';
@@ -86,16 +87,16 @@ async function save() {
   </Section>
 
   <div class="flex justify-end gap-2.5 py-5">
-    <button
+    <Button
       type="button"
-      class="btn"
+     
       disabled={!dirty || replyPolicyStore.saving}
       onclick={() => replyPolicyStore.policy && (draft = { ...replyPolicyStore.policy })}
     >
       {t('instances.discard')}
-    </button>
-    <button type="button" class="btn btn-primary" disabled={!dirty || replyPolicyStore.saving} onclick={save}>
+    </Button>
+    <Button type="button" variant="filled" disabled={!dirty || replyPolicyStore.saving} onclick={save}>
       {replyPolicyStore.saving ? t('instances.saving') : t('instances.save_changes')}
-    </button>
+    </Button>
   </div>
 {/if}

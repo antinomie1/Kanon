@@ -4,8 +4,10 @@ import { t } from '../../stores/i18n.svelte';
 import { instancesStore } from '../../stores/instances.svelte';
 import { qqofficialStore as store } from '../../stores/qqofficial.svelte';
 import { toasts } from '../../stores/toast.svelte';
+import Button from '../ui/Button.svelte';
 import SecretInput from '../ui/SecretInput.svelte';
 import Switch from '../ui/Switch.svelte';
+import TextField from '../ui/TextField.svelte';
 import QqOfficialQrModal from './QqOfficialQrModal.svelte';
 
 /**
@@ -31,18 +33,18 @@ async function bound() {
 {:else}
   <div class="flex flex-wrap items-center gap-x-4 gap-y-3 rounded-2xl bg-accent-tint py-3 pr-3 pl-4">
     <span class="min-w-0 flex-1 text-[14px] text-accent-fg">{t('platforms.qq_scan_hint')}</span>
-    <button type="button" class="btn btn-primary btn-sm" onclick={() => (qrOpen = true)}>
+    <Button type="button" variant="filled" size="sm" onclick={() => (qrOpen = true)}>
       <QrCode size={16} strokeWidth={2} />
       {t('adapters.qq_qr_btn')}
-    </button>
+    </Button>
   </div>
 
   <div class="mt-5 flex flex-col gap-4">
     <div>
       <label class="label" for="qq-appid">{t('adapters.qq_appid')}</label>
-      <input
+      <TextField
         id="qq-appid"
-        class="input mono"
+        mono
         spellcheck="false"
         placeholder="102xxxxxx"
         bind:value={store.formAppId}

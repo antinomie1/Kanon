@@ -5,6 +5,7 @@ import { t } from '../../stores/i18n.svelte';
 import { modelsStore } from '../../stores/models.svelte';
 import { toasts } from '../../stores/toast.svelte';
 import type { ModelCapabilities, ModelSpec } from '../../types';
+import Button from '../ui/Button.svelte';
 import { changeDefaultModel } from './defaultModel';
 import ModelEditorModal from './ModelEditorModal.svelte';
 import { compactTokens, modelName } from './modelFormat';
@@ -78,14 +79,14 @@ async function remove(spec: ModelSpec) {
       <p class="m-0 mt-1 max-w-[60ch] hint">{t('llm.models_hint', { provider })}</p>
     </div>
     <div class="flex flex-wrap gap-2.5">
-      <button type="button" class="btn btn-sm" disabled={discovering} onclick={() => void discover()}>
+      <Button type="button" size="sm" disabled={discovering} onclick={() => void discover()}>
         <RefreshCw size={15} strokeWidth={2} class={discovering ? 'animate-spin' : ''} />
         {discovering ? t('llm.discovering') : t('llm.discover')}
-      </button>
-      <button type="button" class="btn btn-sm" onclick={() => (editing = 'new')}>
+      </Button>
+      <Button type="button" size="sm" onclick={() => (editing = 'new')}>
         <Plus size={15} strokeWidth={2.2} />
         {t('llm.model_add')}
-      </button>
+      </Button>
     </div>
   </div>
 
@@ -122,34 +123,34 @@ async function remove(spec: ModelSpec) {
           </div>
           <div class="ml-auto flex items-center gap-1.5">
             {#if !isDefault}
-              <button
+              <Button
                 type="button"
-                class="btn btn-sm btn-quiet"
+                variant="text" size="sm"
                 disabled={modelsStore.saving}
                 onclick={() => void changeDefaultModel(reference)}
               >
                 {t('llm.make_default')}
-              </button>
+              </Button>
             {/if}
-            <button
+            <Button
               type="button"
-              class="btn btn-sm btn-quiet btn-icon"
+              variant="text" size="sm" square
               title={t('llm.model_edit')}
               aria-label={t('llm.model_edit_title', { name })}
               onclick={() => (editing = spec)}
             >
               <Pencil size={15} strokeWidth={2} />
-            </button>
-            <button
+            </Button>
+            <Button
               type="button"
-              class="btn btn-sm btn-quiet btn-icon"
+              variant="text" size="sm" square
               title={t('llm.remove')}
               aria-label={t('llm.model_remove_title', { name })}
               disabled={modelsStore.saving}
               onclick={() => void remove(spec)}
             >
               <Trash2 size={15} strokeWidth={2} />
-            </button>
+            </Button>
           </div>
         </li>
       {/each}

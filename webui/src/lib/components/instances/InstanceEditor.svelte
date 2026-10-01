@@ -7,6 +7,7 @@ import { describeReplyPolicy } from '../../stores/replyPolicy.svelte';
 import { router } from '../../stores/router.svelte';
 import { toasts } from '../../stores/toast.svelte';
 import type { ReplyMode } from '../../types';
+import Button from '../ui/Button.svelte';
 import Section from '../ui/Section.svelte';
 import Seg from '../ui/Seg.svelte';
 import Select from '../ui/Select.svelte';
@@ -146,20 +147,20 @@ function testChat() {
         {t('instances.power')}
       </span>
       {#if instance}
-        <button type="button" class="btn btn-sm" onclick={testChat}>
+        <Button type="button" size="sm" onclick={testChat}>
           <Send size={15} strokeWidth={2} />
           {t('instances.test_chat')}
-        </button>
-        <button
+        </Button>
+        <Button
           type="button"
-          class="btn btn-sm btn-icon btn-danger"
+          variant="danger" size="sm" square
           title={t('instances.delete_confirm')}
           aria-label={t('instances.delete_confirm')}
           disabled={store.saving}
           onclick={remove}
         >
           <Trash2 size={16} strokeWidth={2} />
-        </button>
+        </Button>
       {/if}
     </div>
   </div>
@@ -190,21 +191,24 @@ function testChat() {
                 : t('instances.platform_unknown')}
           </span>
           {#if state === 'offline'}
-            <button
+            <Button
               type="button"
-              class="btn btn-xs text-danger-fg shadow-[inset_0_0_0_1px_currentColor]"
+              variant="outlined"
+              size="xs"
+              class="kanon-danger"
               onclick={() => router.navigate('platforms', platform)}
             >
               {t('home.alert_check')}
-            </button>
+            </Button>
           {/if}
-          <button
+          <Button
             type="button"
-            class="btn btn-xs btn-quiet {state === 'ok' ? '' : 'text-danger-fg'}"
+            variant={state === 'ok' ? 'text' : 'danger'}
+            size="xs"
             onclick={() => store.toggleAdapter(platform)}
           >
             {t('instances.platform_remove')}
-          </button>
+          </Button>
         </div>
       {/each}
 
@@ -212,9 +216,9 @@ function testChat() {
         <div class="flex flex-wrap gap-2">
           {#each available as adapter (adapter.platform)}
             {@const owner = store.ownerOf(adapter.platform)}
-            <button
+            <Button
               type="button"
-              class="btn btn-sm"
+              size="sm"
               disabled={Boolean(owner)}
               title={owner ? t('instances.adapter_taken', { name: owner }) : undefined}
               onclick={() => store.toggleAdapter(adapter.platform)}
@@ -222,7 +226,7 @@ function testChat() {
               <Plus size={14} strokeWidth={2.2} />
               {adapter.display_name || adapter.platform}
               {#if owner}<span class="font-medium text-fg3">{t('instances.platform_owner', { name: owner })}</span>{/if}
-            </button>
+            </Button>
           {/each}
         </div>
       {:else if store.adapters.length === 0}
@@ -344,15 +348,17 @@ function testChat() {
   </div>
 
   <div class="flex flex-wrap items-center gap-x-3.5 gap-y-1 border-t border-line pt-5 pb-1">
-    <button
+    <Button
       type="button"
-      class="btn btn-quiet h-8! px-0! text-accent!"
+      variant="text"
+      size="sm"
+      class="kanon-btn-flush"
       aria-expanded={showAdvanced}
       onclick={() => (showAdvanced = !showAdvanced)}
     >
       {showAdvanced ? t('instances.hide_advanced') : t('instances.show_advanced')}
       <ChevronDown size={16} strokeWidth={2} class="transition-transform {showAdvanced ? 'rotate-180' : ''}" />
-    </button>
+    </Button>
     {#if !showAdvanced}
       <span class="text-[13.5px] text-fg2">{t('instances.advanced_summary')}</span>
     {/if}
@@ -365,7 +371,7 @@ function testChat() {
   {#if creating || store.changeCount > 0}
     <div class="sticky bottom-4 z-10 mt-6 flex justify-center">
       <div
-        class="flex max-w-full items-center gap-3 rounded-[26px] bg-bar py-2 pr-2 pl-5 text-[14.5px] font-medium text-on-bar shadow-[var(--k-pop)]"
+        class="flex max-w-full items-center gap-3 rounded-full bg-bar py-2 pr-2 pl-5 text-[14.5px] font-medium text-on-bar shadow-[var(--k-pop)]"
       >
         <span class="truncate">
           {creating
@@ -374,17 +380,19 @@ function testChat() {
               ? t('instances.bar_changed_one')
               : t('instances.bar_changed', { n: store.changeCount })}
         </span>
-        <button
+        <Button
           type="button"
-          class="btn btn-quiet btn-sm text-on-bar! opacity-75 hover:opacity-100 hover:bg-transparent!"
+          variant="inverse-plain"
+          size="sm"
+          class="opacity-75 hover:opacity-100"
           disabled={store.saving}
           onclick={discard}
         >
           {creating ? t('common.cancel') : t('instances.discard')}
-        </button>
-        <button
+        </Button>
+        <Button
           type="button"
-          class="btn btn-primary btn-sm"
+          variant="filled" size="sm"
           disabled={store.saving || !store.formName.trim()}
           onclick={save}
         >
@@ -393,7 +401,7 @@ function testChat() {
             : creating
               ? t('instances.create')
               : t('instances.save_changes')}
-        </button>
+        </Button>
       </div>
     </div>
   {/if}

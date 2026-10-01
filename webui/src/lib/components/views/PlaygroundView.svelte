@@ -8,6 +8,7 @@ import { modelsStore } from '../../stores/models.svelte';
 import { personasStore } from '../../stores/personas.svelte';
 import { router } from '../../stores/router.svelte';
 import { toasts } from '../../stores/toast.svelte';
+import Button from '../ui/Button.svelte';
 import PageHead from '../ui/PageHead.svelte';
 import Select from '../ui/Select.svelte';
 import Switch from '../ui/Switch.svelte';
@@ -150,10 +151,10 @@ function split(turn: ChatTurn): { reasoning: string; content: string } {
     <span>{t('chat.sub')}</span>
   {/snippet}
   {#snippet actions()}
-    <button type="button" class="btn" disabled={chat.turns.length === 0} onclick={() => chat.clear()}>
+    <Button type="button" disabled={chat.turns.length === 0} onclick={() => chat.clear()}>
       <MessageSquarePlus size={16} strokeWidth={2} />
       {t('chat.new')}
-    </button>
+    </Button>
   {/snippet}
 </PageHead>
 
@@ -273,9 +274,9 @@ function split(turn: ChatTurn): { reasoning: string; content: string } {
       {#if !model}
         <div class="notice notice-warn items-center">
           <span class="min-w-0 flex-1">{t('chat.no_model')}</span>
-          <button type="button" class="btn btn-sm" onclick={() => router.navigate('models')}>
+          <Button type="button" size="sm" onclick={() => router.navigate('models')}>
             {t('chat.open_models')}
-          </button>
+          </Button>
         </div>
       {/if}
       <div class="flex items-end gap-2.5">
@@ -290,25 +291,28 @@ function split(turn: ChatTurn): { reasoning: string; content: string } {
           class="input h-[46px] min-h-[46px] resize-none rounded-[23px] px-5 py-[11px] leading-[1.5] shadow-none focus:shadow-[inset_0_0_0_2px_var(--k-accent)]"
         ></textarea>
         {#if chat.streaming}
-          <button
+          <Button
             type="button"
-            class="btn btn-icon shrink-0 [--h:46px]"
+            square
+            class="kanon-btn-46 shrink-0"
             title={t('chat.stop')}
             aria-label={t('chat.stop')}
             onclick={() => chat.stop()}
           >
             <Square size={16} strokeWidth={2} class="fill-current" />
-          </button>
+          </Button>
         {:else}
-          <button
+          <Button
             type="submit"
-            class="btn btn-primary btn-icon shrink-0 [--h:46px]"
+            variant="filled"
+            square
+            class="kanon-btn-46 shrink-0"
             title={t('chat.send')}
             aria-label={t('chat.send')}
             disabled={!draft.trim() || !model}
           >
             <ArrowUp size={19} strokeWidth={2.2} />
-          </button>
+          </Button>
         {/if}
       </div>
       <p class="m-0 text-[12.5px] text-fg3">

@@ -10,7 +10,9 @@ const openStack: symbol[] = [];
 <script lang="ts">
 import { X } from 'lucide-svelte';
 import type { Snippet } from 'svelte';
+import { faded, surfaced } from '../../motion';
 import { t } from '../../stores/i18n.svelte';
+import Button from './Button.svelte';
 
 /**
  * Dialog or side drawer with a backdrop.
@@ -57,7 +59,10 @@ $effect(() => {
   if (!open || !panel) return;
   const opener = document.activeElement as HTMLElement | null;
   const first = panel.querySelector<HTMLElement>(
-    'input:not([disabled]), textarea:not([disabled]), select:not([disabled]), button:not([disabled]):not([data-close])',
+    // Buttons are Google's custom element now, so the native `button` selector no longer finds
+    // them; without the second clause a dialog whose only controls are buttons would open with
+    // focus on the panel instead of on the first button.
+    'input:not([disabled]), textarea:not([disabled]), select:not([disabled]), button:not([disabled]):not([data-close]), md-gb-button:not([disabled]):not([data-close])',
   );
   (first ?? panel).focus();
   return () => opener?.focus?.();
@@ -82,6 +87,8 @@ function onkeydown(e: KeyboardEvent) {
     class="fixed inset-0 z-50 flex bg-black/32 {variant === 'drawer'
       ? 'justify-end'
       : 'items-start justify-center overflow-y-auto px-4 py-[8vh]'}"
+    in:faded
+    out:faded={{ duration: 100 }}
   >
     <button
       type="button"
@@ -96,6 +103,8 @@ function onkeydown(e: KeyboardEvent) {
       aria-modal="true"
       aria-label={title}
       tabindex="-1"
+      in:surfaced={variant === 'drawer' ? { mode: 'slide' } : {}}
+      out:surfaced={{ duration: 120 }}
       class="relative flex w-full flex-col bg-card shadow-[var(--k-pop)] outline-none {width} {variant ===
       'drawer'
         ? 'h-full rounded-l-2xl'
@@ -103,16 +112,16 @@ function onkeydown(e: KeyboardEvent) {
     >
       <div class="flex items-center gap-3 px-6 pt-5 pb-3">
         <h2 class="m-0 min-w-0 flex-1 truncate text-[22px] font-normal">{title}</h2>
-        <button
+        <Button
           type="button"
           data-close
-          class="btn btn-quiet btn-icon btn-sm"
+          variant="text" size="sm" square
           aria-label={t('common.close')}
           disabled={locked}
           onclick={close}
         >
           <X size={18} strokeWidth={2} />
-        </button>
+        </Button>
       </div>
       <div class="scroll-thin min-h-0 flex-1 overflow-y-auto px-6 pb-6">
         {@render children()}
