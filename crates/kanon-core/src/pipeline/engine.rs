@@ -1894,7 +1894,7 @@ impl PipelineEngine {
         // up twice, while routing already resolves that collision deterministically.
         let mut plugin_commands: Vec<(String, String, String)> = Vec::new();
         for host in hosts {
-            for plugin in &host.meta {
+            for plugin in host.metas() {
                 for command in &plugin.commands {
                     let name = command.name.trim().trim_start_matches('/').to_string();
                     if name.is_empty() || plugin_commands.iter().any(|(seen, ..)| *seen == name) {

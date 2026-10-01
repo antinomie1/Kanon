@@ -1131,7 +1131,7 @@ fn host_view(host: &ManagedHost, pid: Option<u32>, plugins: Vec<PluginView>) -> 
             .map(|manifest| manifest.plugin.runtime.clone()),
         socket_path: host.socket_path.to_string_lossy().to_string(),
         priority: host.priority,
-        plugin_ids: host.meta.iter().map(|meta| meta.id.clone()).collect(),
+        plugin_ids: host.metas().iter().map(|meta| meta.id.clone()).collect(),
         restartable: host.launch_spec().is_some(),
         pid,
         plugins,
@@ -1143,7 +1143,7 @@ fn plugin_views_for(host: &ManagedHost) -> Vec<PluginView> {
     let manifest = host.manifest();
 
     let mut views: Vec<PluginView> = host
-        .meta
+        .metas()
         .iter()
         .map(|meta| plugin_view_from_meta(meta, host, manifest))
         .collect();

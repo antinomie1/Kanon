@@ -94,7 +94,7 @@ pub struct RealtimeSection {
 /// perfectly healthy core merely because chat debugging is disabled.
 async fn health(State(state): State<ApiState>) -> Json<HealthResponse> {
     let hosts = state.supervisor().get_all_hosts().await;
-    let loaded = hosts.iter().map(|host| host.meta.len()).sum();
+    let loaded = hosts.iter().map(|host| host.metas().len()).sum();
 
     let instances = state.instances().list().await;
     let instances_enabled = instances.iter().filter(|instance| instance.enabled).count();
@@ -148,7 +148,7 @@ pub async fn sample_gauges(state: &ApiState) -> RuntimeGauges {
         resident_memory_bytes: memory.map(|m| m.resident_bytes).unwrap_or_default(),
         virtual_memory_bytes: memory.map(|m| m.virtual_bytes).unwrap_or_default(),
         plugin_hosts: hosts.len(),
-        plugins_loaded: hosts.iter().map(|host| host.meta.len()).sum(),
+        plugins_loaded: hosts.iter().map(|host| host.metas().len()).sum(),
         sessions_total: state.sessions().session_count(),
         sessions_active: state.sessions().active_session_count(),
         ws_connections_active: state

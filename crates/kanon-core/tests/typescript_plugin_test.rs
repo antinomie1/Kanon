@@ -67,11 +67,11 @@ async fn test_typescript_plugin_lifecycle_and_pipeline() {
 
     // 5. Verify GetPluginMeta handshake results
     assert_eq!(
-        managed_host.meta.len(),
+        managed_host.metas().len(),
         1,
         "Expected exactly 1 plugin in metadata"
     );
-    let meta = &managed_host.meta[0];
+    let meta = &managed_host.metas()[0].clone();
     assert_eq!(meta.id, "org.kanon.plugin.demo_ts");
     assert_eq!(meta.name, "Demo TypeScript Plugin");
     assert_eq!(meta.version, "0.1.0");

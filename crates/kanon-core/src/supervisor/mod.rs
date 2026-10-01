@@ -129,11 +129,20 @@ pub struct ManagedHost {
     /// Sub-process child handle. Wrapped in a Mutex for exclusive wait/kill operations.
     child: Mutex<Option<Child>>,
     /// Client for host lifecycle operations (`PluginHostService`).
-    host_client: Mutex<PluginHostServiceClient<Channel>>,
-    /// Client for event and message dispatching (`MessagePipelineService`).
-    pipeline_client: Mutex<MessagePipelineServiceClient<Channel>>,
-    /// Cached metadata obtained during initial handshake.
-    pub meta: Vec<PluginMeta>,
+    ///
+    /// Every call works on a clone: a tonic client over one HTTP/2 channel multiplexes concurrent
+    /// requests, so serializing them behind a lock would only add head-of-line blocking — and a
+    /// deadlock when a command handler on this host waits for a reply delivered by an adapter
+    /// living on the same host.
+    host_client: PluginHostServiceClient<Channel>,
+    /// Client for event and message dispatching (`MessagePipelineService`), cloned per call.
+    pipeline_client: MessagePipelineServiceClient<Channel>,
+    /// Metadata reported by the host: obtained during the handshake and refreshed after every
+    /// accepted configuration reload, so a plugin may offer different commands or tools depending
+    /// on how the operator configured it.
+    ///
+    /// A synchronous lock: it is only held to clone or replace the vector, never across an await.
+    meta: std::sync::RwLock<Vec<PluginMeta>>,
     /// Execution priority for pipeline scheduling (lower executes first, default 500).
     pub priority: i32,
     /// Retained launch recipe, absent for externally registered hosts.
@@ -175,9 +184,9 @@ impl ManagedHost {
             host_id,
             socket_path,
             child: Mutex::new(None),
-            host_client: Mutex::new(PluginHostServiceClient::new(channel.clone())),
-            pipeline_client: Mutex::new(MessagePipelineServiceClient::new(channel)),
-            meta,
+            host_client: PluginHostServiceClient::new(channel.clone()),
+            pipeline_client: MessagePipelineServiceClient::new(channel),
+            meta: std::sync::RwLock::new(meta),
             priority,
             launch_spec: None,
             manifest: None,
@@ -224,9 +233,25 @@ impl ManagedHost {
         self.manifest.as_ref()
     }
 
+    /// Snapshot of the plugin metadata this host currently reports.
+    pub fn metas(&self) -> Vec<PluginMeta> {
+        self.meta
+            .read()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone()
+    }
+
+    /// Replaces the cached plugin metadata.
+    pub fn set_metas(&self, metas: Vec<PluginMeta>) {
+        *self
+            .meta
+            .write()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = metas;
+    }
+
     /// Returns `true` when this host declares the given plugin identifier.
     pub fn declares_plugin(&self, plugin_id: &str) -> bool {
-        self.meta.iter().any(|m| m.id == plugin_id)
+        self.metas().iter().any(|m| m.id == plugin_id)
     }
 
     /// Returns the platform identifiers this host serves as an adapter, from its static manifest.
@@ -284,7 +309,8 @@ impl std::fmt::Debug for ManagedHost {
     /// Child processes and gRPC clients are intentionally omitted: they have no meaningful
     /// textual representation and are guarded by mutexes that must not be locked for logging.
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let plugin_ids: Vec<&str> = self.meta.iter().map(|meta| meta.id.as_str()).collect();
+        let metas = self.metas();
+        let plugin_ids: Vec<&str> = metas.iter().map(|meta| meta.id.as_str()).collect();
         f.debug_struct("ManagedHost")
             .field("host_id", &self.host_id)
             .field("socket_path", &self.socket_path)
@@ -302,7 +328,7 @@ impl ManagedHost {
         &self,
         req: PipelineEventRequest,
     ) -> Result<PreFilterResult, tonic::Status> {
-        let mut client = self.pipeline_client.lock().await;
+        let mut client = self.pipeline_client.clone();
         let response = client.on_pre_filter(req).await?;
         Ok(response.into_inner())
     }
@@ -313,7 +339,7 @@ impl ManagedHost {
         req: CommandExecuteRequest,
     ) -> Result<CommandExecuteResponse, tonic::Status> {
         let start = std::time::Instant::now();
-        let mut client = self.pipeline_client.lock().await;
+        let mut client = self.pipeline_client.clone();
         match client.on_execute_command(req).await {
             Ok(response) => {
                 self.circuit_breaker.record_success(start.elapsed());
@@ -329,7 +355,7 @@ impl ManagedHost {
 
     /// Queries the host for fresh plugin metadata.
     pub async fn get_plugin_meta(&self) -> Result<Vec<PluginMeta>, tonic::Status> {
-        let mut client = self.host_client.lock().await;
+        let mut client = self.host_client.clone();
         let response = client.get_plugin_meta(GetPluginMetaRequest {}).await?;
         Ok(response.into_inner().plugins)
     }
@@ -355,7 +381,7 @@ impl ManagedHost {
         }
 
         let start = std::time::Instant::now();
-        let mut client = self.pipeline_client.lock().await;
+        let mut client = self.pipeline_client.clone();
         match client.on_call_tool(req).await {
             Ok(response) => {
                 self.circuit_breaker.record_success(start.elapsed());
@@ -392,7 +418,7 @@ impl ManagedHost {
         }
 
         let start = std::time::Instant::now();
-        let mut client = self.host_client.lock().await;
+        let mut client = self.host_client.clone();
         match client.invoke_action(req).await {
             Ok(response) => {
                 self.circuit_breaker.record_success(start.elapsed());
@@ -416,7 +442,7 @@ impl ManagedHost {
         config: kanon_proto::prost_types::Struct,
         version: u64,
     ) -> Result<ReloadPluginConfigResponse, tonic::Status> {
-        let mut client = self.host_client.lock().await;
+        let mut client = self.host_client.clone();
         let response = client
             .reload_plugin_config(ReloadPluginConfigRequest {
                 plugin_id: plugin_id.to_string(),
@@ -434,7 +460,7 @@ impl ManagedHost {
         request: DeliverMessageRequest,
     ) -> Result<DeliverMessageResponse, tonic::Status> {
         let start = std::time::Instant::now();
-        let mut client = self.pipeline_client.lock().await;
+        let mut client = self.pipeline_client.clone();
         match client.on_deliver_message(request).await {
             Ok(response) => {
                 self.circuit_breaker.record_success(start.elapsed());
@@ -467,7 +493,7 @@ impl ManagedHost {
 
     /// Identifier of the plugin this host was launched for, when it declared one.
     pub fn primary_plugin_id(&self) -> Option<String> {
-        self.meta
+        self.metas()
             .first()
             .map(|meta| meta.id.clone())
             .or_else(|| self.manifest.as_ref().map(|m| m.plugin.id.clone()))
@@ -487,7 +513,7 @@ impl kanon_llm::tool_router::ToolHost for ManagedHost {
     }
 
     fn plugin_metas(&self) -> Vec<PluginMeta> {
-        self.meta.clone()
+        self.metas()
     }
 
     async fn call_tool(&self, req: ToolCallRequest) -> Result<ToolCallResponse, tonic::Status> {
@@ -1006,9 +1032,9 @@ impl Supervisor {
             host_id: host_id.to_string(),
             socket_path: socket_path.clone(),
             child: Mutex::new(Some(child)),
-            host_client: Mutex::new(host_client),
-            pipeline_client: Mutex::new(pipeline_client),
-            meta: plugins,
+            host_client,
+            pipeline_client,
+            meta: std::sync::RwLock::new(plugins),
             priority,
             launch_spec: Some(spec),
             manifest,
@@ -1310,6 +1336,20 @@ impl Supervisor {
             version = applied,
             "Plugin configuration reloaded with version token"
         );
+
+        // A plugin may derive its commands and tools from its configuration (an API key that
+        // enables a tool, for example), so the metadata is asked for again. The configuration
+        // itself is already applied, which is why a failed refresh is reported, not rolled back:
+        // the previous metadata stays in effect until the next reload or restart.
+        match host.get_plugin_meta().await {
+            Ok(metas) => host.set_metas(metas),
+            Err(status) => tracing::warn!(
+                plugin_id = %plugin_id,
+                host_id = %host.host_id,
+                error = %status,
+                "Plugin metadata could not be refreshed after a configuration reload; keeping the previous commands and tools"
+            ),
+        }
 
         Ok(applied)
     }

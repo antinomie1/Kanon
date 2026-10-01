@@ -230,8 +230,8 @@ async fn test_unified_host_registration_into_supervisor() {
         .expect("Host must exist in Supervisor unified registry");
 
     assert_eq!(managed_host.host_id, "ext_host_1");
-    assert_eq!(managed_host.meta.len(), 1);
-    assert_eq!(managed_host.meta[0].id, "test.plugin");
+    assert_eq!(managed_host.metas().len(), 1);
+    assert_eq!(managed_host.metas()[0].id, "test.plugin");
 
     // Clean up
     let _ = host_shutdown_tx.send(());

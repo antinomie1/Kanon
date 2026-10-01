@@ -62,7 +62,7 @@ impl CommandRouter {
         let mut candidates = Vec::new();
 
         for host in hosts {
-            for plugin in &host.meta {
+            for plugin in host.metas() {
                 for cmd in &plugin.commands {
                     if cmd.name.trim_start_matches('/') == target_name {
                         candidates.push((

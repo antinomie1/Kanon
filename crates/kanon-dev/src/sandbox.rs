@@ -184,7 +184,7 @@ pub async fn run_sandbox(path: &Path, opts: SandboxOptions) -> Result<(), Sandbo
     let host = supervisor.spawn_from_manifest(&manifest_path, None).await?;
 
     println!("\n[Host Connected] ID: {}", host.host_id);
-    for meta in &host.meta {
+    for meta in host.metas() {
         println!(
             "Loaded Plugin: {} ({}) v{}",
             meta.name, meta.id, meta.version
@@ -261,7 +261,7 @@ pub async fn run_sandbox(path: &Path, opts: SandboxOptions) -> Result<(), Sandbo
                 }
 
                 if trimmed == "help" || trimmed == "/help" {
-                    for meta in &host.meta {
+                    for meta in host.metas() {
                         println!("Plugin: {}", meta.name);
                         for c in &meta.commands {
                             println!("  Command: /{} - {}", c.name, c.description);
@@ -322,7 +322,7 @@ async fn execute_sandbox_command(
 ) -> Result<CommandExecuteResponse, SandboxError> {
     let clean_cmd = command.trim_start_matches('/');
     let plugin_id = host
-        .meta
+        .metas()
         .iter()
         .find(|m| m.commands.iter().any(|c| c.name == clean_cmd))
         .map(|m| m.id.clone())
@@ -365,7 +365,7 @@ async fn execute_sandbox_tool(
     args: &[String],
 ) -> Result<ToolCallResponse, SandboxError> {
     let _has_tool = host
-        .meta
+        .metas()
         .iter()
         .any(|m| m.tools.iter().any(|t| t.name == tool_name));
 

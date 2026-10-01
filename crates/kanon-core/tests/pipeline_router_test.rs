@@ -84,8 +84,8 @@ async fn test_pipeline_router_end_to_end_lifecycle() {
         .expect("Failed to spawn demo_rust plugin host");
 
     // Verify metadata handshake registered the /rustcalc command.
-    assert_eq!(managed_host.meta.len(), 1);
-    assert_eq!(managed_host.meta[0].commands[0].name, "rustcalc");
+    assert_eq!(managed_host.metas().len(), 1);
+    assert_eq!(managed_host.metas()[0].commands[0].name, "rustcalc");
 
     // 4. Register a built-in adapter for the fixture platform, then start the pipeline worker
     //    and the outbound dispatcher that routes replies through the adapter registry.
