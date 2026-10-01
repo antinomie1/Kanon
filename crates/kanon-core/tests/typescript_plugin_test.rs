@@ -89,6 +89,7 @@ async fn test_typescript_plugin_lifecycle_and_pipeline() {
         command: "tsgreet".to_string(),
         args: vec!["Alice".to_string()],
         context: None,
+        ..Default::default()
     };
     let cmd_response = managed_host
         .execute_command(cmd_request)

@@ -333,6 +333,7 @@ async fn execute_sandbox_command(
         command: clean_cmd.to_string(),
         args: args.to_vec(),
         context: None,
+        ..Default::default()
     };
 
     println!("[Executing] /{} with args: {:?}", clean_cmd, args);

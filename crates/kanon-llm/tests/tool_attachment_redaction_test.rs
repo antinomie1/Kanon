@@ -61,6 +61,7 @@ impl ToolHost for DrawingHost {
                 description: "Draws a card".to_string(),
                 parameters: None,
             }],
+            ..Default::default()
         }]
     }
 

@@ -102,6 +102,7 @@ impl PluginHostService for MockHostService {
                 description: "Test".to_string(),
                 commands: vec![],
                 tools: vec![],
+                ..Default::default()
             }],
         }))
     }

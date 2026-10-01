@@ -276,6 +276,7 @@ async fn test_agent_builder_and_execution_with_custom_memory() {
             description: "test".to_string(),
             commands: vec![],
             tools: vec![tool_meta],
+            ..Default::default()
         }],
     });
 

@@ -15,7 +15,9 @@ pub mod group_log;
 pub mod observer;
 pub mod pre_filter;
 
-pub use command::{CommandRouter, MatchedCommand};
+pub use command::{
+    CommandRouter, MatchedCommand, MatchedTrigger, ParsedCommand, TriggerMatcher, split_args,
+};
 pub use context::build_user_message;
 pub use dead_letter::{
     DEFAULT_DEAD_LETTER_DIR, DeadLetterDirection, DeadLetterRecord, DeadLetterWriter,

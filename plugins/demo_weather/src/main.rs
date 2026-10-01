@@ -64,6 +64,7 @@ impl Plugin for WeatherPlugin {
                 description: "Fetch current weather report".to_string(),
                 usage: "/weather <city>".to_string(),
                 priority: 200,
+                ..Default::default()
             }],
             tools: vec![ToolMeta {
                 name: "fetch_weather".to_string(),
@@ -72,6 +73,7 @@ impl Plugin for WeatherPlugin {
                     fields: param_fields,
                 }),
             }],
+            ..Default::default()
         }
     }
 

@@ -1415,6 +1415,7 @@ impl Supervisor {
                         description: String::new(),
                         commands: vec![],
                         tools: vec![],
+                        triggers: vec![],
                     })
                     .collect()
             }

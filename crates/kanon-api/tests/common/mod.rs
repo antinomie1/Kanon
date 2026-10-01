@@ -107,12 +107,14 @@ pub fn fixture_meta() -> PluginMeta {
             description: "Fixture command".to_string(),
             usage: "/fixture <expr>".to_string(),
             priority: 100,
+            ..Default::default()
         }],
         tools: vec![ToolMeta {
             name: "fixture_tool".to_string(),
             description: "Fixture tool".to_string(),
             parameters: None,
         }],
+        ..Default::default()
     }
 }
 

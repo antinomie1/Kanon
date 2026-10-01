@@ -93,6 +93,7 @@ async fn test_core_plugin_ipc_handshake_and_pipeline() {
         command: "rustcalc".to_string(),
         args: vec!["2 + 2".to_string()],
         context: None,
+        ..Default::default()
     };
     let cmd_response = managed_host
         .execute_command(cmd_request)

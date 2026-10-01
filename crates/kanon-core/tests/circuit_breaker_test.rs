@@ -54,6 +54,7 @@ fn create_test_host(
                 description: "Test".to_string(),
                 commands: vec![],
                 tools: vec![],
+                ..Default::default()
             }],
             priority,
         )

@@ -89,6 +89,7 @@ async fn test_python_plugin_lifecycle_and_pipeline() {
         command: "pycalc".to_string(),
         args: vec!["10 + 20".to_string()],
         context: None,
+        ..Default::default()
     };
     let cmd_response = managed_host
         .execute_command(cmd_request)

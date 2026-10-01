@@ -24,12 +24,14 @@ impl Plugin for DemoPlugin {
                 description: "High-performance calculation command".to_string(),
                 usage: "/rustcalc <expr>".to_string(),
                 priority: 100,
+                ..Default::default()
             }],
             tools: vec![ToolMeta {
                 name: "fast_calc".to_string(),
                 description: "High-performance mathematical calculation tool".to_string(),
                 parameters: None,
             }],
+            ..Default::default()
         }
     }
 

@@ -100,11 +100,41 @@ message ReloadPluginConfigResponse {
 
 message GetPluginMetaRequest {}
 
+// Who may run a command (or fire a trigger) when the operator's command policy does not name it.
+//
+// The operator's policy always wins; this is only the plugin's default, so a plugin can declare
+// that a destructive command is for administrators without the operator having to know about it.
+enum CommandAccess {
+  COMMAND_ACCESS_EVERYONE = 0;
+  // Anyone in a private chat; only administrators in groups and channels.
+  COMMAND_ACCESS_ADMINS_IN_GROUPS = 1;
+  COMMAND_ACCESS_ADMINS = 2;
+}
+
 message CommandMeta {
   string name = 1;
   string description = 2;
   string usage = 3;
   int32 priority = 4;
+  // Alternative names routed to the same handler; the handler always receives `name`.
+  repeated string aliases = 5;
+  CommandAccess access = 6;
+}
+
+// A message pattern that runs a plugin handler without a slash command.
+//
+// Triggers are matched after slash commands and before the reply policy and the model, against
+// the message text with leading @-mentions removed. The first matching trigger (lowest priority
+// value) handles the message through OnExecuteCommand: `command` is the trigger name, `args` are
+// the capture groups (an unmatched group is an empty string) and `raw_args` is the whole text.
+// A trigger the sender may not fire is skipped silently, since nobody typed a command.
+message TriggerMeta {
+  string name = 1;
+  string description = 2;
+  // Regular expression in Rust `regex` syntax; an invalid pattern never matches and is logged.
+  string pattern = 3;
+  int32 priority = 4;
+  CommandAccess access = 5;
 }
 
 message ToolMeta {
@@ -121,6 +151,7 @@ message PluginMeta {
   string description = 5;
   repeated CommandMeta commands = 6;
   repeated ToolMeta tools = 7;
+  repeated TriggerMeta triggers = 8;
 }
 
 message GetPluginMetaResponse {
@@ -204,9 +235,13 @@ message PreFilterResult {
 
 message CommandExecuteRequest {
   string plugin_id = 1;
+  // Canonical command name (never an alias), or the trigger name.
   string command = 2;
+  // Arguments split on whitespace; quoted text ("a b", 'a b', “a b”) stays one argument.
   repeated string args = 3;
   PipelineEventRequest context = 4;
+  // Everything after the command name, unsplit, for handlers that parse their own syntax.
+  string raw_args = 5;
 }
 
 message CommandExecuteResponse {

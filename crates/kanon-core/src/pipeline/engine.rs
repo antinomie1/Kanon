@@ -26,7 +26,7 @@ use kanon_proto::v1::{
     PipelineEventRequest,
 };
 
-use crate::access::{CommandPolicyStore, META_SENDER_NAME};
+use crate::access::{CommandAccess, CommandPolicyStore, META_SENDER_NAME};
 use crate::adapter::{AdapterDescriptor, AdapterError, AdapterKind};
 use crate::conversation::{ContextPolicyStore, ConversationKind, ReplyPolicyStore, bot_mentioned};
 use crate::instance::InstanceRegistry;
@@ -35,7 +35,7 @@ use crate::mcp::McpPool;
 use crate::notice::{
     EventPolicyStore, META_NOTICE_ACTOR, META_NOTICE_TARGET, NoticeKind, RecallLedger, metadata_str,
 };
-use crate::pipeline::command::CommandRouter;
+use crate::pipeline::command::{CommandRouter, TriggerMatcher};
 use crate::pipeline::context::build_user_message;
 use crate::pipeline::dead_letter::DeadLetterWriter;
 use crate::pipeline::group_log::GroupLog;
@@ -359,6 +359,42 @@ fn strip_leading_mentions(text: &str) -> &str {
     rest
 }
 
+/// Turns a plugin's command (or trigger) response into the pipeline result.
+///
+/// A transport failure is logged and reported as an unsuccessful execution without replies: the
+/// plugin never answered, so there is nothing truthful to send on its behalf.
+fn command_result(
+    command: String,
+    plugin_id: &str,
+    host: &Arc<crate::supervisor::ManagedHost>,
+    outcome: Result<kanon_proto::v1::CommandExecuteResponse, tonic::Status>,
+) -> PipelineResult {
+    match outcome {
+        Ok(response) => PipelineResult::CommandExecuted {
+            command,
+            plugin_id: plugin_id.to_string(),
+            host_id: host.host_id.clone(),
+            success: response.success,
+            replies: response.replies,
+        },
+        Err(status) => {
+            tracing::error!(
+                command = %command,
+                host_id = %host.host_id,
+                error = %status,
+                "Command execution failed with gRPC status"
+            );
+            PipelineResult::CommandExecuted {
+                command,
+                plugin_id: plugin_id.to_string(),
+                host_id: host.host_id.clone(),
+                success: false,
+                replies: vec![],
+            }
+        }
+    }
+}
+
 /// Builds an outbound text reply segment.
 fn text_reply(content: impl Into<String>) -> MessageSegment {
     MessageSegment {
@@ -438,6 +474,8 @@ pub struct PipelineEngine {
     recalls: RecallLedger,
     /// Recent group lines for instances that observe their groups.
     group_log: GroupLog,
+    /// Compiled plugin trigger patterns.
+    triggers: TriggerMatcher,
     /// MCP servers contributing tools alongside plugin hosts.
     mcp: Option<Arc<McpPool>>,
     /// Optional lifecycle observer used by the management control plane for tracing.
@@ -473,6 +511,7 @@ impl PipelineEngine {
             command_policy: None,
             recalls: RecallLedger::default(),
             group_log: GroupLog::default(),
+            triggers: TriggerMatcher::default(),
             mcp: None,
             observer: None,
             dead_letter: Arc::new(DeadLetterWriter::default()),
@@ -1262,105 +1301,136 @@ impl PipelineEngine {
         } else {
             strip_leading_mentions(&text_candidate)
         };
-        // Phase 2-: Command permissions, checked once for built-in and plugin commands alike.
-        // Without a policy store (an embedded pipeline) every command stays open, which is the
-        // pre-policy behaviour; the node always installs one. An instance with its own command
-        // policy replaces the node's, administrators included.
-        if let (Some((cmd_name, _)), Some(store)) = (
-            CommandRouter::parse_command(command_text),
-            self.command_policy.as_ref(),
-        ) && !instance
-            .as_ref()
-            .map_or_else(
+        // The policy that decides who may run commands and fire triggers. Without a policy store
+        // (an embedded pipeline) everything stays open, which is the pre-policy behaviour; the
+        // node always installs one. An instance with its own command policy replaces the node's,
+        // administrators included.
+        let command_policy = self.command_policy.as_ref().map(|store| {
+            instance.as_ref().map_or_else(
                 || store.get(),
                 |instance| instance.effective_command_policy(store.get()),
             )
-            .allows(&cmd_name, &filtered_event)
-        {
-            // The sender's own ID is part of the answer: it is exactly what an operator adds to
-            // the administrator list to grant access.
-            let reply = format!(
-                "/{cmd_name} 仅限管理员使用（你的 ID：{}:{}）",
-                filtered_event.platform, filtered_event.sender_id
-            );
-            return PipelineResult::CommandDenied {
-                command: cmd_name,
-                replies: vec![text_reply(reply)],
-            };
-        }
+        });
 
-        if let Some((cmd_name, args)) = CommandRouter::parse_command(command_text) {
-            if cmd_name.eq_ignore_ascii_case(NEW_SESSION_COMMAND)
-                && let Some(instance) = instance.as_ref()
-            {
-                return self.handle_new_session(&filtered_event, instance).await;
-            }
-            if cmd_name.eq_ignore_ascii_case(MODEL_COMMAND)
-                && let Some(instance) = instance.as_ref()
-            {
-                return self.handle_model_command(instance, &args).await;
-            }
-            if cmd_name.eq_ignore_ascii_case(HELP_COMMAND) {
-                return self.handle_help_command(&hosts);
-            }
-            if cmd_name.eq_ignore_ascii_case(INFO_COMMAND) {
-                return self.handle_info_command(instance.as_ref(), &filtered_event);
-            }
-        }
-
-        if let Some((cmd_name, args)) = CommandRouter::parse_command(command_text) {
-            if let Some(target) = CommandRouter::resolve(&cmd_name, &hosts) {
-                tracing::debug!(
-                    command = %cmd_name,
-                    plugin_id = %target.plugin_id,
-                    host_id = %target.host.host_id,
-                    "Routing slash command to target host"
-                );
-
-                self.observe(PipelineStage::CommandMatched {
-                    event_id: event_id.clone(),
-                    command: cmd_name.clone(),
-                    plugin_id: target.plugin_id.clone(),
-                    host_id: target.host.host_id.clone(),
-                });
-
-                match CommandRouter::dispatch(&target, args, filtered_event.clone()).await {
-                    Ok(response) => {
-                        return PipelineResult::CommandExecuted {
-                            command: cmd_name,
-                            plugin_id: target.plugin_id,
-                            host_id: target.host.host_id.clone(),
-                            success: response.success,
-                            replies: response.replies,
-                        };
-                    }
-                    Err(status) => {
-                        tracing::error!(
-                            command = %cmd_name,
-                            host_id = %target.host.host_id,
-                            error = %status,
-                            "Command execution failed with gRPC status"
-                        );
-                        return PipelineResult::CommandExecuted {
-                            command: cmd_name,
-                            plugin_id: target.plugin_id,
-                            host_id: target.host.host_id.clone(),
-                            success: false,
-                            replies: vec![],
-                        };
-                    }
-                }
+        if let Some(parsed) = CommandRouter::parse_command(command_text) {
+            let name = parsed.name.clone();
+            // `/new` and `/model` act on an instance, so without one they are ordinary names a
+            // plugin may claim; `/help` and `/info` are always the core's.
+            let builtin = ((name.eq_ignore_ascii_case(NEW_SESSION_COMMAND)
+                || name.eq_ignore_ascii_case(MODEL_COMMAND))
+                && instance.is_some())
+                || name.eq_ignore_ascii_case(HELP_COMMAND)
+                || name.eq_ignore_ascii_case(INFO_COMMAND);
+            let target = if builtin {
+                None
             } else {
+                CommandRouter::resolve(&name, &hosts)
+            };
+
+            // Phase 2-: Command permissions, checked once for built-in and plugin commands alike.
+            // A plugin command is checked under its canonical name, so an alias can never bypass
+            // a restriction, and with the access level its plugin declared as the default.
+            let (policy_name, default_access) = match &target {
+                Some(target) => (target.name().to_string(), target.access()),
+                None => (name.clone(), CommandAccess::Everyone),
+            };
+            if let Some(policy) = command_policy.as_ref()
+                && !policy.allows_with_default(&policy_name, default_access, &filtered_event)
+            {
+                // The sender's own ID is part of the answer: it is exactly what an operator adds
+                // to the administrator list to grant access.
+                let reply = format!(
+                    "/{name} 仅限管理员使用（你的 ID：{}:{}）",
+                    filtered_event.platform, filtered_event.sender_id
+                );
+                return PipelineResult::CommandDenied {
+                    command: policy_name,
+                    replies: vec![text_reply(reply)],
+                };
+            }
+
+            if builtin {
+                if name.eq_ignore_ascii_case(HELP_COMMAND) {
+                    return self.handle_help_command(&hosts);
+                }
+                if name.eq_ignore_ascii_case(INFO_COMMAND) {
+                    return self.handle_info_command(instance.as_ref(), &filtered_event);
+                }
+                if let Some(instance) = instance.as_ref() {
+                    if name.eq_ignore_ascii_case(NEW_SESSION_COMMAND) {
+                        return self.handle_new_session(&filtered_event, instance).await;
+                    }
+                    return self.handle_model_command(instance, &parsed.args).await;
+                }
+            }
+
+            let Some(target) = target else {
                 tracing::debug!(
-                    command = %cmd_name,
+                    command = %name,
                     "Slash command detected but no matching plugin was registered"
                 );
                 self.observe(PipelineStage::CommandNotFound {
                     event_id,
-                    command: cmd_name.clone(),
+                    command: name.clone(),
                 });
-                return PipelineResult::CommandNotFound { command: cmd_name };
-            }
+                return PipelineResult::CommandNotFound { command: name };
+            };
+
+            let command = target.name().to_string();
+            tracing::debug!(
+                command = %command,
+                typed = %name,
+                plugin_id = %target.plugin_id,
+                host_id = %target.host.host_id,
+                "Routing slash command to target host"
+            );
+            self.observe(PipelineStage::CommandMatched {
+                event_id: event_id.clone(),
+                command: command.clone(),
+                plugin_id: target.plugin_id.clone(),
+                host_id: target.host.host_id.clone(),
+            });
+            let outcome = CommandRouter::dispatch(&target, parsed, filtered_event.clone()).await;
+            return command_result(command, &target.plugin_id, &target.host, outcome);
+        }
+
+        // Phase 2b: Plugin triggers.
+        //
+        // A trigger is a plugin's claim on a plain message by pattern. It runs where a command
+        // would — after pre-filters, before the reply policy and the model — because a plugin that
+        // asked for "messages matching X" wants them whether or not the bot was mentioned.
+        if notice.is_none()
+            && !command_text.trim().is_empty()
+            && let Some(target) = self.triggers.resolve(command_text, &hosts, |meta| {
+                command_policy.as_ref().is_none_or(|policy| {
+                    policy.allows_with_default(
+                        &meta.name,
+                        CommandAccess::from_proto(meta.access()),
+                        &filtered_event,
+                    )
+                })
+            })
+        {
+            let trigger = target.meta.name.clone();
+            tracing::debug!(
+                trigger = %trigger,
+                plugin_id = %target.plugin_id,
+                host_id = %target.host.host_id,
+                "Routing message to the plugin trigger it matched"
+            );
+            self.observe(PipelineStage::CommandMatched {
+                event_id: event_id.clone(),
+                command: trigger.clone(),
+                plugin_id: target.plugin_id.clone(),
+                host_id: target.host.host_id.clone(),
+            });
+            let outcome = CommandRouter::dispatch_trigger(
+                &target,
+                command_text.trim(),
+                filtered_event.clone(),
+            )
+            .await;
+            return command_result(trigger, &target.plugin_id, &target.host, outcome);
         }
 
         // Phase 2c: Reply policy gate.
@@ -1892,7 +1962,8 @@ impl PipelineEngine {
 
         // Command names are deduplicated: two plugins claiming the same name would otherwise show
         // up twice, while routing already resolves that collision deterministically.
-        let mut plugin_commands: Vec<(String, String, String)> = Vec::new();
+        let mut plugin_commands: Vec<(String, String, String, Vec<String>)> = Vec::new();
+        let mut triggers: Vec<(String, String)> = Vec::new();
         for host in hosts {
             for plugin in host.metas() {
                 for command in &plugin.commands {
@@ -1900,11 +1971,28 @@ impl PipelineEngine {
                     if name.is_empty() || plugin_commands.iter().any(|(seen, ..)| *seen == name) {
                         continue;
                     }
+                    let aliases = command
+                        .aliases
+                        .iter()
+                        .map(|alias| alias.trim().trim_start_matches('/').to_string())
+                        .filter(|alias| !alias.is_empty())
+                        .collect();
                     plugin_commands.push((
                         name,
                         command.description.trim().to_string(),
                         command.usage.trim().to_string(),
+                        aliases,
                     ));
+                }
+                // A trigger without a description is an implementation detail of its plugin, not
+                // something a user can usefully be told about.
+                for trigger in &plugin.triggers {
+                    let description = trigger.description.trim();
+                    if !description.is_empty()
+                        && !triggers.iter().any(|(name, _)| *name == trigger.name)
+                    {
+                        triggers.push((trigger.name.clone(), description.to_string()));
+                    }
                 }
             }
         }
@@ -1912,9 +2000,14 @@ impl PipelineEngine {
         if !plugin_commands.is_empty() {
             plugin_commands.sort_by(|left, right| left.0.cmp(&right.0));
             rendered.push_str("\n插件指令：\n");
-            for (name, description, usage) in plugin_commands {
+            for (name, description, usage, aliases) in plugin_commands {
                 rendered.push('/');
                 rendered.push_str(&name);
+                if !aliases.is_empty() {
+                    rendered.push_str("（别名: /");
+                    rendered.push_str(&aliases.join(", /"));
+                    rendered.push('）');
+                }
                 if !description.is_empty() {
                     rendered.push_str(" — ");
                     rendered.push_str(&description);
@@ -1924,6 +2017,15 @@ impl PipelineEngine {
                     rendered.push_str(&usage);
                     rendered.push('）');
                 }
+                rendered.push('\n');
+            }
+        }
+
+        if !triggers.is_empty() {
+            triggers.sort();
+            rendered.push_str("\n消息触发：\n");
+            for (_, description) in triggers {
+                rendered.push_str(&description);
                 rendered.push('\n');
             }
         }

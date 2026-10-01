@@ -651,6 +651,7 @@ impl McpServer {
             description: format!("Model Context Protocol server '{}'", self.config.name),
             commands: Vec::new(),
             tools: metas,
+            triggers: Vec::new(),
         }];
 
         Ok(())
