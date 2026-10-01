@@ -75,6 +75,20 @@ pub trait Plugin: Send + Sync + 'static {
         })
     }
 
+    /// Runs a management action invoked by the control plane
+    /// (`POST /api/v1/plugins/{id}/actions/{action}`).
+    ///
+    /// Actions are the operator-facing counterpart of tools: they are never advertised to the
+    /// model. The result must be a JSON object (or `null`); an error is reported back to the
+    /// console as a failed action.
+    async fn on_invoke_action(
+        &self,
+        action: &str,
+        _params: serde_json::Value,
+    ) -> PluginResult<serde_json::Value> {
+        Err(format!("this plugin declares no action '{action}'").into())
+    }
+
     /// Publishes an outbound message for the platform this plugin serves as an adapter.
     ///
     /// The core routes every reply whose `platform` matches the plugin's `[adapter]` manifest

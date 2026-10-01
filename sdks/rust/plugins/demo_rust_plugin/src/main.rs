@@ -1,142 +1,91 @@
 //! Demonstration Rust plugin for the Kanon microkernel.
 //!
-//! Provides an example out-of-process plugin that exposes static metadata,
-//! responds to `GetPluginMeta`, and processes the `/rustcalc` command.
+//! Built with [`Router`]: each command, trigger and tool is declared once, next to its handler.
+//! Shows a plain command (`/rustcalc`), a multi-turn conversation started by a trigger
+//! (`count to N`), a tool and a pre-filter.
 
-use kanon_sdk::prelude::message_segment::Segment;
+use std::time::Duration;
+
 use kanon_sdk::prelude::*;
+use serde_json::json;
 
-/// Demonstration plugin implementation.
-struct DemoPlugin;
-
-#[async_trait]
-impl Plugin for DemoPlugin {
-    /// Returns the static metadata declaring plugin identity and supported commands.
-    fn meta(&self) -> PluginMeta {
-        PluginMeta {
-            id: "org.kanon.plugin.demo_rust".to_string(),
-            name: "Demo Rust Plugin".to_string(),
-            version: "0.1.0".to_string(),
-            author: "Kanon Dev".to_string(),
-            description: "Demonstration plugin written in Rust".to_string(),
-            commands: vec![CommandMeta {
-                name: "rustcalc".to_string(),
-                description: "High-performance calculation command".to_string(),
-                usage: "/rustcalc <expr>".to_string(),
-                priority: 100,
-                ..Default::default()
-            }],
-            tools: vec![ToolMeta {
-                name: "fast_calc".to_string(),
-                description: "High-performance mathematical calculation tool".to_string(),
-                parameters: None,
-            }],
-            ..Default::default()
-        }
-    }
-
-    /// Lifecycle hook called when the plugin is loaded by the host runner.
-    async fn on_load(&mut self, ctx: &mut PluginContext) -> PluginResult<()> {
-        println!(
-            "Demo Rust Plugin initialized with data directory: {:?}",
-            ctx.data_dir
-        );
-        Ok(())
-    }
-
-    /// Intercepts inbound events before command dispatch.
-    ///
-    /// Demonstrates pre-filter blocking if the message contains `[block]`.
-    async fn on_pre_filter(
-        &self,
-        req: PipelineEventRequest,
-    ) -> PluginResult<Option<PreFilterResult>> {
-        if req.raw_text.contains("[block]") {
-            let block_reply = MessageSegment {
-                segment: Some(Segment::Text(TextSegment {
-                    content: "Message blocked by Demo Rust Plugin pre-filter".to_string(),
-                })),
-            };
-            return Ok(Some(PreFilterResult {
+fn plugin() -> Router {
+    Router::new("org.kanon.plugin.demo_rust", "Demo Rust Plugin", "0.1.0")
+        .author("Kanon Dev")
+        .description("Demonstration plugin written in Rust")
+        .pre_filter(|event| async move {
+            // Blocks any message containing `[block]`, answering it directly.
+            if !event.text().contains("[block]") {
+                return Ok(None);
+            }
+            Ok(Some(PreFilterResult {
                 action: pre_filter_result::Action::Block as i32,
                 modified_text: String::new(),
-                reply_messages: vec![block_reply],
-            }));
-        }
-        Ok(None)
-    }
-
-    /// Handles command execution for the `/rustcalc` command.
-    async fn on_execute_command(
-        &self,
-        req: CommandExecuteRequest,
-    ) -> PluginResult<CommandExecuteResponse> {
-        let reply_text = if req.command == "rustcalc" {
-            let expr = req.args.join(" ");
-            format!("Rust calculation result for [{expr}]: 42 (fast-path)")
-        } else {
-            format!("Unknown command: {}", req.command)
-        };
-
-        let reply = MessageSegment {
-            segment: Some(Segment::Text(TextSegment {
-                content: reply_text,
-            })),
-        };
-
-        Ok(CommandExecuteResponse {
-            success: true,
-            replies: vec![reply],
-            error_message: String::new(),
-            ..Default::default()
+                reply_messages: vec![segment::text(
+                    "Message blocked by Demo Rust Plugin pre-filter",
+                )],
+            }))
         })
-    }
-
-    /// Executes a registered tool call requested by the LLM state machine.
-    async fn on_call_tool(&self, req: ToolCallRequest) -> PluginResult<ToolCallResponse> {
-        if req.tool_name == "fast_calc" {
-            let mut result_fields = std::collections::BTreeMap::new();
-            result_fields.insert(
-                "result".to_string(),
-                prost_types::Value {
-                    kind: Some(prost_types::value::Kind::NumberValue(42.0)),
-                },
-            );
-            result_fields.insert(
-                "summary".to_string(),
-                prost_types::Value {
-                    kind: Some(prost_types::value::Kind::StringValue(
-                        "Calculation succeeded via Rust plugin tool".to_string(),
-                    )),
-                },
-            );
-
-            return Ok(ToolCallResponse {
-                call_id: req.call_id,
-                success: true,
-                error_message: String::new(),
-                payload: Some(tool_call_response::Payload::StructuredResult(
-                    prost_types::Struct {
-                        fields: result_fields,
-                    },
-                )),
-                attachments: Vec::new(),
-            });
-        }
-
-        Ok(ToolCallResponse {
-            call_id: req.call_id,
-            success: false,
-            error_message: format!("Unknown tool: {}", req.tool_name),
-            payload: None,
-            attachments: Vec::new(),
-        })
-    }
+        .command(
+            CommandSpec::new("rustcalc")
+                .description("High-performance calculation command")
+                .usage("/rustcalc <expr>")
+                .priority(100),
+            |event| async move {
+                // Returning text is the shortest way to answer.
+                let expr = event.args().join(" ");
+                Ok(format!(
+                    "Rust calculation result for [{expr}]: 42 (fast-path)"
+                ))
+            },
+        )
+        .trigger(
+            TriggerSpec::new("count", r"^count to (\d)$").description("Counts along with you"),
+            |event| async move {
+                // A multi-turn conversation: each wait_next sends the replies so far and resumes
+                // with the same sender's next message in this channel.
+                let target: u32 = event.args()[0].parse()?;
+                let mut expected = 1;
+                event
+                    .reply(format!("Let's count to {target}. You start!"))
+                    .await?;
+                let mut current = event;
+                while expected <= target {
+                    let Ok(next) = current.wait_next(Duration::from_secs(60)).await else {
+                        current.reply("Too slow — maybe next time.").await?;
+                        return Ok(());
+                    };
+                    if next.text().trim() != expected.to_string() {
+                        next.reply(format!("That's not {expected}. Game over."))
+                            .await?;
+                        return Ok(());
+                    }
+                    expected += 1;
+                    if expected <= target {
+                        next.reply(expected.to_string()).await?;
+                        expected += 1;
+                    }
+                    current = next;
+                }
+                current.reply("Done!").await?;
+                Ok(())
+            },
+        )
+        .tool(
+            ToolSpec::new("fast_calc")
+                .description("High-performance mathematical calculation tool"),
+            |_args, _event| async move {
+                Ok(json!({
+                    "result": 42.0,
+                    "summary": "Calculation succeeded via Rust plugin tool",
+                }))
+            },
+        )
 }
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     // Launch plugin host listening on assigned socket.
-    KanonHost::new(DemoPlugin).run().await?;
+    KanonHost::new(plugin()).run().await?;
     Ok(())
 }

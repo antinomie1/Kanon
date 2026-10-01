@@ -138,11 +138,18 @@ impl BotApiService for CoreStub {
 
     type RequestLLMStream = ReceiverStream<Result<LlmChunk, Status>>;
 
+    /// Echoes the parameters back as the result, so a test sees both directions of the
+    /// JSON conversion.
     async fn call_platform_api(
         &self,
-        _request: tonic::Request<kanon_proto::v1::PlatformApiRequest>,
+        request: tonic::Request<kanon_proto::v1::PlatformApiRequest>,
     ) -> Result<tonic::Response<kanon_proto::v1::PlatformApiResponse>, tonic::Status> {
-        Err(tonic::Status::unimplemented("not used by this test"))
+        let request = request.into_inner();
+        Ok(tonic::Response::new(kanon_proto::v1::PlatformApiResponse {
+            result: request.params.map(|params| prost_types::Value {
+                kind: Some(prost_types::value::Kind::StructValue(params)),
+            }),
+        }))
     }
 
     async fn request_llm(
@@ -231,9 +238,9 @@ impl BotApiService for CoreStubServer {
 
     async fn call_platform_api(
         &self,
-        _request: tonic::Request<kanon_proto::v1::PlatformApiRequest>,
+        request: tonic::Request<kanon_proto::v1::PlatformApiRequest>,
     ) -> Result<tonic::Response<kanon_proto::v1::PlatformApiResponse>, tonic::Status> {
-        Err(tonic::Status::unimplemented("not used by this test"))
+        self.inner.call_platform_api(request).await
     }
 
     async fn request_llm(
@@ -334,6 +341,34 @@ async fn core_handle_ingests_events_into_the_core() {
 }
 
 /// Registration is the reachability proof used by the host runner.
+#[tokio::test]
+async fn core_handle_calls_the_platform_api_with_json() {
+    let socket = temp_socket("core-platform-api");
+    let _stub = start_core_stub(&socket).await;
+    let handle = CoreHandle::new(connect_with_retry(&socket).await);
+
+    let result = handle
+        .call_platform_api(
+            "onebot",
+            "set_group_ban",
+            serde_json::json!({ "group_id": 1, "users": ["a"], "notify": true }),
+        )
+        .await
+        .expect("platform API call");
+    // Numbers travel as doubles, so integers come back as floats.
+    assert_eq!(
+        result,
+        serde_json::json!({ "group_id": 1.0, "users": ["a"], "notify": true })
+    );
+
+    let rejected = handle
+        .call_platform_api("onebot", "x", serde_json::json!([1]))
+        .await
+        .expect_err("non-object parameters");
+    assert_eq!(rejected.code(), tonic::Code::InvalidArgument);
+    let _ = std::fs::remove_file(&socket);
+}
+
 #[tokio::test]
 async fn core_handle_registers_the_host() {
     let socket = temp_socket("core-register");

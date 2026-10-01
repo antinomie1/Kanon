@@ -258,35 +258,9 @@ fn read_stored_config(
     match serde_json::from_str::<serde_json::Value>(&raw)
         .map_err(|err| format!("invalid {}: {err}", path.display()))?
     {
-        serde_json::Value::Object(fields) => Ok(Some(json_struct(fields))),
+        serde_json::Value::Object(fields) => Ok(Some(crate::json::to_struct(fields))),
         _ => Err(format!("{} must contain a JSON object", path.display()).into()),
     }
-}
-
-/// Converts a JSON object into the protobuf `Struct` the plugin API carries.
-fn json_struct(fields: serde_json::Map<String, serde_json::Value>) -> prost_types::Struct {
-    prost_types::Struct {
-        fields: fields
-            .into_iter()
-            .map(|(key, value)| (key, json_value(value)))
-            .collect(),
-    }
-}
-
-/// Converts one JSON value; protobuf numbers are doubles, as they are on the wire.
-fn json_value(value: serde_json::Value) -> prost_types::Value {
-    use prost_types::value::Kind;
-    let kind = match value {
-        serde_json::Value::Null => Kind::NullValue(0),
-        serde_json::Value::Bool(flag) => Kind::BoolValue(flag),
-        serde_json::Value::Number(number) => Kind::NumberValue(number.as_f64().unwrap_or_default()),
-        serde_json::Value::String(text) => Kind::StringValue(text),
-        serde_json::Value::Array(items) => Kind::ListValue(prost_types::ListValue {
-            values: items.into_iter().map(json_value).collect(),
-        }),
-        serde_json::Value::Object(fields) => Kind::StructValue(json_struct(fields)),
-    };
-    prost_types::Value { kind: Some(kind) }
 }
 
 /// Implementation of [`PluginHostService`] for managing host lifecycle and inspection.
@@ -364,16 +338,44 @@ impl<P: Plugin> PluginHostService for HostServiceImpl<P> {
 
     /// Serves a control-plane management action.
     ///
-    /// Actions are the operator-facing counterpart of tools: they are never advertised to the
-    /// model. The Rust SDK does not declare any yet, so an incoming action is answered with an
-    /// explicit `unimplemented` status instead of being silently dropped.
+    /// Failures are answered as `success = false` with the reason, never as a transport error,
+    /// so the console can show the plugin's own explanation.
     async fn invoke_action(
         &self,
-        _request: Request<kanon_proto::v1::PluginActionRequest>,
+        request: Request<kanon_proto::v1::PluginActionRequest>,
     ) -> Result<Response<kanon_proto::v1::PluginActionResponse>, Status> {
-        Err(Status::unimplemented(
-            "This Rust plugin host declares no management actions",
-        ))
+        let request = request.into_inner();
+        let params = request
+            .parameters
+            .map(|params| serde_json::Value::Object(crate::json::from_struct(params)))
+            .unwrap_or(serde_json::Value::Null);
+        let outcome = self
+            .plugin
+            .read()
+            .await
+            .on_invoke_action(&request.action, params)
+            .await;
+        Ok(Response::new(match outcome {
+            Ok(serde_json::Value::Null) => kanon_proto::v1::PluginActionResponse {
+                success: true,
+                ..Default::default()
+            },
+            Ok(serde_json::Value::Object(fields)) => kanon_proto::v1::PluginActionResponse {
+                success: true,
+                error_message: String::new(),
+                result: Some(crate::json::to_struct(fields)),
+            },
+            Ok(_) => kanon_proto::v1::PluginActionResponse {
+                success: false,
+                error_message: format!("action '{}' returned a non-object result", request.action),
+                result: None,
+            },
+            Err(err) => kanon_proto::v1::PluginActionResponse {
+                success: false,
+                error_message: format!("Action failed: {err}"),
+                result: None,
+            },
+        }))
     }
 
     async fn get_plugin_meta(
