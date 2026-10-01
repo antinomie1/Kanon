@@ -217,7 +217,9 @@ async fn a_tool_attachment_is_delivered_as_an_image_segment() {
     let result = engine.process_event(event("画一张 B50")).await;
 
     let replies = match result {
-        PipelineResult::LlmReplied { content, replies } => {
+        PipelineResult::LlmReplied {
+            content, replies, ..
+        } => {
             assert_eq!(content, "这是你的 B50 图。");
             replies
         }

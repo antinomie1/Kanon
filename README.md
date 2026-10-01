@@ -62,6 +62,11 @@ Every key is optional, and an unknown key stops startup instead of being ignored
 }
 ```
 
+To send a model answer one line at a time, enable **Send each line separately** under Settings →
+Reply, or override it in an instance's reply settings (`reply_policy.split_lines`). It defaults to
+off. Empty and whitespace-only lines are skipped; code lines are split too. A quote appears only on
+the first message, trailing images stay on the last, and the stored model answer remains intact.
+
 | Key | Default | Purpose |
 | :--- | :--- | :--- |
 | `api_addr` | `127.0.0.1:8080` | management gateway bind address (loopback only) |

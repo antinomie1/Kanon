@@ -130,6 +130,11 @@ pub struct ReplyPolicy {
     /// before the model starts; only adapters with the `acknowledge` capability do anything.
     #[serde(default)]
     pub acknowledge: bool,
+    /// Send each nonblank line of a model reply as a separate platform message.
+    ///
+    /// Formatting is applied only at delivery; the model history keeps the complete answer.
+    #[serde(default)]
+    pub split_lines: bool,
 }
 
 /// Default reply probability for [`ReplyMode::Probability`].
@@ -146,6 +151,7 @@ impl Default for ReplyPolicy {
             probability: default_probability(),
             quote_message: false,
             acknowledge: false,
+            split_lines: false,
         }
     }
 }

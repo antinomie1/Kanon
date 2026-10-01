@@ -41,6 +41,7 @@ use crate::pipeline::dead_letter::DeadLetterWriter;
 use crate::pipeline::group_log::GroupLog;
 use crate::pipeline::observer::{PipelineObserver, PipelineStage};
 use crate::pipeline::pre_filter::{PreFilterChain, PreFilterOutcome};
+use crate::pipeline::reply::split_reply_lines;
 use crate::supervisor::circuit_breaker::{CircuitBreaker, CircuitState};
 use crate::supervisor::{AdapterRoute, Supervisor};
 use crate::toggle::{PLUGIN_SECTION, ToggleStore};
@@ -161,6 +162,8 @@ pub enum PipelineResult {
         content: String,
         /// Outbound reply segments generated for the conversational response.
         replies: Vec<MessageSegment>,
+        /// Delivery-only formatting captured from the effective policy for this event.
+        split_lines: bool,
     },
     /// The built-in `/new` command rotated the session of one conversation.
     SessionRotated {
@@ -1700,6 +1703,7 @@ impl PipelineEngine {
                     return PipelineResult::LlmReplied {
                         content: answer.to_string(),
                         replies,
+                        split_lines: reply_policy.split_lines,
                     };
                 }
                 Err(e) => {
@@ -2224,12 +2228,26 @@ impl PipelineEngine {
             _ => &[][..],
         };
 
-        if !replies.is_empty() {
+        let messages = if matches!(
+            &result,
+            PipelineResult::LlmReplied {
+                split_lines: true,
+                ..
+            }
+        ) {
+            split_reply_lines(replies)
+        } else if replies.is_empty() {
+            Vec::new()
+        } else {
+            vec![replies.to_vec()]
+        };
+
+        for segments in messages {
             let deliver_req = DeliverMessageRequest {
-                platform,
-                channel_id,
-                recipient_id,
-                segments: replies.to_vec(),
+                platform: platform.clone(),
+                channel_id: channel_id.clone(),
+                recipient_id: recipient_id.clone(),
+                segments,
                 event_id: event_id.clone(),
             };
 
@@ -2241,7 +2259,7 @@ impl PipelineEngine {
             match self.outbound_sender.try_send(deliver_req.into()) {
                 Ok(()) => {
                     self.observe(PipelineStage::OutboundQueued {
-                        event_id,
+                        event_id: event_id.clone(),
                         platform,
                         channel_id,
                         segment_count,

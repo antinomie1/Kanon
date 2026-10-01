@@ -14,6 +14,7 @@ pub mod engine;
 pub mod group_log;
 pub mod observer;
 pub mod pre_filter;
+mod reply;
 
 pub use command::{CommandRouter, MatchedCommand};
 pub use context::build_user_message;

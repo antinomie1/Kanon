@@ -101,6 +101,8 @@ class InstancesStore {
   formReplyQuote = $state(false);
   /** Progress feedback before answering (reply override only). */
   formReplyAck = $state(false);
+  /** Send nonblank answer lines separately (reply override only). */
+  formReplySplitLines = $state(false);
   /** Expand merged forwards (context override only). */
   formExpandForward = $state(true);
   /** Per-member or shared group sessions. */
@@ -367,6 +369,7 @@ class InstancesStore {
     this.formReplyProbability = 0.5;
     this.formReplyQuote = false;
     this.formReplyAck = false;
+    this.formReplySplitLines = false;
     this.formContextInherit = true;
     this.formExpandForward = true;
     this.formSessionScope = 'user';
@@ -399,6 +402,7 @@ class InstancesStore {
     this.formReplyProbability = instance.reply_policy?.probability ?? 0.5;
     this.formReplyQuote = instance.reply_policy?.quote_message ?? false;
     this.formReplyAck = instance.reply_policy?.acknowledge ?? false;
+    this.formReplySplitLines = instance.reply_policy?.split_lines ?? false;
     // A null override is the `inherit` choice; a stored policy is shown verbatim.
     this.formContextInherit = instance.context_policy === null;
     this.formIncludeChannelId =
@@ -472,6 +476,7 @@ class InstancesStore {
               probability: this.formReplyProbability,
               quote_message: this.formReplyQuote,
               acknowledge: this.formReplyAck,
+              split_lines: this.formReplySplitLines,
             },
       context_policy: this.formContextInherit
         ? null
