@@ -138,7 +138,6 @@ impl SqliteMemory {
                  role TEXT NOT NULL,
                  content TEXT,
                  reasoning_content TEXT,
-                 parts TEXT,
                  tool_calls TEXT,
                  tool_call_id TEXT,
                  name TEXT,
@@ -152,11 +151,15 @@ impl SqliteMemory {
         // `ADD COLUMN IF NOT EXISTS`, so the schema is inspected and missing columns are added
         // explicitly instead of failing the query, which keeps an operator's history usable across
         // the upgrade:
-        // - `messages.parts` (multimodal messages);
         // - `messages.reasoning_content` (separate private reasoning);
-        // - `sessions.summary` (compaction). The former `sessions.system_prompt` column is left
-        //   in place and ignored: the persona is composed per request, never stored per session.
-        Self::ensure_column(&conn, "messages", "parts")?;
+        // - `sessions.summary` (compaction).
+        //
+        // Columns that were dropped from the schema are left in place and ignored:
+        // - `sessions.system_prompt`: the persona is composed per request, never stored per
+        //   session;
+        // - `messages.parts`: a turn's media goes to the model with that turn only. The URLs it
+        //   held are signed and expire, and re-sending a dead one made the provider reject every
+        //   later request of the session.
         Self::ensure_column(&conn, "messages", "reasoning_content")?;
         Self::ensure_column(&conn, "sessions", "summary")?;
 
@@ -244,7 +247,7 @@ impl SqliteMemory {
 
             // Query historical messages ordered chronologically
             let mut msg_stmt = conn.prepare(
-                "SELECT role, content, parts, tool_calls, tool_call_id, name, reasoning_content
+                "SELECT role, content, tool_calls, tool_call_id, name, reasoning_content
                  FROM messages
                  WHERE session_key = ?1
                  ORDER BY id ASC",
@@ -255,10 +258,9 @@ impl SqliteMemory {
             while let Some(row) = msg_rows.next()? {
                 let role_str: String = row.get(0)?;
                 let content: Option<String> = row.get(1)?;
-                let parts_json: Option<String> = row.get(2)?;
-                let tool_calls_json: Option<String> = row.get(3)?;
-                let tool_call_id: Option<String> = row.get(4)?;
-                let name: Option<String> = row.get(5)?;
+                let tool_calls_json: Option<String> = row.get(2)?;
+                let tool_call_id: Option<String> = row.get(3)?;
+                let name: Option<String> = row.get(4)?;
 
                 let role = match role_str.as_str() {
                     "system" => Role::System,
@@ -270,21 +272,11 @@ impl SqliteMemory {
 
                 let tool_calls: Option<Vec<ToolCall>> =
                     tool_calls_json.and_then(|s| serde_json::from_str(&s).ok());
-                // A row whose parts cannot be decoded keeps its textual projection: failing the
-                // whole session load over one malformed media payload would hide the conversation.
-                let parts = parts_json.and_then(|s| match serde_json::from_str(&s) {
-                    Ok(parts) => Some(parts),
-                    Err(err) => {
-                        tracing::warn!(error = %err, "Dropping undecodable message parts");
-                        None
-                    }
-                });
-
                 let mut message = ChatMessage {
                     role,
                     content,
-                    reasoning_content: row.get(6)?,
-                    parts,
+                    reasoning_content: row.get(5)?,
+                    parts: None,
                     tool_calls,
                     tool_call_id,
                     name,
@@ -324,6 +316,9 @@ fn role_name(role: Role) -> &'static str {
 }
 
 /// Inserts one message row inside an open transaction.
+///
+/// Media parts are not stored: history keeps a message's textual projection only (see the
+/// schema notes in `init_connection`).
 fn insert_message(
     tx: &rusqlite::Transaction<'_>,
     session_key: &str,
@@ -334,19 +329,13 @@ fn insert_message(
         .tool_calls
         .as_ref()
         .and_then(|calls| serde_json::to_string(calls).ok());
-    let parts_json = message
-        .parts
-        .as_ref()
-        .and_then(|parts| serde_json::to_string(parts).ok());
-
     tx.execute(
-        "INSERT INTO messages (session_key, role, content, parts, tool_calls, tool_call_id, name, created_at, reasoning_content)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+        "INSERT INTO messages (session_key, role, content, tool_calls, tool_call_id, name, created_at, reasoning_content)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
         params![
             session_key,
             role_name(message.role),
             message.content,
-            parts_json,
             tool_calls_json,
             message.tool_call_id,
             message.name,

@@ -18,8 +18,10 @@ use kanon_llm::gateway::LlmProvider;
 use kanon_llm::gateway::providers::{
     AnthropicMessagesProvider, OpenAiChatProvider, OpenAiResponsesProvider,
 };
-use kanon_llm::gateway::types::{ChatMessage, ChatRequest, ChatResponse, Role, ToolDefinition};
-use kanon_llm::memory::InMemory;
+use kanon_llm::gateway::types::{
+    ChatMessage, ChatRequest, ChatResponse, ContentPart, Role, ToolCall, ToolDefinition,
+};
+use kanon_llm::memory::{InMemory, Memory};
 use kanon_llm::prompt::{BASE_PERSONA_PROMPT, PersonaRegistry};
 use kanon_llm::session::SessionManager;
 use kanon_llm::{canonical_json, canonical_tools, normalize_request};
@@ -222,6 +224,86 @@ async fn each_request_extends_the_previous_one_and_only_the_tail_changes() {
         );
         assert_eq!(after.messages.len(), before.messages.len() + 2);
     }
+}
+
+/// Calls the `alpha` tool when a request ends with the user's message and answers otherwise.
+#[derive(Default)]
+struct ToolThenAnswer {
+    requests: Mutex<Vec<ChatRequest>>,
+}
+
+#[async_trait]
+impl LlmProvider for ToolThenAnswer {
+    async fn chat(&self, request: &ChatRequest) -> Result<ChatResponse, GatewayError> {
+        self.requests.lock().unwrap().push(request.clone());
+        if request.messages.last().map(|message| message.role) == Some(Role::User) {
+            return Ok(ChatResponse {
+                tool_calls: vec![ToolCall {
+                    id: format!("call-{}", request.messages.len()),
+                    name: "alpha".into(),
+                    arguments: json!({}),
+                }],
+                ..ChatResponse::default()
+            });
+        }
+        Ok(ChatResponse {
+            content: Some("done".into()),
+            finish_reason: Some("stop".into()),
+            ..ChatResponse::default()
+        })
+    }
+}
+
+#[tokio::test]
+async fn a_turns_images_go_out_with_that_turn_only() {
+    // Platform image URLs are signed and expire. Re-sent with every later request, one the
+    // provider can no longer download fails the whole session; history keeps the words only.
+    let model = Arc::new(ToolThenAnswer::default());
+    let memory = Arc::new(InMemory::new());
+    let agent = Agent::builder("media", model.clone())
+        .memory(memory.clone())
+        .model("test")
+        .tool(tool("alpha"))
+        .build();
+    let image = ContentPart::image_url("https://cdn.example/a.png?rkey=signed", None);
+    agent
+        .run_message(
+            "session",
+            ChatMessage::user_multimodal("[图片] what is this", vec![image.clone()]),
+            &[],
+        )
+        .await
+        .unwrap();
+    agent.run("session", "and now?", &[]).await.unwrap();
+
+    let requests = model.requests.lock().unwrap().clone();
+    assert_eq!(requests.len(), 4, "each turn is a tool call and an answer");
+    // The model sees the picture in every request of its turn, tool loop included.
+    for request in &requests[..2] {
+        let user = request.messages.iter().find(|m| m.role == Role::User);
+        assert_eq!(user.unwrap().parts.as_ref(), Some(&vec![image.clone()]));
+    }
+    let history = memory.snapshot("session").await.unwrap().messages;
+    assert_eq!(history[0].content.as_deref(), Some("[图片] what is this"));
+    assert!(history.iter().all(|message| message.parts.is_none()));
+
+    // The next turn re-sends the previous request without the picture, then only appends; from
+    // there on each request extends the one before exactly.
+    let mut previous = requests[1].messages.clone();
+    for message in &mut previous {
+        message.parts = None;
+    }
+    assert_eq!(&requests[2].messages[..previous.len()], previous.as_slice());
+    assert_eq!(
+        &requests[3].messages[..requests[2].messages.len()],
+        requests[2].messages.as_slice()
+    );
+    assert!(
+        requests[2..]
+            .iter()
+            .flat_map(|request| &request.messages)
+            .all(|message| message.parts.is_none())
+    );
 }
 
 #[tokio::test]

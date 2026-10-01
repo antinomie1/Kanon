@@ -6,6 +6,7 @@
 //! - [`PipelineEngine`]: Asynchronous worker loop consuming ingested events and managing outbound dispatch.
 //! - [`PipelineObserver`]: Fire-and-forget lifecycle observation hook for control-plane tracing.
 //! - [`build_user_message`]: Translation of inbound segments into the model-visible user message.
+//! - [`inline_images`]: Inbound images downloaded by the node, so the provider never fetches them.
 //! - [`attachment_segments`]: Outbound segments for tool media, limited to what the adapter can send.
 
 pub mod attachment;
@@ -16,9 +17,11 @@ pub mod dead_letter;
 pub mod engine;
 pub mod group_log;
 pub mod hooks;
+pub mod media;
 pub mod observer;
 pub mod pre_filter;
 mod reply;
+mod turns;
 
 pub use attachment::{AttachmentSegments, MediaKind, attachment_segments};
 pub use capture::{Capture, CaptureRegistry, MAX_CAPTURE};
@@ -31,8 +34,9 @@ pub use dead_letter::{
 };
 pub use engine::{
     DEFAULT_OUTBOUND_QUEUE_CAPACITY, DeliveryOutcome, HELP_COMMAND, INFO_COMMAND, MODEL_COMMAND,
-    NEW_SESSION_COMMAND, PipelineEngine, PipelineResult,
+    NEW_SESSION_COMMAND, PipelineEngine, PipelineResult, STOP_COMMAND,
 };
+pub use media::{MAX_INBOUND_IMAGE_BYTES, inline_images};
 pub use observer::{PipelineObserver, PipelineStage};
 pub use pre_filter::{
     PREFILTER_TOTAL_DEADLINE, PREFILTER_WARN_THRESHOLD, PreFilterChain, PreFilterOutcome,

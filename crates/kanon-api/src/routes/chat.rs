@@ -272,6 +272,9 @@ fn map_agent_error(err: AgentError) -> ApiError {
         AgentError::Gateway(gateway) => {
             ApiError::Upstream(format!("Model provider failure: {gateway}"))
         }
+        // Console turns carry no stop signal today; should one be stopped, it is a conflict with
+        // whoever stopped it, not a server fault.
+        AgentError::Stopped => ApiError::Conflict("The turn was stopped before it finished".into()),
     }
 }
 

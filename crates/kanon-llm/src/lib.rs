@@ -32,6 +32,7 @@ pub mod provider;
 pub mod session;
 pub mod slot;
 pub mod sqlite_memory;
+pub mod stop;
 pub mod token;
 pub mod tool_call_text;
 pub mod tool_router;
@@ -67,6 +68,7 @@ pub use session::{
 };
 pub use slot::AgentSlot;
 pub use sqlite_memory::{PersistentMemory, SqliteMemory, SqliteSessionStore};
+pub use stop::{StopSignal, with_stop_signal};
 pub use token::{
     estimate_conversation_tokens, estimate_message_tokens, estimate_request_tokens,
     estimate_text_tokens, estimate_tokens,

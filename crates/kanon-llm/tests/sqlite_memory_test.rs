@@ -1,6 +1,6 @@
 //! Integration tests for embedded SQLite-backed conversation memory (`SqliteMemory`).
 
-use kanon_llm::gateway::types::{ChatMessage, Role, ToolCall};
+use kanon_llm::gateway::types::{ChatMessage, ContentPart, Role, ToolCall};
 use kanon_llm::memory::Memory;
 use kanon_llm::sqlite_memory::SqliteMemory;
 use std::sync::Arc;
@@ -389,6 +389,67 @@ async fn test_sqlite_database_from_an_earlier_version_is_upgraded_in_place() {
     let snapshot = reloaded.snapshot("old").await.unwrap();
     assert_eq!(snapshot.summary.as_deref(), Some("legacy summary"));
     assert_eq!(snapshot.messages.len(), 1);
+}
+
+#[tokio::test]
+async fn test_sqlite_history_never_carries_media_urls() {
+    // Earlier releases stored a turn's image URLs. Those are signed and expire, and the provider
+    // rejects any request holding one it cannot download, so a session that kept one failed every
+    // turn from then on. Such a session must load as words only, and nothing new stores media.
+    let dir = tempdir().expect("Failed to create temporary directory");
+    let db_path = dir.path().join("media.db");
+    {
+        let conn = rusqlite::Connection::open(&db_path).expect("db");
+        conn.execute_batch(
+            r#"CREATE TABLE messages (
+                 id INTEGER PRIMARY KEY AUTOINCREMENT,
+                 session_key TEXT NOT NULL,
+                 role TEXT NOT NULL,
+                 content TEXT,
+                 reasoning_content TEXT,
+                 parts TEXT,
+                 tool_calls TEXT,
+                 tool_call_id TEXT,
+                 name TEXT,
+                 created_at INTEGER NOT NULL
+             );
+             INSERT INTO messages (session_key, role, content, parts, created_at)
+                 VALUES ('group', 'user', '[图片] 这是什么',
+                         '[{"type":"image","url":"https://gchat.qpic.cn/download?rkey=expired"}]', 1);"#,
+        )
+        .expect("seed a session written by the previous release");
+    }
+
+    let memory = SqliteMemory::open(&db_path).expect("open");
+    memory
+        .push_message(
+            "group",
+            ChatMessage::user_multimodal(
+                "[图片] and this?",
+                vec![ContentPart::image_url("https://cdn.example/new.png", None)],
+            ),
+        )
+        .await
+        .unwrap();
+    drop(memory);
+
+    let snapshot = SqliteMemory::open(&db_path)
+        .expect("reopen")
+        .snapshot("group")
+        .await
+        .unwrap();
+    let words: Vec<_> = snapshot
+        .messages
+        .iter()
+        .map(|message| message.content.as_deref().unwrap())
+        .collect();
+    assert_eq!(words, ["[图片] 这是什么", "[图片] and this?"]);
+    assert!(
+        snapshot
+            .messages
+            .iter()
+            .all(|message| message.parts.is_none())
+    );
 }
 
 #[tokio::test]

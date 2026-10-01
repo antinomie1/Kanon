@@ -21,17 +21,25 @@ use kanon_proto::v1::{ToolCallRequest, tool_call_request, tool_call_response};
 use crate::compaction::{COMPACTION_INSTRUCTION, CompactionPolicy, ends_cleanly, summary_block};
 use crate::error::AgentError;
 use crate::gateway::types::{
-    ChatMessage, ChatRequest, ChatResponse, Role, TokenUsage, ToolCall, ToolDefinition,
+    ChatMessage, ChatRequest, ChatResponse, ContentPart, Role, TokenUsage, ToolCall, ToolDefinition,
 };
 use crate::gateway::{ChatChunk, ChatChunkStream, LlmProvider};
 use crate::layout::{canonical_tools, normalize_request};
 use crate::memory::{InMemory, Memory, MemorySnapshot};
+use crate::stop::{StopSignal, unless_stopped};
 use crate::tool_router::{
     ExecutedToolCall, ToolAttachment, ToolHost, aggregate_tools, json_to_prost_struct,
     prost_struct_to_json,
 };
 use dashmap::{DashMap, DashSet};
 use tokio_stream::StreamExt;
+
+/// Result recorded for a tool call that a stopped turn left without one.
+///
+/// Worded for the model, which reads it in later turns: the call produced nothing because the
+/// turn was stopped, not because the tool failed.
+pub const STOPPED_TOOL_RESULT: &str =
+    "Not completed: the turn was stopped before this tool call finished.";
 
 /// Configuration parameters for agent reasoning and execution.
 #[derive(Debug, Clone)]
@@ -610,7 +618,8 @@ impl Agent {
     ///
     /// Identical to [`Agent::run`] except that the caller supplies the message itself, which is how
     /// a multimodal turn carrying images reaches the provider. The textual projection in
-    /// [`ChatMessage::content`] is what token accounting and summaries use.
+    /// [`ChatMessage::content`] is what token accounting and summaries use, and the only part of
+    /// the message stored in history: the images go out with this turn's requests alone.
     pub async fn run_message(
         &self,
         session_id: &str,
@@ -622,7 +631,12 @@ impl Agent {
         }
         let user_input = message.content.clone().unwrap_or_default();
 
-        // 1. Push user message to memory
+        // 1. Push user message to memory, without its media. Platform media URLs are signed and
+        // expire within hours (QQ's `rkey`), and a provider that cannot download one rejects the
+        // whole request. Stored in append-only history, one dead URL would fail every later turn
+        // of the session, so history keeps only the textual projection (`[图片]`) and the media
+        // rides along with this turn's requests alone.
+        let media = message.parts.take();
         self.memory.push_message(session_id, message).await?;
 
         // 2. Dynamically aggregate tools from both native tools and active plugin hosts
@@ -632,12 +646,21 @@ impl Agent {
         let mut attachments: Vec<ToolAttachment> = Vec::new();
         let mut reasoning: Vec<String> = Vec::new();
         let mut iterations = 0;
+        // Set when the caller can stop this turn from outside (see `crate::stop`).
+        let stop = crate::stop::current();
 
         // 3. Reasoning and tool execution loop
         loop {
-            let request = self.build_request(session_id, &tools).await?;
+            let mut request = self.build_request(session_id, &tools).await?;
+            attach_turn_media(&mut request, media.as_ref());
 
-            let mut response = self.provider.chat(&request).await?;
+            // Stopping here leaves history ending in the user message or in tool results, both of
+            // which a later turn continues validly.
+            let Some(response) = unless_stopped(stop.as_ref(), self.provider.chat(&request)).await
+            else {
+                return Err(self.stopped(session_id, &[]).await);
+            };
+            let mut response = response?;
             response.separate_reasoning();
 
             // Recover tool calls a model emitted as text markup instead of structured calls, so the
@@ -739,8 +762,15 @@ impl Agent {
                 .push_message(session_id, response.assistant_message())
                 .await?;
 
+            // Every call of the round, so a stop can answer the ones that have no result yet.
+            let call_ids: Vec<String> = response.tool_calls.iter().map(|c| c.id.clone()).collect();
+
             // Execute each requested tool call
-            for call in response.tool_calls {
+            for (index, call) in response.tool_calls.into_iter().enumerate() {
+                if stop.as_ref().is_some_and(StopSignal::is_stopped) {
+                    return Err(self.stopped(session_id, &call_ids[index..]).await);
+                }
+
                 // Hook: tool call permission / safety check
                 let mut permitted = true;
                 for hook in &self.hooks {
@@ -771,20 +801,27 @@ impl Agent {
                     self.tools.iter().find(|t| t.definition().name == call.name)
                 {
                     tracing::debug!(agent = %self.name, tool = %call.name, "Executing native tool in-process");
-                    let (result_str, is_success) =
-                        match native_tool.call(session_id, call.arguments.clone()).await {
-                            Ok(output) => {
-                                // Same rule as plugin attachments: deduplicated, in execution
-                                // order, and only from calls that succeeded.
-                                for attachment in output.attachments {
-                                    if !attachments.contains(&attachment) {
-                                        attachments.push(attachment);
-                                    }
+                    let Some(result) = unless_stopped(
+                        stop.as_ref(),
+                        native_tool.call(session_id, call.arguments.clone()),
+                    )
+                    .await
+                    else {
+                        return Err(self.stopped(session_id, &call_ids[index..]).await);
+                    };
+                    let (result_str, is_success) = match result {
+                        Ok(output) => {
+                            // Same rule as plugin attachments: deduplicated, in execution
+                            // order, and only from calls that succeeded.
+                            for attachment in output.attachments {
+                                if !attachments.contains(&attachment) {
+                                    attachments.push(attachment);
                                 }
-                                (output.text, true)
                             }
-                            Err(err) => (format!("Error: {err}"), false),
-                        };
+                            (output.text, true)
+                        }
+                        Err(err) => (format!("Error: {err}"), false),
+                    };
 
                     executed_tools.push(ExecutedToolCall {
                         call_id: call.id.clone(),
@@ -866,7 +903,12 @@ impl Agent {
                     "Agent dispatching tool RPC to host"
                 );
 
-                match target_host.call_tool(tool_req).await {
+                let Some(result) =
+                    unless_stopped(stop.as_ref(), target_host.call_tool(tool_req)).await
+                else {
+                    return Err(self.stopped(session_id, &call_ids[index..]).await);
+                };
+                match result {
                     Ok(resp) => {
                         let is_success = resp.success;
                         executed_tools.push(ExecutedToolCall {
@@ -956,6 +998,34 @@ impl Agent {
                 }
             }
         }
+    }
+
+    /// Records the end of a stopped turn and returns the error the turn ends with.
+    ///
+    /// `unanswered` are the calls of the current round that have no result yet. Each gets one
+    /// saying it was stopped: providers reject a conversation in which a tool call has no result,
+    /// so leaving them open would fail every later request of the session. A memory failure while
+    /// recording them is returned instead, since the session is then not known to be valid.
+    async fn stopped(&self, session_id: &str, unanswered: &[String]) -> AgentError {
+        for id in unanswered {
+            if let Err(err) = self
+                .memory
+                .push_message(
+                    session_id,
+                    ChatMessage::tool_response(id, STOPPED_TOOL_RESULT),
+                )
+                .await
+            {
+                return err.into();
+            }
+        }
+        tracing::info!(
+            agent = %self.name,
+            session_id = %session_id,
+            unanswered_tool_calls = unanswered.len(),
+            "Turn stopped before it finished"
+        );
+        AgentError::Stopped
     }
 
     /// Executes the agent reasoning loop in standalone streaming mode, returning incremental chunks
@@ -1253,6 +1323,26 @@ fn redact_tool_paths(mut text: String, paths: &[String]) -> String {
 /// Joins the reasoning collected across one turn's rounds, or `None` when there was none.
 fn joined_reasoning(rounds: &[String]) -> Option<String> {
     (!rounds.is_empty()).then(|| rounds.join("\n\n"))
+}
+
+/// Puts the turn's media back on its user message for one request of the turn.
+///
+/// The turn's message is the last user message: everything after it is this turn's own tool loop,
+/// which holds only assistant and tool messages. The next turn's requests no longer carry it, so
+/// the prefix they share with this one ends just before this message — a one-time cache miss of
+/// that message instead of re-sending every picture of the conversation with each later request.
+fn attach_turn_media(request: &mut ChatRequest, media: Option<&Vec<ContentPart>>) {
+    let Some(media) = media else {
+        return;
+    };
+    if let Some(message) = request
+        .messages
+        .iter_mut()
+        .rev()
+        .find(|message| message.role == Role::User)
+    {
+        message.parts = Some(media.clone());
+    }
 }
 
 /// Recovers tool calls from a completion whose model emitted markup instead of a structured array.

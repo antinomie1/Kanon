@@ -430,7 +430,7 @@ impl LlmProvider for LayoutModel {
 
 #[tokio::test]
 #[ignore = "requires local Docker and the sandbox/bash runtime image"]
-async fn availability_keeps_multimodal_history_and_compaction_prefix_intact() {
+async fn availability_keeps_history_and_compaction_prefix_intact() {
     let dir = tempfile::tempdir().unwrap();
     let policy = permitted();
     let memory = Arc::new(InMemory::new());
@@ -466,7 +466,8 @@ async fn availability_keeps_multimodal_history_and_compaction_prefix_intact() {
         4,
         "availability must not create stored messages"
     );
-    assert_eq!(history[0].parts, Some(parts));
+    // The pictures went to the model with their own turn and are not part of history.
+    assert!(history[0].parts.is_none());
     assert_eq!(
         history[0]
             .content
@@ -492,6 +493,7 @@ async fn availability_keeps_multimodal_history_and_compaction_prefix_intact() {
     );
     assert!(agent.compact_session("group", &[]).await.unwrap());
     let requests = model.requests.lock().unwrap().clone();
+    assert_eq!(requests[0].messages.last().unwrap().parts, Some(parts));
     assert_eq!(
         &requests[1].messages[..history.len() - 1],
         &history[..history.len() - 1]

@@ -134,7 +134,8 @@ pub struct ChatMessage {
     /// Multimodal parts of a user message, present only when the inbound event referenced media.
     ///
     /// `content` always carries the textual projection, so a provider (or a model without vision)
-    /// that ignores these parts still receives a readable message.
+    /// that ignores these parts still receives a readable message. The parts go out with their
+    /// own turn only and are never stored in history (see [`crate::agent::Agent::run_message`]).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub parts: Option<Vec<ContentPart>>,
 

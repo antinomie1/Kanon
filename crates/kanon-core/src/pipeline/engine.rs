@@ -11,7 +11,7 @@
 //! The queue is deliberately bounded: when a platform cannot keep up, the overflow is reported as
 //! an explicit `OutboundFailed` stage instead of growing memory without limit.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::sync::Arc;
 use tokio::sync::{Mutex, RwLock, mpsc, oneshot, watch};
 use tokio::task::JoinHandle;
@@ -169,6 +169,14 @@ pub enum PipelineResult {
         /// Delivery-only formatting captured from the effective policy for this event.
         split_lines: bool,
     },
+    /// The model turn failed after the sender asked for an answer. They are told once; the turn
+    /// is never re-run.
+    LlmFailed {
+        /// The failure, for logs and traces.
+        error: String,
+        /// Short notice delivered back to the conversation.
+        replies: Vec<MessageSegment>,
+    },
     /// The built-in `/new` command rotated the session of one conversation.
     SessionRotated {
         /// Instance whose conversation was rotated.
@@ -308,6 +316,15 @@ pub const HELP_COMMAND: &str = "help";
 /// Name of the built-in system-info command.
 pub const INFO_COMMAND: &str = "info";
 
+/// Name of the built-in command that stops the running model turns of an instance.
+///
+/// A turn can keep the bot busy for minutes (a model calling tools over and over, a hung
+/// provider), and the worker answers events one at a time, so everything else waits behind it.
+/// `/stop` is therefore taken out of the queue while a turn runs (see
+/// [`PipelineEngine::run_worker_loop`]) and handled at once. It acts on every chat of the
+/// instance, so only administrators may use it unless the command policy says otherwise.
+pub const STOP_COMMAND: &str = "stop";
+
 /// Identity of one conversation inside an instance: channel plus sender, or the channel alone when
 /// the instance shares group sessions.
 ///
@@ -413,6 +430,36 @@ fn distribution_name() -> String {
 /// A group platform renders a mention as leading text, so a command typed at the bot arrives as
 /// `@bot /model`. The core only uses this for *command* parsing: the model still receives the
 /// mention, because knowing it was addressed is real context.
+/// The text a command is parsed from: the raw text, or the first text segment without one.
+fn message_text(event: &PipelineEventRequest) -> String {
+    if !event.raw_text.is_empty() {
+        return event.raw_text.clone();
+    }
+    event
+        .segments
+        .iter()
+        .find_map(|s| match &s.segment {
+            Some(Segment::Text(t)) => Some(t.content.clone()),
+            _ => None,
+        })
+        .unwrap_or_default()
+}
+
+/// Whether an ingested event is a `/stop` command, read the way the pipeline reads commands.
+///
+/// Only the shape is checked here; the pipeline itself decides whether an instance owns the
+/// platform and whether the sender may stop it.
+fn is_stop_request(req: &IngestEventRequest) -> bool {
+    let Some(event) = req.event.as_ref() else {
+        return false;
+    };
+    if NoticeKind::from_metadata(event.metadata.as_ref()).is_some() {
+        return false;
+    }
+    CommandRouter::parse_command(strip_leading_mentions(&message_text(event)))
+        .is_some_and(|command| command.name.eq_ignore_ascii_case(STOP_COMMAND))
+}
+
 fn strip_leading_mentions(text: &str) -> &str {
     let mut rest = text.trim_start();
     while let Some(after_at) = rest.strip_prefix('@') {
@@ -432,6 +479,32 @@ fn text_reply(content: impl Into<String>) -> MessageSegment {
             content: content.into(),
         })),
     }
+}
+
+/// The chat notice for a model turn that failed, naming the cause without the provider's raw
+/// error body, which can be long and is meant for the operator's log rather than a group chat.
+///
+/// It says outright that nothing retries: the sender should know that sending again is theirs to
+/// decide, and the node never repeats a failing request on its own.
+fn failure_notice(error: &kanon_llm::ToolRouterError) -> String {
+    use kanon_llm::{GatewayError, ToolRouterError};
+    let reason = match error {
+        ToolRouterError::Gateway(GatewayError::ApiStatus { status, .. }) => {
+            format!("模型服务返回错误（HTTP {status}）")
+        }
+        ToolRouterError::Gateway(GatewayError::Http(err)) if err.is_timeout() => {
+            "模型服务响应超时".to_string()
+        }
+        ToolRouterError::Gateway(GatewayError::Http(_)) => "无法连接模型服务".to_string(),
+        ToolRouterError::Gateway(GatewayError::Json(_) | GatewayError::InvalidResponse(_)) => {
+            "模型的结果无法处理".to_string()
+        }
+        ToolRouterError::Rpc(_) => "插件工具调用失败".to_string(),
+        ToolRouterError::ToolNotFound(name) => format!("模型调用了未注册的工具 {name}"),
+        // A stopped turn is answered by `/stop` itself; the caller never asks for this notice.
+        ToolRouterError::Stopped => "任务已停止".to_string(),
+    };
+    format!("这次没能回复：{reason}。不会自动重试，可以稍后再发。")
 }
 
 /// Renders the `/model` listing as plain text.
@@ -508,6 +581,8 @@ pub struct PipelineEngine {
     triggers: TriggerMatcher,
     /// Plugins waiting for a sender's next message.
     captures: CaptureRegistry,
+    /// Model turns in progress, which `/stop` can end.
+    turns: super::turns::RunningTurns,
     /// MCP servers contributing tools alongside plugin hosts.
     mcp: Option<Arc<McpPool>>,
     /// Optional lifecycle observer used by the management control plane for tracing.
@@ -545,6 +620,7 @@ impl PipelineEngine {
             group_log: GroupLog::default(),
             triggers: TriggerMatcher::default(),
             captures: CaptureRegistry::default(),
+            turns: Default::default(),
             mcp: None,
             observer: None,
             dead_letter: Arc::new(DeadLetterWriter::default()),
@@ -1389,19 +1465,7 @@ impl PipelineEngine {
         });
 
         // Phase 2: Command Router matching
-        // Extract raw text or inspect primary text segment if raw_text is empty.
-        let text_candidate = if !filtered_event.raw_text.is_empty() {
-            filtered_event.raw_text.clone()
-        } else {
-            filtered_event
-                .segments
-                .iter()
-                .find_map(|s| match &s.segment {
-                    Some(Segment::Text(t)) => Some(t.content.clone()),
-                    _ => None,
-                })
-                .unwrap_or_default()
-        };
+        let text_candidate = message_text(&filtered_event);
 
         // Phase 2a: Built-in commands, resolved by the core itself.
         //
@@ -1489,10 +1553,11 @@ impl PipelineEngine {
 
             if let Some(parsed) = CommandRouter::parse_command(command_text) {
                 let name = parsed.name.clone();
-                // `/new` and `/model` act on an instance, so without one they are ordinary names a
-                // plugin may claim; `/help` and `/info` are always the core's.
+                // `/new`, `/model` and `/stop` act on an instance, so without one they are ordinary
+                // names a plugin may claim; `/help` and `/info` are always the core's.
                 let builtin = ((name.eq_ignore_ascii_case(NEW_SESSION_COMMAND)
-                    || name.eq_ignore_ascii_case(MODEL_COMMAND))
+                    || name.eq_ignore_ascii_case(MODEL_COMMAND)
+                    || name.eq_ignore_ascii_case(STOP_COMMAND))
                     && instance.is_some())
                     || name.eq_ignore_ascii_case(HELP_COMMAND)
                     || name.eq_ignore_ascii_case(INFO_COMMAND);
@@ -1507,6 +1572,11 @@ impl PipelineEngine {
                 // a restriction, and with the access level its plugin declared as the default.
                 let (policy_name, default_access) = match &target {
                     Some(target) => (target.name().to_string(), target.access()),
+                    // Stopping cuts off answers in every chat of the instance, not only the
+                    // sender's own.
+                    None if name.eq_ignore_ascii_case(STOP_COMMAND) => {
+                        (STOP_COMMAND.to_string(), CommandAccess::Admins)
+                    }
                     None => (name.clone(), CommandAccess::Everyone),
                 };
                 if let Some(policy) = command_policy.as_ref()
@@ -1534,6 +1604,9 @@ impl PipelineEngine {
                     if let Some(instance) = instance.as_ref() {
                         if name.eq_ignore_ascii_case(NEW_SESSION_COMMAND) {
                             return self.handle_new_session(&filtered_event, instance).await;
+                        }
+                        if name.eq_ignore_ascii_case(STOP_COMMAND) {
+                            return self.handle_stop_command(instance);
                         }
                         return self.handle_model_command(instance, &parsed.args).await;
                     }
@@ -1811,7 +1884,12 @@ impl PipelineEngine {
         for (index, text) in lead.into_iter().enumerate() {
             filtered_event.segments.insert(index, text_reply(text));
         }
-        let user_message = build_user_message(&filtered_event, &capabilities, &context_policy);
+        let mut user_message = build_user_message(&filtered_event, &capabilities, &context_policy);
+        // Only a turn that reaches a model needs its pictures; see `media` for why the node
+        // downloads them instead of passing the platform's URLs on.
+        if answering {
+            super::media::inline_images(&mut user_message).await;
+        }
 
         if (user_message
             .content
@@ -1903,11 +1981,18 @@ impl PipelineEngine {
                 instance: instance.as_ref().map(|instance| instance.id.clone()),
                 shared_context: shared || observing,
             });
+            // Registered for exactly as long as the turn runs, so `/stop` reaches it and only it.
+            let turn = self
+                .turns
+                .begin(instance.as_ref().map(|instance| instance.id.clone()));
             match crate::supervisor::with_tool_event(
                 filtered_event.clone(),
                 crate::with_bash_caller(
                     bash_caller,
-                    router.execute_message(&session_id, user_message, &tool_hosts),
+                    kanon_llm::with_stop_signal(
+                        turn.signal(),
+                        router.execute_message(&session_id, user_message, &tool_hosts),
+                    ),
                 ),
             )
             .await
@@ -2027,12 +2112,31 @@ impl PipelineEngine {
                         split_lines: reply_policy.split_lines,
                     };
                 }
+                Err(kanon_llm::ToolRouterError::Stopped) => {
+                    tracing::info!(
+                        session_id = %session_id,
+                        "Turn stopped by /stop; nothing is sent for it"
+                    );
+                }
                 Err(e) => {
                     tracing::error!(
                         session_id = %session_id,
                         error = %e,
                         "LLM reasoning and tool execution failed"
                     );
+                    // Someone who asked hears that no answer is coming instead of waiting for one.
+                    // A turn the bot started on its own (a sampled group message, a notice) fails
+                    // quietly: while a provider is down, every such turn would fail, and a notice
+                    // for each would flood the group.
+                    let asked = notice.is_none()
+                        && (!kind.is_policy_governed()
+                            || bot_mentioned(filtered_event.metadata.as_ref()));
+                    if asked {
+                        return PipelineResult::LlmFailed {
+                            replies: vec![text_reply(failure_notice(&e))],
+                            error: e.to_string(),
+                        };
+                    }
                 }
             }
         }
@@ -2194,6 +2298,28 @@ impl PipelineEngine {
     ///
     /// The previous session is never deleted: rotation only moves the conversation to a new
     /// session key, so the old history stays inspectable in the console.
+    /// Handles the built-in `/stop` command: stops every running model turn of `instance`.
+    ///
+    /// A stopped turn ends at its next wait on the model or a tool and sends no reply; what it
+    /// already did (commands run, files written) stays done.
+    fn handle_stop_command(&self, instance: &crate::instance::BotInstance) -> PipelineResult {
+        let stopped = self.turns.stop_instance(&instance.id);
+        tracing::info!(
+            instance_id = %instance.id,
+            stopped_turns = stopped,
+            "Built-in /stop stopped the instance's running turns"
+        );
+        let reply = if stopped == 0 {
+            "当前没有正在运行的任务。".to_string()
+        } else {
+            format!("已停止 {stopped} 个正在运行的任务。")
+        };
+        PipelineResult::BuiltinReplied {
+            command: STOP_COMMAND.to_string(),
+            replies: vec![text_reply(reply)],
+        }
+    }
+
     async fn handle_new_session(
         &self,
         event: &PipelineEventRequest,
@@ -2362,6 +2488,7 @@ impl PipelineEngine {
         let mut rendered = String::from("内置指令：\n");
         rendered.push_str("/new — 开始新会话\n");
         rendered.push_str("/model — 列出可用模型；/model <序号> 切换当前实例模型\n");
+        rendered.push_str("/stop — 停止当前实例正在运行的任务\n");
         rendered.push_str("/help — 显示本帮助\n");
         rendered.push_str("/info — 显示系统与运行信息\n");
 
@@ -2508,53 +2635,95 @@ impl PipelineEngine {
     /// explicit `Closed` error), every event still queued is written to the dead-letter log
     /// without being started, and the event in progress gets [`SHUTDOWN_EVENT_GRACE`] to finish
     /// before it is recorded as well. Nothing the node acknowledged disappears silently.
+    ///
+    /// # Stopping
+    /// Events are answered one at a time, so a long turn holds back every other conversation.
+    /// While an event is in progress the worker keeps reading the queue: a `/stop` it finds is
+    /// handled at once, everything else waits its turn in arrival order.
     pub async fn run_worker_loop(&self, mut event_receiver: mpsc::Receiver<IngestEventRequest>) {
         tracing::info!("Pipeline worker loop started");
         let mut phase = self.shutdown.subscribe();
         let draining = |p| p != ShutdownPhase::Running;
+        // Events read from the queue while an earlier one was being processed, in arrival order.
+        // Reading ahead is what lets `/stop` reach a running turn; it is capped at the queue's own
+        // capacity so the ingest high-watermark still pushes back on adapters.
+        let mut waiting: VecDeque<IngestEventRequest> = VecDeque::new();
+        let read_ahead = event_receiver.max_capacity();
+        let mut queue_open = true;
 
         loop {
-            let req = tokio::select! {
-                biased;
-                _ = wait_for_phase(&mut phase, draining) => break,
-                req = event_receiver.recv() => match req {
-                    Some(req) => req,
-                    None => break,
+            let req = match waiting.pop_front() {
+                Some(req) if !draining(*phase.borrow()) => req,
+                Some(req) => {
+                    waiting.push_front(req);
+                    break;
+                }
+                None => tokio::select! {
+                    biased;
+                    _ = wait_for_phase(&mut phase, draining) => break,
+                    req = event_receiver.recv() => match req {
+                        Some(req) => req,
+                        None => break,
+                    },
                 },
             };
 
             let in_flight = req.event.clone();
             let handled = self.handle_ingested(req);
             tokio::pin!(handled);
-            tokio::select! {
-                biased;
-                () = &mut handled => {}
-                _ = wait_for_phase(&mut phase, draining) => {
-                    // Queued events are recorded before waiting on the current one, so a slow
-                    // model cannot use up the time the process has left.
-                    self.spill_queued_events(&mut event_receiver).await;
-                    if tokio::time::timeout(SHUTDOWN_EVENT_GRACE, handled).await.is_err()
-                        && let Some(event) = in_flight
-                    {
-                        self.dead_letter_event(
-                            &event,
-                            "node shut down while the event was being processed; its reply may be missing",
-                        )
-                        .await;
+            loop {
+                tokio::select! {
+                    biased;
+                    () = &mut handled => break,
+                    _ = wait_for_phase(&mut phase, draining) => {
+                        // Queued events are recorded before waiting on the current one, so a slow
+                        // model cannot use up the time the process has left.
+                        self.spill_queued_events(&mut waiting, &mut event_receiver).await;
+                        if tokio::time::timeout(SHUTDOWN_EVENT_GRACE, handled).await.is_err()
+                            && let Some(event) = in_flight
+                        {
+                            self.dead_letter_event(
+                                &event,
+                                "node shut down while the event was being processed; its reply may be missing",
+                            )
+                            .await;
+                        }
+                        tracing::info!("Pipeline worker loop terminated");
+                        return;
                     }
-                    tracing::info!("Pipeline worker loop terminated");
-                    return;
+                    req = event_receiver.recv(), if queue_open && waiting.len() < read_ahead => {
+                        match req {
+                            // Handled now, out of order: in line it would wait for the very turn
+                            // it is meant to stop. The pipeline still checks the instance and the
+                            // sender's permission before stopping anything.
+                            Some(req) if is_stop_request(&req) => self.handle_ingested(req).await,
+                            Some(req) => waiting.push_back(req),
+                            None => queue_open = false,
+                        }
+                    }
                 }
             }
         }
 
-        self.spill_queued_events(&mut event_receiver).await;
+        self.spill_queued_events(&mut waiting, &mut event_receiver)
+            .await;
         tracing::info!("Pipeline worker loop terminated");
     }
 
-    /// Closes the ingest queue and records every event still in it as a dead letter.
-    async fn spill_queued_events(&self, event_receiver: &mut mpsc::Receiver<IngestEventRequest>) {
+    /// Closes the ingest queue and records every event not yet started as a dead letter: first
+    /// those already read ahead, then those still queued, so the log keeps arrival order.
+    async fn spill_queued_events(
+        &self,
+        waiting: &mut VecDeque<IngestEventRequest>,
+        event_receiver: &mut mpsc::Receiver<IngestEventRequest>,
+    ) {
         event_receiver.close();
+        for req in waiting.drain(..) {
+            if let Some(event) = req.event {
+                self.dead_letter_event(&event, "node shut down before the event was processed")
+                    .await;
+            }
+        }
         while let Some(req) = event_receiver.recv().await {
             if let Some(event) = req.event {
                 self.dead_letter_event(&event, "node shut down before the event was processed")
@@ -2606,6 +2775,14 @@ impl PipelineEngine {
                     channel_id = %channel_id,
                     content_len = content.len(),
                     "Pipeline generated LLM reply"
+                );
+            }
+            PipelineResult::LlmFailed { error, .. } => {
+                tracing::info!(
+                    platform = %platform,
+                    channel_id = %channel_id,
+                    error = %error,
+                    "Pipeline told the sender the model turn failed"
                 );
             }
             PipelineResult::CommandExecuted {
@@ -2714,7 +2891,7 @@ impl PipelineEngine {
                 tracing::info!(
                     platform = %platform,
                     channel_id = %channel_id,
-                    "Pipeline event passed (no matching slash command or active LLM provider)"
+                    "Pipeline event passed without a reply"
                 );
             }
         }
@@ -2723,6 +2900,7 @@ impl PipelineEngine {
             PipelineResult::Blocked { replies, .. } => replies,
             PipelineResult::CommandExecuted { replies, .. } => replies,
             PipelineResult::LlmReplied { replies, .. } => replies,
+            PipelineResult::LlmFailed { replies, .. } => replies,
             PipelineResult::SessionRotated { replies, .. } => replies,
             PipelineResult::ModelSelected { replies, .. } => replies,
             PipelineResult::ModelListed { replies, .. } => replies,

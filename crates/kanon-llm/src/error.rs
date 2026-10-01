@@ -44,6 +44,10 @@ pub enum ToolRouterError {
     /// Requested tool name was not declared by any active plugin.
     #[error("Tool '{0}' is not registered on any active plugin host")]
     ToolNotFound(String),
+
+    /// The turn was stopped through its [`crate::StopSignal`] before it finished.
+    #[error("the turn was stopped before it finished")]
+    Stopped,
 }
 
 impl From<tonic::Status> for ToolRouterError {
@@ -74,6 +78,10 @@ pub enum AgentError {
     /// The model did not produce a usable summary when asked to compact a conversation.
     #[error("Conversation compaction failed: {0}")]
     Compaction(String),
+
+    /// The turn was stopped through its [`crate::StopSignal`] before it finished.
+    #[error("the turn was stopped before it finished")]
+    Stopped,
 }
 
 impl From<tonic::Status> for AgentError {
@@ -88,6 +96,7 @@ impl From<ToolRouterError> for AgentError {
             ToolRouterError::Gateway(g) => Self::Gateway(g),
             ToolRouterError::Rpc(s) => Self::Rpc(s),
             ToolRouterError::ToolNotFound(t) => Self::ToolNotFound(t),
+            ToolRouterError::Stopped => Self::Stopped,
         }
     }
 }

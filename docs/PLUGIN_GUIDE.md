@@ -213,7 +213,7 @@ async def roll(self, event: CommandEvent, args: list) -> str: ...
 - **解析**：消息以 `/` 开头才算命令；参数按空白切分，引号（`"a b"`、`'a b'`、`“a b”`）内的文本保持为一个参数，`raw_args` 是命令名之后未切分的原文。
 - **别名**：路由时与正式名同等对待；处理函数收到的 `command` 永远是正式名。
 - **同名冲突**：多个插件声明同名命令时，命令 `priority` 小者胜出，其次比较插件 `priority`。
-- **内置命令优先**：`/help`、`/info`、`/new`、`/model` 由核心处理，插件无法覆盖。
+- **内置命令优先**：`/help`、`/info` 始终由核心处理；`/new`、`/model`、`/stop` 在有实例的会话中由核心处理。插件无法覆盖。
 - **作用域**：`platforms=("onebot",)`、`conversation_kinds=("group",)` 把命令限定在指定平台或会话类型（`private`、`group`、`channel`），留空即不限。范围之外该命令视同未声明——其他插件的同名命令仍可胜出。TS 为 `{ platforms, conversationKinds }`，Rust 为 `CommandSpec::new(..).platform("onebot").conversation_kind(ConversationKind::Group)`。
 - **权限**：`access` 只是插件给出的默认值——`everyone`、`admins_in_groups`（私聊任何人可用，群内仅管理员）、`admins`。操作员可以在控制台或 `PUT /api/v1/system/command-policy` 中按命令名覆盖；管理员名单格式为 `<platform>:<user id>`，默认群主与群管理员也视为管理员。
 
