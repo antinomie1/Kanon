@@ -72,6 +72,7 @@ function setReplyInherit(inherit: boolean) {
   store.formReplyProbability = node?.probability ?? 0.5;
   store.formReplyQuote = node?.quote_message ?? false;
   store.formReplyAck = node?.acknowledge ?? false;
+  store.formReplyReasoning = node?.send_reasoning ?? false;
 }
 
 async function save() {
@@ -331,6 +332,14 @@ function testChat() {
             checked={store.formReplyAck}
             label={t('reply.acknowledge')}
             onchange={(next) => (store.formReplyAck = next)}
+          />
+        </div>
+        <div class="flex items-center gap-3 text-[14.5px]">
+          <span class="flex-1">{t('reply.reasoning')}</span>
+          <Switch
+            checked={store.formReplyReasoning}
+            label={t('reply.reasoning')}
+            onchange={(next) => (store.formReplyReasoning = next)}
           />
         </div>
       {/if}

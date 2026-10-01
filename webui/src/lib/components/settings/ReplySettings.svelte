@@ -83,6 +83,13 @@ async function save() {
       </span>
       <Switch checked={draft.acknowledge} label={t('reply.acknowledge')} onchange={(next) => draft && (draft.acknowledge = next)} />
     </div>
+    <div class="flex items-start gap-3 text-[14.5px]">
+      <span class="min-w-0 flex-1">
+        <span class="block font-semibold">{t('reply.reasoning')}</span>
+        <span class="block hint">{t('reply.reasoning_hint')}</span>
+      </span>
+      <Switch checked={draft.send_reasoning} label={t('reply.reasoning')} onchange={(next) => draft && (draft.send_reasoning = next)} />
+    </div>
   </Section>
 
   <div class="flex justify-end gap-2.5 border-t border-line py-5">

@@ -836,6 +836,7 @@ sequenceDiagram
 - **撤回提示**：只有模型看过的消息被撤回时，才在该会话下一轮的当前用户消息前加 `[通知] …`；模型没看过的内容绝不因撤回而被透露。提示只进入当前轮，不改变请求前缀。
 - **合并转发**：适配器取回内容写入转发段载荷 `messages: [{sender, text, images}]`；上下文策略 `expand_forward`（默认开）决定是否逐条展开并为识图模型附带图片（有条数与图片上限）。
 - **引用回复**：回复策略 `quote_message` 开启时，群聊/频道中的模型回复首段为指向原事件的 `Reply` 段，由各适配器转换为原生引用。
+- **思考内容**：发往聊天平台的回复永不包含 `<think>` 等思考标签与工具调用标记（`kanon_llm::visible_reply` 统一清理）。回复策略 `send_reasoning`（默认关闭）开启时，模型思考内容以纯文本段置于回答之前，仅保留正文、不带标签。
 - **处理中反馈**：回复策略 `acknowledge` 开启时，流水线决定用模型回答后非阻塞调用内置适配器的 `acknowledge()`（默认无操作）；QQ 官方私聊显示「正在输入」，Milky 群聊对原消息点赞。
 - **好友申请与入群邀请**：适配器以 `friend_request` / `group_invite` 通知入站，并在 `kanon.request_token` 中放入仅自己能解读的凭据；事件策略的 `accept_friend_requests` / `accept_group_invites` 开启时，核心调用该适配器的 `accept_request()`。
 

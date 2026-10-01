@@ -17,9 +17,7 @@ use tokio::sync::{Mutex, RwLock, mpsc, oneshot, watch};
 use tokio::task::JoinHandle;
 
 use kanon_llm::tool_router::ToolRouter;
-use kanon_llm::{
-    AgentFactory, AgentSlot, ModelCapabilities, ModelRef, ModelSpec, strip_reasoning_tags,
-};
+use kanon_llm::{AgentFactory, AgentSlot, ModelCapabilities, ModelRef, ModelSpec, visible_reply};
 use kanon_proto::v1::message_segment::Segment;
 use kanon_proto::v1::{
     DeliverMessageRequest, DeliverMessageResponse, IngestEventRequest, MessageSegment,
@@ -1628,10 +1626,12 @@ impl PipelineEngine {
             .await
             {
                 Ok(output) => {
-                    // Defense in depth for custom agents and legacy wrapped completions.
-                    let answer = strip_reasoning_tags(&output.content);
+                    // Chat platforms receive only the answer: reasoning tags and tool-call markup
+                    // that slipped into the text are removed here whatever the provider did.
+                    let (answer, leaked) = visible_reply(&output.content);
+                    let answer = answer.as_str();
                     let mut replies = Vec::new();
-                    if !answer.trim().is_empty() {
+                    if !answer.is_empty() {
                         replies.push(MessageSegment {
                             segment: Some(Segment::Text(kanon_proto::v1::TextSegment {
                                 content: answer.to_string(),
@@ -1674,6 +1674,29 @@ impl PipelineEngine {
                             "LLM produced no user-visible answer or attachment; passing downstream"
                         );
                         return PipelineResult::Passed(filtered_event);
+                    }
+
+                    // Opt-in: the reasoning goes first as its own plain-text segment, content only.
+                    // It is checked after the empty-reply gate so reasoning never becomes a reply
+                    // on its own.
+                    if reply_policy.send_reasoning {
+                        let reasoning = [output.reasoning.as_deref(), leaked.as_deref()]
+                            .into_iter()
+                            .flatten()
+                            .map(|text| visible_reply(text).0)
+                            .filter(|text| !text.is_empty())
+                            .collect::<Vec<_>>()
+                            .join("\n\n");
+                        if !reasoning.is_empty() {
+                            replies.insert(
+                                0,
+                                MessageSegment {
+                                    segment: Some(Segment::Text(kanon_proto::v1::TextSegment {
+                                        content: reasoning,
+                                    })),
+                                },
+                            );
+                        }
                     }
 
                     // The bot's own words belong to the group's record too, and this session has

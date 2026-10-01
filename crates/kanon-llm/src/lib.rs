@@ -35,6 +35,7 @@ pub mod sqlite_memory;
 pub mod token;
 pub mod tool_call_text;
 pub mod tool_router;
+pub mod visible_reply;
 
 pub use agent::{
     Agent, AgentBuilder, AgentConfig, AgentHook, AgentOutput, AgentTool, NativeTool, NativeToolFn,
@@ -74,3 +75,4 @@ pub use tool_call_text::extract_textual_tool_calls;
 pub use tool_router::{
     ToolAttachment, ToolHost, ToolRouter, ToolRouterOutput, aggregate_tools, resolve_tools,
 };
+pub use visible_reply::visible_reply;

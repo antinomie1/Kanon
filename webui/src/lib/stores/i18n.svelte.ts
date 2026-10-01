@@ -803,6 +803,9 @@ export const dictionaries = {
     // Reply policy
     'reply.acknowledge_hint':
       "While the model works, the platform shows that an answer is coming — a typing indicator in QQ private chats (uses one of QQ's passive-reply slots), a 👍 on the group message in Milky.",
+    'reply.reasoning': 'Send reasoning',
+    'reply.reasoning_hint':
+      "Send the model's reasoning before its answer, as plain text without <think> tags. Tool calls are never sent.",
     'reply.describe_always': 'Always reply',
     'reply.describe_mention': 'Reply only when mentioned',
     'reply.describe_never': 'Never reply in groups',
@@ -1677,6 +1680,8 @@ export const dictionaries = {
     // Reply policy
     'reply.acknowledge_hint':
       '模型思考时，让平台显示「正在回复」——QQ 私聊显示「对方正在输入」（会占用一次 QQ 被动回复额度），Milky 群聊给原消息点个 👍。',
+    'reply.reasoning': '发送思考内容',
+    'reply.reasoning_hint': '在回答前先发送模型的思考内容，仅保留正文，不带 <think> 标签。工具调用始终不会发送。',
     'reply.describe_always': '总是回复',
     'reply.describe_mention': '仅在被 @ 时回复',
     'reply.describe_never': '群聊中从不回复',
