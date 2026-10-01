@@ -270,6 +270,11 @@ class MessagePipelineServiceStub:
                 request_serializer=plugin__pb2.DeliverMessageRequest.SerializeToString,
                 response_deserializer=plugin__pb2.DeliverMessageResponse.FromString,
                 _registered_method=True)
+        self.OnDecorateReply = channel.unary_unary(
+                '/kanon.plugin.v1.MessagePipelineService/OnDecorateReply',
+                request_serializer=plugin__pb2.DecorateReplyRequest.SerializeToString,
+                response_deserializer=plugin__pb2.DecorateReplyResult.FromString,
+                _registered_method=True)
 
 
 class MessagePipelineServiceServicer:
@@ -295,13 +300,22 @@ class MessagePipelineServiceServicer:
         raise NotImplementedError('Method not implemented!')
 
     def OnEvent(self, request, context):
-        """Missing associated documentation comment in .proto file."""
+        """Fire-and-forget lifecycle events, sent only for the kinds a plugin lists in `PluginMeta.events`.
+        """
         context.set_code(grpc.StatusCode.UNIMPLEMENTED)
         context.set_details('Method not implemented!')
         raise NotImplementedError('Method not implemented!')
 
     def OnDeliverMessage(self, request, context):
         """Missing associated documentation comment in .proto file."""
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
+    def OnDecorateReply(self, request, context):
+        """Rewrites a reply before it is delivered; called only for plugins with
+        `PluginMeta.decorates_replies`, in host priority order, each seeing the previous result.
+        """
         context.set_code(grpc.StatusCode.UNIMPLEMENTED)
         context.set_details('Method not implemented!')
         raise NotImplementedError('Method not implemented!')
@@ -333,6 +347,11 @@ def add_MessagePipelineServiceServicer_to_server(servicer, server):
                     servicer.OnDeliverMessage,
                     request_deserializer=plugin__pb2.DeliverMessageRequest.FromString,
                     response_serializer=plugin__pb2.DeliverMessageResponse.SerializeToString,
+            ),
+            'OnDecorateReply': grpc.unary_unary_rpc_method_handler(
+                    servicer.OnDecorateReply,
+                    request_deserializer=plugin__pb2.DecorateReplyRequest.FromString,
+                    response_serializer=plugin__pb2.DecorateReplyResult.SerializeToString,
             ),
     }
     generic_handler = grpc.method_handlers_generic_handler(
@@ -481,6 +500,33 @@ class MessagePipelineService:
             metadata,
             _registered_method=True)
 
+    @staticmethod
+    def OnDecorateReply(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(
+            request,
+            target,
+            '/kanon.plugin.v1.MessagePipelineService/OnDecorateReply',
+            plugin__pb2.DecorateReplyRequest.SerializeToString,
+            plugin__pb2.DecorateReplyResult.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
 
 class BotApiServiceStub:
     """3. 核心 API 服务 (运行在 Core 端，监听 core.sock / loopback，Host 主动连接调用)
@@ -516,6 +562,11 @@ class BotApiServiceStub:
                 '/kanon.plugin.v1.BotApiService/RequestLLM',
                 request_serializer=plugin__pb2.LLMRequest.SerializeToString,
                 response_deserializer=plugin__pb2.LLMChunk.FromString,
+                _registered_method=True)
+        self.CallPlatformApi = channel.unary_unary(
+                '/kanon.plugin.v1.BotApiService/CallPlatformApi',
+                request_serializer=plugin__pb2.PlatformApiRequest.SerializeToString,
+                response_deserializer=plugin__pb2.PlatformApiResponse.FromString,
                 _registered_method=True)
         self.SetStorage = channel.unary_unary(
                 '/kanon.plugin.v1.BotApiService/SetStorage',
@@ -571,6 +622,16 @@ class BotApiServiceServicer:
         context.set_details('Method not implemented!')
         raise NotImplementedError('Method not implemented!')
 
+    def CallPlatformApi(self, request, context):
+        """Calls one action of a built-in adapter's platform API (OneBot action, Milky endpoint) and
+        returns its result. Errors are gRPC statuses: NOT_FOUND for an unknown platform,
+        UNIMPLEMENTED when the adapter offers no API, INVALID_ARGUMENT for a malformed action,
+        UNAVAILABLE when the platform rejected or could not take the call.
+        """
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
     def SetStorage(self, request, context):
         """Missing associated documentation comment in .proto file."""
         context.set_code(grpc.StatusCode.UNIMPLEMENTED)
@@ -622,6 +683,11 @@ def add_BotApiServiceServicer_to_server(servicer, server):
                     servicer.RequestLLM,
                     request_deserializer=plugin__pb2.LLMRequest.FromString,
                     response_serializer=plugin__pb2.LLMChunk.SerializeToString,
+            ),
+            'CallPlatformApi': grpc.unary_unary_rpc_method_handler(
+                    servicer.CallPlatformApi,
+                    request_deserializer=plugin__pb2.PlatformApiRequest.FromString,
+                    response_serializer=plugin__pb2.PlatformApiResponse.SerializeToString,
             ),
             'SetStorage': grpc.unary_unary_rpc_method_handler(
                     servicer.SetStorage,
@@ -775,6 +841,33 @@ class BotApiService:
             '/kanon.plugin.v1.BotApiService/RequestLLM',
             plugin__pb2.LLMRequest.SerializeToString,
             plugin__pb2.LLMChunk.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
+    @staticmethod
+    def CallPlatformApi(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(
+            request,
+            target,
+            '/kanon.plugin.v1.BotApiService/CallPlatformApi',
+            plugin__pb2.PlatformApiRequest.SerializeToString,
+            plugin__pb2.PlatformApiResponse.FromString,
             options,
             channel_credentials,
             insecure,

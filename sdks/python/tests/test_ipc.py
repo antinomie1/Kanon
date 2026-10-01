@@ -230,7 +230,7 @@ class TestBoundedShutdown(unittest.IsolatedAsyncioTestCase):
     """
 
     async def test_a_hung_step_is_abandoned_within_the_timeout(self) -> None:
-        from kanon_host.main import _bounded
+        from kanon_sdk.host import _bounded
 
         cancelled = asyncio.Event()
 
@@ -245,7 +245,7 @@ class TestBoundedShutdown(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(cancelled.is_set(), "the hung step must be cancelled")
 
     async def test_a_failing_step_does_not_abort_shutdown(self) -> None:
-        from kanon_host.main import _bounded
+        from kanon_sdk.host import _bounded
 
         async def fails() -> None:
             raise RuntimeError("gateway already closed")
@@ -254,7 +254,7 @@ class TestBoundedShutdown(unittest.IsolatedAsyncioTestCase):
         await _bounded("failing step", fails(), 1.0)
 
     async def test_a_fast_step_completes(self) -> None:
-        from kanon_host.main import _bounded
+        from kanon_sdk.host import _bounded
 
         done = asyncio.Event()
 
