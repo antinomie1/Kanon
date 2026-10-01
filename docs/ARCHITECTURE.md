@@ -305,8 +305,8 @@ Rust 核心全权主导 LLM 的生命周期与推理编排，确保高并发下�
 
 ### 8.2 模型推理通道的可见性边界 (Reasoning Visibility)
 
-- OpenAI 兼容后端（如 DeepSeek 的 `reasoning_content`）返回的推理内容会被 provider 折叠为响应文本前置的 `<think>…</think>` 块，仅供管理控制台（Playground）拆分展示；**该编码只是显示约定，绝不可作为回复下发**。
-- 因此出站路径（`PipelineEngine` 的 LLM 分支）在构造平台回复前必须调用 `kanon_llm::strip_reasoning_tags` 剥离推理块，只投递用户可见答案；推理块被截断（流式未闭合）时答案视为空，宁可不回复也不泄露思维链。
+- 模型返回的原生 `reasoning_content` 与正文 `content` 分开传递、存储和回放。有独立推理字段时（包括空字符串），正文中的 `<think>` 是正文，不再按标签重新分类。流式响应采用相同规则。
+- 无独立推理字段时，仅在模型边界兼容开头的标准 `<think>…</think>`；支持开头嵌套、连续与截断块。正文中的标签、代码示例、单独结束标签以及 `<think >` / `</think >` 等空白变体均不作为推理块过滤。无独立字段且以标准标签开头的纯文本存在固有歧义，字面示例需引用或放进代码块。
 - 该解码器与 provider 的编码器成对维护，禁止在适配器/插件内各自实现标签解析。
 
 ### 8.3 工具与"管理动作"的边界 (Tools vs. Management Actions)
@@ -551,6 +551,7 @@ sequenceDiagram
 - **撤回提示**：只有模型看过的消息被撤回时，才在该会话下一轮的当前用户消息前加 `[通知] …`；模型没看过的内容绝不因撤回而被透露。提示只进入当前轮，不改变请求前缀。
 - **合并转发**：适配器取回内容写入转发段载荷 `messages: [{sender, text, images}]`；上下文策略 `expand_forward`（默认开）决定是否逐条展开并为识图模型附带图片（有条数与图片上限）。
 - **引用回复**：回复策略 `quote_message` 开启时，群聊/频道中的模型回复首段为指向原事件的 `Reply` 段，由各适配器转换为原生引用。
+- **思考内容**：回复策略 `send_reasoning`（默认关闭）只控制独立推理通道是否作为文本段置于回答之前；正文中的字面标签保持不变。提供商设置 `replay_reasoning` 单独控制 API 回传，关闭不删除历史，也不阻止新推理入库。
 - **处理中反馈**：回复策略 `acknowledge` 开启时，流水线决定用模型回答后非阻塞调用内置适配器的 `acknowledge()`（默认无操作）；QQ 官方私聊显示「正在输入」，Milky 群聊对原消息点赞。
 - **好友申请与入群邀请**：适配器以 `friend_request` / `group_invite` 通知入站，并在 `kanon.request_token` 中放入仅自己能解读的凭据；事件策略的 `accept_friend_requests` / `accept_group_invites` 开启时，核心调用该适配器的 `accept_request()`。
 

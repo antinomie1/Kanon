@@ -86,6 +86,43 @@ async fn an_unconfigured_node_lists_presets_and_no_providers() {
 }
 
 #[tokio::test]
+async fn the_reasoning_extension_is_selectable_and_persisted_for_custom_endpoints() {
+    let config_dir = tempfile::tempdir().expect("temp dir");
+    let state = provider_state(config_dir.path().to_path_buf()).await;
+    let app = kanon_api::app(state.clone());
+    let (_, catalog) = common::send_json(&app, Method::GET, "/api/v1/providers", None).await;
+    assert!(
+        catalog["available_protocols"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|p| p["id"] == "openai_reasoning")
+    );
+    let preset = catalog["presets"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|p| p["id"] == "deepseek")
+        .unwrap();
+    assert_eq!(preset["protocol"], "openai_reasoning");
+
+    let mut custom = offline_provider("reasoning-proxy");
+    custom["protocol"] = json!("openai_reasoning");
+    let (status, body) =
+        common::send_json(&app, Method::POST, "/api/v1/providers", Some(custom)).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["providers"][0]["protocol"], "openai_reasoning");
+    assert_eq!(
+        state.node_settings().providers[0].protocol,
+        "openai_reasoning"
+    );
+    let saved: Value =
+        serde_json::from_slice(&std::fs::read(config_dir.path().join("system.json")).unwrap())
+            .unwrap();
+    assert_eq!(saved["providers"][0]["protocol"], "openai_reasoning");
+}
+
+#[tokio::test]
 async fn saving_a_provider_never_picks_a_default_model() {
     let config_dir = tempfile::tempdir().expect("config dir");
     let state = provider_state(config_dir.path().to_path_buf()).await;
@@ -595,4 +632,32 @@ async fn injected_slot_still_receives_the_builder_provider() {
     );
     let agent = state.agent().expect("state exposes the bootstrapped agent");
     assert_eq!(agent.config().default_model, "bootstrap-model");
+}
+
+#[tokio::test]
+async fn reasoning_replay_setting_is_persisted_and_omission_preserves_it() {
+    let dir = tempfile::tempdir().unwrap();
+    let state = provider_state(dir.path().to_path_buf()).await;
+    let app = kanon_api::app(state.clone());
+    let initial = add_provider(&app, "fixture").await;
+    assert_eq!(initial["providers"][0]["replay_reasoning"], true);
+    for preference in [Some(false), None, Some(true)] {
+        let mut payload = offline_provider("fixture");
+        if let Some(value) = preference {
+            payload["replay_reasoning"] = json!(value);
+        }
+        let (status, body) =
+            common::send_json(&app, Method::POST, "/api/v1/providers", Some(payload)).await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        let expected = preference.unwrap_or(false);
+        assert_eq!(body["providers"][0]["replay_reasoning"], expected);
+        let saved: Value =
+            serde_json::from_slice(&std::fs::read(dir.path().join("system.json")).unwrap())
+                .unwrap();
+        assert_eq!(saved["providers"][0]["replay_reasoning"], expected);
+        assert_eq!(
+            state.node_settings().providers[0].replay_reasoning,
+            expected
+        );
+    }
 }

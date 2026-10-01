@@ -128,21 +128,9 @@ function onKeydown(e: KeyboardEvent) {
   }
 }
 
-/**
- * Splits a `<think>` block some models write inline from the answer itself. Reasoning streamed
- * separately takes precedence.
- */
+/** Keeps the answer and the gateway's separate reasoning channel independent. */
 function split(turn: ChatTurn): { reasoning: string; content: string } {
-  const content = turn.content;
-  const start = content.indexOf('<think>');
-  if (start === -1) return { reasoning: turn.reasoning, content };
-  const end = content.indexOf('</think>', start);
-  const inline = content.slice(start + 7, end === -1 ? undefined : end).trim();
-  const rest =
-    end === -1
-      ? content.slice(0, start)
-      : content.slice(0, start) + content.slice(end + 8);
-  return { reasoning: turn.reasoning || inline, content: rest.trim() };
+  return { reasoning: turn.reasoning, content: turn.content };
 }
 </script>
 

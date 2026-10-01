@@ -15,6 +15,7 @@ struct StubProvider;
 impl LlmProvider for StubProvider {
     async fn chat(&self, _request: &ChatRequest) -> Result<ChatResponse, GatewayError> {
         Ok(ChatResponse {
+            reasoning_content: None,
             content: Some("stub".to_string()),
             tool_calls: Vec::new(),
             finish_reason: Some("stop".to_string()),
@@ -43,6 +44,41 @@ fn build_provider_accepts_every_documented_protocol() {
     // The legacy alias must keep working so existing deployments do not break on upgrade.
     build_provider("openai_chat", "https://example.invalid/v1", None, "m")
         .expect("openai_chat alias must stay supported");
+}
+
+#[test]
+fn only_the_documented_endpoint_automatically_enables_reasoning_replay() {
+    use kanon_llm::OpenAiChatProvider;
+    for url in [
+        "https://api.deepseek.com",
+        "https://api.deepseek.com/v1/",
+        "https://api.deepseek.com/v1/chat/completions",
+    ] {
+        let provider = OpenAiChatProvider::new(url, None, "any-model");
+        assert!(provider.replays_reasoning_content(), "{url}");
+        assert!(
+            !provider
+                .with_reasoning_content(false)
+                .replays_reasoning_content()
+        );
+    }
+    for url in [
+        "https://api.openai.com/v1",
+        "http://127.0.0.1:1234/v1",
+        "https://api.deepseek.com.example.invalid/v1",
+        "https://example.invalid/api.deepseek.com",
+        "https://api.deepseek.com@example.invalid/v1",
+        "http://api.deepseek.com/v1",
+        "https://api.deepseek.com:8443/v1",
+    ] {
+        let provider = OpenAiChatProvider::new(url, None, "deepseek-flash");
+        assert!(!provider.replays_reasoning_content(), "{url}");
+        assert!(
+            provider
+                .with_reasoning_content(true)
+                .replays_reasoning_content()
+        );
+    }
 }
 
 #[test]
@@ -101,4 +137,15 @@ fn agent_slot_with_agent_is_configured_immediately() {
         slot.current().expect("seeded agent").config().default_model,
         "seeded"
     );
+}
+
+#[test]
+fn old_provider_settings_default_to_replay_without_changing_explicit_preferences() {
+    let old = serde_json::json!({"name":"fixture", "protocol":"openai", "base_url":"https://example.invalid/v1"});
+    let mut entry: kanon_llm::ProviderEntry = serde_json::from_value(old).unwrap();
+    assert!(entry.replay_reasoning);
+    entry.replay_reasoning = false;
+    let loaded: kanon_llm::ProviderEntry =
+        serde_json::from_str(&serde_json::to_string(&entry).unwrap()).unwrap();
+    assert!(!loaded.replay_reasoning);
 }

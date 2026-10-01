@@ -39,6 +39,7 @@ impl LlmProvider for MockLlmProvider {
             Ok(self.responses[idx].clone())
         } else {
             Ok(ChatResponse {
+                reasoning_content: None,
                 content: Some("Default fallback content".to_string()),
                 tool_calls: vec![],
                 finish_reason: Some("stop".to_string()),
@@ -156,6 +157,7 @@ impl ToolHost for MockToolHost {
 #[tokio::test]
 async fn test_tool_router_direct_text_no_tools() {
     let mock_provider = Arc::new(MockLlmProvider::new(vec![ChatResponse {
+        reasoning_content: None,
         content: Some("Hello! How can I assist you today?".to_string()),
         tool_calls: vec![],
         finish_reason: Some("stop".to_string()),
@@ -188,6 +190,7 @@ async fn test_tool_router_direct_text_no_tools() {
 async fn test_tool_router_successful_tool_loop() {
     // Turn 1: Model asks to call `add_numbers` with arguments { a: 15, b: 27 }
     let turn1 = ChatResponse {
+        reasoning_content: None,
         content: None,
         tool_calls: vec![ToolCall {
             id: "call_math_1".to_string(),
@@ -200,6 +203,7 @@ async fn test_tool_router_successful_tool_loop() {
 
     // Turn 2: After receiving { sum: 42 }, model generates final reply
     let turn2 = ChatResponse {
+        reasoning_content: None,
         content: Some("The sum of 15 and 27 is 42.".to_string()),
         tool_calls: vec![],
         finish_reason: Some("stop".to_string()),
@@ -264,6 +268,7 @@ async fn test_tool_router_surfaces_tool_attachments() {
 
     let provider = Arc::new(MockLlmProvider::new(vec![
         ChatResponse {
+            reasoning_content: None,
             content: None,
             tool_calls: vec![ToolCall {
                 id: "call_draw_1".to_string(),
@@ -274,6 +279,7 @@ async fn test_tool_router_surfaces_tool_attachments() {
             usage: None,
         },
         ChatResponse {
+            reasoning_content: None,
             content: Some("Here is your card.".to_string()),
             tool_calls: vec![],
             finish_reason: Some("stop".to_string()),
@@ -305,6 +311,7 @@ async fn test_tool_router_surfaces_tool_attachments() {
 async fn test_tool_router_max_recursion_limit() {
     // Model keeps returning tool calls in an infinite loop
     let infinite_turn = ChatResponse {
+        reasoning_content: None,
         content: None,
         tool_calls: vec![ToolCall {
             id: "call_inf".to_string(),
@@ -438,12 +445,14 @@ async fn test_tool_router_namespaced_duplicate_dispatch() {
 
     let mock_provider = Arc::new(MockLlmProvider::new(vec![
         ChatResponse {
+            reasoning_content: None,
             content: None,
             tool_calls: vec![tool_call],
             finish_reason: Some("tool_calls".to_string()),
             usage: None,
         },
         ChatResponse {
+            reasoning_content: None,
             content: Some("Search completed via github plugin".to_string()),
             tool_calls: vec![],
             finish_reason: Some("stop".to_string()),

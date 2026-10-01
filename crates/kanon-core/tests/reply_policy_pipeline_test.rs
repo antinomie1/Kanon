@@ -34,6 +34,7 @@ impl LlmProvider for CountingProvider {
     async fn chat(&self, _request: &ChatRequest) -> Result<ChatResponse, GatewayError> {
         self.calls.fetch_add(1, Ordering::SeqCst);
         Ok(ChatResponse {
+            reasoning_content: None,
             content: Some("模型回复".to_string()),
             tool_calls: Vec::new(),
             finish_reason: Some("stop".to_string()),
@@ -535,6 +536,7 @@ impl LlmProvider for RecordingProvider {
             .expect("requests lock")
             .push(request.clone());
         Ok(ChatResponse {
+            reasoning_content: None,
             content: Some("ok".to_string()),
             tool_calls: Vec::new(),
             finish_reason: Some("stop".to_string()),

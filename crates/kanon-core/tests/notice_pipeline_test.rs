@@ -37,6 +37,7 @@ impl LlmProvider for RecordingProvider {
             .unwrap_or_default();
         self.turns.lock().unwrap().push(turn);
         Ok(ChatResponse {
+            reasoning_content: None,
             content: Some("好的".to_string()),
             tool_calls: Vec::new(),
             finish_reason: Some("stop".to_string()),
