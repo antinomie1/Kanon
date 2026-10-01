@@ -245,13 +245,41 @@ impl OpenAiChatProvider {
         self
     }
 
+    /// Converts request history into wire messages.
+    ///
+    /// Reasoning is replayed only for assistant messages after the latest user message, i.e. the
+    /// tool-call sub-rounds of the turn still in progress. That is the documented DeepSeek
+    /// thinking-mode contract: earlier turns' reasoning is discarded by the server-side template,
+    /// so resending it only inflates the payload while leaving the rendered (cached) prompt
+    /// unchanged. Durable history keeps every reasoning block; only this request omits them.
+    fn map_messages_to_wire(&self, messages: &[ChatMessage]) -> Vec<wire::OpenAiMessageWire> {
+        let current_turn_start = messages
+            .iter()
+            .rposition(|msg| msg.role == Role::User)
+            .map_or(0, |index| index + 1);
+        messages
+            .iter()
+            .enumerate()
+            .filter_map(|(index, msg)| {
+                let replay = self.replay_reasoning_content && index >= current_turn_start;
+                self.map_message_to_wire(msg, replay)
+            })
+            .collect()
+    }
+
     /// Converts an internal domain `ChatMessage` into the wire format `OpenAiMessageWire`.
-    fn map_message_to_wire(&self, msg: &ChatMessage) -> Option<wire::OpenAiMessageWire> {
+    ///
+    /// `replay_reasoning` decides whether this assistant message carries `reasoning_content`.
+    fn map_message_to_wire(
+        &self,
+        msg: &ChatMessage,
+        replay_reasoning: bool,
+    ) -> Option<wire::OpenAiMessageWire> {
         let mut msg = msg.clone();
         msg.separate_reasoning();
         // A reasoning-only turn has no valid assistant payload in the standard wire schema.
         // Omit it from this request only; shared durable history and tool-call turns stay intact.
-        if !self.replay_reasoning_content
+        if !replay_reasoning
             && msg.role == Role::Assistant
             && msg.content.as_deref().is_none_or(str::is_empty)
             && !msg.has_parts()
@@ -284,7 +312,7 @@ impl OpenAiChatProvider {
         Some(wire::OpenAiMessageWire {
             role,
             content: message_content(&msg),
-            reasoning_content: if self.replay_reasoning_content && msg.role == Role::Assistant {
+            reasoning_content: if replay_reasoning && msg.role == Role::Assistant {
                 msg.reasoning_content
             } else {
                 None
@@ -340,11 +368,7 @@ impl LlmProvider for OpenAiChatProvider {
             &self.default_model
         };
 
-        let messages: Vec<wire::OpenAiMessageWire> = request
-            .messages
-            .iter()
-            .filter_map(|message| self.map_message_to_wire(message))
-            .collect();
+        let messages = self.map_messages_to_wire(&request.messages);
 
         let tools = if request.tools.is_empty() {
             None
@@ -447,11 +471,7 @@ impl LlmProvider for OpenAiChatProvider {
             &self.default_model
         };
 
-        let messages: Vec<wire::OpenAiMessageWire> = request
-            .messages
-            .iter()
-            .filter_map(|message| self.map_message_to_wire(message))
-            .collect();
+        let messages = self.map_messages_to_wire(&request.messages);
 
         let tools = if request.tools.is_empty() {
             None

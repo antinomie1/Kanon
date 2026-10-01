@@ -31,7 +31,7 @@ async fn server(app: Router) -> String {
 }
 
 #[tokio::test]
-async fn tool_rounds_and_later_turns_replay_separate_reasoning_after_restart() {
+async fn only_current_turn_tool_rounds_replay_reasoning_after_restart() {
     let received = Arc::new(Mutex::new(Vec::<Value>::new()));
     let captured = received.clone();
     let url = server(Router::new().route("/v1/chat/completions", post(move |Json(body): Json<Value>| {
@@ -125,7 +125,13 @@ async fn tool_rounds_and_later_turns_replay_separate_reasoning_after_restart() {
             .collect();
         assert_eq!(assistants.len(), turn);
         for (index, msg) in assistants.iter().enumerate() {
-            assert_eq!(msg["reasoning_content"], format!("private-{index}"));
+            // Only the in-progress turn's tool rounds replay reasoning; the second user turn
+            // (request 3) must not resend reasoning from the completed first turn.
+            if turn < 3 {
+                assert_eq!(msg["reasoning_content"], format!("private-{index}"));
+            } else {
+                assert!(msg.get("reasoning_content").is_none(), "{msg}");
+            }
             assert!(
                 !msg["content"]
                     .as_str()
@@ -141,11 +147,22 @@ async fn tool_rounds_and_later_turns_replay_separate_reasoning_after_restart() {
             );
         }
     }
-    // Adding a later turn must not reshape the already transmitted prefix.
-    let earlier = requests[2]["messages"].as_array().unwrap();
+    // Tool sub-rounds within one turn must not reshape the already transmitted prefix.
+    for round in 1..3 {
+        let earlier = requests[round - 1]["messages"].as_array().unwrap();
+        assert_eq!(
+            &requests[round]["messages"].as_array().unwrap()[..earlier.len()],
+            earlier
+        );
+    }
+    // A later turn keeps the same prefix apart from the dropped prior-turn reasoning.
+    let mut earlier = requests[2]["messages"].as_array().unwrap().clone();
+    for msg in &mut earlier {
+        msg.as_object_mut().unwrap().remove("reasoning_content");
+    }
     assert_eq!(
         &requests[3]["messages"].as_array().unwrap()[..earlier.len()],
-        earlier
+        earlier.as_slice()
     );
 }
 
