@@ -71,7 +71,7 @@ function go(page: Page) {
 
 <div class="flex h-full flex-col gap-5 px-3 pt-[26px] pb-5">
   <div class="flex flex-col gap-[3px] px-4">
-    <span class="text-[22px] leading-7 font-bold">Kanon Console</span>
+    <span class="text-[26px] leading-8 font-bold tracking-[-0.01em]">Kanon Console</span>
     <span class="flex items-center gap-[7px] text-[13px] whitespace-nowrap text-fg2">
       <i
         class="dot {nodeStore.error ? 'dot-bad' : nodeStore.health ? 'dot-ok' : 'dot-warn'}"

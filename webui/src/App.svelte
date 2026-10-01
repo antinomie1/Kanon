@@ -60,7 +60,7 @@ function handleKeydown(e: KeyboardEvent) {
 <svelte:window onkeydown={handleKeydown} />
 
 <div class="flex h-dvh w-full overflow-hidden bg-rail text-fg">
-  <aside class="hidden w-[228px] shrink-0 rail lg:block">
+  <aside class="hidden w-[256px] shrink-0 rail lg:block">
     <Sidebar onOpenCommand={() => (isCommandOpen = true)} />
   </aside>
 
@@ -138,7 +138,7 @@ function handleKeydown(e: KeyboardEvent) {
         aria-label={t('common.close')}
         onclick={() => (isDrawerOpen = false)}
       ></button>
-      <aside class="absolute inset-y-0 left-0 w-[268px] max-w-[85vw] rounded-r-2xl rail shadow-[var(--k-pop)]">
+      <aside class="absolute inset-y-0 left-0 w-[284px] max-w-[85vw] rounded-r-2xl rail shadow-[var(--k-pop)]">
         <Sidebar
           onOpenCommand={() => {
             isDrawerOpen = false;

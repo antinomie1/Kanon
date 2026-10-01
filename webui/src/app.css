@@ -134,10 +134,17 @@
        accent-tint  secondary-container, with accent-fg = on-secondary-container (selected
                     navigation, chosen options, tonal chips)
        tertiary-*   tertiary-container / on-tertiary-container (the empty-state shape)
-       danger-*     error, on-error, error-container, on-error-container
+       danger       error, with on-danger = on-error
        bar-*        inverse-surface, inverse-on-surface, inverse-primary (snackbars)
-       ok-*, warn-* Material custom colours (green #178a5b, amber #9c5d00) harmonised toward the
-                    seed: colour, colour container, on colour container
+       ok, warn     Material custom colours (green #178a5b, amber #9c5d00) harmonised toward the
+                    seed: the custom colour role itself
+
+     The one departure from the roles is the status containers (`danger-tint`, `ok-tint`,
+     `warn-tint`) and the text on them (`*-fg`). The 2025 error container is a vivid mid tone that
+     made every warning shout, and the custom colour containers did not match it, so all three
+     families share one calmer recipe from their own palettes: tone 94 with chroma capped at 16
+     (light) or tone 20 capped at 10 (dark), and text at tone 30 / 88 of the same palette, well
+     above 4.5:1.
 
      Light and dark use the same roles, so in light mode the sheet is the brightest layer and in
      dark mode the darkest, and the frame and cards read as raised in both. */
@@ -159,17 +166,17 @@
     --k-tertiary-fg: #654568;
     --k-danger: #a8364b;
     --k-on-danger: #fff7f7;
-    --k-danger-tint: #f97386;
-    --k-danger-fg: #6e0523;
     --k-bar: #0e0e12;
     --k-on-bar: #9e9ca2;
     --k-bar-accent: #c0bef6;
+    --k-danger-tint: #ffe9e9;
+    --k-danger-fg: #871c34;
     --k-ok: #006b58;
-    --k-ok-tint: #7cf8d8;
-    --k-ok-fg: #002019;
+    --k-ok-tint: #d9f4e9;
+    --k-ok-fg: #005142;
     --k-warn: #96490a;
-    --k-warn-tint: #ffdbc8;
-    --k-warn-fg: #321300;
+    --k-warn-tint: #ffeadf;
+    --k-warn-fg: #743500;
   }
   :root.dark {
     --k-page: #0e0e12;
@@ -189,17 +196,17 @@
     --k-tertiary-fg: #654568;
     --k-danger: #f97386;
     --k-on-danger: #490013;
-    --k-danger-tint: #871c34;
-    --k-danger-fg: #ff97a3;
     --k-bar: #fcf8fe;
     --k-on-bar: #56545a;
     --k-bar-accent: #5c5b81;
+    --k-danger-tint: #3d2c2d;
+    --k-danger-fg: #ffd2d5;
     --k-ok: #5ddbbc;
-    --k-ok-tint: #005142;
-    --k-ok-fg: #7cf8d8;
+    --k-ok-tint: #26332f;
+    --k-ok-fg: #76f2d2;
     --k-warn: #ffb68a;
-    --k-warn-tint: #743500;
-    --k-warn-fg: #ffdbc8;
+    --k-warn-tint: #3d2d24;
+    --k-warn-fg: #ffd4bc;
   }
   :root[data-accent="blue"] {
     --k-page: #faf8fe;
@@ -219,17 +226,17 @@
     --k-tertiary-fg: #533f66;
     --k-danger: #a83836;
     --k-on-danger: #fff7f6;
-    --k-danger-tint: #fa746f;
-    --k-danger-fg: #6e0a12;
     --k-bar: #0d0e12;
     --k-on-bar: #9d9ca2;
     --k-bar-accent: #b4c5f9;
+    --k-danger-tint: #ffe9e7;
+    --k-danger-fg: #871f21;
     --k-ok: #006b58;
-    --k-ok-tint: #7cf8d8;
-    --k-ok-fg: #002019;
+    --k-ok-tint: #d9f4e9;
+    --k-ok-fg: #005142;
     --k-warn: #96490a;
-    --k-warn-tint: #ffdbc8;
-    --k-warn-fg: #321300;
+    --k-warn-tint: #ffeadf;
+    --k-warn-fg: #743500;
   }
   :root.dark[data-accent="blue"] {
     --k-page: #0d0e12;
@@ -249,17 +256,17 @@
     --k-tertiary-fg: #533f66;
     --k-danger: #fa746f;
     --k-on-danger: #490006;
-    --k-danger-tint: #871f21;
-    --k-danger-fg: #ff9993;
     --k-bar: #faf8fe;
     --k-on-bar: #545559;
     --k-bar-accent: #525e81;
+    --k-danger-tint: #3d2c2b;
+    --k-danger-fg: #ffd2cf;
     --k-ok: #5ddbbc;
-    --k-ok-tint: #005142;
-    --k-ok-fg: #7cf8d8;
+    --k-ok-tint: #26332f;
+    --k-ok-fg: #76f2d2;
     --k-warn: #ffb68a;
-    --k-warn-tint: #743500;
-    --k-warn-fg: #ffdbc8;
+    --k-warn-tint: #3d2d24;
+    --k-warn-fg: #ffd4bc;
   }
   :root[data-accent="teal"] {
     --k-page: #f6faf8;
@@ -279,17 +286,17 @@
     --k-tertiary-fg: #1d5364;
     --k-danger: #a83836;
     --k-on-danger: #fff7f6;
-    --k-danger-tint: #fa746f;
-    --k-danger-fg: #6e0a12;
     --k-bar: #0a0f0e;
     --k-on-bar: #999e9c;
     --k-bar-accent: #b4fcee;
+    --k-danger-tint: #ffe9e7;
+    --k-danger-fg: #871f21;
     --k-ok: #006b54;
-    --k-ok-tint: #80f8d2;
-    --k-ok-fg: #002118;
+    --k-ok-tint: #d9f4e8;
+    --k-ok-fg: #00513f;
     --k-warn: #7d5800;
-    --k-warn-tint: #ffdea9;
-    --k-warn-fg: #271900;
+    --k-warn-tint: #ffebcf;
+    --k-warn-fg: #5f4100;
   }
   :root.dark[data-accent="teal"] {
     --k-page: #0a0f0e;
@@ -309,17 +316,17 @@
     --k-tertiary-fg: #1d5364;
     --k-danger: #fa746f;
     --k-on-danger: #490006;
-    --k-danger-tint: #871f21;
-    --k-danger-fg: #ff9993;
     --k-bar: #f6faf8;
     --k-on-bar: #515654;
     --k-bar-accent: #35685f;
+    --k-danger-tint: #3d2c2b;
+    --k-danger-fg: #ffd2cf;
     --k-ok: #62dbb7;
-    --k-ok-tint: #00513f;
-    --k-ok-fg: #80f8d2;
+    --k-ok-tint: #27332e;
+    --k-ok-fg: #7af2cc;
     --k-warn: #f9bc49;
-    --k-warn-tint: #5f4100;
-    --k-warn-fg: #ffdea9;
+    --k-warn-tint: #382f20;
+    --k-warn-fg: #ffd795;
   }
   :root[data-accent="coral"] {
     --k-page: #fff8f6;
@@ -339,17 +346,17 @@
     --k-tertiary-fg: #634a16;
     --k-danger: #a83836;
     --k-on-danger: #fff7f6;
-    --k-danger-tint: #fa746f;
-    --k-danger-fg: #6e0a12;
     --k-bar: #130d0b;
     --k-on-bar: #a79a97;
     --k-bar-accent: #faab94;
+    --k-danger-tint: #ffe9e7;
+    --k-danger-fg: #871f21;
     --k-ok: #246c2d;
-    --k-ok-tint: #a8f5a5;
-    --k-ok-fg: #002105;
+    --k-ok-tint: #e0f3da;
+    --k-ok-fg: #005317;
     --k-warn: #96490a;
-    --k-warn-tint: #ffdbc8;
-    --k-warn-fg: #321300;
+    --k-warn-tint: #ffeadf;
+    --k-warn-fg: #743500;
   }
   :root.dark[data-accent="coral"] {
     --k-page: #130d0b;
@@ -369,17 +376,17 @@
     --k-tertiary-fg: #634a16;
     --k-danger: #fa746f;
     --k-on-danger: #490006;
-    --k-danger-tint: #871f21;
-    --k-danger-fg: #ff9993;
     --k-bar: #fff8f6;
     --k-on-bar: #5d5350;
     --k-bar-accent: #855243;
+    --k-danger-tint: #3d2c2b;
+    --k-danger-fg: #ffd2cf;
     --k-ok: #8dd88b;
-    --k-ok-tint: #005317;
-    --k-ok-fg: #a8f5a5;
+    --k-ok-tint: #2a3328;
+    --k-ok-fg: #a3efa0;
     --k-warn: #ffb68a;
-    --k-warn-tint: #743500;
-    --k-warn-fg: #ffdbc8;
+    --k-warn-tint: #3d2d24;
+    --k-warn-fg: #ffd4bc;
   }
   :root[data-accent="rose"] {
     --k-page: #fff8f8;
@@ -399,17 +406,17 @@
     --k-tertiary-fg: #614469;
     --k-danger: #a8364b;
     --k-on-danger: #fff7f7;
-    --k-danger-tint: #f97386;
-    --k-danger-fg: #6e0523;
     --k-bar: #130d0e;
     --k-on-bar: #a69a9c;
     --k-bar-accent: #faafc3;
+    --k-danger-tint: #ffe9e9;
+    --k-danger-fg: #871c34;
     --k-ok: #246c2d;
-    --k-ok-tint: #a8f5a5;
-    --k-ok-fg: #002105;
+    --k-ok-tint: #e0f3da;
+    --k-ok-fg: #005317;
     --k-warn: #96490a;
-    --k-warn-tint: #ffdbc8;
-    --k-warn-fg: #321300;
+    --k-warn-tint: #ffeadf;
+    --k-warn-fg: #743500;
   }
   :root.dark[data-accent="rose"] {
     --k-page: #130d0e;
@@ -429,17 +436,17 @@
     --k-tertiary-fg: #614469;
     --k-danger: #f97386;
     --k-on-danger: #490013;
-    --k-danger-tint: #871c34;
-    --k-danger-fg: #ff97a3;
     --k-bar: #fff8f8;
     --k-on-bar: #5c5354;
     --k-bar-accent: #81515f;
+    --k-danger-tint: #3d2c2d;
+    --k-danger-fg: #ffd2d5;
     --k-ok: #8dd88b;
-    --k-ok-tint: #005317;
-    --k-ok-fg: #a8f5a5;
+    --k-ok-tint: #2a3328;
+    --k-ok-fg: #a3efa0;
     --k-warn: #ffb68a;
-    --k-warn-tint: #743500;
-    --k-warn-fg: #ffdbc8;
+    --k-warn-tint: #3d2d24;
+    --k-warn-fg: #ffd4bc;
   }
   :root[data-accent="graphite"] {
     --k-page: #f9f9f9;
@@ -459,17 +466,17 @@
     --k-tertiary-fg: #ffffff;
     --k-danger: #ba1a1a;
     --k-on-danger: #ffffff;
-    --k-danger-tint: #ffdad6;
-    --k-danger-fg: #410002;
     --k-bar: #303030;
     --k-on-bar: #f1f1f1;
     --k-bar-accent: #c6c6c6;
+    --k-danger-tint: #ffe9e6;
+    --k-danger-fg: #93000a;
     --k-ok: #006c45;
-    --k-ok-tint: #90f7bf;
-    --k-ok-fg: #002112;
+    --k-ok-tint: #dcf4e2;
+    --k-ok-fg: #005233;
     --k-warn: #895100;
-    --k-warn-tint: #ffdcbc;
-    --k-warn-fg: #2c1600;
+    --k-warn-tint: #ffead9;
+    --k-warn-fg: #683c00;
   }
   :root.dark[data-accent="graphite"] {
     --k-page: #131313;
@@ -489,17 +496,17 @@
     --k-tertiary-fg: #000000;
     --k-danger: #ffb4ab;
     --k-on-danger: #690005;
-    --k-danger-tint: #93000a;
-    --k-danger-fg: #ffdad6;
     --k-bar: #e2e2e2;
     --k-on-bar: #303030;
     --k-bar-accent: #5e5e5e;
+    --k-danger-tint: #3d2c2a;
+    --k-danger-fg: #ffd3cd;
     --k-ok: #73daa4;
-    --k-ok-tint: #005233;
-    --k-ok-fg: #90f7bf;
+    --k-ok-tint: #28332c;
+    --k-ok-fg: #8af1b9;
     --k-warn: #ffb86c;
-    --k-warn-tint: #683c00;
-    --k-warn-fg: #ffdcbc;
+    --k-warn-tint: #3b2e21;
+    --k-warn-fg: #ffd5ae;
   }
 
   html,
