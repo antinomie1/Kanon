@@ -65,7 +65,7 @@ function formatTime(millis: number | null): string {
 
   {#if store.testResult}
     <div class="notice notice-ok mt-4">
-      <CircleCheck size={16} strokeWidth={2.4} class="mt-0.5 shrink-0" />
+      <CircleCheck size={16} strokeWidth={2} class="mt-0.5 shrink-0" />
       <span>
         <b class="block">{t('platforms.test_ok', { ms: store.testResult.latency_ms })}</b>
         {store.testResult.login.nickname} ({store.testResult.login.uin}),
@@ -76,11 +76,11 @@ function formatTime(millis: number | null): string {
   {/if}
 
   {#if store.status}
-    <h3 class="m-0 mt-7 mb-3 text-[15px] font-extrabold">{t('platforms.activity')}</h3>
+    <h3 class="m-0 mt-7 mb-3 text-[15px] font-semibold">{t('platforms.activity')}</h3>
     <dl class="m-0 grid grid-cols-2 gap-2.5">
       <div class="tile">
-        <dt class="text-[12.5px] font-bold text-fg2">{t('adapters.milky_impl')}</dt>
-        <dd class="m-0 mt-0.5 truncate text-[14px] font-bold">
+        <dt class="text-[12.5px] font-medium text-fg2">{t('adapters.milky_impl')}</dt>
+        <dd class="m-0 mt-0.5 truncate text-[14px] font-medium">
           {#if store.status.implementation}
             {store.status.implementation.impl_name}
             {store.status.implementation.impl_version}
@@ -90,23 +90,23 @@ function formatTime(millis: number | null): string {
         </dd>
       </div>
       <div class="tile">
-        <dt class="text-[12.5px] font-bold text-fg2">{t('adapters.milky_last_event')}</dt>
-        <dd class="m-0 mt-0.5 truncate text-[14px] font-bold">
+        <dt class="text-[12.5px] font-medium text-fg2">{t('adapters.milky_last_event')}</dt>
+        <dd class="m-0 mt-0.5 truncate text-[14px] font-medium">
           {formatTime(store.status.last_event_at_unix_ms)}
         </dd>
       </div>
       <div class="tile">
-        <dt class="text-[12.5px] font-bold text-fg2">{t('adapters.milky_counters')}</dt>
-        <dd class="m-0 mt-0.5 text-[14px] font-bold tabular-nums">
+        <dt class="text-[12.5px] font-medium text-fg2">{t('adapters.milky_counters')}</dt>
+        <dd class="m-0 mt-0.5 text-[14px] font-medium tabular-nums">
           {store.status.messages_ingested} / {store.status.messages_delivered}
         </dd>
       </div>
       <div class="tile">
-        <dt class="text-[12.5px] font-bold text-fg2">{t('adapters.milky_events')}</dt>
-        <dd class="m-0 mt-0.5 text-[14px] font-bold tabular-nums">
+        <dt class="text-[12.5px] font-medium text-fg2">{t('adapters.milky_events')}</dt>
+        <dd class="m-0 mt-0.5 text-[14px] font-medium tabular-nums">
           {store.status.events_received}
           {#if store.status.messages_rejected > 0}
-            <span class="font-semibold text-warn">
+            <span class="font-medium text-warn">
               {t('platforms.rejected', { n: store.status.messages_rejected })}
             </span>
           {/if}
@@ -115,7 +115,7 @@ function formatTime(millis: number | null): string {
     </dl>
     {#if store.status.last_error}
       <div class="notice notice-warn mt-3">
-        <TriangleAlert size={16} strokeWidth={2.2} class="mt-0.5 shrink-0" />
+        <TriangleAlert size={16} strokeWidth={2} class="mt-0.5 shrink-0" />
         <span class="min-w-0 break-words">{store.status.last_error}</span>
       </div>
     {/if}

@@ -126,7 +126,7 @@ function isLong(prompt: string): boolean {
   {/snippet}
   {#snippet actions()}
     <button type="button" class="btn btn-primary" onclick={openCreate}>
-      <Plus size={16} strokeWidth={2.6} />
+      <Plus size={16} strokeWidth={2.2} />
       {t('personas.add')}
     </button>
   {/snippet}
@@ -148,7 +148,7 @@ function isLong(prompt: string): boolean {
         <div class="flex flex-wrap items-start gap-x-6 gap-y-2">
           <div class="min-w-0 flex-1 basis-[300px]">
             <div class="flex flex-wrap items-center gap-x-2.5 gap-y-1">
-              <h2 class="m-0 text-[17px] font-extrabold">{persona.name}</h2>
+              <h2 class="m-0 text-[17px] font-semibold">{persona.name}</h2>
               {#if builtin}<span class="chip chip-sm chip-muted">{t('personas.builtin')}</span>{/if}
             </div>
             {#if persona.description}
@@ -157,7 +157,7 @@ function isLong(prompt: string): boolean {
           </div>
           <div class="ml-auto flex items-center gap-2">
             <button type="button" class="btn btn-sm btn-quiet" onclick={() => tryOut(persona)}>
-              <MessageCircle size={15} strokeWidth={2.2} />
+              <MessageCircle size={15} strokeWidth={2} />
               {t('personas.try')}
             </button>
             {#if !builtin}
@@ -172,13 +172,13 @@ function isLong(prompt: string): boolean {
                 disabled={inUse || personasStore.saving}
                 onclick={() => void remove(persona)}
               >
-                <Trash2 size={16} strokeWidth={2.2} />
+                <Trash2 size={16} strokeWidth={2} />
               </button>
             {/if}
           </div>
         </div>
 
-        <div class="rounded-[14px] bg-sunk px-4 py-3">
+        <div class="rounded-xl bg-sunk px-4 py-3">
           <p
             class="m-0 text-[14px] leading-relaxed break-words whitespace-pre-wrap text-fg2 {open
               ? ''
@@ -189,7 +189,7 @@ function isLong(prompt: string): boolean {
           {#if isLong(persona.prompt)}
             <button
               type="button"
-              class="mt-1.5 cursor-pointer text-[13px] font-bold text-accent-fg hover:underline"
+              class="mt-1.5 cursor-pointer text-[13px] font-medium text-accent hover:underline"
               aria-expanded={open}
               onclick={() => (expanded = { ...expanded, [persona.id]: !open })}
             >
@@ -214,7 +214,7 @@ function isLong(prompt: string): boolean {
       <div class="card flex flex-wrap items-center justify-between gap-3 px-[22px] py-4">
         <p class="m-0 text-[14px] text-fg2">{t('personas.empty')}</p>
         <button type="button" class="btn btn-sm" onclick={openCreate}>
-          <Plus size={15} strokeWidth={2.6} />
+          <Plus size={15} strokeWidth={2.2} />
           {t('personas.add')}
         </button>
       </div>

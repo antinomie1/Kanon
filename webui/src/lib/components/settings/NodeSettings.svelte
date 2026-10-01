@@ -50,8 +50,8 @@ const config = $derived(providersStore.systemConfig);
         [t('settings.node_sockets'), String(health.realtime.websocket_connections)],
       ] as [label, value] (label)}
         <div class="tile">
-          <dt class="text-[12.5px] font-bold text-fg2">{label}</dt>
-          <dd class="m-0 mt-0.5 truncate text-[16px] font-extrabold tabular-nums">{value}</dd>
+          <dt class="text-[12.5px] font-medium text-fg2">{label}</dt>
+          <dd class="m-0 mt-0.5 truncate text-[16px] font-semibold tabular-nums">{value}</dd>
         </div>
       {/each}
     </dl>
@@ -70,7 +70,7 @@ const config = $derived(providersStore.systemConfig);
         [t('providers.os_arch'), `${config.environment.os} (${config.environment.arch})`],
       ] as [label, value] (label)}
         <div class="flex items-center gap-3 rounded-xl bg-sunk py-1.5 pr-1.5 pl-3.5">
-          <span class="w-28 shrink-0 text-[13px] font-bold text-fg2">{label}</span>
+          <span class="w-28 shrink-0 text-[13px] font-medium text-fg2">{label}</span>
           <code class="min-w-0 flex-1 truncate text-[13px]" title={value}>{value}</code>
           <button
             type="button"
@@ -78,7 +78,7 @@ const config = $derived(providersStore.systemConfig);
             aria-label={t('settings.copy_value', { label })}
             onclick={() => copy(value)}
           >
-            <Copy size={14} strokeWidth={2.2} />
+            <Copy size={14} strokeWidth={2} />
           </button>
         </div>
       {/each}

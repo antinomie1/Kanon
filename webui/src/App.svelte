@@ -59,12 +59,12 @@ function handleKeydown(e: KeyboardEvent) {
 
 <svelte:window onkeydown={handleKeydown} />
 
-<div class="flex h-dvh w-full overflow-hidden bg-page text-fg">
+<div class="flex h-dvh w-full overflow-hidden bg-rail text-fg">
   <aside class="hidden w-[228px] shrink-0 rail lg:block">
     <Sidebar onOpenCommand={() => (isCommandOpen = true)} />
   </aside>
 
-  <div class="flex min-w-0 flex-1 flex-col">
+  <div class="flex min-w-0 flex-1 flex-col lg:py-3 lg:pr-3">
     <div class="flex h-14 shrink-0 items-center gap-3 rail px-4 lg:hidden">
       <button
         type="button"
@@ -72,13 +72,16 @@ function handleKeydown(e: KeyboardEvent) {
         aria-label={t('shell.open_menu')}
         onclick={() => (isDrawerOpen = true)}
       >
-        <Menu size={20} strokeWidth={2.2} />
+        <Menu size={20} strokeWidth={2} />
       </button>
-      <span class="text-[17px] font-extrabold">Kanon</span>
+      <span class="shrink-0 text-[20px] font-bold">Kanon Console</span>
       <span class="truncate text-[14px] text-fg2">{t(`nav.${router.page}`)}</span>
     </div>
 
-    <main bind:this={scroller} class="scroll-thin min-h-0 flex-1 overflow-y-auto">
+    <main
+      bind:this={scroller}
+      class="scroll-thin min-h-0 flex-1 overflow-y-auto rounded-t-[28px] bg-page lg:rounded-[32px]"
+    >
       <div
         class="mx-auto flex w-full max-w-[1320px] flex-col gap-5 px-4 py-5 sm:px-8 lg:px-10 lg:py-[30px] {fullHeight
           ? 'h-full'
@@ -86,13 +89,17 @@ function handleKeydown(e: KeyboardEvent) {
       >
         {#if nodeStore.error}
           <div class="notice notice-bad items-center" role="alert">
-            <WifiOff size={18} strokeWidth={2.4} class="shrink-0" />
+            <WifiOff size={18} strokeWidth={2} class="shrink-0" />
             <span class="min-w-0 flex-1">
-              <b class="font-extrabold">{t('shell.offline_title')}</b>
+              <b class="font-semibold">{t('shell.offline_title')}</b>
               <span class="ml-1">{t('shell.offline_text', { error: nodeStore.error })}</span>
             </span>
-            <button type="button" class="btn btn-sm" onclick={() => nodeStore.refresh()}>
-              <RefreshCw size={15} strokeWidth={2.4} />
+            <button
+              type="button"
+              class="btn btn-sm text-danger-fg shadow-[inset_0_0_0_1px_currentColor]"
+              onclick={() => nodeStore.refresh()}
+            >
+              <RefreshCw size={15} strokeWidth={2} />
               {t('common.retry')}
             </button>
           </div>
@@ -127,11 +134,11 @@ function handleKeydown(e: KeyboardEvent) {
     <div class="fixed inset-0 z-40 lg:hidden">
       <button
         type="button"
-        class="absolute inset-0 cursor-default bg-[rgb(20_18_30/0.38)]"
+        class="absolute inset-0 cursor-default bg-black/32"
         aria-label={t('common.close')}
         onclick={() => (isDrawerOpen = false)}
       ></button>
-      <aside class="absolute inset-y-0 left-0 w-[268px] max-w-[85vw] rail shadow-[var(--k-pop)]">
+      <aside class="absolute inset-y-0 left-0 w-[268px] max-w-[85vw] rounded-r-2xl rail shadow-[var(--k-pop)]">
         <Sidebar
           onOpenCommand={() => {
             isDrawerOpen = false;

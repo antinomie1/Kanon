@@ -27,7 +27,7 @@ let {
   </select>
   <ChevronDown
     size={16}
-    strokeWidth={2.2}
+    strokeWidth={2}
     class="pointer-events-none absolute right-3.5 top-1/2 -translate-y-1/2 text-fg3"
   />
 </div>

@@ -65,7 +65,7 @@ import Seg from '../ui/Seg.svelte';
 
   {#if store.status?.last_error}
     <div class="notice notice-warn mt-4">
-      <TriangleAlert size={16} strokeWidth={2.2} class="mt-0.5 shrink-0" />
+      <TriangleAlert size={16} strokeWidth={2} class="mt-0.5 shrink-0" />
       <span class="min-w-0 break-words">{store.status.last_error}</span>
     </div>
   {/if}

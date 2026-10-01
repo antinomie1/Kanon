@@ -140,11 +140,11 @@ async function save() {
             type="button"
             aria-pressed={on}
             onclick={() => (capabilities = { ...capabilities, [flag]: !on })}
-            class="inline-flex h-[34px] items-center gap-1.5 rounded-full px-3.5 text-[13.5px] font-bold whitespace-nowrap transition-colors {on
+            class="inline-flex h-[34px] items-center gap-1.5 rounded-full px-3.5 text-[13.5px] font-medium whitespace-nowrap transition-colors {on
               ? 'bg-accent-tint text-accent-fg'
               : 'bg-sunk text-fg2 hover:text-fg'}"
           >
-            {#if on}<Check size={14} strokeWidth={2.8} />{/if}
+            {#if on}<Check size={14} strokeWidth={2.4} />{/if}
             {t(`models.cap_${flag}`)}
           </button>
         {/each}

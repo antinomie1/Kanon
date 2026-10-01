@@ -103,7 +103,7 @@ async function install() {
           id="plugin-file"
           type="file"
           accept=".kpk,.zip,application/zip"
-          class="block w-full text-[14px] text-fg2 file:mr-3 file:h-[34px] file:cursor-pointer file:rounded-full file:border-0 file:bg-sunk file:px-4 file:font-bold file:text-fg"
+          class="block w-full text-[14px] text-fg2 file:mr-3 file:h-[34px] file:cursor-pointer file:rounded-full file:border-0 file:bg-sunk file:px-4 file:font-medium file:text-fg"
           onchange={(e) => (file = e.currentTarget.files?.[0] ?? null)}
         />
         <p class="m-0 mt-2 hint">{t('extensions.archive_hint')}</p>

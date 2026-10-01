@@ -105,7 +105,7 @@ async function save() {
       <div class="notice notice-bad mt-3"><span class="min-w-0 break-words">{saveError}</span></div>
     {/if}
     <details class="mt-5">
-      <summary class="cursor-pointer text-[14px] font-bold text-fg2">{t('extensions.config_schema')}</summary>
+      <summary class="cursor-pointer text-[14px] font-medium text-fg2">{t('extensions.config_schema')}</summary>
       <pre class="scroll-thin m-0 mt-2 overflow-x-auto rounded-xl bg-sunk p-3.5 text-[12.5px]">{JSON.stringify(current.schema, null, 2)}</pre>
     </details>
     <p class="m-0 mt-4 text-[12.5px] text-fg3">{t('extensions.config_version', { n: current.version })}</p>

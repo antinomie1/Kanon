@@ -223,11 +223,11 @@ const CHIP: Record<Tone, string> = {
   <p class="m-0 max-w-[68ch] hint">{t('extensions.mcp_hint')}</p>
   <div class="flex flex-wrap gap-2.5">
     <button type="button" class="btn" disabled={loading} onclick={() => void load()}>
-      <RefreshCw size={16} strokeWidth={2.4} class={loading ? 'animate-spin' : ''} />
+      <RefreshCw size={16} strokeWidth={2} class={loading ? 'animate-spin' : ''} />
       {t('platforms.refresh')}
     </button>
     <button type="button" class="btn btn-primary" onclick={openCreate}>
-      <Plus size={16} strokeWidth={2.6} />
+      <Plus size={16} strokeWidth={2.2} />
       {t('extensions.mcp_add')}
     </button>
   </div>
@@ -242,20 +242,20 @@ const CHIP: Record<Tone, string> = {
     <EmptyState icon={Server} title={t('extensions.mcp_empty')} text={t('extensions.mcp_empty_text')}>
       {#snippet action()}
         <button type="button" class="btn btn-primary" onclick={openCreate}>
-          <Plus size={16} strokeWidth={2.6} />
+          <Plus size={16} strokeWidth={2.2} />
           {t('extensions.mcp_add')}
         </button>
       {/snippet}
     </EmptyState>
   </div>
 {:else if servers.length > 0}
-  <div class="flex flex-col gap-3">
+  <div class="group-list">
     {#each servers as server (server.id)}
       {@const status = health(server)}
-      <article class="card flex flex-wrap items-start gap-x-6 gap-y-3 px-[22px] py-[18px]">
+      <article class="flex flex-wrap items-start gap-x-6 gap-y-3 py-5">
         <div class="flex min-w-0 flex-1 basis-[340px] flex-col gap-1.5">
           <div class="flex flex-wrap items-center gap-x-2.5 gap-y-1">
-            <h2 class="m-0 text-[17px] font-extrabold">{server.name}</h2>
+            <h2 class="m-0 text-[17px] font-semibold">{server.name}</h2>
             <span class="chip chip-sm {CHIP[status.tone]}">
               {#if status.tone !== 'idle'}<i class="dot dot-{status.tone}"></i>{/if}
               {status.label}
@@ -298,7 +298,7 @@ const CHIP: Record<Tone, string> = {
             disabled={busy[server.id]}
             onclick={() => void remove(server)}
           >
-            <Trash2 size={16} strokeWidth={2.2} />
+            <Trash2 size={16} strokeWidth={2} />
           </button>
           <button type="button" class="btn btn-sm" onclick={() => openEdit(server)}>
             {t('extensions.edit')}

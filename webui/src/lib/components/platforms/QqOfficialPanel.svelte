@@ -32,7 +32,7 @@ async function bound() {
   <div class="flex flex-wrap items-center gap-x-4 gap-y-3 rounded-2xl bg-accent-tint py-3 pr-3 pl-4">
     <span class="min-w-0 flex-1 text-[14px] text-accent-fg">{t('platforms.qq_scan_hint')}</span>
     <button type="button" class="btn btn-primary btn-sm" onclick={() => (qrOpen = true)}>
-      <QrCode size={16} strokeWidth={2.4} />
+      <QrCode size={16} strokeWidth={2} />
       {t('adapters.qq_qr_btn')}
     </button>
   </div>
@@ -78,7 +78,7 @@ async function bound() {
 
   {#if store.status?.last_error}
     <div class="notice notice-warn mt-4">
-      <TriangleAlert size={16} strokeWidth={2.2} class="mt-0.5 shrink-0" />
+      <TriangleAlert size={16} strokeWidth={2} class="mt-0.5 shrink-0" />
       <span class="min-w-0 break-words">{store.status.last_error}</span>
     </div>
   {/if}

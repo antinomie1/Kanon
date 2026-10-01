@@ -98,7 +98,7 @@ function onDeleted() {
   {/snippet}
   {#snippet actions()}
     <button type="button" class="btn btn-primary" onclick={() => router.navigate('instances', 'new')}>
-      <Plus size={16} strokeWidth={2.6} />
+      <Plus size={16} strokeWidth={2.2} />
       {t('instances.new')}
     </button>
   {/snippet}
@@ -115,7 +115,7 @@ function onDeleted() {
     <EmptyState icon={Boxes} title={t('home.empty_title')} text={t('home.empty_text')}>
       {#snippet action()}
         <button type="button" class="btn btn-primary" onclick={() => router.navigate('instances', 'new')}>
-          <Plus size={16} strokeWidth={2.6} />
+          <Plus size={16} strokeWidth={2.2} />
           {t('instances.new')}
         </button>
       {/snippet}
@@ -139,7 +139,7 @@ function onDeleted() {
             ? 'bg-accent-tint'
             : 'hover:bg-sunk'}"
         >
-          <span class="truncate text-[15px] font-extrabold {on ? 'text-accent-fg' : ''}">{instance.name}</span>
+          <span class="truncate text-[15px] font-semibold {on ? 'text-accent-fg' : ''}">{instance.name}</span>
           <span class="flex items-center gap-1.5 text-[12.5px] whitespace-nowrap text-fg2">
             {#if !instance.enabled}
               {t('instances.state_off')}
@@ -153,7 +153,7 @@ function onDeleted() {
       {/each}
       {#if openedFor === 'new'}
         <div class="flex flex-col rounded-xl bg-accent-tint px-3 py-2.5 leading-[1.35]">
-          <span class="truncate text-[15px] font-extrabold text-accent-fg">
+          <span class="truncate text-[15px] font-semibold text-accent-fg">
             {instancesStore.formName.trim() || t('instances.new_unnamed')}
           </span>
           <span class="text-[12.5px] text-fg2">{t('instances.state_draft')}</span>

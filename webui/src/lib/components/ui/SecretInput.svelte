@@ -39,9 +39,9 @@ let shown = $state(false);
     onclick={() => (shown = !shown)}
   >
     {#if shown}
-      <EyeOff size={16} strokeWidth={2.2} />
+      <EyeOff size={16} strokeWidth={2} />
     {:else}
-      <Eye size={16} strokeWidth={2.2} />
+      <Eye size={16} strokeWidth={2} />
     {/if}
   </button>
 </div>

@@ -1,17 +1,21 @@
 @import "tailwindcss";
-@import "@fontsource-variable/nunito";
+/* Google Sans Flex is Material 3 Expressive's typeface. Only its weight axis ships (1–1000), which
+   is what the emphasized type styles vary; the other axes would multiply the download. */
+@import "@fontsource-variable/google-sans-flex";
+@import "@fontsource-variable/google-sans-code";
 
 @custom-variant dark (&:where(.dark, .dark *));
 
 @theme {
-  /* Nunito carries Latin text and figures; CJK falls through to the platform's own face, so the
-     bundle never ships a multi-megabyte Chinese font. */
+  /* Google Sans Flex carries Latin text and figures; CJK falls through to the platform's own face,
+     so the bundle never ships a multi-megabyte Chinese font. */
   --font-sans:
-    "Nunito Variable", "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei UI",
-    "Microsoft YaHei", "Noto Sans CJK SC", "Noto Sans SC", system-ui, sans-serif;
+    "Google Sans Flex Variable", "PingFang SC", "Hiragino Sans GB",
+    "Microsoft YaHei UI", "Microsoft YaHei", "Noto Sans CJK SC", "Noto Sans SC",
+    system-ui, sans-serif;
   --font-mono:
-    ui-monospace, "SF Mono", "Cascadia Mono", "JetBrains Mono", Menlo, Consolas,
-    monospace;
+    "Google Sans Code Variable", ui-monospace, "SF Mono", "Cascadia Mono",
+    Menlo, Consolas, monospace;
 
   --text-2xs: 0.75rem;
   --text-2xs--line-height: calc(1 / 0.75);
@@ -21,6 +25,30 @@
   --text-sm--line-height: calc(1.375 / 0.9375);
   --text-base: 1.0625rem;
   --text-base--line-height: calc(1.625 / 1.0625);
+
+  /* Material 3 Expressive motion. Shape and position changes ride a spring that overshoots a
+     little (damping ratio 0.6, stiffness 800, sampled into `linear()`; run it for 350ms, the
+     time the spring takes to settle), so a pressed button or a switch thumb visibly settles.
+     Colour and opacity use the non-bouncing effects curve. */
+  --ease-spring: linear(
+    0,
+    0.071 4.2%,
+    0.236 8.3%,
+    0.437 12.5%,
+    0.634 16.7%,
+    0.802 20.8%,
+    0.931 25%,
+    1.018 29.2%,
+    1.07 33.3%,
+    1.093 39.6%,
+    1.064 50%,
+    1.028 58.3%,
+    1.003 66.7%,
+    0.991 79.2%,
+    0.996 95.8%,
+    1
+  );
+  --ease-effects: cubic-bezier(0.2, 0, 0, 1);
 }
 
 /* Semantic colours. Utilities such as `bg-card`, `text-fg2` or `ring-line` resolve to runtime
@@ -30,6 +58,8 @@
   --color-card: var(--k-card);
   --color-sunk: var(--k-sunk);
   --color-line: var(--k-line);
+  --color-outline: var(--k-outline);
+  --color-rail: var(--k-rail);
   --color-fg: var(--k-fg);
   --color-fg2: var(--k-fg2);
   --color-fg3: var(--k-fg3);
@@ -37,52 +67,31 @@
   --color-accent-tint: var(--k-accent-tint);
   --color-accent-fg: var(--k-accent-fg);
   --color-on-accent: var(--k-on-accent);
+  --color-tertiary-tint: var(--k-tertiary-tint);
+  --color-tertiary-fg: var(--k-tertiary-fg);
   --color-ok: var(--k-ok);
   --color-ok-tint: var(--k-ok-tint);
+  --color-ok-fg: var(--k-ok-fg);
   --color-warn: var(--k-warn);
   --color-warn-tint: var(--k-warn-tint);
   --color-warn-fg: var(--k-warn-fg);
   --color-danger: var(--k-danger);
   --color-danger-tint: var(--k-danger-tint);
+  --color-danger-fg: var(--k-danger-fg);
   --color-bar: var(--k-bar);
   --color-on-bar: var(--k-on-bar);
+  --color-bar-accent: var(--k-bar-accent);
 }
 
 @layer base {
   :root {
     color-scheme: light;
-    /* Neutral surfaces carry a faint tint of the accent: each one fixes its own lightness and
-       chroma, and takes its hue from the accent (`--k-hue`, set per `data-accent` below). OKLCH
-       keeps the tint equally strong and every surface equally light whichever accent is chosen.
-       `--k-tint` scales the chroma, so 0 turns the surfaces into pure greys. */
-    --k-hue: 280;
-    --k-tint: 1;
-    --k-page: oklch(0.966 calc(0.007 * var(--k-tint)) var(--k-hue));
-    --k-card: #ffffff;
-    --k-sunk: oklch(0.943 calc(0.009 * var(--k-tint)) var(--k-hue));
-    --k-line: oklch(0.914 calc(0.014 * var(--k-tint)) var(--k-hue));
-    --k-fg: #22202c;
-    --k-fg2: #625e70;
-    --k-fg3: #8e8a9b;
-    --k-ok: #178a5b;
-    --k-ok-tint: #e3f4ec;
-    --k-warn: #9c5d00;
-    --k-warn-tint: #fff1d9;
-    --k-warn-fg: #75561f;
-    --k-danger: #c8372f;
-    --k-danger-tint: #fdecea;
-    --k-on-danger: #ffffff;
-    --k-bar: #22202c;
-    --k-on-bar: #ffffff;
-    /* The navigation rail sits a shade deeper than the page, which separates the two without a
-       dividing line; `--k-rail-sunk` is what sunken surfaces become on it (see `.rail`). */
-    --k-rail: oklch(0.938 calc(0.011 * var(--k-tint)) var(--k-hue));
-    --k-rail-sunk: oklch(0.902 calc(0.015 * var(--k-tint)) var(--k-hue));
-    --k-seg-on: #ffffff;
-    --k-switch-off: oklch(0.871 calc(0.02 * var(--k-tint)) var(--k-hue));
-    --k-shadow: 0 1px 2px rgb(34 32 44 / 0.06);
-    --k-pop: 0 10px 30px rgb(34 32 44 / 0.16);
-    /* Instance colours for the message timeline, picked by a hash of the instance id. */
+    /* Material elevation levels: 1 for a filled button under the pointer, 3 for anything that
+       floats over the page (dialogs, menus, snackbars). */
+    --k-raise: 0 1px 2px rgb(0 0 0 / 0.3), 0 1px 3px 1px rgb(0 0 0 / 0.15);
+    --k-pop: 0 4px 8px 3px rgb(0 0 0 / 0.15), 0 1px 3px rgb(0 0 0 / 0.3);
+    /* Instance colours for the message timeline, picked by a hash of the instance id. They tell
+       instances apart rather than carry the theme, so they stay outside the Material scheme. */
     --k-i0: #f0663f;
     --k-i1: #129a8b;
     --k-i2: #d99400;
@@ -91,37 +100,11 @@
     --k-i5: #8465e8;
     --k-i6: #3a9e52;
     --k-i7: #7d8599;
-    /* Default accent (violet); `data-accent` below swaps it. */
-    --k-accent: #5b57e0;
-    --k-accent-tint: #ecebfd;
-    --k-accent-fg: #3f3bb8;
-    --k-on-accent: #ffffff;
   }
   :root.dark {
     color-scheme: dark;
-    --k-page: oklch(0.187 calc(0.011 * var(--k-tint)) var(--k-hue));
-    --k-card: oklch(0.231 calc(0.014 * var(--k-tint)) var(--k-hue));
-    --k-sunk: oklch(0.277 calc(0.019 * var(--k-tint)) var(--k-hue));
-    --k-line: oklch(0.31 calc(0.021 * var(--k-tint)) var(--k-hue));
-    --k-fg: #e8eaf0;
-    --k-fg2: #a0a7b5;
-    --k-fg3: #737b8c;
-    --k-ok: #3fd08a;
-    --k-ok-tint: rgb(63 208 138 / 0.13);
-    --k-warn: #f2b04f;
-    --k-warn-tint: rgb(242 176 79 / 0.1);
-    --k-warn-fg: #d9c49a;
-    --k-danger: #ff6b6b;
-    --k-danger-tint: rgb(255 107 107 / 0.13);
-    --k-on-danger: #2a0707;
-    --k-bar: #e8eaf0;
-    --k-on-bar: #111318;
-    --k-rail: oklch(0.155 calc(0.009 * var(--k-tint)) var(--k-hue));
-    --k-rail-sunk: oklch(0.253 calc(0.018 * var(--k-tint)) var(--k-hue));
-    --k-seg-on: oklch(0.349 calc(0.024 * var(--k-tint)) var(--k-hue));
-    --k-switch-off: oklch(0.368 calc(0.022 * var(--k-tint)) var(--k-hue));
-    --k-shadow: none;
-    --k-pop: 0 10px 30px rgb(0 0 0 / 0.5);
+    --k-raise: 0 1px 2px rgb(0 0 0 / 0.5), 0 1px 3px 1px rgb(0 0 0 / 0.3);
+    --k-pop: 0 4px 8px 3px rgb(0 0 0 / 0.3), 0 1px 3px rgb(0 0 0 / 0.5);
     --k-i0: #ff8a6b;
     --k-i1: #2cc0ae;
     --k-i2: #f2b64a;
@@ -130,74 +113,393 @@
     --k-i5: #a390ff;
     --k-i6: #5cc977;
     --k-i7: #9aa1b4;
-    --k-accent: #8c86ff;
-    --k-accent-tint: rgb(140 134 255 / 0.16);
-    --k-accent-fg: #b3aeff;
-    --k-on-accent: #15123a;
   }
 
-  /* Accent colours. Light values keep white button text at 4.5:1 or better; dark values are
-     lighter and carry dark text instead. `--k-hue` is the accent's own OKLCH hue, shared by both
-     modes; graphite leaves the surfaces untinted. */
+  /* Colour schemes. Every value below is a Material 3 colour role, generated with
+     @material/material-color-utilities 0.4.0 using the 2025 (Material 3 Expressive) colour spec:
+     SchemeTonalSpot from each accent's seed colour (the swatch in Settings → Appearance), and
+     SchemeMonochrome for graphite. Regenerate rather than hand-tune them, or the roles stop
+     agreeing with each other's contrast guarantees.
+
+     Role behind each token:
+       page         surface                    the content sheet (Material's default background)
+       card         surface-container          cards and grouped-list rows on the sheet
+       rail         surface-container          the frame and navigation around the sheet
+       sunk         surface-container-highest  filled fields, tracks, search bars
+       line         outline-variant            dividers and decorative outlines
+       outline      outline                    bounds of operable things (fields, outlined buttons)
+       fg / fg2     on-surface / on-surface-variant
+       fg3          outline                    placeholders and the quietest metadata
+       accent       primary, with on-accent = on-primary
+       accent-tint  secondary-container, with accent-fg = on-secondary-container (selected
+                    navigation, chosen options, tonal chips)
+       tertiary-*   tertiary-container / on-tertiary-container (the empty-state shape)
+       danger-*     error, on-error, error-container, on-error-container
+       bar-*        inverse-surface, inverse-on-surface, inverse-primary (snackbars)
+       ok-*, warn-* Material custom colours (green #178a5b, amber #9c5d00) harmonised toward the
+                    seed: colour, colour container, on colour container
+
+     Light and dark use the same roles, so in light mode the sheet is the brightest layer and in
+     dark mode the darkest, and the frame and cards read as raised in both. */
+  :root {
+    --k-page: #fcf8fe;
+    --k-card: #f0ecf6;
+    --k-rail: #f0ecf6;
+    --k-sunk: #e4e1ed;
+    --k-line: #b3b0bc;
+    --k-outline: #7b7984;
+    --k-fg: #32313b;
+    --k-fg2: #5f5e68;
+    --k-fg3: #7b7984;
+    --k-accent: #5b5a8b;
+    --k-on-accent: #fbf7ff;
+    --k-accent-tint: #e3e0f9;
+    --k-accent-fg: #515064;
+    --k-tertiary-tint: #fdd2fd;
+    --k-tertiary-fg: #654568;
+    --k-danger: #a8364b;
+    --k-on-danger: #fff7f7;
+    --k-danger-tint: #f97386;
+    --k-danger-fg: #6e0523;
+    --k-bar: #0e0e12;
+    --k-on-bar: #9e9ca2;
+    --k-bar-accent: #c0bef6;
+    --k-ok: #006b58;
+    --k-ok-tint: #7cf8d8;
+    --k-ok-fg: #002019;
+    --k-warn: #96490a;
+    --k-warn-tint: #ffdbc8;
+    --k-warn-fg: #321300;
+  }
+  :root.dark {
+    --k-page: #0e0e12;
+    --k-card: #191920;
+    --k-rail: #191920;
+    --k-sunk: #25252e;
+    --k-line: #484750;
+    --k-outline: #76747f;
+    --k-fg: #e7e4f0;
+    --k-fg2: #acaab5;
+    --k-fg3: #76747f;
+    --k-accent: #c4c2ee;
+    --k-on-accent: #3d3d61;
+    --k-accent-tint: #3a394d;
+    --k-accent-fg: #bfbdd5;
+    --k-tertiary-tint: #fdd2fd;
+    --k-tertiary-fg: #654568;
+    --k-danger: #f97386;
+    --k-on-danger: #490013;
+    --k-danger-tint: #871c34;
+    --k-danger-fg: #ff97a3;
+    --k-bar: #fcf8fe;
+    --k-on-bar: #56545a;
+    --k-bar-accent: #5c5b81;
+    --k-ok: #5ddbbc;
+    --k-ok-tint: #005142;
+    --k-ok-fg: #7cf8d8;
+    --k-warn: #ffb68a;
+    --k-warn-tint: #743500;
+    --k-warn-fg: #ffdbc8;
+  }
   :root[data-accent="blue"] {
-    --k-hue: 263;
-    --k-accent: #2a66db;
-    --k-accent-tint: #e6eefd;
-    --k-accent-fg: #1d55c4;
+    --k-page: #faf8fe;
+    --k-card: #ededf6;
+    --k-rail: #ededf6;
+    --k-sunk: #e1e2ed;
+    --k-line: #b0b1bc;
+    --k-outline: #787a84;
+    --k-fg: #30323a;
+    --k-fg2: #5d5f68;
+    --k-fg3: #787a84;
+    --k-accent: #4d5e8b;
+    --k-on-accent: #f9f8ff;
+    --k-accent-tint: #dce2f9;
+    --k-accent-fg: #4b5164;
+    --k-tertiary-tint: #e2c8f8;
+    --k-tertiary-fg: #533f66;
+    --k-danger: #a83836;
+    --k-on-danger: #fff7f6;
+    --k-danger-tint: #fa746f;
+    --k-danger-fg: #6e0a12;
+    --k-bar: #0d0e12;
+    --k-on-bar: #9d9ca2;
+    --k-bar-accent: #b4c5f9;
+    --k-ok: #006b58;
+    --k-ok-tint: #7cf8d8;
+    --k-ok-fg: #002019;
+    --k-warn: #96490a;
+    --k-warn-tint: #ffdbc8;
+    --k-warn-fg: #321300;
   }
   :root.dark[data-accent="blue"] {
-    --k-accent: #6e9bff;
-    --k-accent-tint: rgb(110 155 255 / 0.15);
-    --k-accent-fg: #a3c0ff;
-    --k-on-accent: #0b1630;
+    --k-page: #0d0e12;
+    --k-card: #18191f;
+    --k-rail: #18191f;
+    --k-sunk: #23262e;
+    --k-line: #454850;
+    --k-outline: #73757f;
+    --k-fg: #e4e5f0;
+    --k-fg2: #a9aab5;
+    --k-fg3: #73757f;
+    --k-accent: #b9c6ee;
+    --k-on-accent: #333f61;
+    --k-accent-tint: #353b4d;
+    --k-accent-fg: #b9bfd5;
+    --k-tertiary-tint: #e2c8f8;
+    --k-tertiary-fg: #533f66;
+    --k-danger: #fa746f;
+    --k-on-danger: #490006;
+    --k-danger-tint: #871f21;
+    --k-danger-fg: #ff9993;
+    --k-bar: #faf8fe;
+    --k-on-bar: #545559;
+    --k-bar-accent: #525e81;
+    --k-ok: #5ddbbc;
+    --k-ok-tint: #005142;
+    --k-ok-fg: #7cf8d8;
+    --k-warn: #ffb68a;
+    --k-warn-tint: #743500;
+    --k-warn-fg: #ffdbc8;
   }
   :root[data-accent="teal"] {
-    --k-hue: 183;
-    --k-accent: #0b7d70;
-    --k-accent-tint: #ddf3ef;
-    --k-accent-fg: #0a6b60;
+    --k-page: #f6faf8;
+    --k-card: #e7f0ec;
+    --k-rail: #e7f0ec;
+    --k-sunk: #dae5e1;
+    --k-line: #a9b4b1;
+    --k-outline: #727d7a;
+    --k-fg: #2a3532;
+    --k-fg2: #56615f;
+    --k-fg3: #727d7a;
+    --k-accent: #206a60;
+    --k-on-accent: #e2fff8;
+    --k-accent-tint: #cce8e2;
+    --k-accent-fg: #3e5752;
+    --k-tertiary-tint: #afe2f6;
+    --k-tertiary-fg: #1d5364;
+    --k-danger: #a83836;
+    --k-on-danger: #fff7f6;
+    --k-danger-tint: #fa746f;
+    --k-danger-fg: #6e0a12;
+    --k-bar: #0a0f0e;
+    --k-on-bar: #999e9c;
+    --k-bar-accent: #b4fcee;
+    --k-ok: #006b54;
+    --k-ok-tint: #80f8d2;
+    --k-ok-fg: #002118;
+    --k-warn: #7d5800;
+    --k-warn-tint: #ffdea9;
+    --k-warn-fg: #271900;
   }
   :root.dark[data-accent="teal"] {
-    --k-accent: #3cc4b4;
-    --k-accent-tint: rgb(60 196 180 / 0.15);
-    --k-accent-fg: #7ddcd0;
-    --k-on-accent: #06201d;
+    --k-page: #0a0f0e;
+    --k-card: #131b19;
+    --k-rail: #131b19;
+    --k-sunk: #1e2826;
+    --k-line: #3f4a48;
+    --k-outline: #6d7875;
+    --k-fg: #dde8e4;
+    --k-fg2: #a2adaa;
+    --k-fg3: #6d7875;
+    --k-accent: #9cd1c6;
+    --k-on-accent: #114841;
+    --k-accent-tint: #27403b;
+    --k-accent-fg: #aac5bf;
+    --k-tertiary-tint: #afe2f6;
+    --k-tertiary-fg: #1d5364;
+    --k-danger: #fa746f;
+    --k-on-danger: #490006;
+    --k-danger-tint: #871f21;
+    --k-danger-fg: #ff9993;
+    --k-bar: #f6faf8;
+    --k-on-bar: #515654;
+    --k-bar-accent: #35685f;
+    --k-ok: #62dbb7;
+    --k-ok-tint: #00513f;
+    --k-ok-fg: #80f8d2;
+    --k-warn: #f9bc49;
+    --k-warn-tint: #5f4100;
+    --k-warn-fg: #ffdea9;
   }
   :root[data-accent="coral"] {
-    --k-hue: 37;
-    --k-accent: #c94a22;
-    --k-accent-tint: #fde8e0;
-    --k-accent-fg: #a8401c;
+    --k-page: #fff8f6;
+    --k-card: #ffe9e4;
+    --k-rail: #ffe9e4;
+    --k-sunk: #f6ddd7;
+    --k-line: #c3ada7;
+    --k-outline: #8a7671;
+    --k-fg: #3e2f2b;
+    --k-fg2: #6d5b56;
+    --k-fg3: #8a7671;
+    --k-accent: #8c4f3d;
+    --k-on-accent: #fff7f5;
+    --k-accent-tint: #ffdbd1;
+    --k-accent-fg: #694a42;
+    --k-tertiary-tint: #fdd896;
+    --k-tertiary-fg: #634a16;
+    --k-danger: #a83836;
+    --k-on-danger: #fff7f6;
+    --k-danger-tint: #fa746f;
+    --k-danger-fg: #6e0a12;
+    --k-bar: #130d0b;
+    --k-on-bar: #a79a97;
+    --k-bar-accent: #faab94;
+    --k-ok: #246c2d;
+    --k-ok-tint: #a8f5a5;
+    --k-ok-fg: #002105;
+    --k-warn: #96490a;
+    --k-warn-tint: #ffdbc8;
+    --k-warn-fg: #321300;
   }
   :root.dark[data-accent="coral"] {
-    --k-accent: #ff8a66;
-    --k-accent-tint: rgb(255 138 102 / 0.15);
-    --k-accent-fg: #ffb39a;
-    --k-on-accent: #2b0f05;
+    --k-page: #130d0b;
+    --k-card: #221714;
+    --k-rail: #221714;
+    --k-sunk: #30231f;
+    --k-line: #554440;
+    --k-outline: #84716c;
+    --k-fg: #f9e0da;
+    --k-fg2: #bca6a0;
+    --k-fg3: #84716c;
+    --k-accent: #f9b7a4;
+    --k-on-accent: #613427;
+    --k-accent-tint: #50352c;
+    --k-accent-fg: #dfb6ab;
+    --k-tertiary-tint: #fdd896;
+    --k-tertiary-fg: #634a16;
+    --k-danger: #fa746f;
+    --k-on-danger: #490006;
+    --k-danger-tint: #871f21;
+    --k-danger-fg: #ff9993;
+    --k-bar: #fff8f6;
+    --k-on-bar: #5d5350;
+    --k-bar-accent: #855243;
+    --k-ok: #8dd88b;
+    --k-ok-tint: #005317;
+    --k-ok-fg: #a8f5a5;
+    --k-warn: #ffb68a;
+    --k-warn-tint: #743500;
+    --k-warn-fg: #ffdbc8;
   }
   :root[data-accent="rose"] {
-    --k-hue: 0;
-    --k-accent: #c23a6e;
-    --k-accent-tint: #fbe6ee;
-    --k-accent-fg: #a62c5c;
+    --k-page: #fff8f8;
+    --k-card: #fce9ec;
+    --k-rail: #fce9ec;
+    --k-sunk: #f3dde1;
+    --k-line: #c1adb1;
+    --k-outline: #88767a;
+    --k-fg: #3c2f32;
+    --k-fg2: #6b5b5e;
+    --k-fg3: #88767a;
+    --k-accent: #884d5f;
+    --k-on-accent: #fff7f7;
+    --k-accent-tint: #ffd9e1;
+    --k-accent-fg: #674a51;
+    --k-tertiary-tint: #f6d0fd;
+    --k-tertiary-fg: #614469;
+    --k-danger: #a8364b;
+    --k-on-danger: #fff7f7;
+    --k-danger-tint: #f97386;
+    --k-danger-fg: #6e0523;
+    --k-bar: #130d0e;
+    --k-on-bar: #a69a9c;
+    --k-bar-accent: #faafc3;
+    --k-ok: #246c2d;
+    --k-ok-tint: #a8f5a5;
+    --k-ok-fg: #002105;
+    --k-warn: #96490a;
+    --k-warn-tint: #ffdbc8;
+    --k-warn-fg: #321300;
   }
   :root.dark[data-accent="rose"] {
-    --k-accent: #f2729f;
-    --k-accent-tint: rgb(242 114 159 / 0.15);
-    --k-accent-fg: #f7a6c3;
-    --k-on-accent: #2e0a18;
+    --k-page: #130d0e;
+    --k-card: #211719;
+    --k-rail: #211719;
+    --k-sunk: #2f2225;
+    --k-line: #534447;
+    --k-outline: #837175;
+    --k-fg: #f6e0e4;
+    --k-fg2: #baa6aa;
+    --k-fg3: #837175;
+    --k-accent: #f3b6c6;
+    --k-on-accent: #5e3340;
+    --k-accent-tint: #4e343b;
+    --k-accent-fg: #dbb6be;
+    --k-tertiary-tint: #f6d0fd;
+    --k-tertiary-fg: #614469;
+    --k-danger: #f97386;
+    --k-on-danger: #490013;
+    --k-danger-tint: #871c34;
+    --k-danger-fg: #ff97a3;
+    --k-bar: #fff8f8;
+    --k-on-bar: #5c5354;
+    --k-bar-accent: #81515f;
+    --k-ok: #8dd88b;
+    --k-ok-tint: #005317;
+    --k-ok-fg: #a8f5a5;
+    --k-warn: #ffb68a;
+    --k-warn-tint: #743500;
+    --k-warn-fg: #ffdbc8;
   }
   :root[data-accent="graphite"] {
-    --k-tint: 0;
-    --k-accent: #3d3a48;
-    --k-accent-tint: #e9e8ee;
-    --k-accent-fg: #2a2833;
+    --k-page: #f9f9f9;
+    --k-card: #eeeeee;
+    --k-rail: #eeeeee;
+    --k-sunk: #e2e2e2;
+    --k-line: #c6c6c6;
+    --k-outline: #777777;
+    --k-fg: #1b1b1b;
+    --k-fg2: #474747;
+    --k-fg3: #777777;
+    --k-accent: #000000;
+    --k-on-accent: #e2e2e2;
+    --k-accent-tint: #d4d4d4;
+    --k-accent-fg: #1b1b1b;
+    --k-tertiary-tint: #747474;
+    --k-tertiary-fg: #ffffff;
+    --k-danger: #ba1a1a;
+    --k-on-danger: #ffffff;
+    --k-danger-tint: #ffdad6;
+    --k-danger-fg: #410002;
+    --k-bar: #303030;
+    --k-on-bar: #f1f1f1;
+    --k-bar-accent: #c6c6c6;
+    --k-ok: #006c45;
+    --k-ok-tint: #90f7bf;
+    --k-ok-fg: #002112;
+    --k-warn: #895100;
+    --k-warn-tint: #ffdcbc;
+    --k-warn-fg: #2c1600;
   }
   :root.dark[data-accent="graphite"] {
-    --k-accent: #d9dbe3;
-    --k-accent-tint: rgb(217 219 227 / 0.12);
-    --k-accent-fg: #e8eaf0;
-    --k-on-accent: #16181e;
+    --k-page: #131313;
+    --k-card: #1f1f1f;
+    --k-rail: #1f1f1f;
+    --k-sunk: #353535;
+    --k-line: #474747;
+    --k-outline: #919191;
+    --k-fg: #e2e2e2;
+    --k-fg2: #c6c6c6;
+    --k-fg3: #919191;
+    --k-accent: #ffffff;
+    --k-on-accent: #1b1b1b;
+    --k-accent-tint: #474747;
+    --k-accent-fg: #e2e2e2;
+    --k-tertiary-tint: #919191;
+    --k-tertiary-fg: #000000;
+    --k-danger: #ffb4ab;
+    --k-on-danger: #690005;
+    --k-danger-tint: #93000a;
+    --k-danger-fg: #ffdad6;
+    --k-bar: #e2e2e2;
+    --k-on-bar: #303030;
+    --k-bar-accent: #5e5e5e;
+    --k-ok: #73daa4;
+    --k-ok-tint: #005233;
+    --k-ok-fg: #90f7bf;
+    --k-warn: #ffb86c;
+    --k-warn-tint: #683c00;
+    --k-warn-fg: #ffdcbc;
   }
 
   html,
@@ -252,44 +554,86 @@
 }
 
 @layer components {
-  /* The navigation surface. Fields and tracks on it must still read as sunk, which means darker
-     than the rail rather than than the page, so `--k-sunk` is redefined for everything inside. */
+  /* The app frame and navigation surface. `--k-sunk` (surface-container-highest) is still a step
+     beyond it, so fields and tracks on the frame need no override. */
   .rail {
     background: var(--k-rail);
-    --k-sunk: var(--k-rail-sunk);
   }
 
+  /* A filled card: separated from the sheet by tone alone, so a page of cards stays flat. */
   .card {
     background: var(--k-card);
-    border-radius: 18px;
-    box-shadow: var(--k-shadow);
+    border-radius: 28px;
   }
 
-  /* Buttons are always one line: labels never wrap, they are written short instead. */
+  /* A grouped list (Material 3 Expressive's segmented list, as in Android settings): peers sit
+     2px apart on one shared surface, only the group's outer corners are large and every inner
+     corner is small, so the eye reads one block of related rows instead of loose cards. */
+  .group-list {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+  }
+  .group-list > * {
+    background: var(--k-card);
+    border-radius: 4px;
+    padding-inline: 20px;
+  }
+  .group-list > :first-child {
+    border-top-left-radius: 28px;
+    border-top-right-radius: 28px;
+  }
+  .group-list > :last-child {
+    border-bottom-left-radius: 28px;
+    border-bottom-right-radius: 28px;
+  }
+  @media (min-width: 40rem) {
+    .group-list > * {
+      padding-inline: 28px;
+    }
+  }
+
+  /* Buttons are always one line: labels never wrap, they are written short instead. The base
+     button is Material's outlined button; variants below swap the fill and label colour.
+
+     Shape is part of the feedback (Material 3 Expressive): a button is a pill at rest and its
+     corners spring in to 8px while pressed. The pill radius is half of `--h` rather than a huge
+     value, because a transition from 999px would only become visible in its last frame. Size
+     variants and one-off sizes set `--h`, never `height`, so the pill stays round. */
   .btn {
-    height: 40px;
+    --h: 40px;
+    height: var(--h);
     display: inline-flex;
     align-items: center;
     justify-content: center;
     gap: 8px;
-    padding: 0 18px;
-    border-radius: 999px;
+    padding: 0 20px;
+    border-radius: calc(var(--h) / 2);
     border: 0;
     font: inherit;
-    font-size: 14.5px;
-    font-weight: 700;
+    font-size: 14px;
+    font-weight: 500;
+    letter-spacing: 0.01em;
     white-space: nowrap;
     flex-shrink: 0;
-    background: var(--k-card);
-    color: var(--k-fg);
-    box-shadow: inset 0 0 0 1px var(--k-line);
+    background: transparent;
+    color: var(--k-accent);
+    box-shadow: inset 0 0 0 1px var(--k-outline);
     transition:
-      background-color 120ms,
-      box-shadow 120ms,
-      opacity 120ms;
+      border-radius 350ms var(--ease-spring),
+      background-color 150ms var(--ease-effects),
+      box-shadow 150ms var(--ease-effects),
+      opacity 150ms;
   }
+  /* State layers: hover and press lay the label colour over the button at 8% and 12%, so every
+     variant (and every utility recolouring a label, such as `text-warn`) gets a matching hover
+     without its own rule. */
   .btn:hover:not(:disabled) {
-    background: var(--k-sunk);
+    background: color-mix(in oklab, currentColor 8%, transparent);
+  }
+  .btn:active:not(:disabled) {
+    background: color-mix(in oklab, currentColor 12%, transparent);
+    border-radius: 8px;
   }
   .btn:disabled {
     opacity: 0.5;
@@ -299,12 +643,17 @@
     color: var(--k-on-accent);
     box-shadow: none;
   }
+  /* A filled container takes the state layer inside its own colour, and lifts one level. */
   .btn-primary:hover:not(:disabled) {
-    background: var(--k-accent);
-    filter: brightness(1.08);
+    background: color-mix(in oklab, var(--k-accent), var(--k-on-accent) 8%);
+    box-shadow: var(--k-raise);
   }
+  .btn-primary:active:not(:disabled) {
+    background: color-mix(in oklab, var(--k-accent), var(--k-on-accent) 12%);
+    box-shadow: none;
+  }
+  /* Text and icon buttons: no container until hovered. */
   .btn-quiet {
-    background: transparent;
     box-shadow: none;
     color: var(--k-fg2);
   }
@@ -314,67 +663,71 @@
   .btn-danger {
     color: var(--k-danger);
   }
-  .btn-danger:hover:not(:disabled) {
-    background: var(--k-danger-tint);
-  }
   .btn-danger-solid {
     background: var(--k-danger);
     color: var(--k-on-danger);
     box-shadow: none;
   }
   .btn-danger-solid:hover:not(:disabled) {
-    background: var(--k-danger);
-    filter: brightness(1.08);
+    background: color-mix(in oklab, var(--k-danger), var(--k-on-danger) 8%);
+    box-shadow: var(--k-raise);
+  }
+  .btn-danger-solid:active:not(:disabled) {
+    background: color-mix(in oklab, var(--k-danger), var(--k-on-danger) 12%);
+    box-shadow: none;
   }
   .btn-sm {
-    height: 34px;
+    --h: 32px;
     padding: 0 14px;
     font-size: 14px;
   }
   .btn-xs {
-    height: 28px;
+    --h: 28px;
     padding: 0 11px;
     font-size: 13px;
     gap: 6px;
   }
   .btn-icon {
-    width: 40px;
+    width: var(--h);
     padding: 0;
   }
-  .btn-icon.btn-sm {
-    width: 34px;
-  }
-  .btn-icon.btn-xs {
-    width: 28px;
-  }
 
+  /* Material's filled text field: a tonal well with square bottom corners and an active indicator
+     along its bottom edge, which thickens to 2px in the accent on focus. The indicator is an
+     inset shadow rather than a border, so it never shifts the layout. */
   .input {
     width: 100%;
     min-width: 0;
-    height: 42px;
+    height: 40px;
     padding: 0 14px;
     border: 0;
-    border-radius: 12px;
+    border-radius: 4px 4px 0 0;
     background: var(--k-sunk);
     color: var(--k-fg);
     font: inherit;
     font-size: 14.5px;
     outline: none;
-    box-shadow: inset 0 0 0 1px transparent;
-    transition: box-shadow 120ms;
+    box-shadow: inset 0 -1px 0 var(--k-outline);
+    transition:
+      box-shadow 150ms var(--ease-effects),
+      background-color 150ms var(--ease-effects);
   }
   .input::placeholder {
     color: var(--k-fg3);
   }
+  .input:hover:not(:disabled):not(:focus) {
+    background: color-mix(in oklab, var(--k-sunk), var(--k-fg) 4%);
+    box-shadow: inset 0 -1px 0 var(--k-fg);
+  }
   .input:focus {
-    box-shadow: inset 0 0 0 2px var(--k-accent);
+    box-shadow: inset 0 -2px 0 var(--k-accent);
   }
   .input:disabled {
     opacity: 0.6;
   }
   textarea.input {
     height: auto;
-    padding: 10px 14px;
+    padding: 9px 14px;
     line-height: 1.55;
     resize: vertical;
   }
@@ -382,11 +735,25 @@
     font-family: var(--font-mono);
     font-size: 13.5px;
   }
+  /* Filter fields above a list are Material search bars rather than form fields: fully round and
+     without the bottom indicator, so they read as "narrow what is below" and match the sidebar's
+     search. Focus draws a full ring instead, since there is no indicator line to thicken. */
+  .input-search {
+    border-radius: 9999px;
+    padding-left: 40px;
+    box-shadow: none;
+  }
+  .input-search:hover:not(:disabled):not(:focus) {
+    box-shadow: none;
+  }
+  .input-search:focus {
+    box-shadow: inset 0 0 0 2px var(--k-accent);
+  }
 
   .label {
     display: block;
     font-size: 13px;
-    font-weight: 700;
+    font-weight: 500;
     color: var(--k-fg2);
     margin-bottom: 6px;
   }
@@ -396,38 +763,46 @@
     color: var(--k-fg2);
   }
 
+  /* Material chip: outlined when it only names something, filled with a tint when it reports a
+     state (the coloured variants below). */
   .chip {
     height: 28px;
     display: inline-flex;
     align-items: center;
     gap: 6px;
-    padding: 0 11px;
-    border-radius: 14px;
-    background: var(--k-sunk);
+    padding: 0 10px;
+    border-radius: 8px;
+    background: transparent;
+    box-shadow: inset 0 0 0 1px var(--k-line);
     color: var(--k-fg);
     font-size: 13px;
-    font-weight: 700;
+    font-weight: 500;
     white-space: nowrap;
   }
   .chip-sm {
     height: 24px;
-    padding: 0 9px;
+    padding: 0 8px;
+    border-radius: 6px;
     font-size: 12.5px;
   }
   .chip-ok {
     background: var(--k-ok-tint);
-    color: var(--k-ok);
+    box-shadow: none;
+    color: var(--k-ok-fg);
   }
   .chip-warn {
     background: var(--k-warn-tint);
-    color: var(--k-warn);
+    box-shadow: none;
+    color: var(--k-warn-fg);
   }
   .chip-bad {
     background: var(--k-danger-tint);
-    color: var(--k-danger);
+    box-shadow: none;
+    color: var(--k-danger-fg);
   }
   .chip-accent {
     background: var(--k-accent-tint);
+    box-shadow: none;
     color: var(--k-accent-fg);
   }
   .chip-muted {
@@ -454,7 +829,7 @@
 
   /* A borderless, rounded list row used for adapters, hosts and similar items inside a card. */
   .tile {
-    border-radius: 14px;
+    border-radius: 16px;
     background: var(--k-sunk);
     padding: 12px 14px;
   }
@@ -464,13 +839,13 @@
     align-items: flex-start;
     gap: 10px;
     padding: 11px 14px;
-    border-radius: 14px;
+    border-radius: 16px;
     font-size: 14px;
     line-height: 1.5;
   }
   .notice-bad {
     background: var(--k-danger-tint);
-    color: var(--k-danger);
+    color: var(--k-danger-fg);
   }
   .notice-warn {
     background: var(--k-warn-tint);
@@ -478,7 +853,7 @@
   }
   .notice-ok {
     background: var(--k-ok-tint);
-    color: var(--k-ok);
+    color: var(--k-ok-fg);
   }
   .notice-info {
     background: var(--k-sunk);

@@ -102,7 +102,7 @@ function onDeleted() {
   {/snippet}
   {#snippet actions()}
     <button type="button" class="btn btn-primary" onclick={() => (addOpen = true)}>
-      <Plus size={16} strokeWidth={2.6} />
+      <Plus size={16} strokeWidth={2.2} />
       {t('llm.add_provider')}
     </button>
   {/snippet}
@@ -119,7 +119,7 @@ function onDeleted() {
     <EmptyState icon={Server} title={t('llm.empty_title')} text={t('llm.empty_text')}>
       {#snippet action()}
         <button type="button" class="btn btn-primary" onclick={() => (addOpen = true)}>
-          <Plus size={16} strokeWidth={2.6} />
+          <Plus size={16} strokeWidth={2.2} />
           {t('llm.add_provider')}
         </button>
       {/snippet}
@@ -145,7 +145,7 @@ function onDeleted() {
             : 'hover:bg-sunk'}"
         >
           <span class="flex min-w-0 items-center gap-2">
-            <span class="truncate text-[15px] font-extrabold {on ? 'text-accent-fg' : ''}">{provider.name}</span>
+            <span class="truncate text-[15px] font-semibold {on ? 'text-accent-fg' : ''}">{provider.name}</span>
             {#if servesDefault(provider.name)}
               <span class="chip chip-sm chip-accent">{t('llm.default_chip')}</span>
             {/if}

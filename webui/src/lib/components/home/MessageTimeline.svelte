@@ -204,7 +204,7 @@ function ago(ms: number): string {
 <section class="card px-6 pt-5 pb-4">
   <div class="mb-2 flex flex-wrap items-center justify-between gap-3">
     <div class="flex min-w-0 flex-wrap items-baseline gap-x-4 gap-y-1">
-      <h2 class="m-0 text-[17px] font-extrabold whitespace-nowrap">{t('home.timeline_title')}</h2>
+      <h2 class="m-0 text-[17px] font-semibold whitespace-nowrap">{t('home.timeline_title')}</h2>
       <span class="text-[13px] text-fg2">{t('home.timeline_hint')}</span>
     </div>
     <Seg
@@ -224,7 +224,7 @@ function ago(ms: number): string {
     <div class="flex flex-wrap items-center justify-between gap-3 py-8">
       <p class="m-0 hint">{t('home.timeline_offline')}</p>
       <button type="button" class="btn btn-sm" onclick={() => pipelineStore.reconnect()}>
-        <RefreshCw size={15} strokeWidth={2.4} />
+        <RefreshCw size={15} strokeWidth={2} />
         {t('home.reconnect')}
       </button>
     </div>
@@ -239,7 +239,7 @@ function ago(ms: number): string {
             ? 'border-t border-dashed border-line'
             : ''}"
         >
-          <span class="truncate text-[14px] font-extrabold">{lane.name}</span>
+          <span class="truncate text-[14px] font-semibold">{lane.name}</span>
           <span class="text-[12.5px] text-fg2">
             {!lane.enabled
               ? t('home.lane_stopped')
@@ -265,7 +265,7 @@ function ago(ms: number): string {
             {@const info = describe(message)}
             {#if text && shown.has(message.eventId)}
               <span
-                class="pointer-events-none absolute top-[14px] text-[12.5px] font-extrabold whitespace-nowrap {message.outcome ===
+                class="pointer-events-none absolute top-[14px] text-[12.5px] font-semibold whitespace-nowrap {message.outcome ===
                   'blocked' || message.outcome === 'failed'
                   ? 'text-danger'
                   : 'text-fg2'}"
@@ -307,7 +307,7 @@ function ago(ms: number): string {
                 class="pointer-events-none absolute bottom-[42px] z-10 -translate-x-1/2 rounded-xl bg-card px-3.5 py-2 text-[13px] leading-snug whitespace-nowrap shadow-[var(--k-pop),0_0_0_1px_var(--k-line)]"
                 style="left: clamp(80px, {(left + end) / 2}%, calc(100% - 80px))"
               >
-                <b class="block font-extrabold">{info.title}</b>
+                <b class="block font-semibold">{info.title}</b>
                 <span class="text-fg2">{info.text}</span>
               </div>
             {/if}

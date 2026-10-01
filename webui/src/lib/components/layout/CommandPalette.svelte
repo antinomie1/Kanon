@@ -146,19 +146,19 @@ function onkeydown(e: KeyboardEvent) {
   <div class="fixed inset-0 z-50 flex items-start justify-center px-4 pt-[12vh]">
     <button
       type="button"
-      class="absolute inset-0 cursor-default bg-[rgb(20_18_30/0.38)]"
+      class="absolute inset-0 cursor-default bg-black/32"
       aria-label={t('common.close')}
       tabindex="-1"
       onclick={() => (isOpen = false)}
     ></button>
     <div
-      class="relative flex w-full max-w-lg flex-col overflow-hidden rounded-[22px] bg-card shadow-[var(--k-pop)]"
+      class="relative flex w-full max-w-lg flex-col overflow-hidden rounded-[28px] bg-card shadow-[var(--k-pop)]"
       role="dialog"
       aria-modal="true"
       aria-label={t('shell.search')}
     >
       <div class="flex items-center gap-3 border-b border-line px-5">
-        <Search size={18} strokeWidth={2.2} class="shrink-0 text-fg3" />
+        <Search size={18} strokeWidth={2} class="shrink-0 text-fg3" />
         <input
           bind:this={input}
           bind:value={query}
@@ -180,7 +180,7 @@ function onkeydown(e: KeyboardEvent) {
           {#each filtered as command, index (command.id)}
             {@const Icon = command.icon}
             {#if index === 0 || filtered[index - 1].group !== command.group}
-              <div class="px-3 pt-2.5 pb-1 text-[12.5px] font-bold text-fg3">{command.group}</div>
+              <div class="px-3 pt-2.5 pb-1 text-[12.5px] font-medium text-fg3">{command.group}</div>
             {/if}
             <button
               id="palette-{index}"
@@ -189,15 +189,15 @@ function onkeydown(e: KeyboardEvent) {
               aria-selected={index === active}
               onmousemove={() => (active = index)}
               onclick={() => run(command)}
-              class="flex h-11 w-full items-center gap-3 rounded-xl px-3 text-left text-[14.5px] font-semibold {index ===
+              class="flex h-11 w-full items-center gap-3 rounded-full px-4 text-left text-[14.5px] font-medium {index ===
               active
                 ? 'bg-accent-tint text-accent-fg'
                 : 'text-fg'}"
             >
-              <Icon size={17} strokeWidth={2.1} class="shrink-0 {index === active ? 'text-accent' : 'text-fg3'}" />
+              <Icon size={17} strokeWidth={2} class="shrink-0 {index === active ? 'text-accent' : 'text-fg3'}" />
               <span class="min-w-0 flex-1 truncate">{command.title}</span>
               {#if index === active}
-                <CornerDownLeft size={15} strokeWidth={2.2} class="shrink-0 text-accent" />
+                <CornerDownLeft size={15} strokeWidth={2} class="shrink-0 text-accent" />
               {/if}
             </button>
           {/each}

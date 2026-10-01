@@ -71,26 +71,26 @@ async function remove(spec: ModelSpec) {
 <section class="card px-5 pt-5 pb-3 sm:px-7">
   <div class="flex flex-wrap items-start justify-between gap-x-4 gap-y-3">
     <div class="min-w-0 flex-1 basis-[260px]">
-      <h2 class="m-0 text-[17px] font-extrabold">
+      <h2 class="m-0 text-[17px] font-semibold">
         {t('llm.models_title')}
-        <span class="ml-1 font-bold text-fg3">{models.length}</span>
+        <span class="ml-1 font-medium text-fg3">{models.length}</span>
       </h2>
       <p class="m-0 mt-1 max-w-[60ch] hint">{t('llm.models_hint', { provider })}</p>
     </div>
     <div class="flex flex-wrap gap-2.5">
       <button type="button" class="btn btn-sm" disabled={discovering} onclick={() => void discover()}>
-        <RefreshCw size={15} strokeWidth={2.4} class={discovering ? 'animate-spin' : ''} />
+        <RefreshCw size={15} strokeWidth={2} class={discovering ? 'animate-spin' : ''} />
         {discovering ? t('llm.discovering') : t('llm.discover')}
       </button>
       <button type="button" class="btn btn-sm" onclick={() => (editing = 'new')}>
-        <Plus size={15} strokeWidth={2.6} />
+        <Plus size={15} strokeWidth={2.2} />
         {t('llm.model_add')}
       </button>
     </div>
   </div>
 
   {#if models.length === 0}
-    <p class="m-0 mt-4 mb-2 rounded-[14px] bg-sunk px-4 py-3.5 text-[14px] text-fg2">
+    <p class="m-0 mt-4 mb-2 rounded-xl bg-sunk px-4 py-3.5 text-[14px] text-fg2">
       {t('llm.models_empty')}
     </p>
   {:else}
@@ -102,7 +102,7 @@ async function remove(spec: ModelSpec) {
         <li class="flex flex-wrap items-center gap-x-5 gap-y-2 border-t border-line py-3.5 first:border-t-0">
           <div class="min-w-0 flex-1 basis-[280px]">
             <div class="flex flex-wrap items-center gap-x-2.5 gap-y-1">
-              <span class="min-w-0 truncate text-[15px] font-extrabold">{name}</span>
+              <span class="min-w-0 truncate text-[15px] font-semibold">{name}</span>
               {#if isDefault}
                 <span class="chip chip-sm chip-accent">{t('llm.default_chip')}</span>
               {/if}
@@ -138,7 +138,7 @@ async function remove(spec: ModelSpec) {
               aria-label={t('llm.model_edit_title', { name })}
               onclick={() => (editing = spec)}
             >
-              <Pencil size={15} strokeWidth={2.2} />
+              <Pencil size={15} strokeWidth={2} />
             </button>
             <button
               type="button"
@@ -148,7 +148,7 @@ async function remove(spec: ModelSpec) {
               disabled={modelsStore.saving}
               onclick={() => void remove(spec)}
             >
-              <Trash2 size={15} strokeWidth={2.2} />
+              <Trash2 size={15} strokeWidth={2} />
             </button>
           </div>
         </li>

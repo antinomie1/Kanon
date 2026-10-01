@@ -69,9 +69,9 @@ function go(page: Page) {
 }
 </script>
 
-<div class="flex h-full flex-col gap-5 px-3.5 pt-[26px] pb-5">
-  <div class="flex flex-col gap-[3px] px-[11px]">
-    <span class="text-[19px] font-extrabold tracking-[-0.01em]">Kanon</span>
+<div class="flex h-full flex-col gap-5 px-3 pt-[26px] pb-5">
+  <div class="flex flex-col gap-[3px] px-4">
+    <span class="text-[22px] leading-7 font-bold">Kanon Console</span>
     <span class="flex items-center gap-[7px] text-[13px] whitespace-nowrap text-fg2">
       <i
         class="dot {nodeStore.error ? 'dot-bad' : nodeStore.health ? 'dot-ok' : 'dot-warn'}"
@@ -83,14 +83,14 @@ function go(page: Page) {
   <button
     type="button"
     onclick={onOpenCommand}
-    class="flex h-[38px] items-center gap-[9px] rounded-xl bg-sunk px-3 text-[14px] whitespace-nowrap text-fg2 hover:text-fg"
+    class="flex h-10 items-center gap-2.5 rounded-full bg-sunk px-4 text-[14px] whitespace-nowrap text-fg2 hover:text-fg"
   >
-    <Search size={16} strokeWidth={2.2} class="shrink-0" />
+    <Search size={16} strokeWidth={2} class="shrink-0" />
     <span>{t('shell.search')}</span>
     <kbd class="ml-auto font-sans text-[12px] text-fg3">Ctrl K</kbd>
   </button>
 
-  <nav class="scroll-thin -mx-1 flex min-h-0 flex-1 flex-col gap-3.5 overflow-y-auto px-1" aria-label={t('shell.nav')}>
+  <nav class="scroll-thin -mx-1 flex min-h-0 flex-1 flex-col gap-2 overflow-y-auto px-1" aria-label={t('shell.nav')}>
     {#each groups as group, index (index)}
       <div class="flex flex-col gap-0.5">
         {#each group as item (item.id)}
@@ -103,11 +103,11 @@ function go(page: Page) {
               e.preventDefault();
               go(item.id);
             }}
-            class="flex h-[38px] items-center gap-[11px] rounded-[11px] px-[11px] text-[14.5px] whitespace-nowrap no-underline transition-colors {on
-              ? 'bg-card font-extrabold text-accent-fg shadow-[var(--k-shadow)]'
-              : 'font-semibold text-fg hover:bg-sunk'}"
+            class="flex h-12 items-center gap-3 rounded-full px-4 text-[14px] font-medium whitespace-nowrap no-underline transition-colors {on
+              ? 'bg-accent-tint text-accent-fg'
+              : 'text-fg2 hover:bg-fg/8 hover:text-fg'}"
           >
-            <Icon size={18} strokeWidth={2.1} class="shrink-0 {on ? 'text-accent' : 'text-fg3'}" />
+            <Icon size={18} strokeWidth={2} class="shrink-0" />
             <span>{t(`nav.${item.id}`)}</span>
             {#if item.id === 'platforms' && platformTrouble}
               <i

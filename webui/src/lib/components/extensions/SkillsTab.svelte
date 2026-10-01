@@ -129,11 +129,11 @@ async function remove(skill: SkillItem) {
   <p class="m-0 max-w-[68ch] hint">{t('extensions.skills_hint')}</p>
   <div class="flex flex-wrap gap-2.5">
     <button type="button" class="btn" disabled={loading} onclick={() => void load()}>
-      <RefreshCw size={16} strokeWidth={2.4} class={loading ? 'animate-spin' : ''} />
+      <RefreshCw size={16} strokeWidth={2} class={loading ? 'animate-spin' : ''} />
       {t('platforms.refresh')}
     </button>
     <button type="button" class="btn btn-primary" onclick={openInstall}>
-      <Upload size={16} strokeWidth={2.4} />
+      <Upload size={16} strokeWidth={2} />
       {t('extensions.skill_install')}
     </button>
   </div>
@@ -148,48 +148,46 @@ async function remove(skill: SkillItem) {
     <EmptyState icon={BookOpen} title={t('extensions.skills_empty')} text={t('extensions.skills_empty_text')}>
       {#snippet action()}
         <button type="button" class="btn btn-primary" onclick={openInstall}>
-          <Upload size={16} strokeWidth={2.4} />
+          <Upload size={16} strokeWidth={2} />
           {t('extensions.skill_install')}
         </button>
       {/snippet}
     </EmptyState>
   </div>
 {:else if skills.length > 0}
-  <div class="card">
-    <ul class="m-0 list-none p-0">
-      {#each skills as skill (skill.id)}
-        <li class="flex flex-wrap items-center gap-x-6 gap-y-2 border-t border-line px-[22px] py-4 first:border-t-0">
-          <div class="min-w-0 flex-1 basis-[320px]">
-            <div class="flex flex-wrap items-baseline gap-x-2.5">
-              <h2 class="m-0 text-[16px] font-extrabold {skill.enabled ? '' : 'text-fg2'}">{skill.name}</h2>
-              <span class="text-[12.5px] text-fg3">{skill.id}</span>
-            </div>
-            <p class="m-0 mt-0.5 max-w-[80ch] text-[13.5px] text-fg2">{skill.description}</p>
+  <ul class="group-list m-0 list-none p-0">
+    {#each skills as skill (skill.id)}
+      <li class="flex flex-wrap items-center gap-x-6 gap-y-2 py-4">
+        <div class="min-w-0 flex-1 basis-[320px]">
+          <div class="flex flex-wrap items-baseline gap-x-2.5">
+            <h2 class="m-0 text-[16px] font-semibold {skill.enabled ? '' : 'text-fg2'}">{skill.name}</h2>
+            <span class="text-[12.5px] text-fg3">{skill.id}</span>
           </div>
-          <div class="ml-auto flex items-center gap-2.5">
-            <button
-              type="button"
-              class="btn btn-sm btn-quiet btn-icon"
-              aria-label={t('extensions.skill_remove_title', { name: skill.name })}
-              title={t('extensions.remove')}
-              disabled={busy[skill.id]}
-              onclick={() => void remove(skill)}
-            >
-              <Trash2 size={16} strokeWidth={2.2} />
-            </button>
-            <Switch
-              checked={skill.enabled}
-              disabled={busy[skill.id]}
-              label={skill.enabled
-                ? t('platforms.turn_off', { name: skill.name })
-                : t('platforms.turn_on', { name: skill.name })}
-              onchange={(next) => void setEnabled(skill, next)}
-            />
-          </div>
-        </li>
-      {/each}
-    </ul>
-  </div>
+          <p class="m-0 mt-0.5 max-w-[80ch] text-[13.5px] text-fg2">{skill.description}</p>
+        </div>
+        <div class="ml-auto flex items-center gap-2.5">
+          <button
+            type="button"
+            class="btn btn-sm btn-quiet btn-icon"
+            aria-label={t('extensions.skill_remove_title', { name: skill.name })}
+            title={t('extensions.remove')}
+            disabled={busy[skill.id]}
+            onclick={() => void remove(skill)}
+          >
+            <Trash2 size={16} strokeWidth={2} />
+          </button>
+          <Switch
+            checked={skill.enabled}
+            disabled={busy[skill.id]}
+            label={skill.enabled
+              ? t('platforms.turn_off', { name: skill.name })
+              : t('platforms.turn_on', { name: skill.name })}
+            onchange={(next) => void setEnabled(skill, next)}
+          />
+        </div>
+      </li>
+    {/each}
+  </ul>
 {:else if !error}
   <p class="m-0 px-1 hint">{t('common.loading')}</p>
 {/if}
@@ -222,7 +220,7 @@ async function remove(skill: SkillItem) {
           id="skill-file"
           type="file"
           accept=".zip,application/zip"
-          class="block w-full text-[14px] text-fg2 file:mr-3 file:h-[34px] file:cursor-pointer file:rounded-full file:border-0 file:bg-sunk file:px-4 file:font-bold file:text-fg"
+          class="block w-full text-[14px] text-fg2 file:mr-3 file:h-[34px] file:cursor-pointer file:rounded-full file:border-0 file:bg-sunk file:px-4 file:font-medium file:text-fg"
           onchange={(e) => (file = e.currentTarget.files?.[0] ?? null)}
         />
         <p class="m-0 mt-2 hint">{t('extensions.skill_archive_hint')}</p>

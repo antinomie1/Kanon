@@ -173,7 +173,7 @@ async function remove() {
 <section class="card relative px-5 pb-6 sm:px-7">
   <div class="flex flex-wrap items-center gap-x-4 gap-y-3 pt-5 pb-2">
     <div class="flex min-w-0 flex-1 flex-col leading-tight">
-      <h2 class="m-0 truncate text-[22px] font-extrabold">{provider.name}</h2>
+      <h2 class="m-0 truncate text-[22px] font-semibold">{provider.name}</h2>
       <span class="mt-1 flex flex-wrap items-center gap-x-3 gap-y-1 text-[13.5px] text-fg2">
         <span>{protocols.find((p) => p.id === provider.protocol)?.name ?? provider.protocol}</span>
         <span class="flex items-center gap-1.5 whitespace-nowrap">
@@ -193,7 +193,7 @@ async function remove() {
       disabled={providersStore.pending}
       onclick={remove}
     >
-      <Trash2 size={16} strokeWidth={2.2} />
+      <Trash2 size={16} strokeWidth={2} />
     </button>
   </div>
 
@@ -201,7 +201,7 @@ async function remove() {
     <div class="notice notice-bad mt-2" role="alert"><span class="min-w-0 break-words">{formError}</span></div>
   {/if}
 
-  <div>
+  <div class="divide-y divide-line">
     <Section title={t('llm.sec_connection')} hint={t('llm.sec_connection_hint')}>
       <div>
         <label class="label" for="provider-protocol">{t('llm.protocol')}</label>
@@ -261,14 +261,14 @@ async function remove() {
           </datalist>
         </div>
         <button type="button" class="btn" disabled={testing} onclick={() => void test()}>
-          <PlugZap size={16} strokeWidth={2.2} />
+          <PlugZap size={16} strokeWidth={2} />
           {testing ? t('llm.testing') : t('llm.test')}
         </button>
       </div>
       {#if testResult && !testing}
         {#if testResult.status === 'ok'}
           <div class="notice notice-ok flex-col gap-1">
-            <b class="font-extrabold">
+            <b class="font-semibold">
               {t('llm.test_ok', { ms: testResult.latency_ms })}
             </b>
             {#if testResult.reply}
@@ -277,7 +277,7 @@ async function remove() {
           </div>
         {:else}
           <div class="notice notice-bad flex-col gap-1">
-            <b class="font-extrabold">{t('llm.test_failed')}</b>
+            <b class="font-semibold">{t('llm.test_failed')}</b>
             <span class="min-w-0 break-words">{testResult.error}</span>
           </div>
         {/if}
@@ -315,12 +315,12 @@ async function remove() {
   <div class="flex flex-wrap items-center gap-x-3.5 gap-y-1 border-t border-line pt-5 pb-1">
     <button
       type="button"
-      class="btn btn-quiet h-8! px-0! text-accent-fg!"
+      class="btn btn-quiet h-8! px-0! text-accent!"
       aria-expanded={showAdvanced}
       onclick={() => (showAdvanced = !showAdvanced)}
     >
       {showAdvanced ? t('instances.hide_advanced') : t('instances.show_advanced')}
-      <ChevronDown size={16} strokeWidth={2.4} class="transition-transform {showAdvanced ? 'rotate-180' : ''}" />
+      <ChevronDown size={16} strokeWidth={2} class="transition-transform {showAdvanced ? 'rotate-180' : ''}" />
     </button>
     {#if !showAdvanced}
       <span class="text-[13.5px] text-fg2">{t('llm.advanced_summary')}</span>
@@ -330,7 +330,7 @@ async function remove() {
   {#if changeCount > 0}
     <div class="sticky bottom-4 z-10 mt-6 flex justify-center">
       <div
-        class="flex max-w-full items-center gap-3 rounded-[26px] bg-bar py-2 pr-2 pl-5 text-[14.5px] font-bold text-on-bar shadow-[var(--k-pop)]"
+        class="flex max-w-full items-center gap-3 rounded-[26px] bg-bar py-2 pr-2 pl-5 text-[14.5px] font-medium text-on-bar shadow-[var(--k-pop)]"
       >
         <span class="truncate">
           {changeCount === 1

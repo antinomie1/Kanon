@@ -79,7 +79,7 @@ function onkeydown(e: KeyboardEvent) {
 
 {#if open}
   <div
-    class="fixed inset-0 z-50 flex bg-[rgb(20_18_30/0.38)] {variant === 'drawer'
+    class="fixed inset-0 z-50 flex bg-black/32 {variant === 'drawer'
       ? 'justify-end'
       : 'items-start justify-center overflow-y-auto px-4 py-[8vh]'}"
   >
@@ -98,11 +98,11 @@ function onkeydown(e: KeyboardEvent) {
       tabindex="-1"
       class="relative flex w-full flex-col bg-card shadow-[var(--k-pop)] outline-none {width} {variant ===
       'drawer'
-        ? 'h-full'
-        : 'max-h-[84vh] rounded-[22px]'}"
+        ? 'h-full rounded-l-2xl'
+        : 'max-h-[84vh] rounded-[28px]'}"
     >
       <div class="flex items-center gap-3 px-6 pt-5 pb-3">
-        <h2 class="m-0 min-w-0 flex-1 truncate text-[18px] font-extrabold">{title}</h2>
+        <h2 class="m-0 min-w-0 flex-1 truncate text-[22px] font-normal">{title}</h2>
         <button
           type="button"
           data-close
@@ -111,7 +111,7 @@ function onkeydown(e: KeyboardEvent) {
           disabled={locked}
           onclick={close}
         >
-          <X size={18} strokeWidth={2.4} />
+          <X size={18} strokeWidth={2} />
         </button>
       </div>
       <div class="scroll-thin min-h-0 flex-1 overflow-y-auto px-6 pb-6">

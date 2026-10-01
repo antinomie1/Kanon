@@ -51,7 +51,7 @@ const contextSwitches = [
 ] as const;
 </script>
 
-<div class="border-t border-line mt-4">
+<div class="mt-4 divide-y divide-line border-t border-line">
   <Section title={t('group.title')} hint={t('group.hint')}>
     <div>
       <Seg
@@ -69,7 +69,7 @@ const contextSwitches = [
     </div>
     <div class="flex items-start gap-3 text-[14.5px]">
       <span class="min-w-0 flex-1">
-        <span class="block font-semibold">{t('group.observe')}</span>
+        <span class="block font-medium">{t('group.observe')}</span>
         <span class="block hint">{t('group.observe_hint')}</span>
         <SupportBadge capabilities={['group_messages']} />
       </span>
@@ -83,7 +83,7 @@ const contextSwitches = [
 
   <Section title={t('context.title')} hint={t('context.hint')}>
     <div class="flex flex-wrap items-center gap-x-3 gap-y-1 text-[14.5px]">
-      <span class="flex-1 font-semibold">{t('instances.use_global_setting')}</span>
+      <span class="flex-1 font-medium">{t('instances.use_global_setting')}</span>
       {#if store.nodeContextPolicy}
         <span class="text-[13px] text-fg2">
           {t('instances.global_is', { policy: describeContextPolicy(store.nodeContextPolicy) })}
@@ -111,7 +111,7 @@ const contextSwitches = [
 
   <Section title={t('commands.title')} hint={t('instances.commands_hint')}>
     <div class="flex flex-wrap items-center gap-x-3 gap-y-1 text-[14.5px]">
-      <span class="flex-1 font-semibold">{t('instances.use_global_setting')}</span>
+      <span class="flex-1 font-medium">{t('instances.use_global_setting')}</span>
       <Switch
         checked={store.formCommandInherit}
         label={t('instances.use_global_setting')}
@@ -146,7 +146,7 @@ const contextSwitches = [
             bind:group={store.formBash}
           />
           <span class="min-w-0">
-            <span class="block text-[14.5px] font-bold {on ? 'text-accent-fg' : ''}">{t(scope.labelKey)}</span>
+            <span class="block text-[14.5px] font-medium {on ? 'text-accent-fg' : ''}">{t(scope.labelKey)}</span>
             <span class="block hint">{t(scope.hintKey)}</span>
           </span>
         </label>
@@ -154,12 +154,12 @@ const contextSwitches = [
     </div>
     {#if store.formBash === 'shared_context'}
       <div class="notice notice-warn">
-        <TriangleAlert size={16} strokeWidth={2.2} class="mt-0.5 shrink-0" />
+        <TriangleAlert size={16} strokeWidth={2} class="mt-0.5 shrink-0" />
         {t('instances.bash_shared_warning')}
       </div>
     {:else if store.formBash === 'own_context' && (store.formSessionScope === 'group' || store.formObserveGroup)}
       <div class="notice notice-warn">
-        <TriangleAlert size={16} strokeWidth={2.2} class="mt-0.5 shrink-0" />
+        <TriangleAlert size={16} strokeWidth={2} class="mt-0.5 shrink-0" />
         {t('instances.bash_groups_excluded')}
       </div>
     {/if}
@@ -168,7 +168,7 @@ const contextSwitches = [
         {t('instances.bash_node_off')}
         <button
           type="button"
-          class="font-bold text-accent-fg"
+          class="font-medium text-accent"
           onclick={() => router.navigate('settings', 'bash')}
         >
           {t('instances.bash_open_settings')}
@@ -181,14 +181,14 @@ const contextSwitches = [
     {#each kinds as { kind, titleKey } (kind)}
       {@const items = store.itemsOf(kind)}
       <div>
-        <h4 class="m-0 mb-2 text-[13px] font-bold text-fg2">{t(titleKey)}</h4>
+        <h4 class="m-0 mb-2 text-[13px] font-medium text-fg2">{t(titleKey)}</h4>
         {#if items.length === 0}
           <p class="m-0 hint">{t('instances.no_items')}</p>
         {:else}
           <div class="flex flex-col gap-1.5">
             {#each items as item (item.id)}
               <div class="flex items-center gap-3">
-                <span class="min-w-0 flex-1 truncate text-[14px] font-semibold" title={item.id}>{item.name}</span>
+                <span class="min-w-0 flex-1 truncate text-[14px] font-medium" title={item.id}>{item.name}</span>
                 <Seg
                   size="sm"
                   label={item.name}

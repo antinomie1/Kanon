@@ -50,7 +50,7 @@ async function save() {
 </Section>
 
 {#if draft}
-  <div class="flex justify-end gap-2.5 border-t border-line py-5">
+  <div class="flex justify-end gap-2.5 py-5">
     <button
       type="button"
       class="btn"

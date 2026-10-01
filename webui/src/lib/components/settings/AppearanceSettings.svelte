@@ -11,7 +11,8 @@ import Section from '../ui/Section.svelte';
 import Seg from '../ui/Seg.svelte';
 import Switch from '../ui/Switch.svelte';
 
-// Swatch colours shown in the picker; the tokens they switch to live in `app.css`.
+// Swatch colours shown in the picker. Each is the seed its Material scheme in `app.css` is
+// generated from, so it names the accent family rather than matching any one role exactly.
 const SWATCH: Record<Accent, string> = {
   violet: '#5b57e0',
   blue: '#2a66db',
@@ -48,7 +49,7 @@ let previewOn = $state(true);
         role="radio"
         aria-checked={on}
         onclick={() => theme.setAccent(accent)}
-        class="inline-flex h-10 items-center gap-2 rounded-full pr-4 pl-2 text-[14px] font-bold whitespace-nowrap {on
+        class="inline-flex h-10 items-center gap-2 rounded-full pr-4 pl-2 text-[14px] font-medium whitespace-nowrap {on
           ? 'bg-accent-tint text-accent-fg shadow-[inset_0_0_0_2px_var(--k-accent)]'
           : 'bg-sunk text-fg hover:text-fg'}"
       >
@@ -56,7 +57,7 @@ let previewOn = $state(true);
           class="grid h-6 w-6 place-items-center rounded-full text-white"
           style="background: {SWATCH[accent]}"
         >
-          {#if on}<Check size={14} strokeWidth={3} />{/if}
+          {#if on}<Check size={14} strokeWidth={2.6} />{/if}
         </i>
         {t(`settings.accent_${accent}`)}
       </button>
@@ -65,11 +66,11 @@ let previewOn = $state(true);
   <div class="flex flex-wrap items-center gap-4 self-start rounded-2xl px-4 py-3.5 shadow-[inset_0_0_0_1px_var(--k-line)]">
     <span class="text-[13px] whitespace-nowrap text-fg2">{t('settings.preview')}</span>
     <button type="button" class="btn btn-primary btn-sm" tabindex="-1">
-      <Plus size={14} strokeWidth={2.6} />
+      <Plus size={14} strokeWidth={2.2} />
       {t('instances.new')}
     </button>
     <Switch checked={previewOn} label={t('settings.preview')} onchange={(next) => (previewOn = next)} />
-    <span class="text-[14px] font-bold whitespace-nowrap text-accent-fg">{t('nav.instances')}</span>
+    <span class="text-[14px] font-medium whitespace-nowrap text-accent">{t('nav.instances')}</span>
   </div>
 </Section>
 

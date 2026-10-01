@@ -61,7 +61,7 @@ async function save() {
       <label class="flex items-center gap-3 text-[14.5px]">
         <span class="whitespace-nowrap">{t('instances.reply_about')}</span>
         <input type="range" min="0" max="1" step="0.05" bind:value={draft.probability} class="max-w-[360px] flex-1" />
-        <span class="w-11 font-extrabold tabular-nums">{Math.round(draft.probability * 100)}%</span>
+        <span class="w-11 font-semibold tabular-nums">{Math.round(draft.probability * 100)}%</span>
       </label>
     {/if}
   </Section>
@@ -69,7 +69,7 @@ async function save() {
   <Section title={t('settings.reply_how')} hint={t('settings.reply_how_hint')}>
     <div class="flex items-start gap-3 text-[14.5px]">
       <span class="min-w-0 flex-1">
-        <span class="block font-semibold">{t('reply.quote')}</span>
+        <span class="block font-medium">{t('reply.quote')}</span>
         <span class="block hint">{t('reply.quote_hint')}</span>
         <SupportBadge capabilities={['quote_reply']} />
       </span>
@@ -77,7 +77,7 @@ async function save() {
     </div>
     <div class="flex items-start gap-3 text-[14.5px]">
       <span class="min-w-0 flex-1">
-        <span class="block font-semibold">{t('reply.acknowledge')}</span>
+        <span class="block font-medium">{t('reply.acknowledge')}</span>
         <span class="block hint">{t('reply.acknowledge_hint')}</span>
         <SupportBadge capabilities={['acknowledge']} />
       </span>
@@ -85,7 +85,7 @@ async function save() {
     </div>
   </Section>
 
-  <div class="flex justify-end gap-2.5 border-t border-line py-5">
+  <div class="flex justify-end gap-2.5 py-5">
     <button
       type="button"
       class="btn"

@@ -88,7 +88,7 @@ async function resetSandbox() {
   <Section title={t('bash.title')} hint={t('bash.hint')}>
     <div class="flex items-start gap-3 text-[14.5px]">
       <span class="min-w-0 flex-1">
-        <span class="block font-semibold">{t('bash.enabled')}</span>
+        <span class="block font-medium">{t('bash.enabled')}</span>
         <span class="block hint">{t('bash.identity_hint')}</span>
       </span>
       <Switch
@@ -116,7 +116,7 @@ async function resetSandbox() {
 
     {#if draft.execution_mode === 'local'}
       <div class="notice notice-warn">
-        <TriangleAlert size={16} strokeWidth={2.2} class="mt-0.5 shrink-0" />
+        <TriangleAlert size={16} strokeWidth={2} class="mt-0.5 shrink-0" />
         {t('bash.local_hint')}
       </div>
       <label class="block">
@@ -125,7 +125,7 @@ async function resetSandbox() {
       </label>
       <div class="flex items-start gap-3 text-[14.5px]">
         <span class="min-w-0 flex-1">
-          <span class="block font-semibold">{t('bash.auto_review')}</span>
+          <span class="block font-medium">{t('bash.auto_review')}</span>
           <span class="block hint">{t('bash.review_hint')}</span>
         </span>
         <Switch
@@ -150,7 +150,7 @@ async function resetSandbox() {
     {:else}
       <p class="m-0 hint">{t('bash.sandbox_hint')}</p>
       <div class="flex items-center gap-3 text-[14.5px]">
-        <span class="flex-1 font-semibold">{t('bash.network')}</span>
+        <span class="flex-1 font-medium">{t('bash.network')}</span>
         <Switch
           checked={draft.sandbox.network}
           disabled={saving}
@@ -177,7 +177,7 @@ async function resetSandbox() {
     {/if}
   </Section>
 
-  <div class="flex justify-end gap-2.5 border-t border-line py-5">
+  <div class="flex justify-end gap-2.5 py-5">
     <button
       type="button"
       class="btn"

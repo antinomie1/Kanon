@@ -155,11 +155,11 @@ async function restart(row: Row) {
   <p class="m-0 max-w-[68ch] hint">{t('extensions.plugins_hint')}</p>
   <div class="flex flex-wrap gap-2.5">
     <button type="button" class="btn" disabled={loading} onclick={() => void load()}>
-      <RefreshCw size={16} strokeWidth={2.4} class={loading ? 'animate-spin' : ''} />
+      <RefreshCw size={16} strokeWidth={2} class={loading ? 'animate-spin' : ''} />
       {t('platforms.refresh')}
     </button>
     <button type="button" class="btn btn-primary" onclick={() => (installOpen = true)}>
-      <Plus size={16} strokeWidth={2.6} />
+      <Plus size={16} strokeWidth={2.2} />
       {t('extensions.install_plugin')}
     </button>
   </div>
@@ -174,22 +174,22 @@ async function restart(row: Row) {
     <EmptyState icon={Puzzle} title={t('extensions.plugins_empty')} text={t('extensions.plugins_empty_text')}>
       {#snippet action()}
         <button type="button" class="btn btn-primary" onclick={() => (installOpen = true)}>
-          <Plus size={16} strokeWidth={2.6} />
+          <Plus size={16} strokeWidth={2.2} />
           {t('extensions.install_plugin')}
         </button>
       {/snippet}
     </EmptyState>
   </div>
 {:else if rows.length > 0}
-  <div class="flex flex-col gap-3">
+  <div class="group-list">
     {#each rows as row (row.plugin.id)}
       {@const plugin = row.plugin}
       {@const status = statusOf(row)}
       {@const restarts = plugin.health?.restarts ?? 0}
-      <article class="card flex flex-wrap items-start gap-x-6 gap-y-3 px-[22px] py-[18px]">
+      <article class="flex flex-wrap items-start gap-x-6 gap-y-3 py-5">
         <div class="flex min-w-0 flex-1 basis-[340px] flex-col gap-1.5">
           <div class="flex flex-wrap items-center gap-x-2.5 gap-y-1">
-            <h2 class="m-0 text-[17px] font-extrabold">{plugin.name}</h2>
+            <h2 class="m-0 text-[17px] font-semibold">{plugin.name}</h2>
             <span class="text-[13px] text-fg3">v{plugin.version}</span>
             <span class="chip chip-sm {CHIP[status.tone]}">
               {#if status.tone !== 'idle'}<i class="dot dot-{status.tone}"></i>{/if}

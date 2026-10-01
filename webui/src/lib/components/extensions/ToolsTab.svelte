@@ -61,7 +61,7 @@ const SOURCE_KEY: Record<ToolSource, string> = {
 <div class="flex flex-wrap items-center justify-between gap-3 px-1">
   <p class="m-0 max-w-[68ch] hint">{t('extensions.tools_hint')}</p>
   <button type="button" class="btn" disabled={loading} onclick={() => void load()}>
-    <RefreshCw size={16} strokeWidth={2.4} class={loading ? 'animate-spin' : ''} />
+    <RefreshCw size={16} strokeWidth={2} class={loading ? 'animate-spin' : ''} />
     {t('platforms.refresh')}
   </button>
 </div>
@@ -90,9 +90,9 @@ const SOURCE_KEY: Record<ToolSource, string> = {
         ]}
       />
       <label class="relative ml-auto w-full sm:w-[280px]">
-        <Search size={16} strokeWidth={2.4} class="pointer-events-none absolute top-1/2 left-3.5 -translate-y-1/2 text-fg3" />
+        <Search size={16} strokeWidth={2} class="pointer-events-none absolute top-1/2 left-3.5 -translate-y-1/2 text-fg3" />
         <input
-          class="input h-[36px]! pl-10"
+          class="input input-search h-8!"
           type="search"
           aria-label={t('extensions.tools_search')}
           placeholder={t('extensions.tools_search')}
@@ -111,7 +111,7 @@ const SOURCE_KEY: Record<ToolSource, string> = {
             <div class="flex items-start gap-4">
               <div class="min-w-0 flex-1">
                 <div class="flex flex-wrap items-center gap-x-2.5 gap-y-1">
-                  <code class="text-[14px] font-bold">{tool.name}</code>
+                  <code class="text-[14px] font-medium">{tool.name}</code>
                   <span class="chip chip-sm {tool.source === 'builtin' ? 'chip-accent' : 'chip-muted'}">
                     {t(SOURCE_KEY[tool.source])}
                   </span>
@@ -130,7 +130,7 @@ const SOURCE_KEY: Record<ToolSource, string> = {
                 onclick={() => (expanded = { ...expanded, [tool.name]: !open })}
               >
                 {t('extensions.parameters')}
-                <ChevronDown size={14} strokeWidth={2.6} class="transition-transform {open ? 'rotate-180' : ''}" />
+                <ChevronDown size={14} strokeWidth={2.2} class="transition-transform {open ? 'rotate-180' : ''}" />
               </button>
             </div>
             {#if open}
