@@ -138,6 +138,20 @@ impl BotApiService for CoreStub {
 
     type RequestLLMStream = ReceiverStream<Result<LlmChunk, Status>>;
 
+    /// Echoes the parameters back as the result, so a test sees both directions of the
+    /// JSON conversion.
+    async fn call_platform_api(
+        &self,
+        request: tonic::Request<kanon_proto::v1::PlatformApiRequest>,
+    ) -> Result<tonic::Response<kanon_proto::v1::PlatformApiResponse>, tonic::Status> {
+        let request = request.into_inner();
+        Ok(tonic::Response::new(kanon_proto::v1::PlatformApiResponse {
+            result: request.params.map(|params| prost_types::Value {
+                kind: Some(prost_types::value::Kind::StructValue(params)),
+            }),
+        }))
+    }
+
     async fn request_llm(
         &self,
         _request: Request<LlmRequest>,
@@ -156,6 +170,13 @@ impl BotApiService for CoreStub {
         &self,
         _request: Request<GetStorageRequest>,
     ) -> Result<Response<GetStorageResponse>, Status> {
+        Err(Status::unimplemented("not part of this fixture"))
+    }
+
+    async fn get_conversation_history(
+        &self,
+        _request: Request<kanon_sdk::proto::v1::ConversationHistoryRequest>,
+    ) -> Result<Response<kanon_sdk::proto::v1::ConversationHistoryResponse>, Status> {
         Err(Status::unimplemented("not part of this fixture"))
     }
 }
@@ -222,6 +243,13 @@ impl BotApiService for CoreStubServer {
 
     type RequestLLMStream = ReceiverStream<Result<LlmChunk, Status>>;
 
+    async fn call_platform_api(
+        &self,
+        request: tonic::Request<kanon_proto::v1::PlatformApiRequest>,
+    ) -> Result<tonic::Response<kanon_proto::v1::PlatformApiResponse>, tonic::Status> {
+        self.inner.call_platform_api(request).await
+    }
+
     async fn request_llm(
         &self,
         request: Request<LlmRequest>,
@@ -241,6 +269,13 @@ impl BotApiService for CoreStubServer {
         request: Request<GetStorageRequest>,
     ) -> Result<Response<GetStorageResponse>, Status> {
         self.inner.get_storage(request).await
+    }
+
+    async fn get_conversation_history(
+        &self,
+        _request: Request<kanon_sdk::proto::v1::ConversationHistoryRequest>,
+    ) -> Result<Response<kanon_sdk::proto::v1::ConversationHistoryResponse>, Status> {
+        Err(Status::unimplemented("not part of this fixture"))
     }
 }
 
@@ -320,6 +355,34 @@ async fn core_handle_ingests_events_into_the_core() {
 }
 
 /// Registration is the reachability proof used by the host runner.
+#[tokio::test]
+async fn core_handle_calls_the_platform_api_with_json() {
+    let socket = temp_socket("core-platform-api");
+    let _stub = start_core_stub(&socket).await;
+    let handle = CoreHandle::new(connect_with_retry(&socket).await);
+
+    let result = handle
+        .call_platform_api(
+            "onebot",
+            "set_group_ban",
+            serde_json::json!({ "group_id": 1, "users": ["a"], "notify": true }),
+        )
+        .await
+        .expect("platform API call");
+    // Numbers travel as doubles, so integers come back as floats.
+    assert_eq!(
+        result,
+        serde_json::json!({ "group_id": 1.0, "users": ["a"], "notify": true })
+    );
+
+    let rejected = handle
+        .call_platform_api("onebot", "x", serde_json::json!([1]))
+        .await
+        .expect_err("non-object parameters");
+    assert_eq!(rejected.code(), tonic::Code::InvalidArgument);
+    let _ = std::fs::remove_file(&socket);
+}
+
 #[tokio::test]
 async fn core_handle_registers_the_host() {
     let socket = temp_socket("core-register");
@@ -503,5 +566,6 @@ async fn default_command_response(req: CommandExecuteRequest) -> CommandExecuteR
         success: true,
         replies: vec![],
         error_message: format!("Command '{}' executed by default stub handler", req.command),
+        ..Default::default()
     }
 }

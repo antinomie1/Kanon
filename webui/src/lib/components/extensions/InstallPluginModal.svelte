@@ -3,8 +3,10 @@ import { api } from '../../api/client';
 import { errorText } from '../../format';
 import { t } from '../../stores/i18n.svelte';
 import { toasts } from '../../stores/toast.svelte';
+import Button from '../ui/Button.svelte';
 import Modal from '../ui/Modal.svelte';
 import Seg from '../ui/Seg.svelte';
+import TextField from '../ui/TextField.svelte';
 
 /**
  * Installs a plugin from a directory on the node or from an uploaded package.
@@ -87,9 +89,9 @@ async function install() {
     {#if source === 'path'}
       <div>
         <label class="label" for="plugin-path">{t('extensions.path_label')}</label>
-        <input
+        <TextField
           id="plugin-path"
-          class="input mono"
+          mono
           spellcheck="false"
           placeholder="./plugins/demo_weather"
           bind:value={path}
@@ -103,7 +105,7 @@ async function install() {
           id="plugin-file"
           type="file"
           accept=".kpk,.zip,application/zip"
-          class="block w-full text-[14px] text-fg2 file:mr-3 file:h-[34px] file:cursor-pointer file:rounded-full file:border-0 file:bg-sunk file:px-4 file:font-bold file:text-fg"
+          class="block w-full text-[14px] text-fg2 file:mr-3 file:h-[34px] file:cursor-pointer file:rounded-full file:border-0 file:bg-sunk file:px-4 file:font-medium file:text-fg"
           onchange={(e) => (file = e.currentTarget.files?.[0] ?? null)}
         />
         <p class="m-0 mt-2 hint">{t('extensions.archive_hint')}</p>
@@ -115,9 +117,9 @@ async function install() {
   </form>
 
   {#snippet footer()}
-    <button type="button" class="btn" disabled={installing} onclick={onclose}>{t('common.cancel')}</button>
-    <button type="submit" form="install-plugin" class="btn btn-primary" disabled={!ready || installing}>
+    <Button type="button" disabled={installing} onclick={onclose}>{t('common.cancel')}</Button>
+    <Button type="submit" form="install-plugin" variant="filled" disabled={!ready || installing}>
       {installing ? t('extensions.installing') : t('extensions.install')}
-    </button>
+    </Button>
   {/snippet}
 </Modal>

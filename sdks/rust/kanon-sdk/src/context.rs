@@ -5,15 +5,18 @@
 //! the microkernel pipeline.
 
 use std::path::PathBuf;
-use std::sync::Arc;
 
 use kanon_proto::v1::bot_api_service_client::BotApiServiceClient;
 use kanon_proto::v1::{
-    IngestEventRequest, IngestEventResponse, PipelineEventRequest, RegisterHostRequest,
-    RegisterHostResponse,
+    ConversationHistoryRequest, ConversationHistoryResponse, DeliverMessageRequest,
+    DeliverMessageResponse, IngestEventRequest, IngestEventResponse, LlmChunk, LlmMessage,
+    LlmRequest, LlmRole, PipelineEventRequest, PlatformApiRequest, RegisterHostRequest,
+    RegisterHostResponse, SendMessageRequest, SendMessageResponse,
 };
-use tokio::sync::Mutex;
+use tonic::Streaming;
 use tonic::transport::Channel;
+
+use crate::segment::IntoReply;
 
 /// Runtime context passed to plugins during initialization and invocation.
 #[derive(Debug, Clone)]
@@ -57,9 +60,13 @@ impl PluginContext {
 /// A single gRPC channel is shared across every clone instead of dialing per call: plugin hosts
 /// issue these calls from long-running loops (a chat platform poller, a socket reader), and
 /// re-establishing a connection per message would dominate the cost of a text-only event.
+///
+/// Each call works on its own clone of the client. Cloning a tonic client only clones the
+/// channel handle, and HTTP/2 multiplexes the calls, so a long model stream never blocks an
+/// adapter's inbound ingestion.
 #[derive(Debug, Clone)]
 pub struct CoreHandle {
-    client: Arc<Mutex<BotApiServiceClient<Channel>>>,
+    client: BotApiServiceClient<Channel>,
 }
 
 /// `tonic::Status` is inherently large (it carries metadata and a boxed source), and boxing it
@@ -70,7 +77,7 @@ impl CoreHandle {
     /// Wraps an established core channel.
     pub fn new(channel: Channel) -> Self {
         Self {
-            client: Arc::new(Mutex::new(BotApiServiceClient::new(channel))),
+            client: BotApiServiceClient::new(channel),
         }
     }
 
@@ -84,7 +91,7 @@ impl CoreHandle {
         &self,
         request: IngestEventRequest,
     ) -> Result<IngestEventResponse, tonic::Status> {
-        let mut client = self.client.lock().await;
+        let mut client = self.client.clone();
         let response = client.ingest_event(request).await?;
         Ok(response.into_inner())
     }
@@ -94,7 +101,7 @@ impl CoreHandle {
     /// Deliberately trivial: it opens no business path, so a host can distinguish "core is gone"
     /// from "core is busy". Used by [`crate::watchdog::watch_core`].
     pub async fn ping(&self) -> Result<(), tonic::Status> {
-        let mut client = self.client.lock().await;
+        let mut client = self.client.clone();
         let request = kanon_proto::v1::PingRequest {
             timestamp: std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
@@ -113,9 +120,152 @@ impl CoreHandle {
         &self,
         request: RegisterHostRequest,
     ) -> Result<RegisterHostResponse, tonic::Status> {
-        let mut client = self.client.lock().await;
+        let mut client = self.client.clone();
         let response = client.register_host(request).await?;
         Ok(response.into_inner())
+    }
+
+    /// Replies to an inbound event and waits for the platform's delivery result
+    /// (`BotApiService.ReplyMessage`).
+    ///
+    /// Success here is the adapter's delivery outcome, not mere queue admission. An RPC failure
+    /// or timeout is ambiguous — the message may have gone out — so never retry a reply
+    /// automatically.
+    pub async fn reply_to(
+        &self,
+        event: &PipelineEventRequest,
+        content: impl IntoReply,
+    ) -> Result<DeliverMessageResponse, tonic::Status> {
+        let mut request = tonic::Request::new(DeliverMessageRequest {
+            platform: event.platform.clone(),
+            channel_id: event.channel_id.clone(),
+            recipient_id: event.sender_id.clone(),
+            event_id: event.event_id.clone(),
+            segments: content.into_segments(),
+        });
+        // Slightly above Core's own delivery budget, so Core reports the outcome first.
+        request.set_timeout(std::time::Duration::from_secs(35));
+        Ok(self
+            .client
+            .clone()
+            .reply_message(request)
+            .await?
+            .into_inner())
+    }
+
+    /// Sends a message on the bot's own initiative: reminders, broadcasts, subscriptions
+    /// (`BotApiService.SendMessage`).
+    ///
+    /// Success means Core accepted the message into its outbound queue, not that the platform
+    /// delivered it; use [`reply_to`](Self::reply_to) when the delivery outcome matters.
+    /// `channel_id` is the conversation as events report it (`"group:123"`).
+    pub async fn send_message(
+        &self,
+        platform: impl Into<String>,
+        channel_id: impl Into<String>,
+        content: impl IntoReply,
+    ) -> Result<SendMessageResponse, tonic::Status> {
+        let request = SendMessageRequest {
+            platform: platform.into(),
+            channel_id: channel_id.into(),
+            recipient_id: String::new(),
+            segments: content.into_segments(),
+        };
+        Ok(self
+            .client
+            .clone()
+            .send_message(request)
+            .await?
+            .into_inner())
+    }
+
+    /// Asks the node's model one question and returns the complete answer.
+    ///
+    /// The call is independent of every chat conversation: nothing is read from or written to
+    /// any session's memory. Build richer requests (system prompt, history, images, sampling)
+    /// with [`LlmRequest`] and [`llm_message`], and pass them to [`stream_llm`](Self::stream_llm).
+    ///
+    /// Fails with `UNAVAILABLE` when the node has no model configured and `INVALID_ARGUMENT`
+    /// for messages the model cannot take.
+    pub async fn request_llm(&self, prompt: impl Into<String>) -> Result<String, tonic::Status> {
+        let request = LlmRequest {
+            messages: vec![llm_message(LlmRole::User, prompt)],
+            ..Default::default()
+        };
+        let mut stream = self.stream_llm(request).await?;
+        let mut answer = String::new();
+        while let Some(chunk) = stream.message().await? {
+            answer.push_str(&chunk.delta_text);
+        }
+        Ok(answer)
+    }
+
+    /// Starts a model call and returns its answer as a stream of text deltas.
+    pub async fn stream_llm(
+        &self,
+        request: LlmRequest,
+    ) -> Result<Streaming<LlmChunk>, tonic::Status> {
+        Ok(self.client.clone().request_llm(request).await?.into_inner())
+    }
+
+    /// Calls one action of a built-in adapter's platform API and returns its result
+    /// (`BotApiService.CallPlatformApi`).
+    ///
+    /// This reaches what the generic contract does not model, e.g. OneBot's
+    /// `get_group_member_list`. `params` must be a JSON object (or `null` for none); numbers in
+    /// the result come back as floats. Fails with `NOT_FOUND` for an unknown platform,
+    /// `UNIMPLEMENTED` when the adapter offers no API and `UNAVAILABLE` when the platform
+    /// refused the call.
+    pub async fn call_platform_api(
+        &self,
+        platform: impl Into<String>,
+        action: impl Into<String>,
+        params: serde_json::Value,
+    ) -> Result<serde_json::Value, tonic::Status> {
+        let params = match params {
+            serde_json::Value::Object(fields) => Some(crate::json::to_struct(fields)),
+            serde_json::Value::Null => None,
+            _ => {
+                return Err(tonic::Status::invalid_argument(
+                    "platform API parameters must be a JSON object",
+                ));
+            }
+        };
+        let request = PlatformApiRequest {
+            platform: platform.into(),
+            action: action.into(),
+            params,
+        };
+        let response = self.client.clone().call_platform_api(request).await?;
+        Ok(response
+            .into_inner()
+            .result
+            .map(crate::json::from_value)
+            .unwrap_or(serde_json::Value::Null))
+    }
+
+    /// Reads the model conversation `event` belongs to (`BotApiService.GetConversationHistory`):
+    /// the same session the model would continue when answering it.
+    ///
+    /// `limit` keeps only the most recent messages (0 keeps all). Only user and assistant turns
+    /// are returned; tool calls, tool results and the model's reasoning are left out. History
+    /// is read-only. Fails with `NOT_FOUND` when no bot instance answers on the platform and
+    /// `UNAVAILABLE` when no model is configured.
+    pub async fn conversation_history(
+        &self,
+        event: &PipelineEventRequest,
+        limit: u32,
+    ) -> Result<ConversationHistoryResponse, tonic::Status> {
+        let request = ConversationHistoryRequest {
+            context: Some(event.clone()),
+            limit,
+        };
+        Ok(self
+            .client
+            .clone()
+            .get_conversation_history(request)
+            .await?
+            .into_inner())
     }
 
     /// Convenience wrapper building a text-only event for `platform`.
@@ -145,5 +295,14 @@ impl CoreHandle {
         };
 
         self.ingest_event(request).await
+    }
+}
+
+/// Builds one turn of an [`LlmRequest`]; attach images (user turns only) through `images`.
+pub fn llm_message(role: LlmRole, text: impl Into<String>) -> LlmMessage {
+    LlmMessage {
+        role: role as i32,
+        text: text.into(),
+        images: Vec::new(),
     }
 }

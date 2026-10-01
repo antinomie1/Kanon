@@ -234,6 +234,10 @@ export const api = {
     ),
 
   getPlugins: () => request<PluginsResponse>('/api/v1/plugins'),
+  // The node reads its plugin directory only when asked: this rescans it and answers with the
+  // refreshed catalog, which is how a plugin copied in by hand shows up.
+  rescanPlugins: () =>
+    request<PluginsResponse>('/api/v1/plugins/rescan', { method: 'POST' }),
   // Enabling spawns the plugin host; disabling stops it, so the plugin leaves routing entirely.
   setPluginEnabled: (pluginId: string, enabled: boolean) =>
     request<PluginStateResponse>(

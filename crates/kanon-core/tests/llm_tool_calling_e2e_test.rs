@@ -220,9 +220,9 @@ async fn test_llm_tool_calling_e2e_lifecycle() {
         .expect("Failed to spawn demo_rust plugin host");
 
     // Verify metadata discovery registered both the /rustcalc command and the fast_calc tool
-    assert_eq!(managed_host.meta.len(), 1);
-    assert_eq!(managed_host.meta[0].commands[0].name, "rustcalc");
-    assert_eq!(managed_host.meta[0].tools[0].name, "fast_calc");
+    assert_eq!(managed_host.metas().len(), 1);
+    assert_eq!(managed_host.metas()[0].commands[0].name, "rustcalc");
+    assert_eq!(managed_host.metas()[0].tools[0].name, "fast_calc");
 
     // 4. Start Mock LLM HTTP server
     let mock_state = MockServerState {

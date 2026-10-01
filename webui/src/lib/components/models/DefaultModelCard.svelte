@@ -55,7 +55,7 @@ async function apply(next: string) {
 
 <section class="card flex flex-wrap items-start gap-x-8 gap-y-4 px-5 py-5 sm:px-7">
   <div class="min-w-0 flex-1 basis-[300px]">
-    <h2 class="m-0 text-[17px] font-extrabold">{t('llm.default_title')}</h2>
+    <h2 class="m-0 text-[17px] font-semibold">{t('llm.default_title')}</h2>
     <p class="m-0 mt-1 max-w-[56ch] hint">{t('llm.default_hint')}</p>
     {#if spec}
       <div class="mt-3 flex flex-wrap items-center gap-1.5">

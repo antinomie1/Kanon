@@ -42,6 +42,8 @@ Kanon 是基于 Rust 2024 构建的高性能多平台聊天机器人微内核，
 ├── Cargo.toml                      # 根 Workspace 配置 (Rust 2024)
 ├── AGENTS.md                       # 本规范
 ├── docs/ARCHITECTURE.md            # 全景架构设计规范文档
+├── docs/PLUGIN_GUIDE.md            # 插件开发指南
+├── docs/PLUGIN_API.md              # 插件协议参考（RPC 语义、时限、错误码）
 ├── proto/kanon/v1/plugin.proto     # gRPC 契约 IDL
 ├── crates/                         # 核心 Rust 模块
 │   ├── kanon/                      # 程序入口：唯一节点二进制 kanon（组合根，仅负责装配）

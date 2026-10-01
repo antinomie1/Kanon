@@ -105,6 +105,7 @@ async fn connect_handshakes_and_exposes_qualified_tools() {
             tool_name: qualified_tool_name("fake", "echo"),
             session_id: String::new(),
             payload: None,
+            ..Default::default()
         })
         .await
         .expect("tool call");
@@ -117,6 +118,7 @@ async fn connect_handshakes_and_exposes_qualified_tools() {
             tool_name: qualified_tool_name("other", "echo"),
             session_id: String::new(),
             payload: None,
+            ..Default::default()
         })
         .await
         .expect("tool call");
@@ -255,6 +257,7 @@ async fn image_content_becomes_a_file_the_platform_can_send() {
             tool_name: qualified_tool_name("fake", "chart"),
             session_id: String::new(),
             payload: None,
+            ..Default::default()
         })
         .await
         .expect("tool call");

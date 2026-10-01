@@ -3,9 +3,11 @@ import { Plus, X } from 'lucide-svelte';
 import type { CommandPolicyDraft } from '../../stores/commandPolicy.svelte';
 import { t } from '../../stores/i18n.svelte';
 import type { CommandAccess } from '../../types';
+import Button from './Button.svelte';
 import Select from './Select.svelte';
 import SupportBadge from './SupportBadge.svelte';
 import Switch from './Switch.svelte';
+import TextField from './TextField.svelte';
 
 /**
  * Editor for one command policy: administrators, whether group roles count, and the access table.
@@ -47,7 +49,7 @@ function addCommand() {
 
   <div class="flex items-start gap-3 text-[14.5px]">
     <span class="min-w-0 flex-1">
-      <span class="block font-semibold">{t('commands.group_admins')}</span>
+      <span class="block font-medium">{t('commands.group_admins')}</span>
       <span class="block hint">{t('commands.group_admins_hint')}</span>
       <SupportBadge capabilities={['sender_role']} />
     </span>
@@ -64,24 +66,26 @@ function addCommand() {
     <div class="flex flex-col gap-2">
       {#each draft.rows as row, index (row.command)}
         <div class="flex items-center gap-2.5">
-          <code class="w-28 shrink-0 truncate text-[13.5px] font-bold">/{row.command}</code>
+          <code class="w-28 shrink-0 truncate text-[13.5px] font-medium">/{row.command}</code>
           <Select bind:value={draft.rows[index].access} class="flex-1" aria-label="/{row.command}">
             {#each accessLevels as level (level.value)}
               <option value={level.value}>{t(level.labelKey)}</option>
             {/each}
           </Select>
-          <button
+          <Button
             type="button"
             onclick={() => (draft.rows = draft.rows.filter((_, i) => i !== index))}
-            class="btn btn-quiet btn-icon btn-sm"
+            variant="text"
+            size="sm"
+            square
             aria-label={t('commands.remove_named', { command: row.command })}
           >
-            <X size={16} strokeWidth={2.4} />
-          </button>
+            <X size={16} strokeWidth={2} />
+          </Button>
         </div>
       {/each}
       <div class="flex items-center gap-2.5">
-        <input
+        <TextField
           bind:value={newCommand}
           placeholder={t('commands.add_placeholder')}
           aria-label={t('commands.add_placeholder')}
@@ -91,12 +95,12 @@ function addCommand() {
               addCommand();
             }
           }}
-          class="input mono flex-1"
+          mono class="flex-1"
         />
-        <button type="button" onclick={addCommand} class="btn btn-sm" disabled={!newCommand.trim()}>
-          <Plus size={14} strokeWidth={2.6} />
+        <Button type="button" onclick={addCommand} size="sm" disabled={!newCommand.trim()}>
+          <Plus size={14} strokeWidth={2.2} />
           {t('commands.add')}
-        </button>
+        </Button>
       </div>
     </div>
   </div>

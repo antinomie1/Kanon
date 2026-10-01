@@ -36,6 +36,17 @@ pub enum CommandAccess {
     Admins,
 }
 
+impl CommandAccess {
+    /// Converts the plugin-declared access level into the policy type.
+    pub fn from_proto(access: kanon_proto::v1::CommandAccess) -> Self {
+        match access {
+            kanon_proto::v1::CommandAccess::Everyone => Self::Everyone,
+            kanon_proto::v1::CommandAccess::AdminsInGroups => Self::AdminsInGroups,
+            kanon_proto::v1::CommandAccess::Admins => Self::Admins,
+        }
+    }
+}
+
 /// Node-wide command permissions.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CommandPolicy {
@@ -120,13 +131,32 @@ impl CommandPolicy {
 
     /// Whether the sender of `event` may run `command`.
     pub fn allows(&self, command: &str, event: &PipelineEventRequest) -> bool {
-        match self.access.get(&command.to_ascii_lowercase()) {
-            None | Some(CommandAccess::Everyone) => true,
-            Some(CommandAccess::AdminsInGroups) => {
+        self.allows_with_default(command, CommandAccess::Everyone, event)
+    }
+
+    /// Whether the sender of `event` may run `command`, using `default` when this policy does not
+    /// list the command.
+    ///
+    /// `default` is what the plugin declared; the operator's entry always takes precedence, so an
+    /// operator can open a plugin's admin command to everyone or restrict an open one.
+    pub fn allows_with_default(
+        &self,
+        command: &str,
+        default: CommandAccess,
+        event: &PipelineEventRequest,
+    ) -> bool {
+        match self
+            .access
+            .get(&command.to_ascii_lowercase())
+            .copied()
+            .unwrap_or(default)
+        {
+            CommandAccess::Everyone => true,
+            CommandAccess::AdminsInGroups => {
                 !ConversationKind::from_metadata(event.metadata.as_ref()).is_policy_governed()
                     || self.is_admin(event)
             }
-            Some(CommandAccess::Admins) => self.is_admin(event),
+            CommandAccess::Admins => self.is_admin(event),
         }
     }
 }

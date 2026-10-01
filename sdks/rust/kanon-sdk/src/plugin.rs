@@ -6,8 +6,9 @@
 use crate::context::PluginContext;
 use async_trait::async_trait;
 use kanon_proto::v1::{
-    CommandExecuteRequest, CommandExecuteResponse, DeliverMessageRequest, DeliverMessageResponse,
-    PipelineEventRequest, PluginMeta, PreFilterResult, ToolCallRequest, ToolCallResponse,
+    CommandExecuteRequest, CommandExecuteResponse, DecorateReplyRequest, DeliverMessageRequest,
+    DeliverMessageResponse, EventNotification, MessageSegment, PipelineEventRequest, PluginMeta,
+    PreFilterResult, PrepareTurnRequest, ToolCallRequest, ToolCallResponse,
 };
 
 /// Result alias for plugin operations.
@@ -57,6 +58,9 @@ pub trait Plugin: Send + Sync + 'static {
             success: true,
             replies: vec![],
             error_message: format!("Command '{}' executed by default stub handler", req.command),
+            capture_seconds: 0,
+            pass_to_model: false,
+            model_text: None,
         })
     }
 
@@ -71,6 +75,20 @@ pub trait Plugin: Send + Sync + 'static {
             // outbound message.
             attachments: Vec::new(),
         })
+    }
+
+    /// Runs a management action invoked by the control plane
+    /// (`POST /api/v1/plugins/{id}/actions/{action}`).
+    ///
+    /// Actions are the operator-facing counterpart of tools: they are never advertised to the
+    /// model. The result must be a JSON object (or `null`); an error is reported back to the
+    /// console as a failed action.
+    async fn on_invoke_action(
+        &self,
+        action: &str,
+        _params: serde_json::Value,
+    ) -> PluginResult<serde_json::Value> {
+        Err(format!("this plugin declares no action '{action}'").into())
     }
 
     /// Publishes an outbound message for the platform this plugin serves as an adapter.
@@ -91,5 +109,34 @@ pub trait Plugin: Send + Sync + 'static {
                 req.platform
             ),
         })
+    }
+
+    /// Receives a lifecycle event this plugin subscribed to through `PluginMeta.events`.
+    ///
+    /// Events are fire-and-forget: the core does not wait for the outcome, and an error is only
+    /// logged by the host.
+    async fn on_event(&self, _event: EventNotification) -> PluginResult<()> {
+        Ok(())
+    }
+
+    /// Rewrites a reply before delivery; called only when `PluginMeta.decorates_replies` is set.
+    ///
+    /// Return `Ok(None)` to leave the reply untouched, or `Ok(Some(segments))` to replace it (an
+    /// empty list suppresses it). An error leaves the reply untouched.
+    async fn on_decorate_reply(
+        &self,
+        _req: DecorateReplyRequest,
+    ) -> PluginResult<Option<Vec<MessageSegment>>> {
+        Ok(None)
+    }
+
+    /// Adds context to the turn the model is about to answer; called only when
+    /// `PluginMeta.prepares_turns` is set.
+    ///
+    /// The returned text is prepended to the current user message (never to the system prompt),
+    /// so it becomes part of the conversation history. Return an empty string to add nothing. An
+    /// error, or an answer later than three seconds, adds nothing and the turn goes ahead.
+    async fn on_prepare_turn(&self, _req: PrepareTurnRequest) -> PluginResult<String> {
+        Ok(String::new())
     }
 }

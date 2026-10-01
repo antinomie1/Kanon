@@ -215,6 +215,9 @@ async function main(): Promise<void> {
     config: readStoredConfig(dataDir),
     core: coreHandle,
   };
+  // Set before onLoad: plugins commonly override onLoad without calling super, and the SDK's
+  // event objects reach Core through plugin.context.
+  plugin.context = ctx;
   await plugin.onLoad(ctx);
 
   // 3. Prepare IPC socket directory and clean up stale socket
@@ -270,6 +273,22 @@ async function main(): Promise<void> {
     GetPluginMeta: (call: any, callback: any) => {
       callback(null, { plugins: [plugin.meta()] });
     },
+    InvokeAction: async (call: any, callback: any) => {
+      // Plugins written as plain objects may not implement actions at all.
+      if (typeof (plugin as any).onInvokeAction !== "function") {
+        callback(null, {
+          success: false,
+          error_message: `plugin '${call.request.plugin_id}' declares no actions`,
+        });
+        return;
+      }
+      try {
+        const parameters = call.request.parameters ? fromProtoStruct(call.request.parameters) : {};
+        callback(null, await plugin.onInvokeAction(call.request.action, parameters));
+      } catch (err: any) {
+        callback(null, { success: false, error_message: err?.message || "Action error" });
+      }
+    },
   });
 
   server.addService(kanonV1.MessagePipelineService.service, {
@@ -322,6 +341,30 @@ async function main(): Promise<void> {
         callback(null, { received: true });
       } catch (err: any) {
         callback(null, { received: false });
+      }
+    },
+    OnDecorateReply: async (call: any, callback: any) => {
+      if (typeof (plugin as any).onDecorateReply !== "function") {
+        callback(null, { modified: false, segments: [] });
+        return;
+      }
+      try {
+        callback(null, await plugin.onDecorateReply(call.request));
+      } catch (err: any) {
+        // Surfaced as an RPC error: Core then keeps the reply unchanged.
+        callback({ code: grpc.status.INTERNAL, message: err?.message || "Decorate error" });
+      }
+    },
+    OnPrepareTurn: async (call: any, callback: any) => {
+      if (typeof (plugin as any).onPrepareTurn !== "function") {
+        callback(null, { text: "" });
+        return;
+      }
+      try {
+        callback(null, await plugin.onPrepareTurn(call.request));
+      } catch (err: any) {
+        // Surfaced as an RPC error: Core then answers without this plugin's context.
+        callback({ code: grpc.status.INTERNAL, message: err?.message || "Prepare error" });
       }
     },
     OnDeliverMessage: async (call: any, callback: any) => {
@@ -400,8 +443,6 @@ async function main(): Promise<void> {
 
   process.on("SIGINT", () => void shutdown(0));
   process.on("SIGTERM", () => void shutdown(0));
-  process.on("SIGINT", shutdown);
-  process.on("SIGTERM", shutdown);
 }
 
 main().catch((err) => {

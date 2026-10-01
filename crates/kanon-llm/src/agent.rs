@@ -813,6 +813,8 @@ impl Agent {
                     tool_name: actual_tool_name,
                     session_id: session_id.to_string(),
                     payload: structured_args.map(tool_call_request::Payload::StructuredArgs),
+                    // The host attaches the platform event of the turn; the agent never knew it.
+                    context: None,
                 };
 
                 tracing::debug!(
@@ -1049,6 +1051,8 @@ impl Agent {
                     tool_name: actual_tool_name,
                     session_id: session_id.to_string(),
                     payload: structured_args.map(tool_call_request::Payload::StructuredArgs),
+                    // The host attaches the platform event of the turn; the agent never knew it.
+                    context: None,
                 };
 
                 tracing::debug!(

@@ -1,0 +1,37 @@
+/* Bridge between the console's own design tokens and Google's Material 3 Expressive components.
+ *
+ * The elements (`md-gb-*` from `@material/web/labs/gb`, plus the stable `md-*` ones) read the
+ * `--md-sys-*` token set. This file supplies that set from the console's `--k-*` schemes, so the
+ * components follow the accent, the light/dark toggle and the graphite default like the rest of
+ * the console does — without any per-component colour rules.
+ *
+ * Google ships the whole token set as `labs/gb/styles/m3.css`, but that bundle is not imported
+ * directly for two reasons:
+ *   1. its `@layer md.sys.color` block defines the baseline purple and `color-scheme: light dark`
+ *      on `:root`, which would beat the class-based toggle in `app.css` (later layers win), so a
+ *      dark-mode user who chose "light" would still get dark;
+ *   2. the colours belong to `md-colors.css`, which is generated from the same seeds as `--k-*`.
+ * The remaining layers — elevation, icon, motion, shape, space, typography — are imported one by
+ * one, so the console gets Google's numbers for those without the colour clash.
+ */
+@import "@material/web/labs/gb/styles/elevation/md-elevation-tokens.css";
+@import "@material/web/labs/gb/styles/icon/md-icon.css";
+@import "@material/web/labs/gb/styles/motion/md-motion-tokens-easing.css";
+@import "@material/web/labs/gb/styles/shape/md-shape-tokens.css";
+@import "@material/web/labs/gb/styles/space/md-space-tokens.css";
+@import "@material/web/labs/gb/styles/typography/md-typography-tokens.css";
+@import "./md-colors.css";
+
+/* Density decision: the console is an information-dense desktop UI, so it sits between Material's
+ * comfortable defaults and its own old compact scale. Google's `size="xs"` and `size="sm"` control
+ * heights (32px and 40px) are already exactly the two sizes the console uses, so buttons map 1:1;
+ * taller Material controls (the 56px text field) are pulled to 48px by the component-height
+ * overrides next to the component that needs them, not globally here. */
+
+:root {
+  /* Material 3 Expressive's typeface, which is also the console's (`--font-sans` in app.css).
+   * Without this the components would fall back to Google's Roboto Flex default and the two text
+   * styles would visibly disagree. */
+  --md-ref-typeface-plain: var(--font-sans);
+  --md-ref-typeface-brand: var(--font-sans);
+}

@@ -7,10 +7,12 @@ import { confirmDialog } from '../../stores/confirm.svelte';
 import { t } from '../../stores/i18n.svelte';
 import { toasts } from '../../stores/toast.svelte';
 import type { SkillItem } from '../../types';
+import Button from '../ui/Button.svelte';
 import EmptyState from '../ui/EmptyState.svelte';
 import Modal from '../ui/Modal.svelte';
 import Seg from '../ui/Seg.svelte';
 import Switch from '../ui/Switch.svelte';
+import TextField from '../ui/TextField.svelte';
 
 /**
  * Skills: instruction bundles the model reads when it decides one is relevant.
@@ -128,14 +130,14 @@ async function remove(skill: SkillItem) {
 <div class="flex flex-wrap items-center justify-between gap-3 px-1">
   <p class="m-0 max-w-[68ch] hint">{t('extensions.skills_hint')}</p>
   <div class="flex flex-wrap gap-2.5">
-    <button type="button" class="btn" disabled={loading} onclick={() => void load()}>
-      <RefreshCw size={16} strokeWidth={2.4} class={loading ? 'animate-spin' : ''} />
+    <Button type="button" disabled={loading} onclick={() => void load()}>
+      <RefreshCw size={16} strokeWidth={2} class={loading ? 'animate-spin' : ''} />
       {t('platforms.refresh')}
-    </button>
-    <button type="button" class="btn btn-primary" onclick={openInstall}>
-      <Upload size={16} strokeWidth={2.4} />
+    </Button>
+    <Button type="button" variant="filled" onclick={openInstall}>
+      <Upload size={16} strokeWidth={2} />
       {t('extensions.skill_install')}
-    </button>
+    </Button>
   </div>
 </div>
 
@@ -147,49 +149,47 @@ async function remove(skill: SkillItem) {
   <div class="card">
     <EmptyState icon={BookOpen} title={t('extensions.skills_empty')} text={t('extensions.skills_empty_text')}>
       {#snippet action()}
-        <button type="button" class="btn btn-primary" onclick={openInstall}>
-          <Upload size={16} strokeWidth={2.4} />
+        <Button type="button" variant="filled" onclick={openInstall}>
+          <Upload size={16} strokeWidth={2} />
           {t('extensions.skill_install')}
-        </button>
+        </Button>
       {/snippet}
     </EmptyState>
   </div>
 {:else if skills.length > 0}
-  <div class="card">
-    <ul class="m-0 list-none p-0">
-      {#each skills as skill (skill.id)}
-        <li class="flex flex-wrap items-center gap-x-6 gap-y-2 border-t border-line px-[22px] py-4 first:border-t-0">
-          <div class="min-w-0 flex-1 basis-[320px]">
-            <div class="flex flex-wrap items-baseline gap-x-2.5">
-              <h2 class="m-0 text-[16px] font-extrabold {skill.enabled ? '' : 'text-fg2'}">{skill.name}</h2>
-              <span class="text-[12.5px] text-fg3">{skill.id}</span>
-            </div>
-            <p class="m-0 mt-0.5 max-w-[80ch] text-[13.5px] text-fg2">{skill.description}</p>
+  <ul class="group-list m-0 list-none p-0">
+    {#each skills as skill (skill.id)}
+      <li class="flex flex-wrap items-center gap-x-6 gap-y-2 py-4">
+        <div class="min-w-0 flex-1 basis-[320px]">
+          <div class="flex flex-wrap items-baseline gap-x-2.5">
+            <h2 class="m-0 text-[16px] font-semibold {skill.enabled ? '' : 'text-fg2'}">{skill.name}</h2>
+            <span class="text-[12.5px] text-fg3">{skill.id}</span>
           </div>
-          <div class="ml-auto flex items-center gap-2.5">
-            <button
-              type="button"
-              class="btn btn-sm btn-quiet btn-icon"
-              aria-label={t('extensions.skill_remove_title', { name: skill.name })}
-              title={t('extensions.remove')}
-              disabled={busy[skill.id]}
-              onclick={() => void remove(skill)}
-            >
-              <Trash2 size={16} strokeWidth={2.2} />
-            </button>
-            <Switch
-              checked={skill.enabled}
-              disabled={busy[skill.id]}
-              label={skill.enabled
-                ? t('platforms.turn_off', { name: skill.name })
-                : t('platforms.turn_on', { name: skill.name })}
-              onchange={(next) => void setEnabled(skill, next)}
-            />
-          </div>
-        </li>
-      {/each}
-    </ul>
-  </div>
+          <p class="m-0 mt-0.5 max-w-[80ch] text-[13.5px] text-fg2">{skill.description}</p>
+        </div>
+        <div class="ml-auto flex items-center gap-2.5">
+          <Button
+            type="button"
+            variant="text" size="sm" square
+            aria-label={t('extensions.skill_remove_title', { name: skill.name })}
+            title={t('extensions.remove')}
+            disabled={busy[skill.id]}
+            onclick={() => void remove(skill)}
+          >
+            <Trash2 size={16} strokeWidth={2} />
+          </Button>
+          <Switch
+            checked={skill.enabled}
+            disabled={busy[skill.id]}
+            label={skill.enabled
+              ? t('platforms.turn_off', { name: skill.name })
+              : t('platforms.turn_on', { name: skill.name })}
+            onchange={(next) => void setEnabled(skill, next)}
+          />
+        </div>
+      </li>
+    {/each}
+  </ul>
 {:else if !error}
   <p class="m-0 px-1 hint">{t('common.loading')}</p>
 {/if}
@@ -222,7 +222,7 @@ async function remove(skill: SkillItem) {
           id="skill-file"
           type="file"
           accept=".zip,application/zip"
-          class="block w-full text-[14px] text-fg2 file:mr-3 file:h-[34px] file:cursor-pointer file:rounded-full file:border-0 file:bg-sunk file:px-4 file:font-bold file:text-fg"
+          class="block w-full text-[14px] text-fg2 file:mr-3 file:h-[34px] file:cursor-pointer file:rounded-full file:border-0 file:bg-sunk file:px-4 file:font-medium file:text-fg"
           onchange={(e) => (file = e.currentTarget.files?.[0] ?? null)}
         />
         <p class="m-0 mt-2 hint">{t('extensions.skill_archive_hint')}</p>
@@ -230,13 +230,13 @@ async function remove(skill: SkillItem) {
     {:else}
       <div>
         <label class="label" for="skill-path">{t('extensions.path_label')}</label>
-        <input id="skill-path" class="input mono" spellcheck="false" placeholder="./my-skill" bind:value={path} />
+        <TextField id="skill-path" mono spellcheck="false" placeholder="./my-skill" bind:value={path} />
         <p class="m-0 mt-2 hint">{t('extensions.skill_path_hint')}</p>
       </div>
     {/if}
     <div>
       <label class="label" for="skill-id">{t('extensions.skill_id')}</label>
-      <input id="skill-id" class="input mono" spellcheck="false" placeholder="my-skill" bind:value={customId} />
+      <TextField id="skill-id" mono spellcheck="false" placeholder="my-skill" bind:value={customId} />
       <p class="m-0 mt-2 hint">{t('extensions.skill_id_hint')}</p>
     </div>
     {#if installError}
@@ -245,11 +245,11 @@ async function remove(skill: SkillItem) {
   </form>
 
   {#snippet footer()}
-    <button type="button" class="btn" disabled={installing} onclick={() => (installOpen = false)}>
+    <Button type="button" disabled={installing} onclick={() => (installOpen = false)}>
       {t('common.cancel')}
-    </button>
-    <button type="submit" form="install-skill" class="btn btn-primary" disabled={!ready || installing}>
+    </Button>
+    <Button type="submit" form="install-skill" variant="filled" disabled={!ready || installing}>
       {installing ? t('extensions.installing') : t('extensions.install')}
-    </button>
+    </Button>
   {/snippet}
 </Modal>

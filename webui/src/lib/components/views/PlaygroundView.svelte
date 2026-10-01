@@ -8,6 +8,7 @@ import { modelsStore } from '../../stores/models.svelte';
 import { personasStore } from '../../stores/personas.svelte';
 import { router } from '../../stores/router.svelte';
 import { toasts } from '../../stores/toast.svelte';
+import Button from '../ui/Button.svelte';
 import PageHead from '../ui/PageHead.svelte';
 import Select from '../ui/Select.svelte';
 import Switch from '../ui/Switch.svelte';
@@ -138,10 +139,10 @@ function split(turn: ChatTurn): { reasoning: string; content: string } {
     <span>{t('chat.sub')}</span>
   {/snippet}
   {#snippet actions()}
-    <button type="button" class="btn" disabled={chat.turns.length === 0} onclick={() => chat.clear()}>
-      <MessageSquarePlus size={16} strokeWidth={2.2} />
+    <Button type="button" disabled={chat.turns.length === 0} onclick={() => chat.clear()}>
+      <MessageSquarePlus size={16} strokeWidth={2} />
       {t('chat.new')}
-    </button>
+    </Button>
   {/snippet}
 </PageHead>
 
@@ -185,7 +186,7 @@ function split(turn: ChatTurn): { reasoning: string; content: string } {
       {/each}
     </Select>
   </div>
-  <span class="flex h-[42px] items-center gap-2.5 text-[14px] font-bold whitespace-nowrap">
+  <span class="flex h-[42px] items-center gap-2.5 text-[14px] font-medium whitespace-nowrap">
     <Switch
       checked={chat.tools}
       label={t('chat.tools')}
@@ -200,7 +201,7 @@ function split(turn: ChatTurn): { reasoning: string; content: string } {
     <div class="mx-auto flex max-w-[760px] flex-col gap-5">
       {#if chat.turns.length === 0}
         <div class="flex flex-col items-center gap-1.5 py-14 text-center">
-          <p class="m-0 text-[17px] font-extrabold">{t('chat.empty_title', { name: speaker })}</p>
+          <p class="m-0 text-[17px] font-semibold">{t('chat.empty_title', { name: speaker })}</p>
           <p class="m-0 max-w-[52ch] hint">
             {instance ? t('chat.empty_instance') : t('chat.empty_text')}
           </p>
@@ -218,10 +219,10 @@ function split(turn: ChatTurn): { reasoning: string; content: string } {
           {@const parts = split(turn)}
           {@const live = chat.streaming && index === chat.turns.length - 1}
           <div class="flex max-w-[92%] flex-col gap-2">
-            <span class="text-[12.5px] font-bold text-fg2">{speaker}</span>
+            <span class="text-[12.5px] font-medium text-fg2">{speaker}</span>
             {#if parts.reasoning}
-              <details class="rounded-[14px] bg-sunk" open={live && !parts.content}>
-                <summary class="cursor-pointer px-3.5 py-2 text-[13px] font-bold text-fg2 select-none">
+              <details class="rounded-xl bg-sunk" open={live && !parts.content}>
+                <summary class="cursor-pointer px-3.5 py-2 text-[13px] font-medium text-fg2 select-none">
                   {live && !parts.content
                     ? t('chat.thinking')
                     : t('chat.thought', { n: parts.reasoning.length })}
@@ -251,7 +252,7 @@ function split(turn: ChatTurn): { reasoning: string; content: string } {
   </div>
 
   <form
-    class="border-t border-line px-4 py-3 sm:px-6"
+    class="px-4 pt-1 pb-3 sm:px-6"
     onsubmit={(e) => {
       e.preventDefault();
       void send();
@@ -261,12 +262,14 @@ function split(turn: ChatTurn): { reasoning: string; content: string } {
       {#if !model}
         <div class="notice notice-warn items-center">
           <span class="min-w-0 flex-1">{t('chat.no_model')}</span>
-          <button type="button" class="btn btn-sm" onclick={() => router.navigate('models')}>
+          <Button type="button" size="sm" onclick={() => router.navigate('models')}>
             {t('chat.open_models')}
-          </button>
+          </Button>
         </div>
       {/if}
       <div class="flex items-end gap-2.5">
+        <!-- 11px + one 24px line + 11px = 46px, the send button's height: a single line fills the
+             content box exactly, so it sits centred, and every extra line adds one line height. -->
         <textarea
           bind:this={composer}
           bind:value={draft}
@@ -275,28 +278,31 @@ function split(turn: ChatTurn): { reasoning: string; content: string } {
           placeholder={t('chat.placeholder', { name: speaker })}
           oninput={fit}
           onkeydown={onKeydown}
-          class="input h-[46px] min-h-[46px] resize-none py-[11px] leading-[1.5]"
+          class="input h-[46px] min-h-[46px] resize-none rounded-[23px] px-5 py-[11px] leading-6 shadow-none focus:shadow-[inset_0_0_0_2px_var(--k-accent)]"
         ></textarea>
         {#if chat.streaming}
-          <button
+          <Button
             type="button"
-            class="btn btn-icon h-[46px]! w-[46px]! shrink-0"
+            square
+            class="kanon-btn-46 shrink-0"
             title={t('chat.stop')}
             aria-label={t('chat.stop')}
             onclick={() => chat.stop()}
           >
-            <Square size={16} strokeWidth={2.4} class="fill-current" />
-          </button>
+            <Square size={16} strokeWidth={2} class="fill-current" />
+          </Button>
         {:else}
-          <button
+          <Button
             type="submit"
-            class="btn btn-primary btn-icon h-[46px]! w-[46px]! shrink-0"
+            variant="filled"
+            square
+            class="kanon-btn-46 shrink-0"
             title={t('chat.send')}
             aria-label={t('chat.send')}
             disabled={!draft.trim() || !model}
           >
-            <ArrowUp size={19} strokeWidth={2.6} />
-          </button>
+            <ArrowUp size={19} strokeWidth={2.2} />
+          </Button>
         {/if}
       </div>
       <p class="m-0 text-[12.5px] text-fg3">

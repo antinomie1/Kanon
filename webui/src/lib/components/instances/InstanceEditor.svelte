@@ -7,6 +7,7 @@ import { describeReplyPolicy } from '../../stores/replyPolicy.svelte';
 import { router } from '../../stores/router.svelte';
 import { toasts } from '../../stores/toast.svelte';
 import type { ReplyMode } from '../../types';
+import Button from '../ui/Button.svelte';
 import Section from '../ui/Section.svelte';
 import Seg from '../ui/Seg.svelte';
 import Select from '../ui/Select.svelte';
@@ -116,7 +117,7 @@ function testChat() {
         bind:value={store.formName}
         aria-label={t('instances.field_name')}
         placeholder={t('instances.name_placeholder')}
-        class="-mx-2 min-w-0 rounded-lg bg-transparent px-2 py-1 text-[22px] font-extrabold text-fg outline-none placeholder:text-fg3 hover:bg-sunk focus:bg-sunk focus:shadow-[inset_0_0_0_2px_var(--k-accent)]"
+        class="-mx-2 min-w-0 rounded-lg bg-transparent px-2 py-1 text-[22px] font-semibold text-fg outline-none placeholder:text-fg3 hover:bg-sunk focus:bg-sunk focus:shadow-[inset_0_0_0_2px_var(--k-accent)]"
       />
       <span class="flex items-center gap-1.5 text-[13.5px] whitespace-nowrap text-fg2">
         {#if creating}
@@ -129,7 +130,7 @@ function testChat() {
       </span>
     </div>
     <div class="flex flex-wrap items-center gap-2.5">
-      <span class="inline-flex items-center gap-2.5 pr-1 text-[14px] font-bold whitespace-nowrap">
+      <span class="inline-flex items-center gap-2.5 pr-1 text-[14px] font-medium whitespace-nowrap">
         {#if creating}
           <Switch
             checked={store.formEnabled}
@@ -147,20 +148,20 @@ function testChat() {
         {t('instances.power')}
       </span>
       {#if instance}
-        <button type="button" class="btn btn-sm" onclick={testChat}>
-          <Send size={15} strokeWidth={2.2} />
+        <Button type="button" size="sm" onclick={testChat}>
+          <Send size={15} strokeWidth={2} />
           {t('instances.test_chat')}
-        </button>
-        <button
+        </Button>
+        <Button
           type="button"
-          class="btn btn-sm btn-icon btn-danger"
+          variant="danger" size="sm" square
           title={t('instances.delete_confirm')}
           aria-label={t('instances.delete_confirm')}
           disabled={store.saving}
           onclick={remove}
         >
-          <Trash2 size={16} strokeWidth={2.2} />
-        </button>
+          <Trash2 size={16} strokeWidth={2} />
+        </Button>
       {/if}
     </div>
   </div>
@@ -169,7 +170,7 @@ function testChat() {
     <div class="notice notice-bad mb-2" role="alert">{store.error}</div>
   {/if}
 
-  <div class="border-t border-line">
+  <div class="divide-y divide-line border-t border-line">
     <Section title={t('instances.sec_platforms')} hint={t('instances.sec_platforms_hint')}>
       {#each store.formAdapters as platform (platform)}
         {@const state = platformState(platform)}
@@ -177,11 +178,13 @@ function testChat() {
           class="flex min-h-12 flex-wrap items-center gap-x-3 gap-y-1 rounded-xl py-1.5 pr-2 pl-3.5 {state ===
           'ok'
             ? 'bg-sunk'
-            : 'bg-danger-tint'}"
+            : 'bg-danger-tint text-danger-fg'}"
         >
+          <!-- On the error container everything, buttons included, takes on-error-container: the
+               accent and the muted greys fall well under 3:1 against its vivid fill. -->
           <i class="dot {state === 'ok' ? 'dot-ok' : 'dot-bad'}"></i>
-          <span class="text-[14.5px] font-extrabold whitespace-nowrap">{platformName(platform)}</span>
-          <span class="min-w-0 flex-1 truncate text-[13px] {state === 'ok' ? 'text-fg2' : 'text-danger'}">
+          <span class="text-[14.5px] font-semibold whitespace-nowrap">{platformName(platform)}</span>
+          <span class="min-w-0 flex-1 truncate text-[13px] {state === 'ok' ? 'text-fg2' : ''}">
             {state === 'ok'
               ? t('instances.platform_connected')
               : state === 'offline'
@@ -189,17 +192,24 @@ function testChat() {
                 : t('instances.platform_unknown')}
           </span>
           {#if state === 'offline'}
-            <button
+            <Button
               type="button"
-              class="btn btn-xs"
+              variant="outlined"
+              size="xs"
+              class="kanon-danger"
               onclick={() => router.navigate('platforms', platform)}
             >
               {t('home.alert_check')}
-            </button>
+            </Button>
           {/if}
-          <button type="button" class="btn btn-xs btn-quiet" onclick={() => store.toggleAdapter(platform)}>
+          <Button
+            type="button"
+            variant={state === 'ok' ? 'text' : 'danger'}
+            size="xs"
+            onclick={() => store.toggleAdapter(platform)}
+          >
             {t('instances.platform_remove')}
-          </button>
+          </Button>
         </div>
       {/each}
 
@@ -207,23 +217,23 @@ function testChat() {
         <div class="flex flex-wrap gap-2">
           {#each available as adapter (adapter.platform)}
             {@const owner = store.ownerOf(adapter.platform)}
-            <button
+            <Button
               type="button"
-              class="btn btn-sm"
+              size="sm"
               disabled={Boolean(owner)}
               title={owner ? t('instances.adapter_taken', { name: owner }) : undefined}
               onclick={() => store.toggleAdapter(adapter.platform)}
             >
-              <Plus size={14} strokeWidth={2.6} />
+              <Plus size={14} strokeWidth={2.2} />
               {adapter.display_name || adapter.platform}
-              {#if owner}<span class="font-semibold text-fg3">{t('instances.platform_owner', { name: owner })}</span>{/if}
-            </button>
+              {#if owner}<span class="font-medium text-fg3">{t('instances.platform_owner', { name: owner })}</span>{/if}
+            </Button>
           {/each}
         </div>
       {:else if store.adapters.length === 0}
         <p class="m-0 hint">
           {t('instances.no_adapters_hint')}
-          <a href="#/platforms" class="font-bold text-accent-fg">{t('nav.platforms')}</a>
+          <a href="#/platforms" class="font-medium text-accent">{t('nav.platforms')}</a>
         </p>
       {/if}
 
@@ -260,7 +270,7 @@ function testChat() {
       {#if store.modelReferences.length === 0}
         <p class="m-0 hint text-warn!">
           {t('instances.model_catalog_empty')}
-          <a href="#/models" class="font-bold text-accent-fg">{t('nav.models')}</a>
+          <a href="#/models" class="font-medium text-accent">{t('nav.models')}</a>
         </p>
       {/if}
       <label class="block">
@@ -277,7 +287,7 @@ function testChat() {
 
     <Section title={t('instances.sec_groups')} hint={t('instances.sec_groups_hint')}>
       <div class="flex flex-wrap items-center gap-x-3 gap-y-1 text-[14.5px]">
-        <span class="flex-1 font-semibold">{t('instances.use_global_rule')}</span>
+        <span class="flex-1 font-medium">{t('instances.use_global_rule')}</span>
         {#if store.nodeReplyPolicy}
           <span class="text-[13px] text-fg2">
             {t('instances.global_is', { policy: describeReplyPolicy(store.nodeReplyPolicy) })}
@@ -315,7 +325,7 @@ function testChat() {
               bind:value={store.formReplyProbability}
               class="max-w-[360px] flex-1"
             />
-            <span class="w-11 font-extrabold tabular-nums">{Math.round(store.formReplyProbability * 100)}%</span>
+            <span class="w-11 font-semibold tabular-nums">{Math.round(store.formReplyProbability * 100)}%</span>
           </label>
         {/if}
         <div class="flex items-center gap-3 text-[14.5px]">
@@ -347,15 +357,17 @@ function testChat() {
   </div>
 
   <div class="flex flex-wrap items-center gap-x-3.5 gap-y-1 border-t border-line pt-5 pb-1">
-    <button
+    <Button
       type="button"
-      class="btn btn-quiet h-8! px-0! text-accent-fg!"
+      variant="text"
+      size="sm"
+      class="kanon-btn-flush"
       aria-expanded={showAdvanced}
       onclick={() => (showAdvanced = !showAdvanced)}
     >
       {showAdvanced ? t('instances.hide_advanced') : t('instances.show_advanced')}
-      <ChevronDown size={16} strokeWidth={2.4} class="transition-transform {showAdvanced ? 'rotate-180' : ''}" />
-    </button>
+      <ChevronDown size={16} strokeWidth={2} class="transition-transform {showAdvanced ? 'rotate-180' : ''}" />
+    </Button>
     {#if !showAdvanced}
       <span class="text-[13.5px] text-fg2">{t('instances.advanced_summary')}</span>
     {/if}
@@ -368,7 +380,7 @@ function testChat() {
   {#if creating || store.changeCount > 0}
     <div class="sticky bottom-4 z-10 mt-6 flex justify-center">
       <div
-        class="flex max-w-full items-center gap-3 rounded-[26px] bg-bar py-2 pr-2 pl-5 text-[14.5px] font-bold text-on-bar shadow-[var(--k-pop)]"
+        class="flex max-w-full items-center gap-3 rounded-full bg-bar py-2 pr-2 pl-5 text-[14.5px] font-medium text-on-bar shadow-[var(--k-pop)]"
       >
         <span class="truncate">
           {creating
@@ -377,17 +389,20 @@ function testChat() {
               ? t('instances.bar_changed_one')
               : t('instances.bar_changed', { n: store.changeCount })}
         </span>
-        <button
+        <Button
           type="button"
-          class="btn btn-quiet btn-sm text-on-bar! opacity-75 hover:opacity-100 hover:bg-transparent!"
+          variant="inverse-plain"
+          size="sm"
+          class="opacity-75 hover:opacity-100"
           disabled={store.saving}
           onclick={discard}
         >
           {creating ? t('common.cancel') : t('instances.discard')}
-        </button>
-        <button
+        </Button>
+        <Button
           type="button"
-          class="btn btn-primary btn-sm"
+          variant="inverse-filled"
+          size="sm"
           disabled={store.saving || !store.formName.trim()}
           onclick={save}
         >
@@ -396,7 +411,7 @@ function testChat() {
             : creating
               ? t('instances.create')
               : t('instances.save_changes')}
-        </button>
+        </Button>
       </div>
     </div>
   {/if}

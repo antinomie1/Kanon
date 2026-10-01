@@ -1,8 +1,19 @@
 """Demonstration Python plugin for Kanon microkernel."""
 
-from typing import Any, Dict, List, Optional
+import asyncio
+import random
+from typing import Any, Dict, Optional
 
-from kanon_sdk import MessageSegment, Plugin, PluginContext, command, tool
+from kanon_sdk import (
+    CommandEvent,
+    MessageEvent,
+    MessageSegment,
+    Plugin,
+    PluginContext,
+    command,
+    tool,
+    trigger,
+)
 from kanon_sdk.proto import pb
 
 
@@ -38,21 +49,37 @@ class DemoPythonPlugin(Plugin):
         description="Python-based calculation command",
         usage="/pycalc <expr>",
         priority=100,
+        aliases=("pc",),
     )
-    async def handle_pycalc(
-        self,
-        req: pb.CommandExecuteRequest,
-        args: List[str],
-    ) -> pb.CommandExecuteResponse:
-        expr = " ".join(args)
-        reply = MessageSegment.text(
-            f"Python calculation result for [{expr}]: 42 (fast-path)"
-        )
-        return pb.CommandExecuteResponse(
-            success=True,
-            replies=[reply],
-            error_message="",
-        )
+    async def handle_pycalc(self, event: CommandEvent) -> str:
+        # Returning text is the shortest way to answer.
+        return f"Python calculation result for [{' '.join(event.args)}]: 42 (fast-path)"
+
+    @command(name="guess", description="Guess a number between 1 and 10", usage="/guess")
+    async def handle_guess(self, event: CommandEvent) -> None:
+        # A multi-turn conversation: each wait_next sends the replies so far and resumes with the
+        # same sender's next message in this channel.
+        secret = random.randint(1, 10)
+        await event.reply("I picked a number between 1 and 10. Your guess?")
+        for _ in range(3):
+            try:
+                answer = await event.wait_next(timeout=60)
+            except asyncio.TimeoutError:
+                await event.reply(f"Time is up — it was {secret}.")
+                return
+            if not answer.text.strip().isdigit():
+                await answer.reply("Please answer with a number.")
+                continue
+            guess = int(answer.text.strip())
+            if guess == secret:
+                await answer.reply("Correct!")
+                return
+            await answer.reply("Higher." if guess < secret else "Lower.")
+        await event.reply(f"Out of guesses — it was {secret}.")
+
+    @trigger(r"^(?:hi|hello) py$", description="Greets back")
+    async def greet(self, event: MessageEvent) -> list:
+        return [MessageSegment.quote(event.event_id), MessageSegment.text("Hello from Python!")]
 
     @tool(
         name="py_calc",

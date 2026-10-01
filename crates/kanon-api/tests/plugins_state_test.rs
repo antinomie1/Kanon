@@ -52,6 +52,8 @@ async fn plugin_state_fixture(config_dir: PathBuf) -> (ApiState, std::sync::Arc<
         .with_plugins_dir(config_dir.join("plugins"))
         .with_plugin_state(store.clone())
         .build();
+    // The startup scan the composition root runs before serving.
+    state.rescan_plugins().expect("scan plugin directory");
 
     (state, store)
 }
@@ -198,4 +200,54 @@ async fn enabling_a_stopped_plugin_reports_a_start_failure_instead_of_pretending
     let view = plugin_entry(&catalog, common::FIXTURE_PLUGIN_ID);
     assert_eq!(view["enabled"], json!(true));
     assert_ne!(view["status"], json!("running"));
+}
+
+#[tokio::test]
+async fn a_plugin_copied_in_by_hand_appears_only_after_a_rescan() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let (state, _store) = plugin_state_fixture(PathBuf::from(dir.path())).await;
+    let app = kanon_api::app(state);
+
+    let added = dir.path().join("plugins").join("added");
+    std::fs::create_dir_all(&added).expect("create plugin dir");
+    std::fs::write(
+        added.join("plugin.toml"),
+        MANIFEST
+            .replace("org.kanon.plugin.fixture", "org.kanon.plugin.added")
+            .replace("Fixture Plugin", "Added Plugin"),
+    )
+    .expect("write manifest");
+
+    // Reading the catalog does not touch the directory, so the new folder is not listed yet…
+    let (status, body) = common::send_json(&app, Method::GET, "/api/v1/plugins", None).await;
+    assert_eq!(status, StatusCode::OK);
+    let ids: Vec<&Value> = body["plugins"]
+        .as_array()
+        .expect("plugins array")
+        .iter()
+        .map(|plugin| &plugin["id"])
+        .collect();
+    assert!(
+        !ids.contains(&&json!("org.kanon.plugin.added")),
+        "listed before a rescan: {body}"
+    );
+
+    // …and cannot be enabled, because the node does not know it exists.
+    let (status, _) = common::send_json(
+        &app,
+        Method::PUT,
+        "/api/v1/plugins/org.kanon.plugin.added/enabled",
+        Some(json!({ "enabled": true })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+
+    // The operator's rescan finds it and answers with the refreshed catalog.
+    let (status, body) =
+        common::send_json(&app, Method::POST, "/api/v1/plugins/rescan", None).await;
+    assert_eq!(status, StatusCode::OK, "unexpected body: {body}");
+    let view = plugin_entry(&body, "org.kanon.plugin.added");
+    assert_ne!(view["status"], json!("running"));
+    // The running fixture is still there next to it.
+    plugin_entry(&body, common::FIXTURE_PLUGIN_ID);
 }

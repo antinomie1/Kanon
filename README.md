@@ -283,6 +283,8 @@ cargo test --workspace                  # full suite; build the example plugin h
 root manifest restricts `default-members` to them. Use `--workspace` for full-repository verification,
 and build the example plugin hosts first when running the plugin-host tests. Project conventions are
 documented in [AGENTS.md](AGENTS.md) and [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
+Plugin authors should start with [docs/PLUGIN_GUIDE.md](docs/PLUGIN_GUIDE.md); the protocol reference
+is [docs/PLUGIN_API.md](docs/PLUGIN_API.md).
 
 ## License
 

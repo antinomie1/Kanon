@@ -60,7 +60,7 @@ async function flip(key: keyof ContextPolicy, value: boolean) {
     {#each switches as item (item.key)}
       <div class="flex items-start gap-3 text-[14.5px]">
         <span class="min-w-0 flex-1">
-          <span class="block font-semibold">{t(item.labelKey)}</span>
+          <span class="block font-medium">{t(item.labelKey)}</span>
           <span class="block hint">{t(item.hintKey)}</span>
           {#if item.capabilities}<SupportBadge capabilities={item.capabilities} />{/if}
         </span>

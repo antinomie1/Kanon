@@ -72,6 +72,7 @@ impl MockToolHost {
                 description: "Test".to_string(),
                 commands: vec![],
                 tools,
+                ..Default::default()
             }],
             tool_calls_received: Arc::new(AtomicUsize::new(0)),
         }

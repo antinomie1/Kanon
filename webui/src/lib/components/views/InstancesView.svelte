@@ -6,6 +6,7 @@ import { t } from '../../stores/i18n.svelte';
 import { instancesStore } from '../../stores/instances.svelte';
 import { router } from '../../stores/router.svelte';
 import InstanceEditor from '../instances/InstanceEditor.svelte';
+import Button from '../ui/Button.svelte';
 import EmptyState from '../ui/EmptyState.svelte';
 import PageHead from '../ui/PageHead.svelte';
 
@@ -97,10 +98,10 @@ function onDeleted() {
     {/if}
   {/snippet}
   {#snippet actions()}
-    <button type="button" class="btn btn-primary" onclick={() => router.navigate('instances', 'new')}>
-      <Plus size={16} strokeWidth={2.6} />
+    <Button type="button" variant="filled" onclick={() => router.navigate('instances', 'new')}>
+      <Plus size={16} strokeWidth={2.2} />
       {t('instances.new')}
-    </button>
+    </Button>
   {/snippet}
 </PageHead>
 
@@ -114,15 +115,16 @@ function onDeleted() {
   <div class="card">
     <EmptyState icon={Boxes} title={t('home.empty_title')} text={t('home.empty_text')}>
       {#snippet action()}
-        <button type="button" class="btn btn-primary" onclick={() => router.navigate('instances', 'new')}>
-          <Plus size={16} strokeWidth={2.6} />
+        <Button type="button" variant="filled" onclick={() => router.navigate('instances', 'new')}>
+          <Plus size={16} strokeWidth={2.2} />
           {t('instances.new')}
-        </button>
+        </Button>
       {/snippet}
     </EmptyState>
   </div>
 {:else}
   <div class="grid items-start gap-4 lg:grid-cols-[264px_minmax(0,1fr)]">
+    <!-- Drawn like the Settings navigation: pills with Material's 8% hover layer, on a card. -->
     <nav class="card flex flex-col gap-0.5 p-2" aria-label={t('nav.instances')}>
       {#each instances as instance (instance.id)}
         {@const on = instance.id === openedFor}
@@ -135,11 +137,11 @@ function onDeleted() {
             e.preventDefault();
             select(instance.id);
           }}
-          class="flex flex-col rounded-xl px-3 py-2.5 leading-[1.35] text-fg no-underline {on
+          class="flex flex-col rounded-full px-5 py-2.5 leading-[1.35] text-fg no-underline transition-colors {on
             ? 'bg-accent-tint'
-            : 'hover:bg-sunk'}"
+            : 'hover:bg-fg/8'}"
         >
-          <span class="truncate text-[15px] font-extrabold {on ? 'text-accent-fg' : ''}">{instance.name}</span>
+          <span class="truncate text-[15px] font-semibold {on ? 'text-accent-fg' : ''}">{instance.name}</span>
           <span class="flex items-center gap-1.5 text-[12.5px] whitespace-nowrap text-fg2">
             {#if !instance.enabled}
               {t('instances.state_off')}
@@ -152,8 +154,8 @@ function onDeleted() {
         </a>
       {/each}
       {#if openedFor === 'new'}
-        <div class="flex flex-col rounded-xl bg-accent-tint px-3 py-2.5 leading-[1.35]">
-          <span class="truncate text-[15px] font-extrabold text-accent-fg">
+        <div class="flex flex-col rounded-full bg-accent-tint px-5 py-2.5 leading-[1.35]">
+          <span class="truncate text-[15px] font-semibold text-accent-fg">
             {instancesStore.formName.trim() || t('instances.new_unnamed')}
           </span>
           <span class="text-[12.5px] text-fg2">{t('instances.state_draft')}</span>

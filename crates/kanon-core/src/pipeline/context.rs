@@ -24,9 +24,9 @@ use kanon_llm::tool_router::prost_struct_to_json;
 use kanon_llm::{ChatMessage, ContentPart, ModelCapabilities};
 use kanon_proto::prost_types;
 use kanon_proto::v1::PipelineEventRequest;
-use kanon_proto::v1::audio_segment;
 use kanon_proto::v1::image_segment;
 use kanon_proto::v1::message_segment::Segment;
+use kanon_proto::v1::{audio_segment, video_segment};
 use serde_json::Value;
 
 use crate::conversation::{ContextPolicy, META_TIMESTAMP, META_TIMESTAMP_TEXT};
@@ -110,6 +110,17 @@ pub fn build_user_message(
                     media_suffix(&audio_url(audio))
                 ));
             }
+            // Rendered like the platform segments adapters report for the same kinds, so the model
+            // reads a video or file the same way whoever produced it.
+            Some(Segment::Video(video)) => {
+                let url = match video.source.as_ref() {
+                    Some(video_segment::Source::Url(url)) => Some(url.clone()),
+                    _ => None,
+                };
+                text.push(&format!("[视频]{}", media_suffix(&url)));
+            }
+            Some(Segment::File(file)) => text.push(&format!("[文件: {}]", file.name)),
+            Some(Segment::Face(_)) => text.push("[表情]"),
             Some(Segment::Custom(custom)) => {
                 let json = custom
                     .payload

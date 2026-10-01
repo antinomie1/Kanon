@@ -11,6 +11,7 @@ import {
 import { api } from '../../api/client';
 import { errorText } from '../../format';
 import { t } from '../../stores/i18n.svelte';
+import Button from '../ui/Button.svelte';
 import Modal from '../ui/Modal.svelte';
 
 /**
@@ -136,7 +137,7 @@ $effect(() => {
     {#if qrStatus === 'generating' || qrStatus === 'idle'}
       <div class="grid h-56 w-56 place-items-center rounded-2xl bg-sunk">
         <span class="flex flex-col items-center gap-3 text-[13.5px] text-fg2">
-          <LoaderCircle size={28} strokeWidth={2.2} class="animate-spin" />
+          <LoaderCircle size={28} strokeWidth={2} class="animate-spin" />
           {t('adapters.qq_qr_generating')}
         </span>
       </div>
@@ -148,12 +149,12 @@ $effect(() => {
           class="h-52 w-52 object-contain"
         />
       </div>
-      <p class="m-0 mt-3.5 flex items-center gap-2 text-[13.5px] font-bold text-ok">
+      <p class="m-0 mt-3.5 flex items-center gap-2 text-[13.5px] font-medium text-ok">
         <i class="dot dot-ok animate-pulse"></i>
         {t('adapters.qq_qr_waiting')}
       </p>
     {:else if qrStatus === 'success'}
-      <div class="flex h-56 w-56 flex-col items-center justify-center gap-2 rounded-2xl bg-ok-tint p-4 text-ok">
+      <div class="flex h-56 w-56 flex-col items-center justify-center gap-2 rounded-2xl bg-ok-tint p-4 text-ok-fg">
         <CircleCheck size={44} strokeWidth={2} />
         <b class="text-[15px]">{t('adapters.qq_qr_done')}</b>
         <code class="text-[12.5px]">AppID {qrBoundAppId}</code>
@@ -163,42 +164,64 @@ $effect(() => {
       <div class="flex h-56 w-56 flex-col items-center justify-center gap-3 rounded-2xl bg-warn-tint p-4 text-warn-fg">
         <TriangleAlert size={36} strokeWidth={2} class="text-warn" />
         <span class="text-[13.5px]">{t('adapters.qq_qr_expired')}</span>
-        <button type="button" class="btn btn-sm" onclick={startLogin}>
+        <Button
+          type="button"
+          variant="outlined"
+          size="sm"
+          class="kanon-warn"
+          onclick={startLogin}
+        >
           {t('adapters.qq_qr_retry')}
-        </button>
+        </Button>
       </div>
     {:else if qrStatus === 'error'}
-      <div class="flex h-56 w-56 flex-col items-center justify-center gap-3 rounded-2xl bg-danger-tint p-4 text-danger">
+      <div class="flex h-56 w-56 flex-col items-center justify-center gap-3 rounded-2xl bg-danger-tint p-4 text-danger-fg">
         <CircleX size={36} strokeWidth={2} />
         <span class="line-clamp-4 text-[13px] break-words">{qrStatusMsg ?? t('common.error')}</span>
-        <button type="button" class="btn btn-sm" onclick={startLogin}>
+        <Button
+          type="button"
+          variant="outlined"
+          size="sm"
+          class="kanon-danger"
+          onclick={startLogin}
+        >
           {t('adapters.qq_qr_retry')}
-        </button>
+        </Button>
       </div>
     {/if}
   </div>
 
   {#if qrCodeUrl && qrStatus === 'waiting'}
     <div class="mt-4 flex flex-wrap items-center justify-center gap-2">
-      <a href={qrCodeUrl} target="_blank" rel="noopener noreferrer" class="btn btn-sm no-underline">
-        <ExternalLink size={15} strokeWidth={2.4} />
+      <Button
+        href={qrCodeUrl}
+        target="_blank"
+        rel="noopener noreferrer"
+        size="sm"
+        class="no-underline"
+      >
+        <ExternalLink size={15} strokeWidth={2} />
         {t('adapters.qq_qr_open_link')}
-      </a>
-      <button type="button" class="btn btn-sm" onclick={copyQrUrl}>
+      </Button>
+      <Button type="button" size="sm" onclick={copyQrUrl}>
         {#if qrCopied}
-          <Check size={15} strokeWidth={2.6} class="text-ok" />
+          <Check size={15} strokeWidth={2.2} class="text-ok" />
           {t('adapters.qq_qr_copied')}
         {:else}
-          <Copy size={15} strokeWidth={2.4} />
+          <Copy size={15} strokeWidth={2} />
           {t('adapters.qq_qr_copy_link')}
         {/if}
-      </button>
+      </Button>
     </div>
   {/if}
 
   {#snippet footer()}
-    <button type="button" class="btn {qrStatus === 'success' ? 'btn-primary' : ''}" onclick={onclose}>
+    <Button
+      type="button"
+      variant={qrStatus === 'success' ? 'filled' : 'outlined'}
+      onclick={onclose}
+    >
       {qrStatus === 'success' ? t('platforms.done') : t('common.close')}
-    </button>
+    </Button>
   {/snippet}
 </Modal>

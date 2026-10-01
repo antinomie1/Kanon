@@ -8,6 +8,7 @@ import { describeReplyPolicy } from '../../stores/replyPolicy.svelte';
 import { router } from '../../stores/router.svelte';
 import type { TimelineMessage } from '../../timeline';
 import MessageTimeline from '../home/MessageTimeline.svelte';
+import Button from '../ui/Button.svelte';
 import EmptyState from '../ui/EmptyState.svelte';
 import PageHead from '../ui/PageHead.svelte';
 import Switch from '../ui/Switch.svelte';
@@ -68,49 +69,49 @@ const modelMissing = $derived(nodeStore.health?.llm_configured === false);
 <PageHead {title}>
   {#snippet sub()}
     {#if messages.length > 0}
-      <span><b class="mr-1 font-extrabold text-fg tabular-nums">{perMinute}</b>{t('home.stat_per_minute')}</span>
+      <span><b class="mr-1 font-semibold text-fg tabular-nums">{perMinute}</b>{t('home.stat_per_minute')}</span>
       {#if averageReply !== null}
         <span>
-          <b class="mr-1 font-extrabold text-fg tabular-nums">{t('home.seconds', { n: averageReply.toFixed(1) })}</b>{t('home.stat_average')}
+          <b class="mr-1 font-semibold text-fg tabular-nums">{t('home.seconds', { n: averageReply.toFixed(1) })}</b>{t('home.stat_average')}
         </span>
       {/if}
-      <span><b class="mr-1 font-extrabold text-fg tabular-nums">{blocked}</b>{t('home.stat_blocked')}</span>
+      <span><b class="mr-1 font-semibold text-fg tabular-nums">{blocked}</b>{t('home.stat_blocked')}</span>
     {:else if loaded}
       <span>{t('home.stat_quiet', { span: t(`home.span_${span}`) })}</span>
     {/if}
   {/snippet}
   {#snippet actions()}
-    <button type="button" class="btn btn-primary" onclick={() => router.navigate('instances', 'new')}>
-      <Plus size={16} strokeWidth={2.6} />
+    <Button type="button" variant="filled" onclick={() => router.navigate('instances', 'new')}>
+      <Plus size={16} strokeWidth={2.2} />
       {t('instances.new')}
-    </button>
+    </Button>
   {/snippet}
 </PageHead>
 
 {#if modelMissing}
-  <div class="flex flex-wrap items-center gap-x-3.5 gap-y-2 rounded-[18px] bg-warn-tint py-2.5 pr-2.5 pl-3">
+  <div class="flex flex-wrap items-center gap-x-3.5 gap-y-2 rounded-2xl bg-warn-tint py-2.5 pr-2.5 pl-3">
     <span class="grid h-[34px] w-[34px] shrink-0 place-items-center rounded-full bg-card text-warn">
-      <BrainCircuit size={17} strokeWidth={2.2} />
+      <BrainCircuit size={17} strokeWidth={2} />
     </span>
     <p class="m-0 min-w-0 flex-1 basis-[240px] text-[14px] text-warn-fg">
-      <b class="mr-2 text-[15px] font-extrabold text-fg">{t('home.alert_model_title')}</b>
+      <b class="mr-2 text-[15px] font-semibold text-fg">{t('home.alert_model_title')}</b>
       {t('home.alert_model_text')}
     </p>
-    <button type="button" class="btn btn-sm shadow-none! text-warn" onclick={() => router.navigate('models')}>
+    <Button type="button" variant="warn" size="sm" onclick={() => router.navigate('models')}>
       {t('home.alert_model_action')}
-    </button>
+    </Button>
   </div>
 {/if}
 
 {#each problems as problem (problem.platform)}
-  <div class="flex flex-wrap items-center gap-x-3.5 gap-y-2 rounded-[18px] bg-warn-tint py-2.5 pr-2.5 pl-3">
+  <div class="flex flex-wrap items-center gap-x-3.5 gap-y-2 rounded-2xl bg-warn-tint py-2.5 pr-2.5 pl-3">
     <span class="grid h-[34px] w-[34px] shrink-0 place-items-center rounded-full bg-card text-warn">
-      <TriangleAlert size={17} strokeWidth={2.2} />
+      <TriangleAlert size={17} strokeWidth={2} />
     </span>
     <!-- Title and text share one paragraph so a narrow screen wraps the text under the title
          instead of squeezing it into a column beside it. -->
     <p class="m-0 min-w-0 flex-1 basis-[240px] text-[14px] text-warn-fg">
-      <b class="mr-2 text-[15px] font-extrabold text-fg">
+      <b class="mr-2 text-[15px] font-semibold text-fg">
         {problem.reason === 'unknown'
           ? t('home.alert_unknown_title', { platform: problem.displayName })
           : t('home.alert_offline_title', {
@@ -123,21 +124,23 @@ const modelMissing = $derived(nodeStore.health?.llm_configured === false);
         : t('home.alert_offline_text', { name: problem.instanceName })}
     </p>
     {#if problem.reason === 'unknown'}
-      <button
+      <Button
         type="button"
-        class="btn btn-sm shadow-none! text-warn"
+        variant="warn"
+        size="sm"
         onclick={() => router.navigate('instances', problem.instanceId)}
       >
         {t('home.alert_edit_instance')}
-      </button>
+      </Button>
     {:else}
-      <button
+      <Button
         type="button"
-        class="btn btn-sm shadow-none! text-warn"
+        variant="warn"
+        size="sm"
         onclick={() => router.navigate('platforms', problem.platform)}
       >
         {t('home.alert_check')}
-      </button>
+      </Button>
     {/if}
   </div>
 {/each}
@@ -146,10 +149,10 @@ const modelMissing = $derived(nodeStore.health?.llm_configured === false);
   <div class="card">
     <EmptyState icon={Boxes} title={t('home.empty_title')} text={t('home.empty_text')}>
       {#snippet action()}
-        <button type="button" class="btn btn-primary" onclick={() => router.navigate('instances', 'new')}>
-          <Plus size={16} strokeWidth={2.6} />
+        <Button type="button" variant="filled" onclick={() => router.navigate('instances', 'new')}>
+          <Plus size={16} strokeWidth={2.2} />
           {t('instances.new')}
-        </button>
+        </Button>
       {/snippet}
     </EmptyState>
   </div>
@@ -163,7 +166,7 @@ const modelMissing = $derived(nodeStore.health?.llm_configured === false);
           <div class="flex min-w-0 flex-col leading-[1.35]">
             <a
               href="#/instances/{encodeURIComponent(instance.id)}"
-              class="truncate text-[17px] font-extrabold text-fg no-underline hover:text-accent-fg"
+              class="truncate text-[17px] font-semibold text-fg no-underline hover:text-accent"
             >
               {instance.name}
             </a>
@@ -205,11 +208,11 @@ const modelMissing = $derived(nodeStore.health?.llm_configured === false);
             {#if model.reference}
               <code class="text-[12.5px]">{model.reference}</code>
             {:else}
-              <span class="font-bold text-warn">{t('instances.fact_no_model')}</span>
+              <span class="font-medium text-warn">{t('instances.fact_no_model')}</span>
             {/if}
           </dd>
           <dt class="whitespace-nowrap text-fg2">{t('instances.fact_groups')}</dt>
-          <dd class="m-0 truncate font-bold">{describeReplyPolicy(reply.policy)}</dd>
+          <dd class="m-0 truncate font-medium">{describeReplyPolicy(reply.policy)}</dd>
         </dl>
       </article>
     {/each}

@@ -108,6 +108,7 @@ async fn register_plugin_host(supervisor: &Supervisor, plugin_id: &str) {
             description: "Policy fixture host".to_string(),
             commands: Vec::new(),
             tools: Vec::new(),
+            ..Default::default()
         }],
         100,
     ));

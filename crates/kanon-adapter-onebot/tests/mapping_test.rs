@@ -307,3 +307,47 @@ fn quotes_carry_text_files_and_stickers_into_context() {
         Some(Segment::Text(_))
     ));
 }
+
+/// Typed video, file and face segments become the OneBot segments of the same kinds; a file
+/// without a name is refused rather than sent anonymously.
+#[test]
+fn typed_video_file_and_face_segments_are_sent_natively() {
+    use kanon_proto::v1::{FaceSegment, FileSegment, VideoSegment, file_segment, video_segment};
+
+    let (_, params) = delivery(&request(vec![
+        MessageSegment {
+            segment: Some(Segment::Video(VideoSegment {
+                source: Some(video_segment::Source::Url(
+                    "https://cdn.example/v.mp4".into(),
+                )),
+                ..Default::default()
+            })),
+        },
+        MessageSegment {
+            segment: Some(Segment::File(FileSegment {
+                source: Some(file_segment::Source::FilePath("/tmp/r.pdf".into())),
+                name: "report.pdf".into(),
+            })),
+        },
+        MessageSegment {
+            segment: Some(Segment::Face(FaceSegment { id: "76".into() })),
+        },
+    ]))
+    .unwrap();
+    assert_eq!(
+        params["message"],
+        json!([
+            {"type": "video", "data": {"file": "https://cdn.example/v.mp4"}},
+            {"type": "file", "data": {"file": "file:///tmp/r.pdf", "name": "report.pdf"}},
+            {"type": "face", "data": {"id": "76"}},
+        ])
+    );
+
+    let unnamed = MessageSegment {
+        segment: Some(Segment::File(FileSegment {
+            source: Some(file_segment::Source::Url("https://cdn.example/x".into())),
+            name: String::new(),
+        })),
+    };
+    assert!(delivery(&request(vec![unnamed])).is_err());
+}

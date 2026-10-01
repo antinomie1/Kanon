@@ -16,7 +16,7 @@ use axum::Json;
 use axum::Router;
 use axum::extract::{FromRequest, Path as AxumPath, State};
 use axum::routing::{get, post};
-use kanon_core::{ManagedHost, PluginManifest, PluginScanner, SupervisorError};
+use kanon_core::{DiscoveredPlugin, ManagedHost, PluginManifest, PluginScanner, SupervisorError};
 use kanon_llm::tool_router::{json_to_prost_struct, prost_struct_to_json};
 use kanon_proto::v1::PluginMeta;
 use kanon_storage::PluginId;
@@ -32,6 +32,9 @@ use crate::state::ApiState;
 pub fn routes() -> Router<ApiState> {
     Router::new()
         .route("/api/v1/plugins", get(list_plugins))
+        // The plugin directory is read only on request: listing serves the last scan, and this
+        // route is what makes a folder copied in by hand show up.
+        .route("/api/v1/plugins/rescan", post(rescan_plugins))
         .route("/api/v1/plugins/install", post(install_plugin))
         .route(
             "/api/v1/plugins/:id/config",
@@ -284,10 +287,10 @@ async fn list_plugins(State(state): State<ApiState>) -> Json<PluginCatalog> {
     }
 
     // Disabled plugins have no host at all, so the catalog would otherwise hide them and the
-    // console could never re-enable one. Scan the plugin directory and present the rest (with a
+    // console could never re-enable one. Present the rest of the last directory scan (with a
     // placeholder status: the overlay below decides the final one).
-    for discovered in discovered_plugin_views(state.plugins_dir(), &plugin_views) {
-        plugin_views.push(discovered);
+    for on_disk in on_disk_plugin_views(state.plugins_on_disk(), &plugin_views) {
+        plugin_views.push(on_disk);
     }
 
     // Overlay the operator's enable/disable state and the watchdog's health, after every entry
@@ -337,28 +340,35 @@ async fn list_plugins(State(state): State<ApiState>) -> Json<PluginCatalog> {
     })
 }
 
+/// Rescans the plugin directory on the operator's request and answers with the fresh catalog.
+///
+/// A scan that fails is reported rather than answered with an empty list, which would look like
+/// every stopped plugin had been deleted.
+async fn rescan_plugins(State(state): State<ApiState>) -> Result<Json<PluginCatalog>, ApiError> {
+    let found = state.rescan_plugins().map_err(|err| {
+        ApiError::Internal(format!(
+            "Could not scan {}: {err}",
+            state.plugins_dir().display()
+        ))
+    })?;
+    tracing::info!(
+        count = found.len(),
+        dir = %state.plugins_dir().display(),
+        "Plugin directory rescanned on request"
+    );
+    Ok(list_plugins(State(state)).await)
+}
+
 /// Builds catalog entries for plugins on disk that have no running host.
 ///
 /// Without this fill the console would lose the ability to re-enable a plugin it had disabled
 /// (and could not see a plugin whose runtime is missing, either), because both cases have no
 /// host process to enumerate. The caller applies the enable/disable overlay afterwards.
-fn discovered_plugin_views(
-    plugins_dir: &std::path::Path,
+fn on_disk_plugin_views(
+    on_disk: Vec<DiscoveredPlugin>,
     existing: &[PluginView],
 ) -> Vec<PluginView> {
-    let discovered = match kanon_core::PluginScanner::scan(plugins_dir) {
-        Ok(found) => found,
-        Err(err) => {
-            tracing::warn!(
-                dir = %plugins_dir.display(),
-                error = %err,
-                "Could not scan the plugin directory while building the catalog"
-            );
-            return Vec::new();
-        }
-    };
-
-    discovered
+    on_disk
         .into_iter()
         .filter(|plugin| {
             !existing
@@ -579,6 +589,8 @@ async fn call_plugin_tool(
         payload: Some(kanon_proto::v1::tool_call_request::Payload::StructuredArgs(
             args_struct,
         )),
+        // A console test call happens outside any platform conversation.
+        context: None,
     };
 
     let response = host.on_call_tool(req).await.map_err(|status| {
@@ -677,7 +689,7 @@ async fn set_plugin_enabled(
 ) -> Result<Json<PluginStateResponse>, ApiError> {
     let running = state.supervisor().find_host_for_plugin(&plugin_id).await;
     let manifest_path = if running.is_none() {
-        Some(find_manifest_path(state.plugins_dir(), &plugin_id)?)
+        Some(find_manifest_path(&state, &plugin_id)?)
     } else {
         None
     };
@@ -765,22 +777,17 @@ async fn set_plugin_enabled(
     }
 }
 
-/// Resolves the manifest path of a plugin that is present on disk but not running.
-fn find_manifest_path(
-    plugins_dir: &std::path::Path,
-    plugin_id: &str,
-) -> Result<std::path::PathBuf, ApiError> {
-    let discovered = kanon_core::PluginScanner::scan(plugins_dir).map_err(|err| {
-        ApiError::Internal(format!("Could not scan {}: {err}", plugins_dir.display()))
-    })?;
-
-    discovered
+/// Resolves the manifest path of a plugin that the last directory scan found but is not running.
+fn find_manifest_path(state: &ApiState, plugin_id: &str) -> Result<std::path::PathBuf, ApiError> {
+    state
+        .plugins_on_disk()
         .into_iter()
         .find(|plugin| plugin.manifest.plugin.id == plugin_id)
         .map(|plugin| plugin.manifest_path)
         .ok_or_else(|| {
             ApiError::NotFound(format!(
-                "Plugin '{plugin_id}' is not loaded and no manifest for it exists on this node"
+                "Plugin '{plugin_id}' is not loaded and the last plugin directory scan did not \
+                 find it; rescan the directory if it was added since"
             ))
         })
 }
@@ -930,6 +937,13 @@ async fn install_from_path(
     ensure_entrypoint_executable(&dest_dir, &manifest.plugin.entrypoint);
 
     let target_manifest_path = dest_dir.join("plugin.toml");
+    // The files are in place, so the node knows the plugin from here on, even if its host fails
+    // to start below: the operator can then fix the cause and enable it from the console.
+    state.record_installed_plugin(DiscoveredPlugin {
+        manifest: manifest.clone(),
+        manifest_path: target_manifest_path.clone(),
+        plugin_dir: dest_dir.clone(),
+    });
     let spawn_result = state
         .supervisor()
         .spawn_from_manifest(&target_manifest_path, None)
@@ -1131,7 +1145,7 @@ fn host_view(host: &ManagedHost, pid: Option<u32>, plugins: Vec<PluginView>) -> 
             .map(|manifest| manifest.plugin.runtime.clone()),
         socket_path: host.socket_path.to_string_lossy().to_string(),
         priority: host.priority,
-        plugin_ids: host.meta.iter().map(|meta| meta.id.clone()).collect(),
+        plugin_ids: host.metas().iter().map(|meta| meta.id.clone()).collect(),
         restartable: host.launch_spec().is_some(),
         pid,
         plugins,
@@ -1143,7 +1157,7 @@ fn plugin_views_for(host: &ManagedHost) -> Vec<PluginView> {
     let manifest = host.manifest();
 
     let mut views: Vec<PluginView> = host
-        .meta
+        .metas()
         .iter()
         .map(|meta| plugin_view_from_meta(meta, host, manifest))
         .collect();

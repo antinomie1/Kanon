@@ -50,17 +50,17 @@ const current = $derived(
       <a
         href="#/settings/{section.id}"
         aria-current={on ? 'page' : undefined}
-        class="flex h-10 shrink-0 items-center gap-2.5 rounded-xl px-3 text-[14.5px] whitespace-nowrap no-underline {on
-          ? 'bg-accent-tint font-extrabold text-accent-fg'
-          : 'font-semibold text-fg hover:bg-sunk'}"
+        class="flex h-10 shrink-0 items-center gap-2.5 rounded-full px-4 text-[14px] font-medium whitespace-nowrap no-underline transition-colors {on
+          ? 'bg-accent-tint text-accent-fg'
+          : 'text-fg2 hover:bg-fg/8 hover:text-fg'}"
       >
-        <Icon size={17} strokeWidth={2.1} class="shrink-0 {on ? 'text-accent' : 'text-fg3'}" />
+        <Icon size={17} strokeWidth={2} class="shrink-0" />
         {t(`settings.section_${section.id}`)}
       </a>
     {/each}
   </nav>
 
-  <section class="card px-5 pb-2 sm:px-7">
+  <section class="group-list">
     {#if current === 'appearance'}
       <AppearanceSettings />
     {:else if current === 'replies'}

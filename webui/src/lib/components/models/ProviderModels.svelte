@@ -5,6 +5,7 @@ import { t } from '../../stores/i18n.svelte';
 import { modelsStore } from '../../stores/models.svelte';
 import { toasts } from '../../stores/toast.svelte';
 import type { ModelCapabilities, ModelSpec } from '../../types';
+import Button from '../ui/Button.svelte';
 import { changeDefaultModel } from './defaultModel';
 import ModelEditorModal from './ModelEditorModal.svelte';
 import { compactTokens, modelName } from './modelFormat';
@@ -71,26 +72,26 @@ async function remove(spec: ModelSpec) {
 <section class="card px-5 pt-5 pb-3 sm:px-7">
   <div class="flex flex-wrap items-start justify-between gap-x-4 gap-y-3">
     <div class="min-w-0 flex-1 basis-[260px]">
-      <h2 class="m-0 text-[17px] font-extrabold">
+      <h2 class="m-0 text-[17px] font-semibold">
         {t('llm.models_title')}
-        <span class="ml-1 font-bold text-fg3">{models.length}</span>
+        <span class="ml-1 font-medium text-fg3">{models.length}</span>
       </h2>
       <p class="m-0 mt-1 max-w-[60ch] hint">{t('llm.models_hint', { provider })}</p>
     </div>
     <div class="flex flex-wrap gap-2.5">
-      <button type="button" class="btn btn-sm" disabled={discovering} onclick={() => void discover()}>
-        <RefreshCw size={15} strokeWidth={2.4} class={discovering ? 'animate-spin' : ''} />
+      <Button type="button" size="sm" disabled={discovering} onclick={() => void discover()}>
+        <RefreshCw size={15} strokeWidth={2} class={discovering ? 'animate-spin' : ''} />
         {discovering ? t('llm.discovering') : t('llm.discover')}
-      </button>
-      <button type="button" class="btn btn-sm" onclick={() => (editing = 'new')}>
-        <Plus size={15} strokeWidth={2.6} />
+      </Button>
+      <Button type="button" size="sm" onclick={() => (editing = 'new')}>
+        <Plus size={15} strokeWidth={2.2} />
         {t('llm.model_add')}
-      </button>
+      </Button>
     </div>
   </div>
 
   {#if models.length === 0}
-    <p class="m-0 mt-4 mb-2 rounded-[14px] bg-sunk px-4 py-3.5 text-[14px] text-fg2">
+    <p class="m-0 mt-4 mb-2 rounded-xl bg-sunk px-4 py-3.5 text-[14px] text-fg2">
       {t('llm.models_empty')}
     </p>
   {:else}
@@ -102,7 +103,7 @@ async function remove(spec: ModelSpec) {
         <li class="flex flex-wrap items-center gap-x-5 gap-y-2 border-t border-line py-3.5 first:border-t-0">
           <div class="min-w-0 flex-1 basis-[280px]">
             <div class="flex flex-wrap items-center gap-x-2.5 gap-y-1">
-              <span class="min-w-0 truncate text-[15px] font-extrabold">{name}</span>
+              <span class="min-w-0 truncate text-[15px] font-semibold">{name}</span>
               {#if isDefault}
                 <span class="chip chip-sm chip-accent">{t('llm.default_chip')}</span>
               {/if}
@@ -122,34 +123,34 @@ async function remove(spec: ModelSpec) {
           </div>
           <div class="ml-auto flex items-center gap-1.5">
             {#if !isDefault}
-              <button
+              <Button
                 type="button"
-                class="btn btn-sm btn-quiet"
+                variant="text" size="sm"
                 disabled={modelsStore.saving}
                 onclick={() => void changeDefaultModel(reference)}
               >
                 {t('llm.make_default')}
-              </button>
+              </Button>
             {/if}
-            <button
+            <Button
               type="button"
-              class="btn btn-sm btn-quiet btn-icon"
+              variant="text" size="sm" square
               title={t('llm.model_edit')}
               aria-label={t('llm.model_edit_title', { name })}
               onclick={() => (editing = spec)}
             >
-              <Pencil size={15} strokeWidth={2.2} />
-            </button>
-            <button
+              <Pencil size={15} strokeWidth={2} />
+            </Button>
+            <Button
               type="button"
-              class="btn btn-sm btn-quiet btn-icon"
+              variant="text" size="sm" square
               title={t('llm.remove')}
               aria-label={t('llm.model_remove_title', { name })}
               disabled={modelsStore.saving}
               onclick={() => void remove(spec)}
             >
-              <Trash2 size={15} strokeWidth={2.2} />
-            </button>
+              <Trash2 size={15} strokeWidth={2} />
+            </Button>
           </div>
         </li>
       {/each}

@@ -67,6 +67,8 @@ impl LlmProvider for DrawingProvider {
 struct DrawingHost {
     /// Path the attachment points at.
     image_path: String,
+    /// Event attached to the last tool call, so the test can check who invoked the tool.
+    caller: Arc<std::sync::Mutex<Option<PipelineEventRequest>>>,
 }
 
 #[tonic::async_trait]
@@ -94,6 +96,7 @@ impl kanon_proto::v1::message_pipeline_service_server::MessagePipelineService fo
         request: tonic::Request<ToolCallRequest>,
     ) -> Result<tonic::Response<ToolCallResponse>, tonic::Status> {
         let req = request.into_inner();
+        *self.caller.lock().unwrap() = req.context.clone();
         let result = json_to_prost_struct(&serde_json::json!({ "content": "card rendered" }))
             .expect("struct");
 
@@ -117,6 +120,24 @@ impl kanon_proto::v1::message_pipeline_service_server::MessagePipelineService fo
         Ok(tonic::Response::new(EventAck { received: true }))
     }
 
+    async fn on_decorate_reply(
+        &self,
+        _request: tonic::Request<kanon_proto::v1::DecorateReplyRequest>,
+    ) -> Result<tonic::Response<kanon_proto::v1::DecorateReplyResult>, tonic::Status> {
+        Ok(tonic::Response::new(
+            kanon_proto::v1::DecorateReplyResult::default(),
+        ))
+    }
+
+    async fn on_prepare_turn(
+        &self,
+        _request: tonic::Request<kanon_proto::v1::PrepareTurnRequest>,
+    ) -> Result<tonic::Response<kanon_proto::v1::PrepareTurnResult>, tonic::Status> {
+        Ok(tonic::Response::new(
+            kanon_proto::v1::PrepareTurnResult::default(),
+        ))
+    }
+
     async fn on_deliver_message(
         &self,
         _request: tonic::Request<DeliverMessageRequest>,
@@ -129,11 +150,20 @@ impl kanon_proto::v1::message_pipeline_service_server::MessagePipelineService fo
     }
 }
 
-/// Starts the drawing fixture over loopback so the test also runs without Unix socket support.
-async fn register_drawing_host(supervisor: &Supervisor, socket_path: PathBuf, image_path: String) {
+/// Starts the drawing fixture over loopback and captures the invoking event.
+async fn register_drawing_host(
+    supervisor: &Supervisor,
+    socket_path: PathBuf,
+    image_path: String,
+) -> Arc<std::sync::Mutex<Option<PipelineEventRequest>>> {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let address = listener.local_addr().unwrap();
-    let service = DrawingHost { image_path };
+    let caller = Arc::new(std::sync::Mutex::new(None));
+    let service = DrawingHost {
+        image_path,
+        caller: caller.clone(),
+    };
+
     tokio::spawn(async move {
         tonic::transport::Server::builder()
             .add_service(MessagePipelineServiceServer::new(service))
@@ -165,6 +195,7 @@ async fn register_drawing_host(supervisor: &Supervisor, socket_path: PathBuf, im
             100,
         )))
         .await;
+    caller
 }
 
 /// Inbound event fixture.
@@ -204,7 +235,7 @@ async fn check_attachment(final_text: &'static str, expected_text: &str, platfor
     std::fs::write(&image, b"png-bytes").expect("fixture image");
 
     let supervisor = Arc::new(Supervisor::new(Some(dir.path().to_path_buf()), None));
-    register_drawing_host(
+    let caller = register_drawing_host(
         &supervisor,
         dir.path().join("host_draw.sock"),
         image.to_string_lossy().to_string(),
@@ -224,6 +255,15 @@ async fn check_attachment(final_text: &'static str, expected_text: &str, platfor
     let mut incoming = event("画一张 B50");
     incoming.platform = platform.to_string();
     let result = engine.process_event(incoming).await;
+
+    // The tool learns which platform event invoked it, without the model passing it along.
+    let invoked_by = caller
+        .lock()
+        .unwrap()
+        .clone()
+        .expect("tool call carries its event");
+    assert_eq!(invoked_by.sender_id, "user:1");
+    assert_eq!(invoked_by.channel_id, "group:1");
 
     let replies = match result {
         PipelineResult::LlmReplied { content, replies } => {

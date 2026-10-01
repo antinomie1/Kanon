@@ -18,13 +18,14 @@ use tokio::task::JoinHandle;
 
 use kanon_llm::tool_router::ToolRouter;
 use kanon_llm::{AgentFactory, AgentSlot, ModelCapabilities, ModelRef, ModelSpec, visible_reply};
+use kanon_proto::v1::event_notification::Detail;
 use kanon_proto::v1::message_segment::Segment;
 use kanon_proto::v1::{
-    DeliverMessageRequest, DeliverMessageResponse, IngestEventRequest, MessageSegment,
-    PipelineEventRequest,
+    DeliverMessageRequest, DeliverMessageResponse, EventKind, IngestEventRequest, LlmResponseEvent,
+    MessageSegment, MessageSentEvent, PipelineEventRequest, ReplySource,
 };
 
-use crate::access::{CommandPolicyStore, META_SENDER_NAME};
+use crate::access::{CommandAccess, CommandPolicyStore, META_SENDER_NAME};
 use crate::adapter::{AdapterDescriptor, AdapterError, AdapterKind};
 use crate::conversation::{ContextPolicyStore, ConversationKind, ReplyPolicyStore, bot_mentioned};
 use crate::instance::InstanceRegistry;
@@ -33,10 +34,12 @@ use crate::mcp::McpPool;
 use crate::notice::{
     EventPolicyStore, META_NOTICE_ACTOR, META_NOTICE_TARGET, NoticeKind, RecallLedger, metadata_str,
 };
-use crate::pipeline::command::CommandRouter;
+use crate::pipeline::capture::CaptureRegistry;
+use crate::pipeline::command::{CommandRouter, TriggerMatcher};
 use crate::pipeline::context::build_user_message;
 use crate::pipeline::dead_letter::DeadLetterWriter;
 use crate::pipeline::group_log::GroupLog;
+use crate::pipeline::hooks;
 use crate::pipeline::observer::{PipelineObserver, PipelineStage};
 use crate::pipeline::pre_filter::{PreFilterChain, PreFilterOutcome};
 use crate::supervisor::circuit_breaker::{CircuitBreaker, CircuitState};
@@ -222,6 +225,65 @@ pub enum PipelineResult {
     },
     /// Inbound event passed through the pipeline without matching any slash command or LLM rule.
     Passed(PipelineEventRequest),
+}
+
+/// A model conversation as stored, read by [`PipelineEngine::conversation_history`].
+#[derive(Debug, Clone)]
+pub struct ConversationHistory {
+    /// Session the conversation is stored under.
+    pub session_id: String,
+    /// Summary of compacted older turns, if the conversation was ever compacted.
+    pub summary: Option<String>,
+    /// Stored messages, oldest first, including tool calls and tool results.
+    pub messages: Vec<kanon_llm::ChatMessage>,
+}
+
+/// Why a conversation's history could not be read.
+#[derive(Debug, thiserror::Error)]
+pub enum HistoryError {
+    /// No enabled instance answers on the platform, so no conversation exists there.
+    #[error("no enabled bot instance claims platform '{0}'")]
+    NoInstance(String),
+    /// Several instances claim the platform; the owner is never guessed.
+    #[error("instance routing is ambiguous: {0}")]
+    Ambiguous(String),
+    /// No model is configured, so there is no conversation memory to read.
+    #[error("no model is configured")]
+    NoModel,
+    /// The memory backend failed.
+    #[error("conversation history could not be read: {0}")]
+    Memory(String),
+}
+
+/// What happens to a message after a plugin command, trigger or continuation handled it.
+enum CommandFlow {
+    /// The handler answered; the pipeline ends with this result.
+    Finished(PipelineResult),
+    /// The handler handed the message on: the reply policy and the model see this event next.
+    PassToModel(PipelineEventRequest),
+}
+
+/// Replaces the text of a message, keeping its other segments (images, mentions) in place.
+///
+/// The first text segment takes the new text and the other text segments are dropped, so the
+/// model reads the replacement exactly once; a message without text gets the text in front.
+fn replace_message_text(event: &mut PipelineEventRequest, text: String) {
+    let mut replaced = false;
+    event
+        .segments
+        .retain_mut(|segment| match &mut segment.segment {
+            Some(Segment::Text(existing)) if !replaced => {
+                existing.content = text.clone();
+                replaced = true;
+                true
+            }
+            Some(Segment::Text(_)) => false,
+            _ => true,
+        });
+    if !replaced && !event.segments.is_empty() {
+        event.segments.insert(0, text_reply(text.clone()));
+    }
+    event.raw_text = text;
 }
 
 /// Name of the built-in session command, handled by the core and never by the model.
@@ -436,6 +498,10 @@ pub struct PipelineEngine {
     recalls: RecallLedger,
     /// Recent group lines for instances that observe their groups.
     group_log: GroupLog,
+    /// Compiled plugin trigger patterns.
+    triggers: TriggerMatcher,
+    /// Plugins waiting for a sender's next message.
+    captures: CaptureRegistry,
     /// MCP servers contributing tools alongside plugin hosts.
     mcp: Option<Arc<McpPool>>,
     /// Optional lifecycle observer used by the management control plane for tracing.
@@ -471,6 +537,8 @@ impl PipelineEngine {
             command_policy: None,
             recalls: RecallLedger::default(),
             group_log: GroupLog::default(),
+            triggers: TriggerMatcher::default(),
+            captures: CaptureRegistry::default(),
             mcp: None,
             observer: None,
             dead_letter: Arc::new(DeadLetterWriter::default()),
@@ -658,6 +726,66 @@ impl PipelineEngine {
         }
     }
 
+    /// The hosts whose plugins `instance` runs, by its plugin policy and the global toggles.
+    ///
+    /// Without a toggle store or an instance every host is kept, as the node behaved before
+    /// instances existed.
+    async fn instance_hosts(
+        &self,
+        instance: Option<&crate::instance::BotInstance>,
+        hosts: Vec<Arc<crate::supervisor::ManagedHost>>,
+    ) -> Vec<Arc<crate::supervisor::ManagedHost>> {
+        let (Some(toggles), Some(instance)) = (&self.toggles, instance) else {
+            return hosts;
+        };
+        let mut allowed = Vec::with_capacity(hosts.len());
+        for host in hosts {
+            let plugin_id = host.primary_plugin_id().unwrap_or_default();
+            let globally_enabled = toggles.is_enabled(PLUGIN_SECTION, &plugin_id).await;
+            if instance.allows_plugin(&plugin_id, globally_enabled) {
+                allowed.push(host);
+            } else {
+                tracing::debug!(
+                    instance_id = %instance.id,
+                    plugin_id = %plugin_id,
+                    "Plugin skipped for this instance by its plugin policy"
+                );
+            }
+        }
+        allowed
+    }
+
+    /// Tells subscribed plugins that the bot sent a message on `request.platform`.
+    ///
+    /// The plugins are those of the instance serving the platform, as for inbound events; with
+    /// an instance registry but no instance claiming the platform nobody is told.
+    async fn emit_message_sent(&self, request: &DeliverMessageRequest, message_id: &str) {
+        let hosts = self.supervisor.get_all_hosts().await;
+        if !hosts.iter().any(|host| {
+            host.metas()
+                .iter()
+                .any(|plugin| plugin.events().any(|kind| kind == EventKind::MessageSent))
+        }) {
+            return;
+        }
+        let instance = match &self.instances {
+            Some(registry) => match registry.resolve_by_platform(&request.platform).await {
+                Ok(Some(instance)) => Some(instance),
+                _ => return,
+            },
+            None => None,
+        };
+        let hosts = self.instance_hosts(instance.as_ref(), hosts).await;
+        hooks::emit_event(
+            &hosts,
+            EventKind::MessageSent,
+            Detail::MessageSent(MessageSentEvent {
+                message: Some(request.clone()),
+                message_id: message_id.to_string(),
+            }),
+        );
+    }
+
     /// Delivers one outbound message to the adapter owning its platform.
     ///
     /// Routing order is built-in adapter first, then plugin host. Every failure path is explicit:
@@ -775,6 +903,7 @@ impl PipelineEngine {
                     error_message: String::new(),
                 };
                 breaker.record_success(start.elapsed());
+                self.emit_message_sent(&request, &outcome.message_id).await;
                 tracing::info!(
                     platform = %outcome.platform,
                     channel_id = %channel_id,
@@ -1101,6 +1230,14 @@ impl PipelineEngine {
             None => None,
         };
 
+        // Phase 0b: Per-instance plugin policy.
+        //
+        // Filtering here (rather than inside each later phase) means a plugin this instance
+        // disabled cannot pre-filter, answer commands, offer tools or observe events — one
+        // decision covers the whole pipeline. It runs before notices so a notice reaches only
+        // the plugins this instance runs.
+        let hosts = self.instance_hosts(instance.as_ref(), hosts).await;
+
         // Phase 0a: Notices.
         //
         // A join, poke or recall is not a message. Only the node's event policy decides whether the
@@ -1113,6 +1250,8 @@ impl PipelineEngine {
         let bash_sender = (notice.is_none() && !event.sender_id.trim().is_empty())
             .then(|| format!("{platform}:{}", event.sender_id));
         if let Some(kind) = notice {
+            // Subscribers observe every notice, whether or not the bot itself reacts to it.
+            hooks::emit_event(&hosts, EventKind::Notice, Detail::Notice(event.clone()));
             let policy = self
                 .event_policy
                 .as_ref()
@@ -1167,33 +1306,6 @@ impl PipelineEngine {
                 };
             }
         }
-
-        // Phase 0b: Per-instance plugin policy.
-        //
-        // Filtering here (rather than inside each later phase) means a plugin this instance
-        // disabled cannot pre-filter, answer commands or offer tools — one decision covers the
-        // whole pipeline. Without a toggle store or an instance the node behaves as before.
-        let hosts: Vec<Arc<crate::supervisor::ManagedHost>> =
-            match (&self.toggles, instance.as_ref()) {
-                (Some(toggles), Some(instance)) => {
-                    let mut allowed = Vec::with_capacity(hosts.len());
-                    for host in hosts {
-                        let plugin_id = host.primary_plugin_id().unwrap_or_default();
-                        let globally_enabled = toggles.is_enabled(PLUGIN_SECTION, &plugin_id).await;
-                        if instance.allows_plugin(&plugin_id, globally_enabled) {
-                            allowed.push(host);
-                        } else {
-                            tracing::debug!(
-                                instance_id = %instance.id,
-                                plugin_id = %plugin_id,
-                                "Plugin skipped for this instance by its plugin policy"
-                            );
-                        }
-                    }
-                    allowed
-                }
-                _ => hosts,
-            };
 
         // Phase 1: PreFilter Interception Chain
         self.observe(PipelineStage::PreFilterStarted {
@@ -1260,106 +1372,227 @@ impl PipelineEngine {
         } else {
             strip_leading_mentions(&text_candidate)
         };
-        // Phase 2-: Command permissions, checked once for built-in and plugin commands alike.
-        // Without a policy store (an embedded pipeline) every command stays open, which is the
-        // pre-policy behaviour; the node always installs one. An instance with its own command
-        // policy replaces the node's, administrators included.
-        if let (Some((cmd_name, _)), Some(store)) = (
-            CommandRouter::parse_command(command_text),
-            self.command_policy.as_ref(),
-        ) && !instance
-            .as_ref()
-            .map_or_else(
+        // The policy that decides who may run commands and fire triggers. Without a policy store
+        // (an embedded pipeline) everything stays open, which is the pre-policy behaviour; the
+        // node always installs one. An instance with its own command policy replaces the node's,
+        // administrators included.
+        let command_policy = self.command_policy.as_ref().map(|store| {
+            instance.as_ref().map_or_else(
                 || store.get(),
                 |instance| instance.effective_command_policy(store.get()),
             )
-            .allows(&cmd_name, &filtered_event)
-        {
-            // The sender's own ID is part of the answer: it is exactly what an operator adds to
-            // the administrator list to grant access.
-            let reply = format!(
-                "/{cmd_name} 仅限管理员使用（你的 ID：{}:{}）",
-                filtered_event.platform, filtered_event.sender_id
-            );
-            return PipelineResult::CommandDenied {
-                command: cmd_name,
-                replies: vec![text_reply(reply)],
-            };
-        }
+        });
 
-        if let Some((cmd_name, args)) = CommandRouter::parse_command(command_text) {
-            if cmd_name.eq_ignore_ascii_case(NEW_SESSION_COMMAND)
-                && let Some(instance) = instance.as_ref()
+        // Phase 2a: Conversation captures.
+        //
+        // A plugin that asked a question gets the sender's next message before anything else may
+        // interpret it — even text that looks like a command is the answer it is waiting for.
+        // The capture is consumed here either way, so a plugin that has been disabled or whose
+        // host is gone cannot keep swallowing the sender's messages.
+        //
+        // Phases 2a–2b run in a labelled block: a handler that hands the message on to the model
+        // (`pass_to_model`) leaves it with the event the model should read, skipping the
+        // remaining handlers, while every other outcome returns from the pipeline directly.
+        let filtered_event = 'handlers: {
+            if notice.is_none()
+                && let Some(capture) = self.captures.take(&filtered_event)
             {
-                return self.handle_new_session(&filtered_event, instance).await;
+                match hosts.iter().find(|host| host.host_id == capture.host_id) {
+                    Some(host) => {
+                        tracing::debug!(
+                            command = %capture.command,
+                            plugin_id = %capture.plugin_id,
+                            host_id = %host.host_id,
+                            "Routing captured message to the waiting plugin"
+                        );
+                        self.observe(PipelineStage::CommandMatched {
+                            event_id: event_id.clone(),
+                            command: capture.command.clone(),
+                            plugin_id: capture.plugin_id.clone(),
+                            host_id: host.host_id.clone(),
+                        });
+                        let outcome = CommandRouter::dispatch_continuation(
+                            host,
+                            &capture,
+                            command_text,
+                            filtered_event.clone(),
+                        )
+                        .await;
+                        match self
+                            .command_result(
+                                &hosts,
+                                capture.command,
+                                &capture.plugin_id,
+                                host,
+                                &filtered_event,
+                                outcome,
+                            )
+                            .await
+                        {
+                            CommandFlow::Finished(result) => return result,
+                            CommandFlow::PassToModel(event) => break 'handlers event,
+                        }
+                    }
+                    None => tracing::warn!(
+                        plugin_id = %capture.plugin_id,
+                        host_id = %capture.host_id,
+                        "Captured conversation's plugin is no longer active here; processing the message normally"
+                    ),
+                }
             }
-            if cmd_name.eq_ignore_ascii_case(MODEL_COMMAND)
-                && let Some(instance) = instance.as_ref()
-            {
-                return self.handle_model_command(instance, &args).await;
-            }
-            if cmd_name.eq_ignore_ascii_case(HELP_COMMAND) {
-                return self.handle_help_command(&hosts);
-            }
-            if cmd_name.eq_ignore_ascii_case(INFO_COMMAND) {
-                return self.handle_info_command(instance.as_ref(), &filtered_event);
-            }
-        }
 
-        if let Some((cmd_name, args)) = CommandRouter::parse_command(command_text) {
-            if let Some(target) = CommandRouter::resolve(&cmd_name, &hosts) {
+            if let Some(parsed) = CommandRouter::parse_command(command_text) {
+                let name = parsed.name.clone();
+                // `/new` and `/model` act on an instance, so without one they are ordinary names a
+                // plugin may claim; `/help` and `/info` are always the core's.
+                let builtin = ((name.eq_ignore_ascii_case(NEW_SESSION_COMMAND)
+                    || name.eq_ignore_ascii_case(MODEL_COMMAND))
+                    && instance.is_some())
+                    || name.eq_ignore_ascii_case(HELP_COMMAND)
+                    || name.eq_ignore_ascii_case(INFO_COMMAND);
+                let target = if builtin {
+                    None
+                } else {
+                    CommandRouter::resolve(&name, &hosts, &filtered_event)
+                };
+
+                // Phase 2-: Command permissions, checked once for built-in and plugin commands alike.
+                // A plugin command is checked under its canonical name, so an alias can never bypass
+                // a restriction, and with the access level its plugin declared as the default.
+                let (policy_name, default_access) = match &target {
+                    Some(target) => (target.name().to_string(), target.access()),
+                    None => (name.clone(), CommandAccess::Everyone),
+                };
+                if let Some(policy) = command_policy.as_ref()
+                    && !policy.allows_with_default(&policy_name, default_access, &filtered_event)
+                {
+                    // The sender's own ID is part of the answer: it is exactly what an operator adds
+                    // to the administrator list to grant access.
+                    let reply = format!(
+                        "/{name} 仅限管理员使用（你的 ID：{}:{}）",
+                        filtered_event.platform, filtered_event.sender_id
+                    );
+                    return PipelineResult::CommandDenied {
+                        command: policy_name,
+                        replies: vec![text_reply(reply)],
+                    };
+                }
+
+                if builtin {
+                    if name.eq_ignore_ascii_case(HELP_COMMAND) {
+                        return self.handle_help_command(&hosts);
+                    }
+                    if name.eq_ignore_ascii_case(INFO_COMMAND) {
+                        return self.handle_info_command(instance.as_ref(), &filtered_event);
+                    }
+                    if let Some(instance) = instance.as_ref() {
+                        if name.eq_ignore_ascii_case(NEW_SESSION_COMMAND) {
+                            return self.handle_new_session(&filtered_event, instance).await;
+                        }
+                        return self.handle_model_command(instance, &parsed.args).await;
+                    }
+                }
+
+                let Some(target) = target else {
+                    tracing::debug!(
+                        command = %name,
+                        "Slash command detected but no matching plugin was registered"
+                    );
+                    self.observe(PipelineStage::CommandNotFound {
+                        event_id,
+                        command: name.clone(),
+                    });
+                    return PipelineResult::CommandNotFound { command: name };
+                };
+
+                let command = target.name().to_string();
                 tracing::debug!(
-                    command = %cmd_name,
+                    command = %command,
+                    typed = %name,
                     plugin_id = %target.plugin_id,
                     host_id = %target.host.host_id,
                     "Routing slash command to target host"
                 );
-
                 self.observe(PipelineStage::CommandMatched {
                     event_id: event_id.clone(),
-                    command: cmd_name.clone(),
+                    command: command.clone(),
                     plugin_id: target.plugin_id.clone(),
                     host_id: target.host.host_id.clone(),
                 });
-
-                match CommandRouter::dispatch(&target, args, filtered_event.clone()).await {
-                    Ok(response) => {
-                        return PipelineResult::CommandExecuted {
-                            command: cmd_name,
-                            plugin_id: target.plugin_id,
-                            host_id: target.host.host_id.clone(),
-                            success: response.success,
-                            replies: response.replies,
-                        };
-                    }
-                    Err(status) => {
-                        tracing::error!(
-                            command = %cmd_name,
-                            host_id = %target.host.host_id,
-                            error = %status,
-                            "Command execution failed with gRPC status"
-                        );
-                        return PipelineResult::CommandExecuted {
-                            command: cmd_name,
-                            plugin_id: target.plugin_id,
-                            host_id: target.host.host_id.clone(),
-                            success: false,
-                            replies: vec![],
-                        };
-                    }
+                let outcome =
+                    CommandRouter::dispatch(&target, parsed, filtered_event.clone()).await;
+                match self
+                    .command_result(
+                        &hosts,
+                        command,
+                        &target.plugin_id,
+                        &target.host,
+                        &filtered_event,
+                        outcome,
+                    )
+                    .await
+                {
+                    CommandFlow::Finished(result) => return result,
+                    CommandFlow::PassToModel(event) => break 'handlers event,
                 }
-            } else {
-                tracing::debug!(
-                    command = %cmd_name,
-                    "Slash command detected but no matching plugin was registered"
-                );
-                self.observe(PipelineStage::CommandNotFound {
-                    event_id,
-                    command: cmd_name.clone(),
-                });
-                return PipelineResult::CommandNotFound { command: cmd_name };
             }
-        }
+
+            // Phase 2b: Plugin triggers.
+            //
+            // A trigger is a plugin's claim on a plain message by pattern. It runs where a command
+            // would — after pre-filters, before the reply policy and the model — because a plugin that
+            // asked for "messages matching X" wants them whether or not the bot was mentioned.
+            if notice.is_none()
+                && !command_text.trim().is_empty()
+                && let Some(target) =
+                    self.triggers
+                        .resolve(command_text, &filtered_event, &hosts, |meta| {
+                            command_policy.as_ref().is_none_or(|policy| {
+                                policy.allows_with_default(
+                                    &meta.name,
+                                    CommandAccess::from_proto(meta.access()),
+                                    &filtered_event,
+                                )
+                            })
+                        })
+            {
+                let trigger = target.meta.name.clone();
+                tracing::debug!(
+                    trigger = %trigger,
+                    plugin_id = %target.plugin_id,
+                    host_id = %target.host.host_id,
+                    "Routing message to the plugin trigger it matched"
+                );
+                self.observe(PipelineStage::CommandMatched {
+                    event_id: event_id.clone(),
+                    command: trigger.clone(),
+                    plugin_id: target.plugin_id.clone(),
+                    host_id: target.host.host_id.clone(),
+                });
+                let outcome = CommandRouter::dispatch_trigger(
+                    &target,
+                    command_text.trim(),
+                    filtered_event.clone(),
+                )
+                .await;
+                match self
+                    .command_result(
+                        &hosts,
+                        trigger,
+                        &target.plugin_id,
+                        &target.host,
+                        &filtered_event,
+                        outcome,
+                    )
+                    .await
+                {
+                    CommandFlow::Finished(result) => return result,
+                    CommandFlow::PassToModel(event) => break 'handlers event,
+                }
+            }
+
+            filtered_event
+        };
 
         // Phase 2c: Reply policy gate.
         //
@@ -1469,11 +1702,23 @@ impl PipelineEngine {
         // of the current user message: runtime facts belong to the current turn, never to the
         // cached prefix. They are only taken when a model will actually read them.
         let ledger_key = format!("{platform}\u{1f}{conversation}");
+        // Sessions are namespaced by the instance that owns the conversation, so two bots can
+        // never share context. An unpartitioned pipeline keeps the legacy conversation key.
+        let session_id = match instance.as_ref() {
+            Some(instance) => instance.conversation_session_id(&conversation),
+            None => conversation.clone(),
+        };
         let mut filtered_event = filtered_event;
         let answering = resolved_agent.is_some();
         let mut lead: Vec<String> = Vec::new();
         if answering {
             lead.extend(self.recalls.take_notes(&ledger_key));
+            // Plugin context joins the current turn only, after the core's own notes and before
+            // the speaker label, which must stay directly in front of the message it introduces.
+            // Preparers see the message as the user sent it, before any of this leading text.
+            if notice.is_none() {
+                lead.extend(hooks::prepare_turn(&hosts, &filtered_event, &session_id).await);
+            }
         }
         // Observed group lines this session has not seen come first, then the speaker of the
         // current message; the current message is recorded so other sessions see it later.
@@ -1553,13 +1798,6 @@ impl PipelineEngine {
                 });
             }
 
-            // Sessions are namespaced by the instance that owns the conversation, so two bots can
-            // never share context. An unpartitioned pipeline keeps the legacy conversation key.
-            let session_id = match instance.as_ref() {
-                Some(instance) => instance.conversation_session_id(&conversation),
-                None => conversation.clone(),
-            };
-
             // The instance decides the persona; sessions without one keep whatever the console
             // (or the default catalog) assigned to them.
             if let Some(instance) = instance.as_ref()
@@ -1619,9 +1857,12 @@ impl PipelineEngine {
                 instance: instance.as_ref().map(|instance| instance.id.clone()),
                 shared_context: shared || observing,
             });
-            match crate::with_bash_caller(
-                bash_caller,
-                router.execute_message(&session_id, user_message, &tool_hosts),
+            match crate::supervisor::with_tool_event(
+                filtered_event.clone(),
+                crate::with_bash_caller(
+                    bash_caller,
+                    router.execute_message(&session_id, user_message, &tool_hosts),
+                ),
             )
             .await
             {
@@ -1706,8 +1947,28 @@ impl PipelineEngine {
                         self.group_log.mark_seen(&group_key, &ledger_key, seq);
                     }
 
-                    // The platform adapter turns this into its native quote of the triggering message.
-                    if quote_reply {
+                    hooks::emit_event(
+                        &hosts,
+                        EventKind::LlmResponse,
+                        Detail::LlmResponse(LlmResponseEvent {
+                            context: Some(filtered_event.clone()),
+                            content: answer.to_string(),
+                        }),
+                    );
+                    // Decoration changes only what is delivered; memory keeps the model's own
+                    // words, so the conversation the model sees stays exactly what it said.
+                    let mut replies = hooks::decorate_reply(
+                        &hosts,
+                        &filtered_event,
+                        ReplySource::Llm,
+                        "",
+                        replies,
+                    )
+                    .await;
+
+                    // The platform adapter turns this into its native quote of the triggering
+                    // message; a reply a decorator suppressed gets no lone quote.
+                    if quote_reply && !replies.is_empty() {
                         replies.insert(
                             0,
                             MessageSegment {
@@ -1740,6 +2001,153 @@ impl PipelineEngine {
         }
 
         PipelineResult::Passed(filtered_event)
+    }
+
+    /// Reads the model conversation that answering `event` would continue.
+    ///
+    /// The session is derived exactly as the model phase derives it — owning instance, group
+    /// session scope, `/new` generation — so a plugin reads the same history the model would see.
+    /// Read-only by construction: history is append-only and only the pipeline writes it.
+    pub async fn conversation_history(
+        &self,
+        event: &PipelineEventRequest,
+    ) -> Result<ConversationHistory, HistoryError> {
+        let instance = match &self.instances {
+            Some(registry) => match registry.resolve_by_platform(&event.platform).await {
+                Ok(Some(instance)) => Some(instance),
+                Ok(None) => return Err(HistoryError::NoInstance(event.platform.clone())),
+                Err(err) => return Err(HistoryError::Ambiguous(err.to_string())),
+            },
+            None => None,
+        };
+        let agent = match &self.agent_factory {
+            Some(factory) => {
+                factory.agent_for_model(instance.as_ref().and_then(|i| i.model.as_deref()))
+            }
+            None => self.agent.current(),
+        }
+        .ok_or(HistoryError::NoModel)?;
+
+        let conversation = conversation_key(event, shares_session(instance.as_ref(), event));
+        let session_id = match instance.as_ref() {
+            Some(instance) => instance.conversation_session_id(&conversation),
+            None => conversation,
+        };
+        let snapshot = agent
+            .memory()
+            .snapshot(&session_id)
+            .await
+            .map_err(|err| HistoryError::Memory(err.to_string()))?;
+        Ok(ConversationHistory {
+            session_id,
+            summary: snapshot.summary,
+            messages: snapshot.messages,
+        })
+    }
+
+    /// Turns a plugin's command (or trigger) response into the pipeline result, recording the
+    /// conversation capture the plugin asked for, or hands the message on to the model.
+    ///
+    /// A transport failure is logged and reported as an unsuccessful execution without replies:
+    /// the plugin never answered, so there is nothing truthful to send on its behalf.
+    async fn command_result(
+        &self,
+        hosts: &[Arc<crate::supervisor::ManagedHost>],
+        command: String,
+        plugin_id: &str,
+        host: &Arc<crate::supervisor::ManagedHost>,
+        event: &PipelineEventRequest,
+        outcome: Result<kanon_proto::v1::CommandExecuteResponse, tonic::Status>,
+    ) -> CommandFlow {
+        match outcome {
+            Ok(response) => {
+                let pass_to_model = response.pass_to_model && response.capture_seconds == 0;
+                if response.pass_to_model && !pass_to_model {
+                    tracing::warn!(
+                        command = %command,
+                        plugin_id = %plugin_id,
+                        "Plugin both captured the conversation and passed the message to the model; keeping the capture"
+                    );
+                }
+                if response.capture_seconds > 0
+                    && !self.captures.capture(
+                        event,
+                        &host.host_id,
+                        plugin_id,
+                        &command,
+                        response.capture_seconds,
+                    )
+                {
+                    tracing::warn!(
+                        command = %command,
+                        plugin_id = %plugin_id,
+                        "Plugin asked to capture a conversation whose event names no sender; ignored"
+                    );
+                }
+                let replies = hooks::decorate_reply(
+                    hosts,
+                    event,
+                    ReplySource::Command,
+                    &command,
+                    response.replies,
+                )
+                .await;
+                if pass_to_model {
+                    tracing::debug!(
+                        command = %command,
+                        plugin_id = %plugin_id,
+                        rewritten = response.model_text.is_some(),
+                        "Plugin handed the message on to the model"
+                    );
+                    if !response.success {
+                        tracing::warn!(
+                            command = %command,
+                            plugin_id = %plugin_id,
+                            error = %response.error_message,
+                            "Plugin reported a failure while handing the message on"
+                        );
+                    }
+                    // The handler's own replies go out first, through the same FIFO the model's
+                    // answer will take, so they arrive in the order they were produced.
+                    if !replies.is_empty() {
+                        self.enqueue_reply(DeliverMessageRequest {
+                            platform: event.platform.clone(),
+                            channel_id: event.channel_id.clone(),
+                            recipient_id: event.sender_id.clone(),
+                            segments: replies,
+                            event_id: event.event_id.clone(),
+                        });
+                    }
+                    let mut event = event.clone();
+                    if let Some(text) = response.model_text {
+                        replace_message_text(&mut event, text);
+                    }
+                    return CommandFlow::PassToModel(event);
+                }
+                CommandFlow::Finished(PipelineResult::CommandExecuted {
+                    command,
+                    plugin_id: plugin_id.to_string(),
+                    host_id: host.host_id.clone(),
+                    success: response.success,
+                    replies,
+                })
+            }
+            Err(status) => {
+                tracing::error!(
+                    command = %command,
+                    host_id = %host.host_id,
+                    error = %status,
+                    "Command execution failed with gRPC status"
+                );
+                CommandFlow::Finished(PipelineResult::CommandExecuted {
+                    command,
+                    plugin_id: plugin_id.to_string(),
+                    host_id: host.host_id.clone(),
+                    success: false,
+                    replies: vec![],
+                })
+            }
+        }
     }
 
     /// Handles the built-in `/new` command for one conversation.
@@ -1919,19 +2327,37 @@ impl PipelineEngine {
 
         // Command names are deduplicated: two plugins claiming the same name would otherwise show
         // up twice, while routing already resolves that collision deterministically.
-        let mut plugin_commands: Vec<(String, String, String)> = Vec::new();
+        let mut plugin_commands: Vec<(String, String, String, Vec<String>)> = Vec::new();
+        let mut triggers: Vec<(String, String)> = Vec::new();
         for host in hosts {
-            for plugin in &host.meta {
+            for plugin in host.metas() {
                 for command in &plugin.commands {
                     let name = command.name.trim().trim_start_matches('/').to_string();
                     if name.is_empty() || plugin_commands.iter().any(|(seen, ..)| *seen == name) {
                         continue;
                     }
+                    let aliases = command
+                        .aliases
+                        .iter()
+                        .map(|alias| alias.trim().trim_start_matches('/').to_string())
+                        .filter(|alias| !alias.is_empty())
+                        .collect();
                     plugin_commands.push((
                         name,
                         command.description.trim().to_string(),
                         command.usage.trim().to_string(),
+                        aliases,
                     ));
+                }
+                // A trigger without a description is an implementation detail of its plugin, not
+                // something a user can usefully be told about.
+                for trigger in &plugin.triggers {
+                    let description = trigger.description.trim();
+                    if !description.is_empty()
+                        && !triggers.iter().any(|(name, _)| *name == trigger.name)
+                    {
+                        triggers.push((trigger.name.clone(), description.to_string()));
+                    }
                 }
             }
         }
@@ -1939,9 +2365,14 @@ impl PipelineEngine {
         if !plugin_commands.is_empty() {
             plugin_commands.sort_by(|left, right| left.0.cmp(&right.0));
             rendered.push_str("\n插件指令：\n");
-            for (name, description, usage) in plugin_commands {
+            for (name, description, usage, aliases) in plugin_commands {
                 rendered.push('/');
                 rendered.push_str(&name);
+                if !aliases.is_empty() {
+                    rendered.push_str("（别名: /");
+                    rendered.push_str(&aliases.join(", /"));
+                    rendered.push('）');
+                }
                 if !description.is_empty() {
                     rendered.push_str(" — ");
                     rendered.push_str(&description);
@@ -1951,6 +2382,15 @@ impl PipelineEngine {
                     rendered.push_str(&usage);
                     rendered.push('）');
                 }
+                rendered.push('\n');
+            }
+        }
+
+        if !triggers.is_empty() {
+            triggers.sort();
+            rendered.push_str("\n消息触发：\n");
+            for (_, description) in triggers {
+                rendered.push_str(&description);
                 rendered.push('\n');
             }
         }
@@ -2252,69 +2692,76 @@ impl PipelineEngine {
         };
 
         if !replies.is_empty() {
-            let deliver_req = DeliverMessageRequest {
+            self.enqueue_reply(DeliverMessageRequest {
                 platform,
                 channel_id,
                 recipient_id,
                 segments: replies.to_vec(),
-                event_id: event_id.clone(),
-            };
+                event_id,
+            });
+        }
+    }
 
-            let platform = deliver_req.platform.clone();
-            let channel_id = deliver_req.channel_id.clone();
-            let segment_count = deliver_req.segments.len();
+    /// Hands a reply to the outbound queue without waiting.
+    ///
+    /// The pipeline worker must never await platform I/O; a full or closed queue sends the reply
+    /// to the dead-letter log instead, written off the worker.
+    fn enqueue_reply(&self, deliver_req: DeliverMessageRequest) {
+        let event_id = deliver_req.event_id.clone();
+        let platform = deliver_req.platform.clone();
+        let channel_id = deliver_req.channel_id.clone();
+        let segment_count = deliver_req.segments.len();
 
-            // Non-blocking hand-off: the pipeline worker must never await platform I/O.
-            match self.outbound_sender.try_send(deliver_req.into()) {
-                Ok(()) => {
-                    self.observe(PipelineStage::OutboundQueued {
-                        event_id,
-                        platform,
-                        channel_id,
-                        segment_count,
-                    });
-                }
-                Err(mpsc::error::TrySendError::Full(dropped)) => {
-                    tracing::warn!(
-                        platform = %platform,
-                        channel_id = %channel_id,
-                        "Outbound queue is full; dropping reply to dead letter to protect pipeline latency"
-                    );
-                    let dead_letter = Arc::clone(&self.dead_letter);
-                    tokio::spawn(async move {
-                        let _ = dead_letter
-                            .write_record(&dropped.request, "outbound queue is full")
-                            .await;
-                    });
-                    self.observe(PipelineStage::OutboundFailed {
-                        platform,
-                        channel_id,
-                        reason: "outbound queue is full; reply dropped".to_string(),
-                    });
-                }
-                Err(mpsc::error::TrySendError::Closed(dropped)) => {
-                    tracing::warn!(
-                        platform = %platform,
-                        channel_id = %channel_id,
-                        "Outbound dispatcher is not running; dropping reply to dead letter"
-                    );
-                    // Written off the worker, like the full-queue case, so the pipeline never
-                    // waits on disk I/O for a reply it cannot send anyway.
-                    let dead_letter = Arc::clone(&self.dead_letter);
-                    tokio::spawn(async move {
-                        if let Err(err) = dead_letter
-                            .write_record(&dropped.request, "outbound dispatcher is not running")
-                            .await
-                        {
-                            tracing::error!(error = %err, "Failed to persist dead letter record; the reply is lost");
-                        }
-                    });
-                    self.observe(PipelineStage::OutboundFailed {
-                        platform,
-                        channel_id,
-                        reason: "outbound dispatcher is not running; reply dropped".to_string(),
-                    });
-                }
+        // Non-blocking hand-off: the pipeline worker must never await platform I/O.
+        match self.outbound_sender.try_send(deliver_req.into()) {
+            Ok(()) => {
+                self.observe(PipelineStage::OutboundQueued {
+                    event_id,
+                    platform,
+                    channel_id,
+                    segment_count,
+                });
+            }
+            Err(mpsc::error::TrySendError::Full(dropped)) => {
+                tracing::warn!(
+                    platform = %platform,
+                    channel_id = %channel_id,
+                    "Outbound queue is full; dropping reply to dead letter to protect pipeline latency"
+                );
+                let dead_letter = Arc::clone(&self.dead_letter);
+                tokio::spawn(async move {
+                    let _ = dead_letter
+                        .write_record(&dropped.request, "outbound queue is full")
+                        .await;
+                });
+                self.observe(PipelineStage::OutboundFailed {
+                    platform,
+                    channel_id,
+                    reason: "outbound queue is full; reply dropped".to_string(),
+                });
+            }
+            Err(mpsc::error::TrySendError::Closed(dropped)) => {
+                tracing::warn!(
+                    platform = %platform,
+                    channel_id = %channel_id,
+                    "Outbound dispatcher is not running; dropping reply to dead letter"
+                );
+                // Written off the worker, like the full-queue case, so the pipeline never
+                // waits on disk I/O for a reply it cannot send anyway.
+                let dead_letter = Arc::clone(&self.dead_letter);
+                tokio::spawn(async move {
+                    if let Err(err) = dead_letter
+                        .write_record(&dropped.request, "outbound dispatcher is not running")
+                        .await
+                    {
+                        tracing::error!(error = %err, "Failed to persist dead letter record; the reply is lost");
+                    }
+                });
+                self.observe(PipelineStage::OutboundFailed {
+                    platform,
+                    channel_id,
+                    reason: "outbound dispatcher is not running; reply dropped".to_string(),
+                });
             }
         }
     }

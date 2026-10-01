@@ -160,6 +160,33 @@ fn a_command_policy_is_normalized_and_validated() {
     assert!(missing_platform.prepare().is_err());
 }
 
+/// A plugin's declared access applies to commands the operator did not list, and the operator's
+/// entry overrides it in both directions.
+#[test]
+fn plugin_declared_access_is_a_default_the_operator_overrides() {
+    let member = event(
+        "e",
+        "/ban",
+        "group",
+        &[(META_SENDER_ROLE, Kind::StringValue("member".into()))],
+    );
+    let policy = CommandPolicy::default();
+    assert!(!policy.allows_with_default("ban", CommandAccess::Admins, &member));
+    assert!(policy.allows_with_default("ban", CommandAccess::Everyone, &member));
+
+    let opened = CommandPolicy {
+        access: [("ban".to_string(), CommandAccess::Everyone)].into(),
+        ..CommandPolicy::default()
+    };
+    assert!(opened.allows_with_default("ban", CommandAccess::Admins, &member));
+
+    let restricted = CommandPolicy {
+        access: [("ban".to_string(), CommandAccess::Admins)].into(),
+        ..CommandPolicy::default()
+    };
+    assert!(!restricted.allows_with_default("ban", CommandAccess::Everyone, &member));
+}
+
 #[test]
 fn access_levels_follow_the_conversation_and_the_sender() {
     let policy = CommandPolicy::default();

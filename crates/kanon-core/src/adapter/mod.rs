@@ -77,6 +77,8 @@ pub enum Capability {
     FriendRequests,
     /// Reports group invitations and accepts them through [`PlatformAdapter::accept_request`].
     GroupInvites,
+    /// Passes plugin calls to the platform's own API through [`PlatformAdapter::call_api`].
+    PlatformApi,
 }
 
 impl Capability {
@@ -84,7 +86,7 @@ impl Capability {
     pub fn needs_callback(self) -> bool {
         matches!(
             self,
-            Self::Acknowledge | Self::FriendRequests | Self::GroupInvites
+            Self::Acknowledge | Self::FriendRequests | Self::GroupInvites | Self::PlatformApi
         )
     }
 }
@@ -121,6 +123,16 @@ pub enum AdapterError {
         platform: String,
         /// The capability it lacks.
         capability: Capability,
+    },
+    /// The platform rejected a raw API call, or the call could not reach it.
+    #[error("adapter '{platform}' API call '{action}' failed: {reason}")]
+    Api {
+        /// Platform identifier the call was made on.
+        platform: String,
+        /// Platform action that failed.
+        action: String,
+        /// Underlying reason reported by the adapter.
+        reason: String,
     },
     /// Inbound payload verification (e.g. HMAC signature or bearer token) failed.
     #[error("adapter '{platform}' authentication failed: {reason}")]
@@ -286,6 +298,23 @@ pub trait PlatformAdapter: Send + Sync {
         Err(AdapterError::Unsupported {
             platform: self.platform().to_string(),
             capability: Capability::FriendRequests,
+        })
+    }
+
+    /// Calls one action of the platform's own API with JSON parameters and returns its result.
+    ///
+    /// This is the escape hatch for platform features the generic contract does not model (group
+    /// management, profile lookups, ...). The action name has already been checked by the core to
+    /// be a plain identifier. An adapter that declares [`Capability::PlatformApi`] must implement
+    /// it; the default reports the capability as unsupported.
+    async fn call_api(
+        &self,
+        _action: &str,
+        _params: serde_json::Value,
+    ) -> Result<serde_json::Value, AdapterError> {
+        Err(AdapterError::Unsupported {
+            platform: self.platform().to_string(),
+            capability: Capability::PlatformApi,
         })
     }
 

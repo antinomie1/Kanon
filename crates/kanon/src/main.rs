@@ -281,7 +281,8 @@ async fn main() -> StartupResult<()> {
     let service = CoreApiService::new(ingress.clone())
         .with_supervisor(supervisor.clone())
         .with_outbound_sender(engine.outbound_sender())
-        .with_agent_slot(state.llm_slot().clone());
+        .with_agent_slot(state.llm_slot().clone())
+        .with_engine(engine.clone());
     let ipc_server = CoreIpcServer::new(socket_path.clone(), service);
 
     // --- Graceful shutdown channels ---------------------------------------------------
@@ -313,9 +314,21 @@ async fn main() -> StartupResult<()> {
         tracing::warn!(error = %err, "Failed to ensure ./data/plugins directory exists");
     }
 
-    // Auto-discover and launch declared plugins from ./plugins directory, skipping any the
-    // operator disabled.
-    load_plugins_from_directory(&supervisor, "./plugins", &plugin_state).await;
+    // Scan ./plugins once and launch what it declares, skipping any the operator disabled. This is
+    // the only automatic scan: afterwards the directory is read again only when the console asks
+    // for a rescan, and the gateway's catalog serves this same snapshot until then.
+    let plugins = match state.rescan_plugins() {
+        Ok(plugins) => plugins,
+        Err(err) => {
+            tracing::error!(
+                dir = %state.plugins_dir().display(),
+                error = %err,
+                "Failed to scan plugins directory"
+            );
+            Vec::new()
+        }
+    };
+    launch_plugins(&supervisor, plugins, &plugin_state).await;
 
     // A crashed host is otherwise invisible: the supervisor would keep advertising a dead process
     // as healthy and route events into a closed socket. The watchdog prunes and restarts it.
@@ -512,23 +525,15 @@ fn init_tracing(observability: Arc<Observability>, log: &str) -> StartupResult<(
     Ok(())
 }
 
-/// Discovers plugins in the specified directory and launches their host processes.
+/// Launches the host processes of the plugins found by the startup scan.
 ///
 /// Missing runtime environments (e.g. Python / TypeScript) or individual manifest errors
 /// degrade gracefully to ensure the core microkernel and API gateway remain operational.
-async fn load_plugins_from_directory(
+async fn launch_plugins(
     supervisor: &Arc<Supervisor>,
-    dir: impl AsRef<std::path::Path>,
+    plugins: Vec<kanon_core::DiscoveredPlugin>,
     plugin_state: &Arc<ToggleStore>,
 ) {
-    let plugins = match kanon_core::PluginScanner::scan(dir.as_ref()) {
-        Ok(p) => p,
-        Err(e) => {
-            tracing::error!(dir = %dir.as_ref().display(), error = %e, "Failed to scan plugins directory");
-            return;
-        }
-    };
-
     tracing::info!(
         count = plugins.len(),
         "Discovered plugins during startup scan"

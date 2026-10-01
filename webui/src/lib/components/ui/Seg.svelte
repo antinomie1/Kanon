@@ -2,10 +2,20 @@
 import type { IconComponent } from '../../types';
 
 /**
- * Segmented control: a small set of mutually exclusive choices shown side by side.
+ * Segmented control, drawn by Google's outlined segmented button set
+ * (`md-outlined-segmented-button-set`): a small set of mutually exclusive choices shown side by
+ * side, so the current choice and the alternatives are visible without opening anything.
  *
- * Used instead of a `<select>` whenever every option fits on one line, so the current choice and
- * the alternatives are visible without opening anything.
+ * The set is light-DOM: each option is one `<md-outlined-segmented-button>` child, which is why the
+ * wrapper renders them itself instead of taking a snippet. Two details the console needs:
+ *
+ *   - size. Google's segments are 40px, which is the console's `md`; `sm` sets the set's own
+ *     `--md-outlined-segmented-button-container-height` to 32px.
+ *   - selection. The set owns the selected state (`setButtonSelected(index, selected)`) and reports
+ *     it with a `segmented-button-set-selection` event carrying the index, so the wrapper maps
+ *     `value` to an index and back. A labelled segment gets Google's check mark on selection; an
+ *     icon-only segment keeps its icon instead, because a check would replace the only thing
+ *     identifying it.
  */
 let {
   options,
@@ -23,39 +33,68 @@ let {
   size?: 'sm' | 'md';
   disabled?: boolean;
 } = $props();
+
+let set = $state<(HTMLElement & { updateComplete?: Promise<unknown> }) | null>(
+  null,
+);
+
+/**
+ * Pushes the console's value into the set, which owns the selection.
+ *
+ * The buttons are set directly rather than through `setButtonSelected`, because the set refuses to
+ * select a *disabled* button — which would leave a disabled control showing nothing instead of the
+ * value it stands for. Writing the buttons keeps `value` authoritative in every case; clicks still
+ * go through the set, whose own handler updates the buttons and then reports the index.
+ */
+$effect(() => {
+  const el = set;
+  const index = options.findIndex((option) => option.value === value);
+  if (!el || index < 0) return;
+  void el.updateComplete?.then(() => {
+    const buttons = [
+      ...el.querySelectorAll('md-outlined-segmented-button'),
+    ] as (HTMLElement & {
+      selected?: boolean;
+    })[];
+    buttons.forEach((button, i) => {
+      if (button.selected !== (i === index)) button.selected = i === index;
+    });
+  });
+});
+
+/**
+ * The set reports selection through its own event rather than through the buttons, so the index it
+ * carries is translated back into the option's value. Clicks that re-select the current option are
+ * ignored so `onchange` only ever fires for a real change.
+ */
+function onSelection(event: Event) {
+  const detail = (event as CustomEvent<{ index: number; selected: boolean }>)
+    .detail;
+  if (!detail?.selected) return;
+  const next = options[detail.index]?.value;
+  if (next === undefined || next === value) return;
+  value = next;
+  onchange(next);
+}
 </script>
 
-<div
-  role="radiogroup"
+<md-outlined-segmented-button-set
+  bind:this={set}
+  class={size === 'sm' ? 'kanon-seg-sm' : ''}
   aria-label={label}
-  class="inline-flex max-w-full gap-0.5 rounded-xl bg-sunk p-[3px] {disabled ? 'opacity-50' : ''}"
+  onsegmented-button-set-selection={onSelection}
 >
   {#each options as option (option.value)}
     {@const Icon = option.icon}
-    {@const on = option.value === value}
-    <button
-      type="button"
-      role="radio"
-      aria-checked={on}
-      aria-label={option.label ? undefined : (option.title ?? option.value)}
+    <md-outlined-segmented-button
+      label={option.label ?? ''}
       title={option.title}
       {disabled}
-      onclick={() => onchange(option.value)}
-      class="inline-flex items-center justify-center gap-1.5 whitespace-nowrap font-bold transition-colors {size ===
-      'sm'
-        ? 'h-[26px] text-[12.5px] rounded-[9px]'
-        : 'h-[34px] text-[14px] rounded-[10px]'} {option.label
-        ? size === 'sm'
-          ? 'px-2.5'
-          : 'px-4'
-        : size === 'sm'
-          ? 'w-[28px]'
-          : 'w-[36px]'} {on
-        ? 'bg-[var(--k-seg-on)] text-fg shadow-[0_1px_2px_rgb(34_32_44/0.1)]'
-        : 'text-fg2 hover:text-fg'}"
+      noCheckmark={!option.label}
     >
-      {#if Icon}<Icon size={size === 'sm' ? 14 : 15} strokeWidth={2.2} />{/if}
-      {#if option.label}<span>{option.label}</span>{/if}
-    </button>
+      {#if Icon}
+        <span slot="icon"><Icon size={size === 'sm' ? 15 : 16} strokeWidth={2} /></span>
+      {/if}
+    </md-outlined-segmented-button>
   {/each}
-</div>
+</md-outlined-segmented-button-set>

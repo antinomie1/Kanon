@@ -7,10 +7,12 @@ import { confirmDialog } from '../../stores/confirm.svelte';
 import { t } from '../../stores/i18n.svelte';
 import { toasts } from '../../stores/toast.svelte';
 import type { McpServerView, McpTransport } from '../../types';
+import Button from '../ui/Button.svelte';
 import EmptyState from '../ui/EmptyState.svelte';
 import Modal from '../ui/Modal.svelte';
 import Seg from '../ui/Seg.svelte';
 import Switch from '../ui/Switch.svelte';
+import TextField from '../ui/TextField.svelte';
 
 /**
  * MCP servers: tool providers the node connects to over stdio or HTTP.
@@ -222,14 +224,14 @@ const CHIP: Record<Tone, string> = {
 <div class="flex flex-wrap items-center justify-between gap-3 px-1">
   <p class="m-0 max-w-[68ch] hint">{t('extensions.mcp_hint')}</p>
   <div class="flex flex-wrap gap-2.5">
-    <button type="button" class="btn" disabled={loading} onclick={() => void load()}>
-      <RefreshCw size={16} strokeWidth={2.4} class={loading ? 'animate-spin' : ''} />
+    <Button type="button" disabled={loading} onclick={() => void load()}>
+      <RefreshCw size={16} strokeWidth={2} class={loading ? 'animate-spin' : ''} />
       {t('platforms.refresh')}
-    </button>
-    <button type="button" class="btn btn-primary" onclick={openCreate}>
-      <Plus size={16} strokeWidth={2.6} />
+    </Button>
+    <Button type="button" variant="filled" onclick={openCreate}>
+      <Plus size={16} strokeWidth={2.2} />
       {t('extensions.mcp_add')}
-    </button>
+    </Button>
   </div>
 </div>
 
@@ -241,21 +243,21 @@ const CHIP: Record<Tone, string> = {
   <div class="card">
     <EmptyState icon={Server} title={t('extensions.mcp_empty')} text={t('extensions.mcp_empty_text')}>
       {#snippet action()}
-        <button type="button" class="btn btn-primary" onclick={openCreate}>
-          <Plus size={16} strokeWidth={2.6} />
+        <Button type="button" variant="filled" onclick={openCreate}>
+          <Plus size={16} strokeWidth={2.2} />
           {t('extensions.mcp_add')}
-        </button>
+        </Button>
       {/snippet}
     </EmptyState>
   </div>
 {:else if servers.length > 0}
-  <div class="flex flex-col gap-3">
+  <div class="group-list">
     {#each servers as server (server.id)}
       {@const status = health(server)}
-      <article class="card flex flex-wrap items-start gap-x-6 gap-y-3 px-[22px] py-[18px]">
+      <article class="flex flex-wrap items-start gap-x-6 gap-y-3 py-5">
         <div class="flex min-w-0 flex-1 basis-[340px] flex-col gap-1.5">
           <div class="flex flex-wrap items-center gap-x-2.5 gap-y-1">
-            <h2 class="m-0 text-[17px] font-extrabold">{server.name}</h2>
+            <h2 class="m-0 text-[17px] font-semibold">{server.name}</h2>
             <span class="chip chip-sm {CHIP[status.tone]}">
               {#if status.tone !== 'idle'}<i class="dot dot-{status.tone}"></i>{/if}
               {status.label}
@@ -290,19 +292,19 @@ const CHIP: Record<Tone, string> = {
         </div>
 
         <div class="ml-auto flex items-center gap-2.5">
-          <button
+          <Button
             type="button"
-            class="btn btn-sm btn-quiet btn-icon"
+            variant="text" size="sm" square
             aria-label={t('extensions.mcp_remove_title', { name: server.name })}
             title={t('extensions.remove')}
             disabled={busy[server.id]}
             onclick={() => void remove(server)}
           >
-            <Trash2 size={16} strokeWidth={2.2} />
-          </button>
-          <button type="button" class="btn btn-sm" onclick={() => openEdit(server)}>
+            <Trash2 size={16} strokeWidth={2} />
+          </Button>
+          <Button type="button" size="sm" onclick={() => openEdit(server)}>
             {t('extensions.edit')}
-          </button>
+          </Button>
           <Switch
             checked={server.enabled}
             disabled={busy[server.id]}
@@ -336,13 +338,13 @@ const CHIP: Record<Tone, string> = {
     <div class="grid gap-4 sm:grid-cols-2">
       <div>
         <label class="label" for="mcp-name">{t('extensions.mcp_name')}</label>
-        <input id="mcp-name" class="input" placeholder="Filesystem" bind:value={formName} />
+        <TextField id="mcp-name" placeholder="Filesystem" bind:value={formName} />
       </div>
       <div>
         <label class="label" for="mcp-id">{t('extensions.mcp_id')}</label>
-        <input
+        <TextField
           id="mcp-id"
-          class="input mono"
+          mono
           spellcheck="false"
           placeholder="filesystem"
           disabled={editingId !== null}
@@ -365,13 +367,13 @@ const CHIP: Record<Tone, string> = {
     {#if formKind === 'stdio'}
       <div>
         <label class="label" for="mcp-command">{t('extensions.mcp_command')}</label>
-        <input id="mcp-command" class="input mono" spellcheck="false" placeholder="npx" bind:value={formCommand} />
+        <TextField id="mcp-command" mono spellcheck="false" placeholder="npx" bind:value={formCommand} />
       </div>
       <div>
         <label class="label" for="mcp-args">{t('extensions.mcp_args')}</label>
-        <input
+        <TextField
           id="mcp-args"
-          class="input mono"
+          mono
           spellcheck="false"
           placeholder="-y @modelcontextprotocol/server-filesystem ./files"
           bind:value={formArgs}
@@ -381,9 +383,9 @@ const CHIP: Record<Tone, string> = {
     {:else}
       <div>
         <label class="label" for="mcp-url">{t('extensions.mcp_url')}</label>
-        <input
+        <TextField
           id="mcp-url"
-          class="input mono"
+          mono
           spellcheck="false"
           placeholder="https://example.com/mcp"
           bind:value={formUrl}
@@ -410,11 +412,11 @@ const CHIP: Record<Tone, string> = {
   </form>
 
   {#snippet footer()}
-    <button type="button" class="btn" disabled={saving} onclick={() => (editorOpen = false)}>
+    <Button type="button" disabled={saving} onclick={() => (editorOpen = false)}>
       {t('common.cancel')}
-    </button>
-    <button type="submit" form="mcp-editor" class="btn btn-primary" disabled={saving}>
+    </Button>
+    <Button type="submit" form="mcp-editor" variant="filled" disabled={saving}>
       {saving ? t('platforms.saving') : editingId ? t('extensions.mcp_save') : t('extensions.mcp_add')}
-    </button>
+    </Button>
   {/snippet}
 </Modal>

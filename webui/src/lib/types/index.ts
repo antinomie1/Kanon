@@ -626,7 +626,8 @@ export type Capability =
   | 'poke'
   | 'recall'
   | 'friend_requests'
-  | 'group_invites';
+  | 'group_invites'
+  | 'platform_api';
 
 export interface AdapterItem {
   platform: string;

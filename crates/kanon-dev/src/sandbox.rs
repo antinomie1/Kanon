@@ -18,7 +18,7 @@ use kanon_proto::prost_types;
 use kanon_proto::v1::message_segment::Segment;
 use kanon_proto::v1::{
     CommandExecuteRequest, CommandExecuteResponse, ToolCallRequest, ToolCallResponse,
-    audio_segment, image_segment, tool_call_request, tool_call_response,
+    audio_segment, image_segment, tool_call_request, tool_call_response, video_segment,
 };
 
 use crate::lint::{LintError, find_manifest_path};
@@ -95,6 +95,18 @@ fn format_segments(segments: &[kanon_proto::v1::MessageSegment]) -> String {
                     }
                     None => out.push("[Audio]".to_string()),
                 },
+                Segment::Video(v) => match &v.source {
+                    Some(video_segment::Source::Url(u)) => out.push(format!("[Video URL: {}]", u)),
+                    Some(video_segment::Source::FilePath(p)) => {
+                        out.push(format!("[Video File: {}]", p))
+                    }
+                    Some(video_segment::Source::RawBytes(b)) => {
+                        out.push(format!("[Video Bytes: {}B]", b.len()))
+                    }
+                    None => out.push("[Video]".to_string()),
+                },
+                Segment::File(f) => out.push(format!("[File: {}]", f.name)),
+                Segment::Face(f) => out.push(format!("[Face: {}]", f.id)),
                 Segment::Mention(m) => out.push(format!("@{}", m.target_user_id)),
                 Segment::Reply(r) => {
                     out.push(format!("[Reply to {}: {}]", r.target_message_id, r.snippet))
@@ -184,7 +196,7 @@ pub async fn run_sandbox(path: &Path, opts: SandboxOptions) -> Result<(), Sandbo
     let host = supervisor.spawn_from_manifest(&manifest_path, None).await?;
 
     println!("\n[Host Connected] ID: {}", host.host_id);
-    for meta in &host.meta {
+    for meta in host.metas() {
         println!(
             "Loaded Plugin: {} ({}) v{}",
             meta.name, meta.id, meta.version
@@ -261,7 +273,7 @@ pub async fn run_sandbox(path: &Path, opts: SandboxOptions) -> Result<(), Sandbo
                 }
 
                 if trimmed == "help" || trimmed == "/help" {
-                    for meta in &host.meta {
+                    for meta in host.metas() {
                         println!("Plugin: {}", meta.name);
                         for c in &meta.commands {
                             println!("  Command: /{} - {}", c.name, c.description);
@@ -322,7 +334,7 @@ async fn execute_sandbox_command(
 ) -> Result<CommandExecuteResponse, SandboxError> {
     let clean_cmd = command.trim_start_matches('/');
     let plugin_id = host
-        .meta
+        .metas()
         .iter()
         .find(|m| m.commands.iter().any(|c| c.name == clean_cmd))
         .map(|m| m.id.clone())
@@ -333,6 +345,8 @@ async fn execute_sandbox_command(
         command: clean_cmd.to_string(),
         args: args.to_vec(),
         context: None,
+        raw_args: args.join(" "),
+        continuation: false,
     };
 
     println!("[Executing] /{} with args: {:?}", clean_cmd, args);
@@ -365,7 +379,7 @@ async fn execute_sandbox_tool(
     args: &[String],
 ) -> Result<ToolCallResponse, SandboxError> {
     let _has_tool = host
-        .meta
+        .metas()
         .iter()
         .any(|m| m.tools.iter().any(|t| t.name == tool_name));
 
@@ -392,6 +406,8 @@ async fn execute_sandbox_tool(
         tool_name: tool_name.to_string(),
         session_id: "sandbox_session".to_string(),
         payload: structured_payload.map(tool_call_request::Payload::StructuredArgs),
+        // The sandbox has no platform conversation to attach.
+        context: None,
     };
 
     println!(

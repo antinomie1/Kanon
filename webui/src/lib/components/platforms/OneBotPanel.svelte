@@ -3,8 +3,10 @@ import { TriangleAlert } from 'lucide-svelte';
 import { t } from '../../stores/i18n.svelte';
 import { onebotStore as store } from '../../stores/onebot.svelte';
 import type { OneBotTransport } from '../../types';
+import Checkbox from '../ui/Checkbox.svelte';
 import SecretInput from '../ui/SecretInput.svelte';
 import Seg from '../ui/Seg.svelte';
+import TextField from '../ui/TextField.svelte';
 
 /**
  * Connection settings of the built-in OneBot v11 adapter, shown in the platform drawer.
@@ -37,9 +39,9 @@ import Seg from '../ui/Seg.svelte';
     </div>
     <div>
       <label class="label" for="onebot-url">{t('adapters.onebot_ws_url')}</label>
-      <input
+      <TextField
         id="onebot-url"
-        class="input mono"
+        mono
         spellcheck="false"
         placeholder="ws://127.0.0.1:6700"
         bind:value={store.formWsUrl}
@@ -56,7 +58,7 @@ import Seg from '../ui/Seg.svelte';
       />
       {#if store.tokenConfigured}
         <label class="mt-2.5 flex items-center gap-2.5 text-[14px] text-fg2">
-          <input type="checkbox" class="check" bind:checked={store.formClearToken} />
+          <Checkbox bind:checked={store.formClearToken} label={t('adapters.onebot_clear_token')} />
           {t('adapters.onebot_clear_token')}
         </label>
       {/if}
@@ -65,7 +67,7 @@ import Seg from '../ui/Seg.svelte';
 
   {#if store.status?.last_error}
     <div class="notice notice-warn mt-4">
-      <TriangleAlert size={16} strokeWidth={2.2} class="mt-0.5 shrink-0" />
+      <TriangleAlert size={16} strokeWidth={2} class="mt-0.5 shrink-0" />
       <span class="min-w-0 break-words">{store.status.last_error}</span>
     </div>
   {/if}

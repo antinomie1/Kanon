@@ -7,8 +7,8 @@ use kanon_proto::prost_types::{self, value::Kind};
 use kanon_proto::v1::message_segment::Segment;
 use kanon_proto::v1::{
     AudioSegment, DeliverMessageRequest, ImageSegment, MentionSegment, MessageSegment,
-    PipelineEventRequest, RawCustomSegment, ReplySegment, TextSegment, audio_segment,
-    image_segment,
+    PipelineEventRequest, RawCustomSegment, ReplySegment, TextSegment, audio_segment, file_segment,
+    image_segment, video_segment,
 };
 use serde_json::{Map, Value, json};
 
@@ -177,6 +177,13 @@ fn render(segments: &[MessageSegment]) -> String {
             }
             Some(Segment::Image(_)) => text.push_str("[image]"),
             Some(Segment::Audio(_)) => text.push_str("[voice]"),
+            Some(Segment::Video(_)) => text.push_str("[video]"),
+            Some(Segment::Face(_)) => text.push_str("[face]"),
+            Some(Segment::File(file)) => {
+                text.push_str("[file:");
+                text.push_str(&file.name);
+                text.push(']');
+            }
             Some(Segment::Custom(custom)) => {
                 let kind = custom
                     .type_name
@@ -339,6 +346,28 @@ fn outgoing(segment: &MessageSegment) -> Result<Value, String> {
             };
             ("record", json!({"file": file}))
         }
+        Some(Segment::Video(video)) => {
+            let file = match video.source.as_ref().ok_or("video has no source")? {
+                video_segment::Source::Url(url) => url.clone(),
+                video_segment::Source::FilePath(path) => file_uri(path),
+                video_segment::Source::RawBytes(bytes) => base64_uri(bytes),
+            };
+            ("video", json!({"file": file}))
+        }
+        // `file` is an extension segment (NapCat, LLOneBot, Lagrange); an implementation without
+        // it rejects the message, which surfaces as a delivery error.
+        Some(Segment::File(document)) => {
+            if document.name.is_empty() {
+                return Err("file segment has no name".into());
+            }
+            let file = match document.source.as_ref().ok_or("file has no source")? {
+                file_segment::Source::Url(url) => url.clone(),
+                file_segment::Source::FilePath(path) => file_uri(path),
+                file_segment::Source::RawBytes(bytes) => base64_uri(bytes),
+            };
+            ("file", json!({"file": file, "name": document.name}))
+        }
+        Some(Segment::Face(face)) => ("face", json!({"id": face.id})),
         Some(Segment::Custom(custom)) => {
             let kind = custom
                 .type_name

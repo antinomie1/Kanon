@@ -7,10 +7,10 @@ use tonic::{Request, async_trait};
 
 use kanon_core::ipc::CoreApiService;
 use kanon_llm::error::GatewayError;
-use kanon_llm::gateway::types::{ChatChunk, ChatRequest, ChatResponse};
+use kanon_llm::gateway::types::{ChatChunk, ChatRequest, ChatResponse, ContentPart, Role};
 use kanon_llm::gateway::{ChatChunkStream, LlmGateway, LlmProvider};
-use kanon_proto::v1::LlmRequest;
 use kanon_proto::v1::bot_api_service_server::BotApiService;
+use kanon_proto::v1::{ImageSegment, LlmMessage, LlmRequest, LlmRole, image_segment};
 
 struct MockStreamingProvider;
 
@@ -47,9 +47,9 @@ async fn test_core_request_llm_streaming_with_gateway() {
     let service = CoreApiService::new(event_tx).with_gateway(gateway);
 
     let request = Request::new(LlmRequest {
-        prompt: "Tell me a joke".to_string(),
         model: "test-model".to_string(),
-        parameters: None,
+        messages: vec![user("Tell me a joke")],
+        ..Default::default()
     });
 
     let response = service
@@ -80,9 +80,8 @@ async fn test_core_request_llm_unavailable_without_provider() {
     let service = CoreApiService::new(event_tx); // No agent slot configured
 
     let request = Request::new(LlmRequest {
-        prompt: "ping".to_string(),
-        model: "default".to_string(),
-        parameters: None,
+        messages: vec![user("ping")],
+        ..Default::default()
     });
 
     // A node without a provider must refuse explicitly. Answering with a synthetic completion
@@ -133,34 +132,29 @@ async fn test_core_request_llm_streaming_with_parameters() {
     let (event_tx, _event_rx) = mpsc::channel(16);
     let service = CoreApiService::new(event_tx).with_gateway(gateway);
 
-    let mut param_fields = std::collections::BTreeMap::new();
-    param_fields.insert(
-        "system_prompt".to_string(),
-        kanon_proto::prost_types::Value {
-            kind: Some(kanon_proto::prost_types::value::Kind::StringValue(
-                "You are an assistant".to_string(),
-            )),
-        },
-    );
-    param_fields.insert(
-        "temperature".to_string(),
-        kanon_proto::prost_types::Value {
-            kind: Some(kanon_proto::prost_types::value::Kind::NumberValue(0.7)),
-        },
-    );
-    param_fields.insert(
-        "max_tokens".to_string(),
-        kanon_proto::prost_types::Value {
-            kind: Some(kanon_proto::prost_types::value::Kind::NumberValue(256.0)),
-        },
-    );
-
     let request = Request::new(LlmRequest {
-        prompt: "Hello with params".to_string(),
         model: "custom-model".to_string(),
-        parameters: Some(kanon_proto::prost_types::Struct {
-            fields: param_fields,
-        }),
+        system_prompt: "You are an assistant".to_string(),
+        messages: vec![
+            user("Hi"),
+            LlmMessage {
+                role: LlmRole::Assistant as i32,
+                text: "Hello!".to_string(),
+                images: Vec::new(),
+            },
+            LlmMessage {
+                role: LlmRole::User as i32,
+                text: "What is this?".to_string(),
+                images: vec![ImageSegment {
+                    source: Some(image_segment::Source::Url(
+                        "https://example.com/cat.png".to_string(),
+                    )),
+                    ..Default::default()
+                }],
+            },
+        ],
+        temperature: Some(0.7),
+        max_tokens: Some(256),
     });
 
     let response = service
@@ -186,18 +180,62 @@ async fn test_core_request_llm_streaming_with_parameters() {
     assert_eq!(req.model, "custom-model");
     assert_eq!(req.temperature, Some(0.7));
     assert_eq!(req.max_tokens, Some(256));
-    assert_eq!(req.messages.len(), 2);
-    assert_eq!(
-        req.messages[0].role,
-        kanon_llm::gateway::types::Role::System
-    );
+    assert_eq!(req.messages.len(), 4);
+    assert_eq!(req.messages[0].role, Role::System);
     assert_eq!(
         req.messages[0].content.as_deref(),
         Some("You are an assistant")
     );
-    assert_eq!(req.messages[1].role, kanon_llm::gateway::types::Role::User);
+    assert_eq!(req.messages[1].role, Role::User);
+    assert_eq!(req.messages[2].role, Role::Assistant);
+    assert_eq!(req.messages[3].content.as_deref(), Some("What is this?"));
     assert_eq!(
-        req.messages[1].content.as_deref(),
-        Some("Hello with params")
+        req.messages[3].parts,
+        Some(vec![ContentPart::image_url(
+            "https://example.com/cat.png",
+            None
+        )])
     );
+}
+
+/// What a provider cannot represent is refused up front rather than silently dropped.
+#[tokio::test]
+async fn test_core_request_llm_rejects_unrepresentable_messages() {
+    let gateway = Arc::new(LlmGateway::new(Arc::new(MockStreamingProvider), "m"));
+    let (event_tx, _event_rx) = mpsc::channel(16);
+    let service = CoreApiService::new(event_tx).with_gateway(gateway);
+
+    let invalid = [
+        Vec::new(),
+        vec![LlmMessage {
+            text: "no role".to_string(),
+            ..Default::default()
+        }],
+        vec![LlmMessage {
+            role: LlmRole::User as i32,
+            images: vec![ImageSegment {
+                source: Some(image_segment::Source::RawBytes(vec![1, 2, 3])),
+                ..Default::default()
+            }],
+            ..Default::default()
+        }],
+    ];
+    for messages in invalid {
+        let status = service
+            .request_llm(Request::new(LlmRequest {
+                messages,
+                ..Default::default()
+            }))
+            .await
+            .expect_err("invalid request is refused");
+        assert_eq!(status.code(), tonic::Code::InvalidArgument);
+    }
+}
+
+fn user(text: &str) -> LlmMessage {
+    LlmMessage {
+        role: LlmRole::User as i32,
+        text: text.to_string(),
+        images: Vec::new(),
+    }
 }
