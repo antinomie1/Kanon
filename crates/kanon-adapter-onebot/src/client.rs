@@ -102,6 +102,17 @@ impl OneBotClient {
         })
     }
 
+    /// Calls any action and returns its `data` untouched (`null` when the peer sent none).
+    ///
+    /// Used for plugin pass-through calls, whose response shape only the plugin knows.
+    pub async fn call_raw(&self, action: &str, params: &Value) -> Result<Value, OneBotError> {
+        let mut response = Self::request(self.session()?, action, params).await?;
+        Ok(response
+            .get_mut("data")
+            .map(Value::take)
+            .unwrap_or(Value::Null))
+    }
+
     /// Calls an action with no response data, accepting null or omitted `data` on success.
     pub async fn call_void<In: Serialize + ?Sized>(
         &self,

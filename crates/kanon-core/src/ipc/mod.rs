@@ -15,14 +15,14 @@ use tonic::{Request, Response, Status};
 use kanon_proto::v1::bot_api_service_server::{BotApiService, BotApiServiceServer};
 use kanon_proto::v1::{
     DeliverMessageRequest, DeliverMessageResponse, GetStorageRequest, GetStorageResponse,
-    IngestEventRequest, IngestEventResponse, LlmChunk, LlmRequest, RegisterHostRequest,
-    RegisterHostResponse, SendMessageRequest, SendMessageResponse, SetStorageRequest,
-    SetStorageResponse,
+    IngestEventRequest, IngestEventResponse, LlmChunk, LlmRequest, PlatformApiRequest,
+    PlatformApiResponse, RegisterHostRequest, RegisterHostResponse, SendMessageRequest,
+    SendMessageResponse, SetStorageRequest, SetStorageResponse,
 };
 use kanon_transport::{IpcListener, core_socket_path};
 
-use crate::adapter::{EventIngress, IngestError};
-use crate::supervisor::{HostRegistration, Supervisor};
+use crate::adapter::{AdapterError, EventIngress, IngestError};
+use crate::supervisor::{AdapterRoute, HostRegistration, Supervisor};
 use kanon_llm::{AgentSlot, ChatMessage, ChatRequest, LlmGateway};
 use tokio_stream::StreamExt;
 
@@ -406,6 +406,62 @@ impl BotApiService for CoreApiService {
         Ok(Response::new(tokio_stream::wrappers::ReceiverStream::new(
             rx,
         )))
+    }
+
+    /// Passes a plugin's raw platform API call to the built-in adapter serving the platform.
+    async fn call_platform_api(
+        &self,
+        request: Request<PlatformApiRequest>,
+    ) -> Result<Response<PlatformApiResponse>, Status> {
+        let req = request.into_inner();
+        // The action becomes part of a URL path (Milky) or a protocol field (OneBot); a plain
+        // identifier is all either needs, and anything else could address something unintended.
+        if req.action.is_empty()
+            || !req
+                .action
+                .chars()
+                .all(|ch| ch.is_ascii_alphanumeric() || ch == '_' || ch == '.')
+        {
+            return Err(Status::invalid_argument(format!(
+                "platform action '{}' must be letters, digits, '_' or '.'",
+                req.action
+            )));
+        }
+        let Some(supervisor) = &self.supervisor else {
+            return Err(Status::unavailable(
+                "no supervisor is attached to this core",
+            ));
+        };
+        let adapter = match supervisor.resolve_adapter(&req.platform).await {
+            Some(AdapterRoute::Builtin(adapter)) => adapter,
+            Some(AdapterRoute::Plugin { plugin_id, .. }) => {
+                return Err(Status::unimplemented(format!(
+                    "platform '{}' is served by plugin '{plugin_id}', which offers no platform API \
+                     through the core",
+                    req.platform
+                )));
+            }
+            None => {
+                return Err(Status::not_found(format!(
+                    "no adapter serves platform '{}'",
+                    req.platform
+                )));
+            }
+        };
+
+        let params = req
+            .params
+            .map(kanon_llm::tool_router::prost_struct_to_json)
+            .unwrap_or_else(|| serde_json::Value::Object(Default::default()));
+        match adapter.call_api(&req.action, params).await {
+            Ok(result) => Ok(Response::new(PlatformApiResponse {
+                result: Some(kanon_llm::tool_router::json_to_prost_value(&result)),
+            })),
+            Err(err @ AdapterError::Unsupported { .. }) => {
+                Err(Status::unimplemented(err.to_string()))
+            }
+            Err(err) => Err(Status::unavailable(err.to_string())),
+        }
     }
 
     /// Sets an embedded KV key-value pair.

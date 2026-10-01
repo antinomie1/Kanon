@@ -58,6 +58,7 @@ const CAPABILITIES: &[Capability] = &[
     Capability::Recall,
     Capability::FriendRequests,
     Capability::GroupInvites,
+    Capability::PlatformApi,
 ];
 
 /// Reaction used to acknowledge a message: QQ face 76, the thumbs-up.
@@ -535,6 +536,32 @@ impl PlatformAdapter for MilkyAdapter {
 
     fn capabilities(&self) -> &[Capability] {
         CAPABILITIES
+    }
+
+    /// Passes the call to the Milky API endpoint of the same name.
+    async fn call_api(
+        &self,
+        action: &str,
+        params: serde_json::Value,
+    ) -> Result<serde_json::Value, AdapterError> {
+        let client = self
+            .state
+            .read()
+            .expect("adapter state poisoned")
+            .client
+            .clone()
+            .ok_or_else(|| AdapterError::Configuration {
+                platform: self.platform.clone(),
+                reason: "the Milky adapter is disabled".to_string(),
+            })?;
+        client
+            .call_raw(action, &params)
+            .await
+            .map_err(|error| AdapterError::Api {
+                platform: self.platform.clone(),
+                action: action.to_string(),
+                reason: error.to_string(),
+            })
     }
 
     /// Accepts a friend request or group invitation with the token its notice carried.

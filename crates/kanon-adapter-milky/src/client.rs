@@ -124,6 +124,20 @@ impl MilkyClient {
         Ok(())
     }
 
+    /// Calls any endpoint and returns its `data` untouched (`null` when the implementation
+    /// omitted it).
+    ///
+    /// Used for plugin pass-through calls, whose response shape only the plugin knows.
+    pub async fn call_raw(
+        &self,
+        endpoint: &str,
+        input: &serde_json::Value,
+    ) -> Result<serde_json::Value, MilkyError> {
+        let envelope: ApiGeneralResponse<serde_json::Value> =
+            self.dispatch(endpoint, input).await?;
+        Ok(envelope.data.unwrap_or(serde_json::Value::Null))
+    }
+
     /// Sends one request and unwraps the transport-level part of the envelope.
     ///
     /// Kept private on purpose: every public entry point goes through the two typed helpers

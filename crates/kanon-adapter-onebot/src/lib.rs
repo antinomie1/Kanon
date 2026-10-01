@@ -43,6 +43,7 @@ const CAPABILITIES: &[Capability] = &[
     Capability::Recall,
     Capability::FriendRequests,
     Capability::GroupInvites,
+    Capability::PlatformApi,
 ];
 
 /// Observable lifecycle of the universal connection.
@@ -303,6 +304,25 @@ impl PlatformAdapter for OneBotAdapter {
             .call_void(action, &params)
             .await
             .map_err(|error| self.delivery_error(error.to_string()))
+    }
+
+    /// Passes the call to the OneBot action of the same name.
+    ///
+    /// Failures are returned to the calling plugin and not recorded as the adapter's last error:
+    /// a plugin asking for an action the implementation lacks says nothing about the connection.
+    async fn call_api(
+        &self,
+        action: &str,
+        params: serde_json::Value,
+    ) -> Result<serde_json::Value, AdapterError> {
+        self.client()
+            .call_raw(action, &params)
+            .await
+            .map_err(|error| AdapterError::Api {
+                platform: self.platform.clone(),
+                action: action.to_string(),
+                reason: error.to_string(),
+            })
     }
 
     async fn start(&self, ingress: EventIngress) -> Result<(), AdapterError> {

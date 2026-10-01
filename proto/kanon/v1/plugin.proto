@@ -56,6 +56,11 @@ service BotApiService {
   // A deadline/disconnect is an unknown outcome and must not trigger an automatic retry.
   rpc ReplyMessage (DeliverMessageRequest) returns (DeliverMessageResponse);
   rpc RequestLLM (LLMRequest) returns (stream LLMChunk);
+  // Calls one action of a built-in adapter's platform API (OneBot action, Milky endpoint) and
+  // returns its result. Errors are gRPC statuses: NOT_FOUND for an unknown platform,
+  // UNIMPLEMENTED when the adapter offers no API, INVALID_ARGUMENT for a malformed action,
+  // UNAVAILABLE when the platform rejected or could not take the call.
+  rpc CallPlatformApi (PlatformApiRequest) returns (PlatformApiResponse);
   rpc SetStorage (SetStorageRequest) returns (SetStorageResponse);
   rpc GetStorage (GetStorageRequest) returns (GetStorageResponse);
   // Liveness probe answered by the core itself, without touching the pipeline.
@@ -392,6 +397,18 @@ message IngestEventRequest {
 message IngestEventResponse {
   bool accepted = 1;
   string event_id = 2;
+}
+
+message PlatformApiRequest {
+  string platform = 1;
+  // Platform action name: letters, digits, `_` and `.` only.
+  string action = 2;
+  google.protobuf.Struct params = 3;
+}
+
+message PlatformApiResponse {
+  // The action's result as the platform returned it; `null` when it returned nothing.
+  google.protobuf.Value result = 1;
 }
 
 message SendMessageRequest {

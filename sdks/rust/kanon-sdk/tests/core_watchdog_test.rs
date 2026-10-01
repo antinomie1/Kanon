@@ -74,6 +74,13 @@ impl BotApiService for StubCore {
     type RequestLLMStream =
         tokio_stream::wrappers::ReceiverStream<Result<kanon_proto::v1::LlmChunk, Status>>;
 
+    async fn call_platform_api(
+        &self,
+        _request: tonic::Request<kanon_proto::v1::PlatformApiRequest>,
+    ) -> Result<tonic::Response<kanon_proto::v1::PlatformApiResponse>, tonic::Status> {
+        Err(tonic::Status::unimplemented("not used by this test"))
+    }
+
     async fn request_llm(
         &self,
         _request: Request<LlmRequest>,

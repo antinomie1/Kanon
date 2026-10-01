@@ -428,6 +428,7 @@ export const dictionaries = {
     'capability.recall': 'Recalls',
     'capability.friend_requests': 'Friend requests',
     'capability.group_invites': 'Group invitations',
+    'capability.platform_api': 'Plugin platform API calls',
     'capability.supported_by': 'Works on',
     'capability.none': 'No platform on this node supports this yet',
     // Models page
@@ -1322,6 +1323,7 @@ export const dictionaries = {
     'capability.recall': '撤回通知',
     'capability.friend_requests': '好友申请',
     'capability.group_invites': '入群邀请',
+    'capability.platform_api': '插件调用平台 API',
     'capability.supported_by': '支持的平台',
     'capability.none': '节点上暂时没有平台支持这一项',
     // Models page
