@@ -247,6 +247,45 @@ parameters = "not an object"
     );
 }
 
+/// An adapter written before media capabilities existed still lints, but is told that tool media
+/// no longer reaches its platform until it declares what it delivers.
+#[test]
+fn test_plugin_lint_warns_adapter_without_media_capabilities() {
+    let tmp = tempdir().expect("tempdir");
+    std::fs::write(tmp.path().join("main.py"), "").unwrap();
+    let manifest = |capabilities: &str| {
+        format!(
+            "[plugin]\nid = \"com.example.bridge\"\nname = \"Bridge\"\nversion = \"1.0.0\"\n\
+             runtime = \"python\"\nentrypoint = \"main.py\"\n\n\
+             [adapter]\nplatform = \"bridge\"\ncapabilities = [{capabilities}]\n"
+        )
+    };
+    let manifest_path = tmp.path().join("plugin.toml");
+
+    std::fs::write(&manifest_path, manifest("\"quote_reply\"")).unwrap();
+    let report = lint_plugin(&manifest_path).expect("Lint run must parse");
+    assert!(report.is_valid(), "{:?}", report.errors);
+    assert!(
+        report
+            .warnings
+            .iter()
+            .any(|warning| warning.contains("declares no send_image")),
+        "{:?}",
+        report.warnings
+    );
+
+    std::fs::write(&manifest_path, manifest("\"quote_reply\", \"send_image\"")).unwrap();
+    let report = lint_plugin(&manifest_path).expect("Lint run must parse");
+    assert!(
+        report
+            .warnings
+            .iter()
+            .all(|warning| !warning.contains("send_image")),
+        "{:?}",
+        report.warnings
+    );
+}
+
 #[test]
 fn test_plugin_pack_bundle_and_sha256() {
     let tmp = tempdir().expect("tempdir");

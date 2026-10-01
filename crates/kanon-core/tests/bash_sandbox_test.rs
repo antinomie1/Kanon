@@ -37,7 +37,7 @@ async fn invoke(tool: &BashTool, command: &str, seconds: u64) -> Result<Value, V
         ),
     )
     .await;
-    match result {
+    match result.map(|output| output.text) {
         Ok(text) => Ok(serde_json::from_str(&text)
             .unwrap_or_else(|_| panic!("invalid sandbox result: {text}"))),
         Err(text) => Err(serde_json::from_str(&text).unwrap_or(json!({"error":text}))),

@@ -19,7 +19,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use kanon_llm::agent::AgentTool;
+use kanon_llm::agent::{AgentTool, ToolOutput};
 use kanon_llm::gateway::types::ToolDefinition;
 use thiserror::Error;
 
@@ -404,7 +404,18 @@ impl AgentTool for ReadSkillTool {
         }
     }
 
-    async fn call(&self, session_id: &str, arguments: serde_json::Value) -> Result<String, String> {
+    async fn call(
+        &self,
+        session_id: &str,
+        arguments: serde_json::Value,
+    ) -> Result<ToolOutput, String> {
+        self.read(session_id, arguments).await.map(ToolOutput::from)
+    }
+}
+
+impl ReadSkillTool {
+    /// Returns the body of the requested skill, if this session's instance may use it.
+    async fn read(&self, session_id: &str, arguments: serde_json::Value) -> Result<String, String> {
         let requested = arguments
             .get("name")
             .and_then(|value| value.as_str())

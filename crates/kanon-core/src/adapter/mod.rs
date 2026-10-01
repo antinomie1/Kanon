@@ -79,6 +79,14 @@ pub enum Capability {
     GroupInvites,
     /// Passes plugin calls to the platform's own API through [`PlatformAdapter::call_api`].
     PlatformApi,
+    /// Delivers image segments.
+    SendImage,
+    /// Delivers audio segments as playable voice messages.
+    SendVoice,
+    /// Delivers video segments.
+    SendVideo,
+    /// Delivers file segments of any type under the name they carry.
+    SendFile,
 }
 
 impl Capability {

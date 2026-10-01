@@ -700,9 +700,14 @@ impl ApiStateBuilder {
         self
     }
 
-    /// Registers Bash, its per-turn status hook and its management handle together.
+    /// Registers Bash, its `send_file` companion, its per-turn status hook and its management
+    /// handle together.
     pub fn with_bash_tool(mut self, tool: Arc<BashTool>) -> Self {
         self.native_tools.push(tool.clone());
+        // Copies go where every tool attachment goes, so the startup sweep covers them too.
+        self.native_tools.push(Arc::new(
+            tool.send_file_tool(kanon_core::DEFAULT_ATTACHMENT_DIR),
+        ));
         self.hooks
             .push(Arc::new(BashAvailabilityHook(tool.clone())));
         self.bash_tool = Some(tool);

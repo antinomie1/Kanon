@@ -402,8 +402,6 @@ pub struct McpServer {
     next_request_id: std::sync::atomic::AtomicU64,
     /// Directory receiving attachments materialized from tool results.
     attachment_dir: PathBuf,
-    /// Monotonic suffix keeping attachment file names unique within one process.
-    attachment_seq: std::sync::atomic::AtomicU64,
 }
 
 impl std::fmt::Debug for McpServer {
@@ -426,7 +424,6 @@ impl McpServer {
             health: Mutex::new(McpHealth::default()),
             next_request_id: std::sync::atomic::AtomicU64::new(1),
             attachment_dir: PathBuf::from(DEFAULT_ATTACHMENT_DIR),
-            attachment_seq: std::sync::atomic::AtomicU64::new(1),
         }
     }
 
@@ -689,7 +686,7 @@ impl McpServer {
                             texts.push(text.to_string());
                         }
                     }
-                    Some("image") => {
+                    Some("image") | Some("audio") => {
                         let mime = item
                             .get("mimeType")
                             .and_then(|value| value.as_str())
@@ -699,19 +696,38 @@ impl McpServer {
                                 .push(format!("[attachment skipped: {mime} item carries no data]"));
                             continue;
                         };
-                        if attachments.len() >= MCP_MAX_ATTACHMENTS {
-                            notes.push(format!(
-                                "[attachment skipped: at most {MCP_MAX_ATTACHMENTS} attachments are forwarded per call]"
-                            ));
+                        self.collect_attachment(&mut attachments, &mut notes, mime, data, None);
+                    }
+                    // An embedded resource is either readable text for the model or a file
+                    // (`blob`, base64) for the user, named after the last component of its URI.
+                    Some("resource") => {
+                        let Some(resource) = item.get("resource") else {
                             continue;
-                        }
-                        match self.store_attachment(mime, data) {
-                            Ok(attachment) => attachments.push(attachment),
-                            Err(reason) => notes.push(format!("[attachment skipped: {reason}]")),
+                        };
+                        if let Some(text) = resource.get("text").and_then(|value| value.as_str()) {
+                            texts.push(text.to_string());
+                        } else if let Some(blob) =
+                            resource.get("blob").and_then(|value| value.as_str())
+                        {
+                            let mime = resource
+                                .get("mimeType")
+                                .and_then(|value| value.as_str())
+                                .unwrap_or("application/octet-stream");
+                            let name = resource
+                                .get("uri")
+                                .and_then(|value| value.as_str())
+                                .and_then(|uri| resource_file_name(uri, mime));
+                            self.collect_attachment(
+                                &mut attachments,
+                                &mut notes,
+                                mime,
+                                blob,
+                                name.as_deref(),
+                            );
                         }
                     }
-                    // Unsupported content kinds (audio, resources, ...) are ignored rather than
-                    // guessed at; the text items still describe the result.
+                    // Other content kinds (resource links, ...) are ignored rather than guessed
+                    // at; the text items still describe the result.
                     _ => {}
                 }
             }
@@ -739,11 +755,40 @@ impl McpServer {
         Ok(McpToolOutcome { text, attachments })
     }
 
+    /// Stores one base64 attachment unless the per-call limit is reached; every skip becomes a
+    /// note in the tool result.
+    fn collect_attachment(
+        &self,
+        attachments: &mut Vec<ToolAttachment>,
+        notes: &mut Vec<String>,
+        mime: &str,
+        data: &str,
+        name: Option<&str>,
+    ) {
+        if attachments.len() >= MCP_MAX_ATTACHMENTS {
+            notes.push(format!(
+                "[attachment skipped: at most {MCP_MAX_ATTACHMENTS} attachments are forwarded per call]"
+            ));
+            return;
+        }
+        match self.store_attachment(mime, data, name) {
+            Ok(attachment) => attachments.push(attachment),
+            Err(reason) => notes.push(format!("[attachment skipped: {reason}]")),
+        }
+    }
+
     /// Decodes one base64 attachment and writes it beside the node's data.
     ///
-    /// Returns a human-readable reason on failure; the caller turns it into a note in the tool
-    /// result so a dropped picture is never mistaken for a successful one.
-    fn store_attachment(&self, mime: &str, data: &str) -> Result<ToolAttachment, String> {
+    /// A named attachment gets a directory of its own so the file keeps exactly that name: the
+    /// file name is what a recipient sees. Returns a human-readable reason on failure; the caller
+    /// turns it into a note in the tool result so a dropped file is never mistaken for a
+    /// successful one.
+    fn store_attachment(
+        &self,
+        mime: &str,
+        data: &str,
+        name: Option<&str>,
+    ) -> Result<ToolAttachment, String> {
         use base64::Engine;
 
         // Some servers inline a full data URL instead of raw base64.
@@ -764,20 +809,7 @@ impl McpServer {
             ));
         }
 
-        std::fs::create_dir_all(&self.attachment_dir)
-            .map_err(|err| format!("failed to create {}: {err}", self.attachment_dir.display()))?;
-
-        let seq = self
-            .attachment_seq
-            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        let stamp = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|elapsed| elapsed.as_millis())
-            .unwrap_or_default();
-        let path = self
-            .attachment_dir
-            .join(format!("{stamp}-{seq}.{}", extension_for_mime(mime)));
-
+        let path = new_attachment_path(&self.attachment_dir, mime, name)?;
         std::fs::write(&path, &bytes)
             .map_err(|err| format!("failed to write {}: {err}", path.display()))?;
 
@@ -1200,16 +1232,122 @@ impl McpServer {
     }
 }
 
+/// The file name an embedded resource is delivered under, taken from its URI.
+///
+/// Only the last path component is used, and anything that could leave the attachment directory
+/// or is not a portable file name is rejected (the attachment then gets a generated name). A name
+/// without an extension gets the MIME type's, so the recipient can open the file.
+fn resource_file_name(uri: &str, mime: &str) -> Option<String> {
+    let rest = uri.split_once("://").map_or(uri, |(_, rest)| rest);
+    let path = rest.split(['?', '#']).next().unwrap_or_default();
+    let name = path.rsplit('/').next().unwrap_or_default().trim();
+    let portable = !name.is_empty()
+        && name != "."
+        && name != ".."
+        && name.len() <= 200
+        && !name
+            .chars()
+            .any(|c| c.is_control() || matches!(c, '\\' | ':' | '*' | '?' | '"' | '<' | '>' | '|'));
+    if !portable {
+        return None;
+    }
+    let extension = extension_for_mime(mime);
+    if name.contains('.') || extension == "bin" {
+        Some(name.to_string())
+    } else {
+        Some(format!("{name}.{extension}"))
+    }
+}
+
 /// File extension used for one MIME type.
-fn extension_for_mime(mime: &str) -> &'static str {
-    match mime {
-        "image/png" => "png",
-        "image/jpeg" | "image/jpg" => "jpg",
-        "image/gif" => "gif",
-        "image/webp" => "webp",
-        "image/bmp" => "bmp",
-        "application/pdf" => "pdf",
-        _ => "bin",
+pub(crate) fn extension_for_mime(mime: &str) -> &'static str {
+    let mime = mime.trim().to_ascii_lowercase();
+    MEDIA_TYPES
+        .iter()
+        .find(|(known, _)| *known == mime)
+        .map_or("bin", |(_, extension)| extension)
+}
+
+/// MIME type for a file extension; `application/octet-stream` when it is not a known one.
+///
+/// An unknown type is still sent, as a named file: the extension it keeps tells the recipient's
+/// client what opens it.
+pub(crate) fn mime_for_extension(extension: &str) -> &'static str {
+    let extension = extension.trim().to_ascii_lowercase();
+    MEDIA_TYPES
+        .iter()
+        .find(|(_, known)| *known == extension)
+        .map_or("application/octet-stream", |(mime, _)| mime)
+}
+
+/// MIME types and the file extensions they are stored under, for lookups in both directions.
+///
+/// The first row naming a MIME type gives its extension and the first row naming an extension
+/// gives its MIME type, so canonical rows come before their aliases.
+const MEDIA_TYPES: &[(&str, &str)] = &[
+    ("image/png", "png"),
+    ("image/jpeg", "jpg"),
+    ("image/jpg", "jpg"),
+    ("image/jpeg", "jpeg"),
+    ("image/gif", "gif"),
+    ("image/webp", "webp"),
+    ("image/bmp", "bmp"),
+    ("audio/mpeg", "mp3"),
+    ("audio/mp3", "mp3"),
+    ("audio/wav", "wav"),
+    ("audio/wave", "wav"),
+    ("audio/x-wav", "wav"),
+    ("audio/ogg", "ogg"),
+    ("audio/ogg", "oga"),
+    ("audio/opus", "opus"),
+    ("audio/aac", "aac"),
+    ("audio/mp4", "m4a"),
+    ("audio/m4a", "m4a"),
+    ("audio/x-m4a", "m4a"),
+    ("audio/flac", "flac"),
+    ("audio/aiff", "aiff"),
+    ("audio/amr", "amr"),
+    ("audio/silk", "silk"),
+    ("video/mp4", "mp4"),
+    ("video/webm", "webm"),
+    ("video/quicktime", "mov"),
+    ("video/x-matroska", "mkv"),
+    ("application/pdf", "pdf"),
+    ("application/zip", "zip"),
+    ("application/json", "json"),
+    ("text/plain", "txt"),
+    ("text/csv", "csv"),
+    ("text/markdown", "md"),
+];
+
+/// Process-wide sequence that keeps attachment names unique when several tools store attachments
+/// within the same millisecond.
+static ATTACHMENT_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+
+/// Reserves a fresh path in `dir` for one attachment; the caller writes the file.
+///
+/// A named attachment gets a directory of its own so the file keeps exactly that name: the file
+/// name is what a recipient sees. An unnamed one is stored flat under its MIME type's extension.
+pub(crate) fn new_attachment_path(
+    dir: &Path,
+    mime: &str,
+    name: Option<&str>,
+) -> Result<PathBuf, String> {
+    std::fs::create_dir_all(dir)
+        .map_err(|err| format!("failed to create {}: {err}", dir.display()))?;
+    let seq = ATTACHMENT_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let stamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|elapsed| elapsed.as_millis())
+        .unwrap_or_default();
+    match name {
+        Some(name) => {
+            let slot = dir.join(format!("{stamp}-{seq}"));
+            std::fs::create_dir(&slot)
+                .map_err(|err| format!("failed to create {}: {err}", slot.display()))?;
+            Ok(slot.join(name))
+        }
+        None => Ok(dir.join(format!("{stamp}-{seq}.{}", extension_for_mime(mime)))),
     }
 }
 
@@ -1238,7 +1376,9 @@ pub fn prune_attachments(dir: &Path, max_age: Duration) -> std::io::Result<usize
     for entry in std::fs::read_dir(dir)? {
         let entry = entry?;
         let path = entry.path();
-        if !path.is_file() {
+        // Named attachments live in a directory of their own; either entry is one attachment.
+        let is_dir = path.is_dir();
+        if !is_dir && !path.is_file() {
             continue;
         }
         let Ok(modified) = entry.metadata().and_then(|meta| meta.modified()) else {
@@ -1247,7 +1387,15 @@ pub fn prune_attachments(dir: &Path, max_age: Duration) -> std::io::Result<usize
         let Ok(age) = std::time::SystemTime::now().duration_since(modified) else {
             continue;
         };
-        if age >= max_age && std::fs::remove_file(&path).is_ok() {
+        if age < max_age {
+            continue;
+        }
+        let swept = if is_dir {
+            std::fs::remove_dir_all(&path)
+        } else {
+            std::fs::remove_file(&path)
+        };
+        if swept.is_ok() {
             removed += 1;
         }
     }

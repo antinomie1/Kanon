@@ -12,6 +12,12 @@ use tokio::sync::Mutex;
 const API_TIMEOUT: Duration = Duration::from_secs(30);
 /// Media uploads carry the whole file inline, so they get a longer deadline.
 const UPLOAD_TIMEOUT: Duration = Duration::from_secs(120);
+
+/// The most bytes one media upload carries.
+///
+/// QQ takes a single `url` / `file_data` upload of up to 20 MiB; bigger media needs the chunked
+/// upload (`upload_prepare` and its parts), which this adapter does not implement.
+pub const MAX_UPLOAD_BYTES: usize = 20 * 1024 * 1024;
 /// A cached token is refreshed this long before QQ says it expires, so a request never races
 /// the expiry.
 const TOKEN_MARGIN: Duration = Duration::from_secs(60);
@@ -182,6 +188,15 @@ impl Api {
         }
         match source {
             MediaSource::Url(url) => body["url"] = json!(url),
+            // Checked here so an oversized attachment fails with its size, not with whatever QQ
+            // answers after receiving a 30 MiB request body.
+            MediaSource::Bytes(bytes) if bytes.len() > MAX_UPLOAD_BYTES => {
+                return Err(format!(
+                    "attachment is {:.1} MiB; one QQ upload holds at most {} MiB",
+                    bytes.len() as f64 / (1024.0 * 1024.0),
+                    MAX_UPLOAD_BYTES >> 20
+                ));
+            }
             MediaSource::Bytes(bytes) => {
                 body["file_data"] = json!(base64::engine::general_purpose::STANDARD.encode(bytes))
             }
@@ -194,6 +209,34 @@ impl Api {
             .filter(|info| !info.is_empty())
             .map(str::to_owned)
             .ok_or_else(|| "QQ media upload response has no file_info".into())
+    }
+
+    /// Downloads a public resource of at most `limit` bytes.
+    ///
+    /// The body streams in chunks and the download stops at the limit, so an unexpectedly large
+    /// resource cannot fill memory before it is rejected. No QQ credentials are attached: the
+    /// resource belongs to someone else.
+    pub async fn download(&self, url: &str, limit: usize) -> Result<Vec<u8>, String> {
+        let failed = |err: reqwest::Error| format!("cannot download {url}: {err}");
+        let mut response = self
+            .http
+            .get(url)
+            .timeout(UPLOAD_TIMEOUT)
+            .send()
+            .await
+            .and_then(reqwest::Response::error_for_status)
+            .map_err(failed)?;
+        let mut body = Vec::new();
+        while let Some(chunk) = response.chunk().await.map_err(failed)? {
+            if body.len() + chunk.len() > limit {
+                return Err(format!(
+                    "{url} is larger than the {} MiB one QQ upload holds",
+                    limit >> 20
+                ));
+            }
+            body.extend_from_slice(&chunk);
+        }
+        Ok(body)
     }
 
     /// Posts a message to a guild channel (`/channels/{id}/messages`).

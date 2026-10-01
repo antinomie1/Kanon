@@ -94,6 +94,27 @@ pub struct AdapterSection {
     pub capabilities: Vec<crate::adapter::Capability>,
 }
 
+impl AdapterSection {
+    /// Whether the declaration lists none of the `send_*` media capabilities.
+    ///
+    /// Such an adapter is sent no tool-produced images, voice, video or files: the core leaves
+    /// them out of the reply and names them in a note instead. Manifests written before media
+    /// capabilities existed look exactly like this, so loaders warn about it rather than let
+    /// media stop arriving without a word.
+    pub fn sends_no_media(&self) -> bool {
+        use crate::adapter::Capability;
+        !self.capabilities.iter().any(|capability| {
+            matches!(
+                capability,
+                Capability::SendImage
+                    | Capability::SendVoice
+                    | Capability::SendVideo
+                    | Capability::SendFile
+            )
+        })
+    }
+}
+
 /// Complete representation of a parsed `plugin.toml` manifest.
 ///
 /// Unknown sections are rejected rather than ignored. In particular, a Python or TypeScript

@@ -586,6 +586,16 @@ pub enum AdapterRoute {
     },
 }
 
+impl AdapterRoute {
+    /// The capabilities the routed adapter declares, from its trait or its plugin manifest.
+    pub fn capabilities(&self) -> Vec<crate::adapter::Capability> {
+        match self {
+            AdapterRoute::Builtin(adapter) => adapter.capabilities().to_vec(),
+            AdapterRoute::Plugin { host, .. } => host.adapter_capabilities(),
+        }
+    }
+}
+
 impl std::fmt::Debug for AdapterRoute {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
@@ -1117,6 +1127,19 @@ impl Supervisor {
         let manifest_path_ref = manifest_path.as_ref();
         let manifest = PluginManifest::load_from_file(manifest_path_ref)
             .map_err(|e| SupervisorError::Manifest(e.to_string()))?;
+        if let Some(adapter) = manifest
+            .adapter
+            .as_ref()
+            .filter(|adapter| adapter.sends_no_media())
+        {
+            tracing::warn!(
+                plugin_id = %manifest.plugin.id,
+                platform = %adapter.platform,
+                "Adapter plugin declares no send_image/send_voice/send_video/send_file capability; \
+                 tool-produced media is left out of its replies. Declare the kinds the platform \
+                 delivers under [adapter] capabilities in plugin.toml"
+            );
+        }
 
         let host_id = manifest.plugin.id.replace('.', "_");
         let priority = manifest.plugin.priority.unwrap_or(500);

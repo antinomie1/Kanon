@@ -34,7 +34,8 @@ use kanon_proto::prost_types;
 use kanon_proto::v1::message_segment::Segment;
 use kanon_proto::v1::{
     AudioSegment, ImageSegment, MentionSegment, MessageSegment, PipelineEventRequest,
-    RawCustomSegment, ReplySegment, TextSegment, audio_segment, image_segment, video_segment,
+    RawCustomSegment, ReplySegment, TextSegment, audio_segment, file_segment, image_segment,
+    video_segment,
 };
 use serde_json::{Map, Value, json};
 use thiserror::Error;
@@ -183,6 +184,9 @@ pub enum MappingError {
     /// The segment kind exists in Kanon but Milky cannot send it inside a message.
     #[error("Milky cannot send {0} inside a message")]
     Unsupported(&'static str),
+    /// A file segment carries no name; Milky requires one to upload the file.
+    #[error("file segment has no name; Milky uploads files under the name they carry")]
+    FileName,
     /// A custom segment's payload does not match its declared Milky type.
     #[error("custom segment '{0}' carries a payload that does not match its Milky type: {1}")]
     CustomPayload(String, String),
@@ -637,18 +641,58 @@ fn known_custom_payload(segment: &IncomingSegment) -> (&'static str, Value) {
     }
 }
 
-/// Translates Kanon segments into the Milky outbound message array.
+/// A file Milky sends through its upload API, since a Milky message has no file segment.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OutboundFile {
+    /// File URI in one of the three forms Milky accepts.
+    pub uri: String,
+    /// Name the recipient sees.
+    pub name: String,
+}
+
+/// A delivery split the way Milky sends it: one message, then each file uploaded after it.
+#[derive(Debug, Clone, PartialEq)]
+pub struct OutboundDelivery {
+    /// Message segments; empty when the reply holds nothing but files (and a quote of them).
+    pub message: Vec<OutgoingSegment>,
+    /// Files uploaded after the message, in order.
+    pub files: Vec<OutboundFile>,
+}
+
+/// Translates Kanon segments into a Milky message plus the files uploaded after it.
 ///
 /// Fails as soon as one segment cannot be represented, instead of dropping it: a reply that
-/// silently loses its attachment is worse than a delivery the operator can see failing.
-pub fn outbound_segments(
-    segments: &[MessageSegment],
-) -> Result<Vec<OutgoingSegment>, MappingError> {
-    if segments.is_empty() {
-        return Err(MappingError::Empty);
+/// silently loses its attachment is worse than a delivery the operator can see failing. A quote
+/// only decorates a message, so when nothing else is left for the message it is not sent alone —
+/// an upload cannot quote.
+pub fn outbound_delivery(segments: &[MessageSegment]) -> Result<OutboundDelivery, MappingError> {
+    let mut message = Vec::new();
+    let mut files = Vec::new();
+    for segment in segments {
+        match segment.segment.as_ref() {
+            Some(Segment::File(file)) => {
+                if file.name.trim().is_empty() {
+                    return Err(MappingError::FileName);
+                }
+                files.push(OutboundFile {
+                    uri: media_uri(file.source.as_ref())?,
+                    name: file.name.clone(),
+                });
+            }
+            _ => message.push(outbound_segment(segment)?),
+        }
     }
 
-    segments.iter().map(outbound_segment).collect()
+    if message
+        .iter()
+        .all(|segment| matches!(segment, OutgoingSegment::Reply(_)))
+    {
+        message.clear();
+    }
+    if message.is_empty() && files.is_empty() {
+        return Err(MappingError::Empty);
+    }
+    Ok(OutboundDelivery { message, files })
 }
 
 /// Translates one Kanon segment into a Milky outbound segment.
@@ -721,8 +765,8 @@ fn media_uri(source: Option<&impl MediaSource>) -> Result<String, MappingError> 
 
 /// A Kanon media source that can be rendered as a Milky URI.
 ///
-/// Implemented for the generated `image_segment::Source` and `audio_segment::Source` so the two
-/// identical oneofs share one conversion instead of two copies of the same match.
+/// Implemented for each generated media `Source` oneof so the identical oneofs share one
+/// conversion contract instead of scattered copies of the same match.
 pub trait MediaSource {
     /// Renders this source as one of the three URI forms Milky accepts.
     fn to_milky_uri(&self) -> Result<String, MappingError>;
@@ -744,6 +788,16 @@ impl MediaSource for video_segment::Source {
             video_segment::Source::Url(url) => Ok(url.clone()),
             video_segment::Source::FilePath(path) => Ok(file_uri(path)),
             video_segment::Source::RawBytes(bytes) => Ok(base64_uri(bytes)),
+        }
+    }
+}
+
+impl MediaSource for file_segment::Source {
+    fn to_milky_uri(&self) -> Result<String, MappingError> {
+        match self {
+            file_segment::Source::Url(url) => Ok(url.clone()),
+            file_segment::Source::FilePath(path) => Ok(file_uri(path)),
+            file_segment::Source::RawBytes(bytes) => Ok(base64_uri(bytes)),
         }
     }
 }

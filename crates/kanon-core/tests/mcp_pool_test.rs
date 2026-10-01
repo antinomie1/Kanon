@@ -39,6 +39,8 @@ while IFS= read -r line; do
           printf '{"jsonrpc":"2.0","id":%s,"result":{"content":[{"type":"text","text":"chart text"},{"type":"image","mimeType":"image/png","data":"%s"}]}}\n' "$id" "$FAKE_IMAGE_BASE64" ;;
         *'"name":"broken_image"'*)
           printf '{"jsonrpc":"2.0","id":%s,"result":{"content":[{"type":"image","mimeType":"image/png","data":"not-base64!!"}]}}\n' "$id" ;;
+        *'"name":"files"'*)
+          printf '{"jsonrpc":"2.0","id":%s,"result":{"content":[{"type":"audio","mimeType":"audio/mpeg","data":"aGVsbG8="},{"type":"resource","resource":{"uri":"file:///reports/q3.pdf?v=2","mimeType":"application/pdf","blob":"JVBERi0="}},{"type":"resource","resource":{"uri":"file:///reports/..","mimeType":"application/pdf","blob":"JVBERi0="}},{"type":"resource","resource":{"uri":"memo://notes","mimeType":"text/plain","text":"note text"}}]}}\n' "$id" ;;
         *)
           printf '{"jsonrpc":"2.0","id":%s,"result":{"content":[{"type":"text","text":"pong"}]}}\n' "$id" ;;
       esac ;;
@@ -202,15 +204,19 @@ async fn stale_attachments_are_swept_but_fresh_ones_survive() {
     let fresh = attachments.join("fresh.png");
     std::fs::write(&stale, b"old").expect("stale file");
     std::fs::write(&fresh, b"new").expect("fresh file");
+    // A named attachment lives in a directory of its own.
+    let stale_named = attachments.join("1-1");
+    std::fs::create_dir_all(&stale_named).expect("named dir");
+    std::fs::write(stale_named.join("report.pdf"), b"old").expect("named file");
 
-    // Backdate one file beyond the retention window without pulling in a dependency.
+    // Backdate entries beyond the retention window without pulling in a dependency.
     let long_ago = std::time::SystemTime::now() - std::time::Duration::from_secs(10 * 24 * 60 * 60);
-    std::fs::File::options()
-        .write(true)
-        .open(&stale)
-        .expect("open stale")
-        .set_times(std::fs::FileTimes::new().set_modified(long_ago))
-        .expect("backdate");
+    for entry in [&stale, &stale_named] {
+        std::fs::File::open(entry)
+            .expect("open stale entry")
+            .set_times(std::fs::FileTimes::new().set_modified(long_ago))
+            .expect("backdate");
+    }
 
     let removed = prune_attachments(
         &attachments,
@@ -218,8 +224,12 @@ async fn stale_attachments_are_swept_but_fresh_ones_survive() {
     )
     .expect("prune");
 
-    assert_eq!(removed, 1);
+    assert_eq!(removed, 2);
     assert!(!stale.exists(), "the stale attachment must be swept");
+    assert!(
+        !stale_named.exists(),
+        "a stale named attachment goes with its directory"
+    );
     assert!(fresh.exists(), "a fresh attachment must survive");
 }
 
@@ -305,6 +315,50 @@ async fn an_undecodable_image_is_reported_instead_of_vanishing() {
         "the reason must travel with the result: {}",
         outcome.text
     );
+}
+
+#[tokio::test]
+async fn audio_and_file_resources_become_attachments_under_their_own_names() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let script = write_fixture_server(dir.path());
+    let attachments = dir.path().join("attachments");
+    let server =
+        McpServer::new(fixture_config(&script, "fake")).with_attachment_dir(attachments.clone());
+
+    let outcome = server
+        .call("files", serde_json::json!({}))
+        .await
+        .expect("tool call");
+
+    // A text resource is for the model, not a file for the user.
+    assert_eq!(outcome.text, "note text");
+    let kinds: Vec<&str> = outcome
+        .attachments
+        .iter()
+        .map(|attachment| attachment.mime_type.as_str())
+        .collect();
+    assert_eq!(kinds, ["audio/mpeg", "application/pdf", "application/pdf"]);
+
+    let path = |index: usize| {
+        let path = std::path::PathBuf::from(
+            outcome.attachments[index]
+                .file_path
+                .as_deref()
+                .expect("file path"),
+        );
+        assert!(path.starts_with(&attachments), "{}", path.display());
+        path
+    };
+    assert_eq!(std::fs::read(path(0)).expect("audio bytes"), b"hello");
+    // The URI names the file the recipient sees.
+    assert_eq!(path(1).file_name().unwrap(), "q3.pdf");
+    assert_eq!(std::fs::read(path(1)).expect("pdf bytes"), b"%PDF-");
+    // A name that would leave the attachment directory falls back to a generated one.
+    assert_eq!(
+        path(2).parent().unwrap(),
+        attachments.canonicalize().unwrap()
+    );
+    assert_eq!(path(2).extension().unwrap(), "pdf");
 }
 
 #[tokio::test]

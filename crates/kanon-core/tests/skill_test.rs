@@ -216,7 +216,7 @@ async fn read_skill_enforces_the_instance_override() {
         .call(&session, serde_json::json!({ "name": "beta" }))
         .await
         .expect("allowed skill");
-    assert!(body.contains("Beta body"));
+    assert!(body.text.contains("Beta body"));
 
     let missing = tool
         .call(&session, serde_json::json!({}))

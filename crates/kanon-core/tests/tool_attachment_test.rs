@@ -11,6 +11,7 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use kanon_core::pipeline::{PipelineEngine, PipelineResult};
 use kanon_core::supervisor::{ManagedHost, Supervisor};
+use kanon_core::{AdapterError, Capability, PlatformAdapter};
 use kanon_llm::gateway::types::{ChatRequest, ChatResponse, ToolCall};
 use kanon_llm::memory::{InMemory, Memory};
 use kanon_llm::tool_router::{ToolRouter, json_to_prost_struct};
@@ -246,12 +247,19 @@ async fn a_tool_attachment_survives_empty_reasoning_only_and_truncated_answers()
     }
 }
 
-async fn check_attachment(
+/// A pipeline whose model calls the drawing tool once and then answers `final_text`.
+struct DrawingTurn {
+    engine: PipelineEngine,
+    supervisor: Arc<Supervisor>,
+    caller: Arc<std::sync::Mutex<Option<PipelineEventRequest>>>,
+    image: PathBuf,
+    _dir: tempfile::TempDir,
+}
+
+async fn drawing_turn(
     final_text: &'static str,
-    expected_text: &str,
-    platform: &str,
     final_reasoning: Option<&'static str>,
-) {
+) -> DrawingTurn {
     let dir = tempdir().expect("temp dir");
     let image = dir.path().join("card.png");
     std::fs::write(&image, b"png-bytes").expect("fixture image");
@@ -277,8 +285,79 @@ async fn check_attachment(
         .model("test-model")
         .build(),
     );
-    let engine =
-        PipelineEngine::new(supervisor).with_tool_router(Arc::new(ToolRouter::from_arc(agent)));
+    let engine = PipelineEngine::new(supervisor.clone())
+        .with_tool_router(Arc::new(ToolRouter::from_arc(agent)));
+    DrawingTurn {
+        engine,
+        supervisor,
+        caller,
+        image,
+        _dir: dir,
+    }
+}
+
+/// Built-in adapter that delivers text and files but declares no image support.
+struct NoImages;
+
+#[async_trait]
+impl PlatformAdapter for NoImages {
+    fn platform(&self) -> &str {
+        "qqofficial"
+    }
+
+    fn capabilities(&self) -> &[Capability] {
+        &[Capability::SendFile]
+    }
+
+    async fn deliver(
+        &self,
+        _request: DeliverMessageRequest,
+    ) -> Result<DeliverMessageResponse, AdapterError> {
+        Ok(DeliverMessageResponse::default())
+    }
+}
+
+#[tokio::test]
+async fn an_attachment_the_adapter_cannot_send_is_named_in_the_reply() {
+    let turn = drawing_turn("这是你的 B50 图。", None).await;
+    turn.supervisor
+        .adapters()
+        .register(Arc::new(NoImages))
+        .await
+        .expect("register adapter");
+
+    let replies = match turn.engine.process_event(event("画一张 B50")).await {
+        PipelineResult::LlmReplied { replies, .. } => replies,
+        other => panic!("expected an LLM reply, got {other:?}"),
+    };
+    let texts: Vec<&str> = replies
+        .iter()
+        .map(|reply| match &reply.segment {
+            Some(Segment::Text(text)) => text.content.as_str(),
+            other => panic!("expected only text, got {other:?}"),
+        })
+        .collect();
+    assert_eq!(
+        texts,
+        [
+            "这是你的 B50 图。",
+            "[未能发送图片 card.png：当前平台不支持]"
+        ]
+    );
+}
+
+async fn check_attachment(
+    final_text: &'static str,
+    expected_text: &str,
+    platform: &str,
+    final_reasoning: Option<&'static str>,
+) {
+    let DrawingTurn {
+        engine,
+        caller,
+        image,
+        ..
+    } = drawing_turn(final_text, final_reasoning).await;
 
     let mut incoming = event("画一张 B50");
     incoming.platform = platform.to_string();

@@ -52,6 +52,7 @@ async fn call(tool: &BashTool, command: &str) -> Result<String, String> {
         tool.call("test", json!({"command":command})),
     )
     .await
+    .map(|output| output.text)
 }
 
 #[tokio::test]

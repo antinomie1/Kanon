@@ -39,7 +39,7 @@ pub mod visible_reply;
 
 pub use agent::{
     Agent, AgentBuilder, AgentConfig, AgentHook, AgentOutput, AgentTool, NativeTool, NativeToolFn,
-    NoopHost,
+    NoopHost, ToolOutput,
 };
 pub use compaction::{COMPACTION_INSTRUCTION, CompactionPolicy};
 pub use error::{AgentError, GatewayError, MemoryError, ToolRouterError};

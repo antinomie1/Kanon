@@ -284,6 +284,14 @@ pub fn lint_plugin(path: &Path) -> Result<LintReport, LintError> {
                 break;
             }
         }
+        if adapter.sends_no_media() {
+            warnings.push(format!(
+                "Adapter '{}' declares no send_image/send_voice/send_video/send_file capability, so \
+                 tool-produced media is left out of its replies. Add the kinds the platform \
+                 delivers to [adapter] capabilities, e.g. capabilities = [\"send_image\", \"send_file\"]",
+                adapter.platform
+            ));
+        }
     }
 
     Ok(LintReport {

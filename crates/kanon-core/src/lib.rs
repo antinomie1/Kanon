@@ -35,7 +35,8 @@ pub use adapter::{
 pub use bash::{
     BashAvailabilityHook, BashCaller, BashExecutionMode, BashLocalConfig, BashPolicy,
     BashPolicyStore, BashReviewDecision, BashReviewRequest, BashReviewer, BashSandboxConfig,
-    BashTool, DEFAULT_BASH_WORKSPACE, ModelBashReviewer, with_bash_caller,
+    BashTool, DEFAULT_BASH_WORKSPACE, MAX_SEND_FILE_BYTES, ModelBashReviewer, SendFileTool,
+    with_bash_caller,
 };
 pub use conversation::{
     ContextPolicy, ContextPolicyStore, ConversationKind, META_BOT_MENTIONED,

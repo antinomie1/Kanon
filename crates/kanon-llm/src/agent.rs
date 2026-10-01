@@ -111,6 +111,26 @@ pub struct AgentOutput {
     pub attachments: Vec<ToolAttachment>,
 }
 
+/// What a native tool hands back from a successful call.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ToolOutput {
+    /// Result text recorded as the tool response the model reads.
+    pub text: String,
+    /// Media for the user, delivered with the turn's reply exactly like plugin and MCP
+    /// attachments. The model never sees these; describe them in `text` without file paths.
+    pub attachments: Vec<ToolAttachment>,
+}
+
+impl From<String> for ToolOutput {
+    /// A text-only result, which is what most tools return.
+    fn from(text: String) -> Self {
+        Self {
+            text,
+            attachments: Vec::new(),
+        }
+    }
+}
+
 /// Pluggable tool abstraction for in-process or native agent tools.
 ///
 /// Allows developers, internal modules, or dynamic scripts to expose functions
@@ -121,7 +141,13 @@ pub trait AgentTool: Send + Sync {
     fn definition(&self) -> ToolDefinition;
 
     /// Invokes the tool implementation in-process.
-    async fn call(&self, session_id: &str, arguments: serde_json::Value) -> Result<String, String>;
+    ///
+    /// The error string is shown to the model as the failed call's result.
+    async fn call(
+        &self,
+        session_id: &str,
+        arguments: serde_json::Value,
+    ) -> Result<ToolOutput, String>;
 }
 
 /// Helper type for asynchronous native tool closures.
@@ -157,8 +183,14 @@ impl AgentTool for NativeTool {
         self.definition.clone()
     }
 
-    async fn call(&self, session_id: &str, arguments: serde_json::Value) -> Result<String, String> {
-        (self.handler)(session_id, arguments).await
+    async fn call(
+        &self,
+        session_id: &str,
+        arguments: serde_json::Value,
+    ) -> Result<ToolOutput, String> {
+        (self.handler)(session_id, arguments)
+            .await
+            .map(ToolOutput::from)
     }
 }
 
@@ -741,7 +773,16 @@ impl Agent {
                     tracing::debug!(agent = %self.name, tool = %call.name, "Executing native tool in-process");
                     let (result_str, is_success) =
                         match native_tool.call(session_id, call.arguments.clone()).await {
-                            Ok(res) => (res, true),
+                            Ok(output) => {
+                                // Same rule as plugin attachments: deduplicated, in execution
+                                // order, and only from calls that succeeded.
+                                for attachment in output.attachments {
+                                    if !attachments.contains(&attachment) {
+                                        attachments.push(attachment);
+                                    }
+                                }
+                                (output.text, true)
+                            }
                             Err(err) => (format!("Error: {err}"), false),
                         };
 
@@ -1009,9 +1050,11 @@ impl Agent {
                 if let Some(native_tool) =
                     self.tools.iter().find(|t| t.definition().name == call.name)
                 {
+                    // A stream carries text only; attachments are dropped here exactly as plugin
+                    // attachments are below.
                     let (result_str, is_success) =
                         match native_tool.call(session_id, call.arguments.clone()).await {
-                            Ok(res) => (res, true),
+                            Ok(output) => (output.text, true),
                             Err(err) => (format!("Error: {err}"), false),
                         };
                     for hook in &self.hooks {

@@ -40,7 +40,8 @@ use crate::mapping::{self, ChannelScene};
 use crate::protocol::{
     AcceptFriendRequestInput, AcceptGroupInvitationInput, Event, GetForwardedMessagesInput,
     GetGroupMemberInfoInput, GetUserProfileInput, SendGroupMessageInput,
-    SendGroupMessageReactionInput, SendPrivateMessageInput,
+    SendGroupMessageReactionInput, SendPrivateMessageInput, UploadGroupFileInput,
+    UploadPrivateFileInput,
 };
 use kanon_proto::v1::PipelineEventRequest;
 
@@ -59,6 +60,10 @@ const CAPABILITIES: &[Capability] = &[
     Capability::FriendRequests,
     Capability::GroupInvites,
     Capability::PlatformApi,
+    Capability::SendImage,
+    Capability::SendVoice,
+    Capability::SendVideo,
+    Capability::SendFile,
 ];
 
 /// Reaction used to acknowledge a message: QQ face 76, the thumbs-up.
@@ -466,7 +471,7 @@ impl PlatformAdapter for MilkyAdapter {
             });
         };
 
-        let segments = mapping::outbound_segments(&request.segments).map_err(|err| {
+        let delivery = mapping::outbound_delivery(&request.segments).map_err(|err| {
             AdapterError::Delivery {
                 platform: self.platform.clone(),
                 reason: err.to_string(),
@@ -475,63 +480,107 @@ impl PlatformAdapter for MilkyAdapter {
 
         // Naming the segment kinds makes a delivery observable in the trace log without dumping
         // user content, which is what an operator needs when a platform rejects a payload.
-        let segment_types: Vec<&str> = segments
+        let segment_types: Vec<&str> = delivery
+            .message
             .iter()
             .map(mapping::outbound_segment_type)
             .collect();
+        let file_count = delivery.files.len();
 
-        let sent = match target.scene {
-            ChannelScene::Group => {
-                let input = SendGroupMessageInput {
-                    group_id: target.peer_id,
-                    message: segments,
-                };
-                client
-                    .send_group_message(&input)
-                    .await
-                    .map(|out| out.message_seq)
+        // The message goes first so text introducing a file arrives before it. A failure after it
+        // was sent still fails the delivery: the operator must learn that a file never arrived.
+        let mut message_id = String::new();
+        if !delivery.message.is_empty() {
+            let sent = match target.scene {
+                ChannelScene::Group => {
+                    let input = SendGroupMessageInput {
+                        group_id: target.peer_id,
+                        message: delivery.message,
+                    };
+                    client
+                        .send_group_message(&input)
+                        .await
+                        .map(|out| out.message_seq)
+                }
+                ChannelScene::Friend => {
+                    let input = SendPrivateMessageInput {
+                        user_id: target.peer_id,
+                        message: delivery.message,
+                    };
+                    client
+                        .send_private_message(&input)
+                        .await
+                        .map(|out| out.message_seq)
+                }
+                // Rejected by `delivery_target` above; handled explicitly so a future scene cannot
+                // silently fall through to a private message.
+                ChannelScene::Temp => {
+                    unreachable!("temporary conversations are rejected before send")
+                }
+            };
+            match sent {
+                Ok(message_seq) => message_id = message_seq.to_string(),
+                Err(err) => {
+                    return Err(record_failure(
+                        &self.state,
+                        err.into_adapter_error(&self.platform),
+                    ));
+                }
             }
-            ChannelScene::Friend => {
-                let input = SendPrivateMessageInput {
-                    user_id: target.peer_id,
-                    message: segments,
-                };
-                client
-                    .send_private_message(&input)
-                    .await
-                    .map(|out| out.message_seq)
-            }
-            // Rejected by `delivery_target` above; handled explicitly so a future scene cannot
-            // silently fall through to a private message.
-            ChannelScene::Temp => unreachable!("temporary conversations are rejected before send"),
-        };
-
-        match sent {
-            Ok(message_seq) => {
-                self.state
-                    .write()
-                    .expect("adapter state poisoned")
-                    .status
-                    .messages_delivered += 1;
-
-                tracing::debug!(
-                    channel = %request.channel_id,
-                    segments = ?segment_types,
-                    message_seq,
-                    "Milky message delivered"
-                );
-
-                Ok(DeliverMessageResponse {
-                    success: true,
-                    message_id: message_seq.to_string(),
-                    error_message: String::new(),
-                })
-            }
-            Err(err) => Err(record_failure(
-                &self.state,
-                err.into_adapter_error(&self.platform),
-            )),
         }
+
+        // An upload yields a file id, not a message sequence, so it never becomes the message id.
+        for file in delivery.files {
+            let uploaded = match target.scene {
+                ChannelScene::Group => client
+                    .upload_group_file(&UploadGroupFileInput {
+                        group_id: target.peer_id,
+                        // The group's root folder, the protocol's own default.
+                        parent_folder_id: "/".to_string(),
+                        file_uri: file.uri,
+                        file_name: file.name,
+                    })
+                    .await
+                    .map(drop),
+                ChannelScene::Friend => client
+                    .upload_private_file(&UploadPrivateFileInput {
+                        user_id: target.peer_id,
+                        file_uri: file.uri,
+                        file_name: file.name,
+                    })
+                    .await
+                    .map(drop),
+                ChannelScene::Temp => {
+                    unreachable!("temporary conversations are rejected before send")
+                }
+            };
+            if let Err(err) = uploaded {
+                return Err(record_failure(
+                    &self.state,
+                    err.into_adapter_error(&self.platform),
+                ));
+            }
+        }
+
+        self.state
+            .write()
+            .expect("adapter state poisoned")
+            .status
+            .messages_delivered += 1;
+
+        tracing::debug!(
+            channel = %request.channel_id,
+            segments = ?segment_types,
+            files = file_count,
+            message_id = %message_id,
+            "Milky message delivered"
+        );
+
+        Ok(DeliverMessageResponse {
+            success: true,
+            message_id,
+            error_message: String::new(),
+        })
     }
 
     fn capabilities(&self) -> &[Capability] {

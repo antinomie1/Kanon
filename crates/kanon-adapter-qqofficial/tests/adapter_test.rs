@@ -18,14 +18,17 @@ use kanon_adapter_qqofficial::{ConnectionState, Endpoints, QqOfficialAdapter, Qq
 use kanon_core::{AdapterError, EventIngress, PlatformAdapter};
 use kanon_proto::v1::message_segment::Segment;
 use kanon_proto::v1::{
-    DeliverMessageRequest, ImageSegment, IngestEventRequest, MessageSegment, PipelineEventRequest,
-    ReplySegment, TextSegment, image_segment,
+    AudioSegment, DeliverMessageRequest, ImageSegment, IngestEventRequest, MessageSegment,
+    PipelineEventRequest, ReplySegment, TextSegment, audio_segment, image_segment,
 };
 use serde_json::{Value, json};
 use tokio::sync::mpsc;
 use tokio::time::timeout;
 
 const WAIT: Duration = Duration::from_secs(5);
+
+/// The start of an MPEG Layer III stream: a format QQ plays as voice without conversion.
+const MP3_FRAME: &[u8] = &[0xFF, 0xFB, 0x90, 0x64, 0, 0, 0, 0];
 
 /// One accepted gateway connection, driven by the test.
 struct Socket {
@@ -75,6 +78,7 @@ async fn start_mock() -> (Mock, mpsc::UnboundedReceiver<Socket>) {
         .route("/gateway", get(gateway))
         .route("/ws", get(ws))
         .route("/v2/:scope/:target/:kind", post(v2))
+        .route("/media/hello.mp3", get(|| async { MP3_FRAME.to_vec() }))
         .with_state(mock.clone());
     tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
     (mock, accepted)
@@ -531,4 +535,85 @@ async fn delivery_preserves_line_indentation() {
         })
         .await;
     assert!(blank.is_err(), "whitespace-only text must not be sent");
+}
+
+fn voice(source: audio_segment::Source) -> DeliverMessageRequest {
+    DeliverMessageRequest {
+        platform: "qqofficial".into(),
+        channel_id: "c2c:U1".into(),
+        event_id: "C1".into(),
+        segments: vec![MessageSegment {
+            segment: Some(Segment::Audio(AudioSegment {
+                source: Some(source),
+                duration_seconds: None,
+            })),
+        }],
+        ..Default::default()
+    }
+}
+
+/// Voice is uploaded as data QQ plays: a URL is fetched by the adapter rather than handed to QQ,
+/// audio QQ cannot play is refused before any upload, and so is media over the upload limit.
+#[tokio::test]
+async fn voice_and_oversized_media_are_checked_before_upload() {
+    use base64::Engine;
+
+    let (mock, mut accepted) = start_mock().await;
+    let (adapter, _socket, _ingest) = connected(&mock, &mut accepted).await;
+
+    adapter
+        .deliver(voice(audio_segment::Source::Url(format!(
+            "http://{}/media/hello.mp3",
+            mock.addr
+        ))))
+        .await
+        .expect("voice delivery");
+    {
+        let calls = mock.calls.lock().unwrap();
+        let (path, upload) = &calls[calls.len() - 2];
+        assert_eq!(path, "/v2/users/U1/files");
+        assert_eq!(upload["file_type"], 3);
+        assert!(upload.get("url").is_none(), "the adapter fetched the URL");
+        assert_eq!(
+            upload["file_data"],
+            base64::engine::general_purpose::STANDARD.encode(MP3_FRAME)
+        );
+    }
+
+    let uploads_before = mock.calls.lock().unwrap().len();
+    let opus = adapter
+        .deliver(voice(audio_segment::Source::RawBytes(
+            b"OggS\x00\x02not a real opus stream".to_vec(),
+        )))
+        .await
+        .expect_err("QQ cannot play it and Kanon cannot convert it");
+    assert!(
+        opus.to_string().contains("QQ plays WAV, MP3 and SILK"),
+        "{opus}"
+    );
+
+    let oversized = adapter
+        .deliver(DeliverMessageRequest {
+            platform: "qqofficial".into(),
+            channel_id: "c2c:U1".into(),
+            event_id: "C1".into(),
+            segments: vec![MessageSegment {
+                segment: Some(Segment::Image(ImageSegment {
+                    source: Some(image_segment::Source::RawBytes(vec![
+                        0;
+                        20 * 1024 * 1024 + 1
+                    ])),
+                    mime_type: Some("image/png".into()),
+                    filename: None,
+                })),
+            }],
+            ..Default::default()
+        })
+        .await
+        .expect_err("over the upload limit");
+    assert!(
+        oversized.to_string().contains("at most 20 MiB"),
+        "{oversized}"
+    );
+    assert_eq!(mock.calls.lock().unwrap().len(), uploads_before);
 }

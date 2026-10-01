@@ -552,14 +552,18 @@ sequenceDiagram
 - **合并转发**：适配器取回内容写入转发段载荷 `messages: [{sender, text, images}]`；上下文策略 `expand_forward`（默认开）决定是否逐条展开并为识图模型附带图片（有条数与图片上限）。
 - **引用回复**：回复策略 `quote_message` 开启时，群聊/频道中的模型回复首段为指向原事件的 `Reply` 段，由各适配器转换为原生引用。
 - **思考内容**：回复策略 `send_reasoning`（默认关闭）只控制独立推理通道是否作为文本段置于回答之前；正文中的字面标签保持不变。提供商设置 `replay_reasoning` 单独控制 API 回传，关闭不删除历史，也不阻止新推理入库。
+- **工具产出的媒体**：工具结果中的附件按 MIME 类型发送为对应的段——`image/*` 为图片、`audio/*` 为语音、`video/*` 为视频，其余一律为文件，文件名即附件文件自身的名字。核心只发送目标适配器声明了 `send_image` / `send_voice` / `send_video` / `send_file` 的类型；不支持的附件不进入消息，而是在回复末尾附一行说明，其余内容照常投递。一个媒体能力都没声明的适配器插件（多为媒体能力出现前写的清单）在加载时记录警告，`kanon-dev lint` 也会提示。MCP 工具的 `image` / `audio` 内容与带 `blob` 的嵌入资源都会成为附件，资源以其 URI 末段命名；原生工具通过 `ToolOutput.attachments` 交出附件，规则相同（仅成功的调用、按执行顺序去重）。
+- **QQ 官方的媒体**：每个附件单次上传，上限 20 MiB（更大的需分片上传，未实现，超限即明确报错）。语音接口只播放 SILK、WAV、MP3：这三种原样上传；FLAC、Ogg Vorbis、AAC/M4A、ALAC、AIFF、CAF 由适配器用纯 Rust 解码（symphonia）并转为 24 kHz 单声道 16 位 WAV，节点运行时不需要 ffmpeg 或 SILK 库；Opus、AMR 无法转换，投递失败并说明可用格式。语音 URL 由适配器下载后再判断格式，而不是交给 QQ 拉取。
 - **处理中反馈**：回复策略 `acknowledge` 开启时，流水线决定用模型回答后非阻塞调用内置适配器的 `acknowledge()`（默认无操作）；QQ 官方私聊显示「正在输入」，Milky 群聊对原消息点赞。
 - **好友申请与入群邀请**：适配器以 `friend_request` / `group_invite` 通知入站，并在 `kanon.request_token` 中放入仅自己能解读的凭据；事件策略的 `accept_friend_requests` / `accept_group_invites` 开启时，核心调用该适配器的 `accept_request()`。
 
-**适配器能力声明 (Capabilities)**：凡依赖平台差异的功能都走上面的通用契约（元数据键、回复段、`acknowledge()`、`accept_request()`），每个适配器用 `Capability` 声明自己实现了哪些：`sender_name`、`sender_role`、`group_messages`、`quote_reply`、`forward_content`、`acknowledge`、`member_join`、`bot_join`、`friend_add`、`poke`、`recall`、`friend_requests`、`group_invites`。内置适配器实现 `PlatformAdapter::capabilities()`，插件在 `plugin.toml` 的 `[adapter] capabilities` 中声明（需要回调的 `acknowledge` / `friend_requests` / `group_invites` 仅内置适配器可用，插件声明即清单错误）。`GET /api/v1/adapters` 返回每个适配器的能力，控制台在每个相关设置旁列出支持它的适配器——新适配器只需如实声明，无需改动控制台。
+**适配器能力声明 (Capabilities)**：凡依赖平台差异的功能都走上面的通用契约（元数据键、回复段、`acknowledge()`、`accept_request()`），每个适配器用 `Capability` 声明自己实现了哪些：`sender_name`、`sender_role`、`group_messages`、`quote_reply`、`forward_content`、`acknowledge`、`member_join`、`bot_join`、`friend_add`、`poke`、`recall`、`friend_requests`、`group_invites`、`platform_api`、`send_image`、`send_voice`、`send_video`、`send_file`。内置适配器实现 `PlatformAdapter::capabilities()`，插件在 `plugin.toml` 的 `[adapter] capabilities` 中声明（需要回调的 `acknowledge` / `friend_requests` / `group_invites` 仅内置适配器可用，插件声明即清单错误）。`GET /api/v1/adapters` 返回每个适配器的能力，控制台在每个相关设置旁列出支持它的适配器——新适配器只需如实声明，无需改动控制台。
 
 **命令权限**：节点级 `command_policy`（`/api/v1/system/command-policy`）列出管理员（`<平台>:<用户 ID>`），可选把群主/群管理员（`kanon.sender_role`）视为管理员，并按命令名设定 `everyone` / `admins_in_groups` / `admins`；默认 `/new` 为「群聊仅管理员」、`/model` 为「仅管理员」，未列出的命令（含插件命令）所有人可用。被拒绝时回复发送者 ID，方便运维加入管理员列表。实例可设置自己的 `command_policy` 覆盖（为 `null` 时继承节点策略），覆盖时整体替换节点策略，包括管理员列表。
 
 **Bash 工具**：`bash_policy.enabled` 打开后，仅所属实例生效命令权限（实例覆盖或节点策略）中 `admins` 按 ID 显式列出的管理员可用，群主/群管理员不算。调用者（`BashCaller`：发送者、实例、是否共享上下文）取自适配器的原始事件；通知与控制台聊天没有调用者。实例级 `bash` 决定可用范围：`disabled`、`own_context`（默认，仅私聊和未旁听的按人会话）、`shared_context`（全群共享会话与旁听群也可用——其他成员的消息会进入上下文，需运维显式开启）。可用性提示、首次校验以及排队/审查后的复核都经过同一个 `Gate::check`，拒绝时会告诉模型具体是哪项设置。执行后端（持久化容器，或本机加可选 AI 审查）只由运维选择。
+
+**`send_file` 工具**：与 Bash 同时注册、经过同一个 `Gate::check`，把 Bash 工作目录（容器内为 `/workspace`）中的一个文件附到本轮回复上，媒体类型按扩展名判断。路径只接受工作目录内的相对路径（或容器视角的 `/workspace/...`），拒绝 `..`；Unix 上逐级 `openat(O_NOFOLLOW)` 打开，任何一级是符号链接都拒绝，最后一级加 `O_NONBLOCK` 并要求是普通文件——沙箱里的代码可以在挂载的工作目录中放置指向宿主文件的链接，"先检查路径再打开"会留下被替换的窗口。打开后的文件复制到 `data/attachments/`（上限 20 MiB）再交给投递，送出的就是检查过的那份字节，之后由启动时的清扫回收。
 
 **群聊上下文**（实例级）：`session_scope` 为 `user`（默认，群内每人一个会话）或 `group`（全群共享一个会话，每条消息以 `kanon.sender_name` 标注说话人）；`observe_group` 开启时，未被回复的群消息与机器人自己的回复进入有界缓冲（30 条 / 30 分钟），在该会话下次被回答时作为 `[群聊记录]` 放在当前轮开头，并按会话记录已读位置——每行只进入一次历史，请求前缀保持仅追加（`group_context_test` 验证）。旁听依赖 `group_messages` 能力。
 

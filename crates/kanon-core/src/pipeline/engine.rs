@@ -1927,33 +1927,23 @@ impl PipelineEngine {
                         });
                     }
 
-                    // Rich media produced by a tool (an MCP server drawing a B50 card, for example)
-                    // travels as its own segment: the platform then shows the picture instead of a
-                    // sentence describing where it was written.
-                    for attachment in &output.attachments {
-                        let source = match (&attachment.file_path, &attachment.url) {
-                            (Some(path), _) => Some(
-                                kanon_proto::v1::image_segment::Source::FilePath(path.clone()),
-                            ),
-                            (None, Some(url)) => {
-                                Some(kanon_proto::v1::image_segment::Source::Url(url.clone()))
-                            }
-                            (None, None) => None,
-                        };
-                        let Some(source) = source else {
-                            tracing::warn!(
-                                mime_type = %attachment.mime_type,
-                                "Tool attachment has neither a file path nor a URL; dropping it"
-                            );
-                            continue;
-                        };
-                        replies.push(MessageSegment {
-                            segment: Some(Segment::Image(kanon_proto::v1::ImageSegment {
-                                source: Some(source),
-                                mime_type: Some(attachment.mime_type.clone()),
-                                filename: None,
-                            })),
-                        });
+                    // Rich media produced by a tool (an MCP server drawing a B50 card, a TTS voice
+                    // clip, a generated PDF) travels as its own segment of the kind its MIME type
+                    // names, limited to the kinds the platform's adapter declares it can send.
+                    if !output.attachments.is_empty() {
+                        let declared = self
+                            .supervisor
+                            .resolve_adapter(&filtered_event.platform)
+                            .await
+                            .map(|route| route.capabilities());
+                        let media = super::attachment::attachment_segments(
+                            &output.attachments,
+                            declared.as_deref(),
+                        );
+                        replies.extend(media.segments);
+                        if !media.notes.is_empty() {
+                            replies.push(text_reply(media.notes.join("\n")));
+                        }
                     }
 
                     // Tool media is a complete reply even when the model produced only reasoning.

@@ -429,6 +429,10 @@ export const dictionaries = {
     'capability.friend_requests': 'Friend requests',
     'capability.group_invites': 'Group invitations',
     'capability.platform_api': 'Plugin platform API calls',
+    'capability.send_image': 'Send images',
+    'capability.send_voice': 'Send voice',
+    'capability.send_video': 'Send videos',
+    'capability.send_file': 'Send files',
     'capability.supported_by': 'Works on',
     'capability.none': 'No platform on this node supports this yet',
     // Models page
@@ -1332,6 +1336,10 @@ export const dictionaries = {
     'capability.friend_requests': '好友申请',
     'capability.group_invites': '入群邀请',
     'capability.platform_api': '插件调用平台 API',
+    'capability.send_image': '发送图片',
+    'capability.send_voice': '发送语音',
+    'capability.send_video': '发送视频',
+    'capability.send_file': '发送文件',
     'capability.supported_by': '支持的平台',
     'capability.none': '节点上暂时没有平台支持这一项',
     // Models page

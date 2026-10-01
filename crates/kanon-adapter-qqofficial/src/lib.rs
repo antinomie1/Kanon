@@ -13,6 +13,7 @@ pub mod bind;
 pub mod config;
 mod gateway;
 pub mod mapping;
+pub mod voice;
 
 pub use api::Endpoints;
 pub use config::{DISPLAY_NAME, PLATFORM, QqOfficialConfig};
@@ -39,11 +40,17 @@ use mapping::{Quote, QuoteStore};
 ///
 /// A public QQ bot only receives group messages that @-mention it, and group events carry openids
 /// rather than names or roles, so it does not declare group observation, sender names or roles.
+/// Media goes out through one upload of at most 20 MiB each: images, voice (converted to a format
+/// QQ plays when needed, see [`voice`]), video, and named files (`file_type = 4`).
 const CAPABILITIES: &[Capability] = &[
     Capability::QuoteReply,
     Capability::Acknowledge,
     Capability::BotJoin,
     Capability::FriendAdd,
+    Capability::SendImage,
+    Capability::SendVoice,
+    Capability::SendVideo,
+    Capability::SendFile,
 ];
 
 /// How many recent messages are remembered for resolving quotes.
@@ -286,9 +293,9 @@ struct Media {
 }
 
 impl Media {
-    /// What the item is, judged by the MIME type the pipeline reports. Tool output of any kind
-    /// arrives as an image segment, so a video or a document is recognized here and sent as what
-    /// it is instead of failing as a broken picture.
+    /// What an image segment really holds, judged by the MIME type it reports. A plugin may
+    /// label a video or a document as an image segment; it is sent as what it is instead of
+    /// failing as a broken picture.
     fn kind_for(mime_type: Option<&str>) -> MediaKind {
         match mime_type.map(str::to_ascii_lowercase) {
             None => MediaKind::Image,
@@ -507,11 +514,14 @@ impl PlatformAdapter for QqOfficialAdapter {
                     kind: MediaKind::Voice,
                     name: None,
                     source: self
-                        .media_source(audio.source.as_ref().map(|source| match source {
-                            audio_segment::Source::Url(url) => Source::Url(url),
-                            audio_segment::Source::FilePath(path) => Source::Path(path),
-                            audio_segment::Source::RawBytes(bytes) => Source::Bytes(bytes),
-                        }))
+                        .voice_source(
+                            &api,
+                            audio.source.as_ref().map(|source| match source {
+                                audio_segment::Source::Url(url) => Source::Url(url),
+                                audio_segment::Source::FilePath(path) => Source::Path(path),
+                                audio_segment::Source::RawBytes(bytes) => Source::Bytes(bytes),
+                            }),
+                        )
                         .await?,
                 }),
                 Some(Segment::Video(video)) => media.push(Media {
@@ -630,6 +640,34 @@ impl QqOfficialAdapter {
             Some(Source::Bytes(bytes)) => Ok(MediaSource::Bytes(bytes.to_vec())),
             None => Err(self.delivery_error("media segment has no source")),
         }
+    }
+
+    /// Resolves a voice source to bytes QQ plays as a voice message.
+    ///
+    /// Unlike other media, a voice URL is downloaded here instead of being handed to QQ: whether
+    /// QQ can play it depends on the bytes, and an Opus URL passed through would fail inside QQ
+    /// without a reason. Conversion runs on a blocking thread because decoding is CPU-bound.
+    async fn voice_source(
+        &self,
+        api: &Api,
+        source: Option<Source<'_>>,
+    ) -> Result<MediaSource, AdapterError> {
+        let audio = match source {
+            Some(Source::Url(url)) => api
+                .download(url, api::MAX_UPLOAD_BYTES)
+                .await
+                .map_err(|err| self.delivery_error(err))?,
+            Some(Source::Path(path)) => tokio::fs::read(path).await.map_err(|err| {
+                self.delivery_error(format!("cannot read attachment {path}: {err}"))
+            })?,
+            Some(Source::Bytes(bytes)) => bytes.to_vec(),
+            None => return Err(self.delivery_error("media segment has no source")),
+        };
+        tokio::task::spawn_blocking(move || voice::playable(audio))
+            .await
+            .map_err(|err| self.delivery_error(format!("voice conversion stopped: {err}")))?
+            .map(MediaSource::Bytes)
+            .map_err(|err| self.delivery_error(err))
     }
 
     async fn send_text(

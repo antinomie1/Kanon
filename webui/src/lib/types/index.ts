@@ -629,7 +629,11 @@ export type Capability =
   | 'recall'
   | 'friend_requests'
   | 'group_invites'
-  | 'platform_api';
+  | 'platform_api'
+  | 'send_image'
+  | 'send_voice'
+  | 'send_video'
+  | 'send_file';
 
 export interface AdapterItem {
   platform: string;

@@ -50,7 +50,9 @@ fn bash(root: &std::path::Path, policy: Arc<BashPolicyStore>) -> BashTool {
 }
 
 async fn run(tool: &BashTool, args: Value) -> Result<String, String> {
-    with_bash_caller(caller("alice"), tool.call("same-group", args)).await
+    with_bash_caller(caller("alice"), tool.call("same-group", args))
+        .await
+        .map(|output| output.text)
 }
 
 #[tokio::test]

@@ -146,7 +146,7 @@ parameters = { type = "object", properties = { city = { type = "string" } }, req
 [adapter]                         # 可选：声明后本插件成为该平台的适配器
 platform = "my_im"
 display_name = "My IM"
-capabilities = ["sender_name", "quote_reply"]
+capabilities = ["sender_name", "quote_reply", "send_image", "send_file"]
 ```
 
 要点：
@@ -469,7 +469,7 @@ TypeScript 中方法名为驼峰（`imageUrl`、`mentionAll`）。`file_path` �
 
 - **出站**：核心把 `platform` 匹配的每条消息通过 `OnDeliverMessage` 投给本插件。必须覆盖 `on_deliver_message`；默认实现会明确返回失败，绝不“假成功”。
 - **入站**：用 `core.ingest_event(...)` 把平台消息推回流水线。必须检查返回的 `accepted`：为 `false` 表示核心队列已满、事件被丢弃，适配器应自行降速。
-- **元数据**：用 `kanon.conversation_kind`、`kanon.bot_mentioned`、`kanon.sender_name` 等平台无关键名描述事件（见 [PLUGIN_API.md §6.2](./PLUGIN_API.md#62-元数据键)），并通过 `capabilities` 声明实现了哪些通用能力。需要回调适配器的能力（如 `acknowledge`、`platform_api`）只有内置适配器能声明。
+- **元数据**：用 `kanon.conversation_kind`、`kanon.bot_mentioned`、`kanon.sender_name` 等平台无关键名描述事件（见 [PLUGIN_API.md §6.2](./PLUGIN_API.md#62-元数据键)），并通过 `capabilities` 声明实现了哪些通用能力。需要回调适配器的能力（如 `acknowledge`、`platform_api`）只有内置适配器能声明。能发送哪些媒体也在这里声明：`send_image`、`send_voice`、`send_video`、`send_file`——核心只把已声明类型的工具附件交给本插件，未声明的类型以一行说明代替。一个媒体能力都没声明的适配器插件（多为媒体能力出现前写的清单）在加载时会记录警告，`kanon-dev lint` 也会提示。
 
 完整契约见 [ARCHITECTURE.md §9.5](./ARCHITECTURE.md)。
 

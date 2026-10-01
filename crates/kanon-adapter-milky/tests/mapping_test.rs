@@ -6,8 +6,8 @@
 
 use kanon_adapter_milky::mapping::{
     self, CHANNEL_FRIEND, CHANNEL_GROUP, CHANNEL_TEMP, CUSTOM_SEGMENT_PREFIX, ChannelScene,
-    MappingError, channel_id, delivery_target, inbound_message, outbound_segment,
-    outbound_segments, parse_channel_id, render_text,
+    MappingError, OutboundFile, channel_id, delivery_target, inbound_message, outbound_delivery,
+    outbound_segment, parse_channel_id, render_text,
 };
 use kanon_adapter_milky::protocol::{Event, IncomingSegment, OutgoingSegment};
 use kanon_proto::v1::message_segment::Segment;
@@ -528,7 +528,9 @@ fn native_segments_round_trip_both_ways() {
 
     let inbound: Vec<IncomingSegment> = serde_json::from_value(wire).expect("fixtures decode");
     let kanon: Vec<MessageSegment> = inbound.iter().map(mapping::incoming_segment).collect();
-    let back: Vec<OutgoingSegment> = outbound_segments(&kanon).expect("segments should map");
+    let back: Vec<OutgoingSegment> = outbound_delivery(&kanon)
+        .expect("segments should map")
+        .message;
 
     let rendered: Vec<serde_json::Value> = back
         .iter()
@@ -598,7 +600,7 @@ fn unsendable_and_malformed_segments_fail_explicitly() {
     ));
 
     // An empty message has nothing to send.
-    assert!(matches!(outbound_segments(&[]), Err(MappingError::Empty)));
+    assert!(matches!(outbound_delivery(&[]), Err(MappingError::Empty)));
 
     // A segment with no kind set carries nothing.
     assert!(matches!(
@@ -623,9 +625,9 @@ fn json_struct_conversion_round_trips() {
 }
 
 /// Typed video and face segments map to Milky's own; a file cannot travel inside a message, so
-/// it is refused instead of silently dropped.
+/// a delivery uploads it after the message instead.
 #[test]
-fn typed_video_and_face_map_and_files_are_refused() {
+fn typed_video_and_face_map_and_files_are_uploaded_after_the_message() {
     use kanon_proto::v1::{FaceSegment, FileSegment, VideoSegment, file_segment, video_segment};
 
     let video = MessageSegment {
@@ -647,16 +649,45 @@ fn typed_video_and_face_map_and_files_are_refused() {
         json!({ "type": "face", "data": { "face_id": "76", "is_large": false } })
     );
 
-    let file = MessageSegment {
+    let file = |name: &str| MessageSegment {
         segment: Some(Segment::File(FileSegment {
-            source: Some(file_segment::Source::Url(
-                "https://cdn.example/r.pdf".into(),
-            )),
-            name: "r.pdf".into(),
+            source: Some(file_segment::Source::FilePath("/tmp/r.pdf".into())),
+            name: name.into(),
         })),
     };
     assert!(matches!(
-        outbound_segment(&file),
+        outbound_segment(&file("r.pdf")),
         Err(MappingError::Unsupported(_))
+    ));
+
+    let quote = MessageSegment {
+        segment: Some(Segment::Reply(ReplySegment {
+            target_message_id: "milky:group:1:42".into(),
+            snippet: String::new(),
+        })),
+    };
+    let uploaded = vec![OutboundFile {
+        uri: "file:///tmp/r.pdf".into(),
+        name: "r.pdf".into(),
+    }];
+
+    let delivery = outbound_delivery(&[quote.clone(), text("here"), file("r.pdf")]).expect("maps");
+    assert_eq!(
+        delivery.message,
+        vec![
+            OutgoingSegment::Reply(42),
+            OutgoingSegment::Text("here".into())
+        ]
+    );
+    assert_eq!(delivery.files, uploaded);
+
+    // A quote alone would be an empty message, and an upload cannot quote.
+    let delivery = outbound_delivery(&[quote, file("r.pdf")]).expect("maps");
+    assert!(delivery.message.is_empty());
+    assert_eq!(delivery.files, uploaded);
+
+    assert!(matches!(
+        outbound_delivery(&[file(" ")]),
+        Err(MappingError::FileName)
     ));
 }

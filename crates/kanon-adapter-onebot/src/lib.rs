@@ -29,7 +29,8 @@ use tokio::{
 /// What this adapter implements through the generic adapter contract.
 ///
 /// OneBot v11 has no standard way to show a typing indicator or react to a message, so it does
-/// not acknowledge.
+/// not acknowledge. Files go out as the `file` extension segment (NapCat, LLOneBot, Lagrange); an
+/// implementation without it rejects the message, which surfaces as a delivery error.
 const CAPABILITIES: &[Capability] = &[
     Capability::SenderName,
     Capability::SenderRole,
@@ -44,6 +45,10 @@ const CAPABILITIES: &[Capability] = &[
     Capability::FriendRequests,
     Capability::GroupInvites,
     Capability::PlatformApi,
+    Capability::SendImage,
+    Capability::SendVoice,
+    Capability::SendVideo,
+    Capability::SendFile,
 ];
 
 /// Observable lifecycle of the universal connection.

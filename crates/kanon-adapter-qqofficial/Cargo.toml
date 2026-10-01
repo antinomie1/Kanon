@@ -18,6 +18,8 @@ serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 async-trait = "0.1"
 tracing = "0.1"
+# Pure-Rust decoders for voice QQ cannot play as is; MP3 and WAV pass through untouched.
+symphonia = { version = "0.6", default-features = false, features = ["aac", "adpcm", "aiff", "alac", "caf", "flac", "isomp4", "ogg", "pcm", "vorbis"] }
 
 [dev-dependencies]
 axum = { version = "0.7", features = ["ws"] }

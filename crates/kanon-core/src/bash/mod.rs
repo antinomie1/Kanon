@@ -5,10 +5,13 @@ mod access;
 mod local;
 mod review;
 mod sandbox;
+mod send_file;
 
 pub use review::{BashReviewDecision, BashReviewRequest, BashReviewer, ModelBashReviewer};
 
 pub use sandbox::{BashSandboxConfig, DEFAULT_BASH_WORKSPACE};
+
+pub use send_file::{MAX_SEND_FILE_BYTES, SendFileTool};
 
 pub use access::{
     BashCaller, BashExecutionMode, BashLocalConfig, BashPolicy, BashPolicyStore, with_bash_caller,
@@ -18,7 +21,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, RwLock};
 
 use async_trait::async_trait;
-use kanon_llm::{AgentError, AgentHook, AgentTool, ChatMessage, ToolDefinition};
+use kanon_llm::{AgentError, AgentHook, AgentTool, ChatMessage, ToolDefinition, ToolOutput};
 use serde::Deserialize;
 
 use crate::access::CommandPolicyStore;
@@ -86,6 +89,18 @@ impl BashTool {
             reviewer: RwLock::new(None),
         })
     }
+    /// The companion tool that attaches files from this tool's working directory to the reply.
+    ///
+    /// It checks the same gate as Bash, so it is available exactly when Bash is. Copies are
+    /// written to `attachment_dir`, which the node sweeps like every other tool attachment.
+    pub fn send_file_tool(&self, attachment_dir: impl Into<PathBuf>) -> SendFileTool {
+        SendFileTool {
+            root: self.root.clone(),
+            gate: self.gate.clone(),
+            attachment_dir: attachment_dir.into(),
+        }
+    }
+
     /// Attaches the live reviewer; a missing reviewer never grants approval.
     pub fn set_reviewer(&self, reviewer: Arc<dyn BashReviewer>) {
         *self
@@ -214,7 +229,14 @@ impl AgentTool for BashTool {
         &self,
         _session_id: &str,
         arguments: serde_json::Value,
-    ) -> Result<String, String> {
+    ) -> Result<ToolOutput, String> {
+        self.run(arguments).await.map(ToolOutput::from)
+    }
+}
+
+impl BashTool {
+    /// Runs one command for the verified caller of the current turn and returns its JSON report.
+    async fn run(&self, arguments: serde_json::Value) -> Result<String, String> {
         // Never infer authorization from a session name, message text or tool arguments.
         let caller = access::current_caller();
         self.gate
