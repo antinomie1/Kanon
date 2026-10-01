@@ -51,10 +51,16 @@
 @layer base {
   :root {
     color-scheme: light;
-    --k-page: #f4f3f8;
+    /* Neutral surfaces carry a faint tint of the accent: each one fixes its own lightness and
+       chroma, and takes its hue from the accent (`--k-hue`, set per `data-accent` below). OKLCH
+       keeps the tint equally strong and every surface equally light whichever accent is chosen.
+       `--k-tint` scales the chroma, so 0 turns the surfaces into pure greys. */
+    --k-hue: 280;
+    --k-tint: 1;
+    --k-page: oklch(0.966 calc(0.007 * var(--k-tint)) var(--k-hue));
     --k-card: #ffffff;
-    --k-sunk: #ecebf2;
-    --k-line: #e3e1eb;
+    --k-sunk: oklch(0.943 calc(0.009 * var(--k-tint)) var(--k-hue));
+    --k-line: oklch(0.914 calc(0.014 * var(--k-tint)) var(--k-hue));
     --k-fg: #22202c;
     --k-fg2: #625e70;
     --k-fg3: #8e8a9b;
@@ -70,10 +76,10 @@
     --k-on-bar: #ffffff;
     /* The navigation rail sits a shade deeper than the page, which separates the two without a
        dividing line; `--k-rail-sunk` is what sunken surfaces become on it (see `.rail`). */
-    --k-rail: #ebe9f1;
-    --k-rail-sunk: #dfdde8;
+    --k-rail: oklch(0.938 calc(0.011 * var(--k-tint)) var(--k-hue));
+    --k-rail-sunk: oklch(0.902 calc(0.015 * var(--k-tint)) var(--k-hue));
     --k-seg-on: #ffffff;
-    --k-switch-off: #d6d2e0;
+    --k-switch-off: oklch(0.871 calc(0.02 * var(--k-tint)) var(--k-hue));
     --k-shadow: 0 1px 2px rgb(34 32 44 / 0.06);
     --k-pop: 0 10px 30px rgb(34 32 44 / 0.16);
     /* Instance colours for the message timeline, picked by a hash of the instance id. */
@@ -93,10 +99,10 @@
   }
   :root.dark {
     color-scheme: dark;
-    --k-page: #111318;
-    --k-card: #1a1d24;
-    --k-sunk: #242832;
-    --k-line: #2c303b;
+    --k-page: oklch(0.187 calc(0.011 * var(--k-tint)) var(--k-hue));
+    --k-card: oklch(0.231 calc(0.014 * var(--k-tint)) var(--k-hue));
+    --k-sunk: oklch(0.277 calc(0.019 * var(--k-tint)) var(--k-hue));
+    --k-line: oklch(0.31 calc(0.021 * var(--k-tint)) var(--k-hue));
     --k-fg: #e8eaf0;
     --k-fg2: #a0a7b5;
     --k-fg3: #737b8c;
@@ -110,10 +116,10 @@
     --k-on-danger: #2a0707;
     --k-bar: #e8eaf0;
     --k-on-bar: #111318;
-    --k-rail: #0b0c10;
-    --k-rail-sunk: #1f222b;
-    --k-seg-on: #353a47;
-    --k-switch-off: #3a3f4b;
+    --k-rail: oklch(0.155 calc(0.009 * var(--k-tint)) var(--k-hue));
+    --k-rail-sunk: oklch(0.253 calc(0.018 * var(--k-tint)) var(--k-hue));
+    --k-seg-on: oklch(0.349 calc(0.024 * var(--k-tint)) var(--k-hue));
+    --k-switch-off: oklch(0.368 calc(0.022 * var(--k-tint)) var(--k-hue));
     --k-shadow: none;
     --k-pop: 0 10px 30px rgb(0 0 0 / 0.5);
     --k-i0: #ff8a6b;
@@ -131,8 +137,10 @@
   }
 
   /* Accent colours. Light values keep white button text at 4.5:1 or better; dark values are
-     lighter and carry dark text instead. */
+     lighter and carry dark text instead. `--k-hue` is the accent's own OKLCH hue, shared by both
+     modes; graphite leaves the surfaces untinted. */
   :root[data-accent="blue"] {
+    --k-hue: 263;
     --k-accent: #2a66db;
     --k-accent-tint: #e6eefd;
     --k-accent-fg: #1d55c4;
@@ -144,6 +152,7 @@
     --k-on-accent: #0b1630;
   }
   :root[data-accent="teal"] {
+    --k-hue: 183;
     --k-accent: #0b7d70;
     --k-accent-tint: #ddf3ef;
     --k-accent-fg: #0a6b60;
@@ -155,6 +164,7 @@
     --k-on-accent: #06201d;
   }
   :root[data-accent="coral"] {
+    --k-hue: 37;
     --k-accent: #c94a22;
     --k-accent-tint: #fde8e0;
     --k-accent-fg: #a8401c;
@@ -166,6 +176,7 @@
     --k-on-accent: #2b0f05;
   }
   :root[data-accent="rose"] {
+    --k-hue: 0;
     --k-accent: #c23a6e;
     --k-accent-tint: #fbe6ee;
     --k-accent-fg: #a62c5c;
@@ -177,6 +188,7 @@
     --k-on-accent: #2e0a18;
   }
   :root[data-accent="graphite"] {
+    --k-tint: 0;
     --k-accent: #3d3a48;
     --k-accent-tint: #e9e8ee;
     --k-accent-fg: #2a2833;

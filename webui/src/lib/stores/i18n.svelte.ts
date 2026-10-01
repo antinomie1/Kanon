@@ -766,7 +766,7 @@ export const dictionaries = {
       "Match system follows your computer's light or dark setting.",
     'settings.accent': 'Accent colour',
     'settings.accent_hint':
-      'Used for buttons, selections and switches. Saved in this browser only.',
+      'Used for buttons, selections and switches, and lightly tints the background. Saved in this browser only.',
     'settings.accent_violet': 'Violet',
     'settings.accent_blue': 'Blue',
     'settings.accent_teal': 'Teal',
@@ -1642,7 +1642,7 @@ export const dictionaries = {
     'settings.theme_hint': '跟随系统时，会随电脑的浅色或深色设置切换。',
     'settings.accent': '主题色',
     'settings.accent_hint':
-      '按钮、选中项和开关都用这个颜色。只保存在这个浏览器里。',
+      '按钮、选中项和开关都用这个颜色，背景也会带上淡淡的同色调。只保存在这个浏览器里。',
     'settings.accent_violet': '紫罗兰',
     'settings.accent_blue': '海蓝',
     'settings.accent_teal': '青绿',
