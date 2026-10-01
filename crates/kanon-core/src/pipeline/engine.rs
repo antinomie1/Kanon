@@ -1691,9 +1691,12 @@ impl PipelineEngine {
                 instance: instance.as_ref().map(|instance| instance.id.clone()),
                 shared_context: shared || observing,
             });
-            match crate::with_bash_caller(
-                bash_caller,
-                router.execute_message(&session_id, user_message, &tool_hosts),
+            match crate::supervisor::with_tool_event(
+                filtered_event.clone(),
+                crate::with_bash_caller(
+                    bash_caller,
+                    router.execute_message(&session_id, user_message, &tool_hosts),
+                ),
             )
             .await
             {

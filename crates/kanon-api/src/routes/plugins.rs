@@ -579,6 +579,8 @@ async fn call_plugin_tool(
         payload: Some(kanon_proto::v1::tool_call_request::Payload::StructuredArgs(
             args_struct,
         )),
+        // A console test call happens outside any platform conversation.
+        context: None,
     };
 
     let response = host.on_call_tool(req).await.map_err(|status| {

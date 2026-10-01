@@ -333,7 +333,7 @@ async fn execute_sandbox_command(
         command: clean_cmd.to_string(),
         args: args.to_vec(),
         context: None,
-        ..Default::default()
+        raw_args: args.join(" "),
     };
 
     println!("[Executing] /{} with args: {:?}", clean_cmd, args);
@@ -393,6 +393,8 @@ async fn execute_sandbox_tool(
         tool_name: tool_name.to_string(),
         session_id: "sandbox_session".to_string(),
         payload: structured_payload.map(tool_call_request::Payload::StructuredArgs),
+        // The sandbox has no platform conversation to attach.
+        context: None,
     };
 
     println!(

@@ -242,6 +242,7 @@ async fn test_tool_host_call_tool_fast_fails_when_circuit_open() {
         tool_name: "calc".to_string(),
         session_id: "session-1".to_string(),
         payload: None,
+        ..Default::default()
     };
 
     let start = std::time::Instant::now();

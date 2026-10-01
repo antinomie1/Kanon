@@ -260,6 +260,9 @@ message ToolCallRequest {
     google.protobuf.Struct structured_args = 4;
     bytes raw_bytes = 5;
   }
+  // The inbound event whose conversation turn invoked the tool: who asked, where, on which
+  // platform. Absent when the model runs outside a platform conversation (the console chat).
+  PipelineEventRequest context = 6;
 }
 
 message ToolCallResponse {

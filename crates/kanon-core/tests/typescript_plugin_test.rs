@@ -149,6 +149,7 @@ async fn test_typescript_plugin_lifecycle_and_pipeline() {
         tool_name: "ts_calc".to_string(),
         session_id: "session_1".to_string(),
         payload: None,
+        ..Default::default()
     };
     let tool_response = managed_host
         .on_call_tool(tool_request)

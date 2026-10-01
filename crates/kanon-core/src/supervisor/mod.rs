@@ -516,9 +516,31 @@ impl kanon_llm::tool_router::ToolHost for ManagedHost {
         self.metas()
     }
 
-    async fn call_tool(&self, req: ToolCallRequest) -> Result<ToolCallResponse, tonic::Status> {
+    async fn call_tool(&self, mut req: ToolCallRequest) -> Result<ToolCallResponse, tonic::Status> {
+        // The router knows the session, not the platform event; the pipeline scoped the event
+        // around the turn, so the plugin learns who asked and where.
+        if req.context.is_none() {
+            req.context = TOOL_EVENT.try_with(Clone::clone).ok();
+        }
         self.on_call_tool(req).await
     }
+}
+
+tokio::task_local! {
+    // Task scope (not a field) because one agent serves overlapping turns; each turn's tool calls
+    // must see their own event and never a neighbour's.
+    static TOOL_EVENT: PipelineEventRequest;
+}
+
+/// Runs `turn` with `event` attached to every plugin tool call it makes.
+///
+/// Tool calls made inside the future carry the event as `ToolCallRequest.context`, so a tool can
+/// tell who invoked it and in which conversation without trusting model-supplied arguments.
+pub async fn with_tool_event<F: std::future::Future>(
+    event: PipelineEventRequest,
+    turn: F,
+) -> F::Output {
+    TOOL_EVENT.scope(event, turn).await
 }
 
 /// Where an outbound message for a platform should be delivered.
