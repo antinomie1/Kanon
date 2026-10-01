@@ -28,13 +28,13 @@ let {
   title={label}
   {disabled}
   onclick={() => onchange(!checked)}
-  class="relative w-11 h-6 rounded-full transition cursor-pointer shrink-0 disabled:opacity-50 disabled:cursor-not-allowed {checked
-    ? 'bg-emerald-500'
-    : 'bg-zinc-300 dark:bg-zinc-700'}"
+  class="relative inline-block w-10 h-6 rounded-full shrink-0 transition-colors disabled:opacity-50 {checked
+    ? 'bg-accent'
+    : 'bg-[var(--k-switch-off)]'}"
 >
   <span
-    class="absolute top-0.5 left-0.5 w-5 h-5 rounded-full bg-white transition-transform {checked
-      ? 'translate-x-5'
+    class="absolute top-[3px] left-[3px] w-[18px] h-[18px] rounded-full bg-white shadow-[0_1px_2px_rgb(0_0_0/0.2)] transition-transform {checked
+      ? 'translate-x-4'
       : ''}"
   ></span>
 </button>

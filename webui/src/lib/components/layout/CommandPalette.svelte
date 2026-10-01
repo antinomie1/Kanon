@@ -1,186 +1,204 @@
 <script lang="ts">
 import {
   Activity,
-  Blocks,
-  Cpu,
+  Boxes,
+  BrainCircuit,
+  CornerDownLeft,
+  Drama,
+  House,
   Languages,
-  MessageSquare,
+  MessageCircle,
+  MessagesSquare,
   Moon,
+  Plug,
+  Plus,
+  Puzzle,
   RefreshCw,
   Search,
   Settings,
-  Sparkles,
   Sun,
-  Terminal,
-  Trash2,
-  Users,
 } from 'lucide-svelte';
 import { i18n, t } from '../../stores/i18n.svelte';
-import { logStore } from '../../stores/logs.svelte';
+import { instancesStore } from '../../stores/instances.svelte';
 import { nodeStore } from '../../stores/node.svelte';
+import { type Page, router } from '../../stores/router.svelte';
 import { theme } from '../../stores/theme.svelte';
+import type { IconComponent } from '../../types';
 
-let { isOpen = $bindable(false), onSelectTab = (_tab: string) => {} } = $props<{
-  isOpen: boolean;
-  onSelectTab?: (tab: string) => void;
-}>();
+let { isOpen = $bindable(false) } = $props<{ isOpen: boolean }>();
+
+interface Command {
+  id: string;
+  title: string;
+  group: string;
+  icon: IconComponent;
+  action: () => void;
+}
 
 let query = $state('');
+let active = $state(0);
+let input = $state<HTMLInputElement>();
 
-const commands = $derived([
+const pages: { id: Page; icon: IconComponent }[] = [
+  { id: 'home', icon: House },
+  { id: 'chat', icon: MessageCircle },
+  { id: 'instances', icon: Boxes },
+  { id: 'sessions', icon: MessagesSquare },
+  { id: 'personas', icon: Drama },
+  { id: 'platforms', icon: Plug },
+  { id: 'models', icon: BrainCircuit },
+  { id: 'extensions', icon: Puzzle },
+  { id: 'activity', icon: Activity },
+  { id: 'settings', icon: Settings },
+];
+
+const commands = $derived<Command[]>([
+  ...pages.map((page) => ({
+    id: `page:${page.id}`,
+    title: t(`nav.${page.id}`),
+    group: t('palette.pages'),
+    icon: page.icon,
+    action: () => router.navigate(page.id),
+  })),
+  ...instancesStore.instances.map((instance) => ({
+    id: `instance:${instance.id}`,
+    title: instance.name,
+    group: t('palette.instances'),
+    icon: Boxes,
+    action: () => router.navigate('instances', instance.id),
+  })),
   {
-    id: 'overview',
-    title: `${t('nav.overview')} (Overview)`,
-    category: 'Navigation',
-    icon: Activity,
-    action: () => onSelectTab('overview'),
-  },
-  {
-    id: 'chat',
-    title: `${t('nav.chat')} (Chat)`,
-    category: 'Navigation',
-    icon: MessageSquare,
-    action: () => onSelectTab('chat'),
-  },
-  {
-    id: 'pipeline',
-    title: `${t('nav.pipeline')} (Pipeline & Logs)`,
-    category: 'Navigation',
-    icon: Terminal,
-    action: () => onSelectTab('pipeline'),
-  },
-  {
-    id: 'plugins',
-    title: `${t('nav.plugins')} (Plugins & Adapters)`,
-    category: 'Navigation',
-    icon: Blocks,
-    action: () => onSelectTab('plugins'),
-  },
-  {
-    id: 'sessions',
-    title: `${t('nav.sessions')} (Sessions)`,
-    category: 'Navigation',
-    icon: Users,
-    action: () => onSelectTab('sessions'),
-  },
-  {
-    id: 'personas',
-    title: `${t('nav.personas')} (Personas)`,
-    category: 'Navigation',
-    icon: Sparkles,
-    action: () => onSelectTab('personas'),
-  },
-  {
-    id: 'providers',
-    title: `${t('nav.providers')} (Model Providers)`,
-    category: 'Navigation',
-    icon: Cpu,
-    action: () => onSelectTab('providers'),
-  },
-  {
-    id: 'system',
-    title: `${t('nav.system')} (System Settings)`,
-    category: 'Navigation',
-    icon: Settings,
-    action: () => onSelectTab('system'),
-  },
-  {
-    id: 'clear_logs',
-    title: 'Clear WebSocket Log Buffer',
-    category: 'Action',
-    icon: Trash2,
-    action: () => logStore.clear(),
+    id: 'new-instance',
+    title: t('instances.new'),
+    group: t('palette.actions'),
+    icon: Plus,
+    action: () => router.navigate('instances', 'new'),
   },
   {
     id: 'refresh',
-    title: t('common.refresh'),
-    category: 'Action',
+    title: t('palette.refresh'),
+    group: t('palette.actions'),
     icon: RefreshCw,
-    action: () => nodeStore.refresh(),
+    action: () => {
+      void nodeStore.refresh();
+      void instancesStore.load();
+    },
   },
   {
-    id: 'toggle_lang',
-    title: `Switch Language: ${i18n.locale === 'zh' ? 'English' : '简体中文'}`,
-    category: 'Action',
+    id: 'language',
+    title: i18n.locale === 'zh' ? 'Switch to English' : '切换到中文',
+    group: t('palette.actions'),
     icon: Languages,
     action: () => i18n.toggle(),
   },
   {
-    id: 'toggle_theme',
-    title: 'Toggle Light / Dark Theme',
-    category: 'Action',
+    id: 'theme',
+    title: theme.dark ? t('palette.theme_light') : t('palette.theme_dark'),
+    group: t('palette.actions'),
     icon: theme.dark ? Sun : Moon,
     action: () => theme.toggle(),
   },
 ]);
 
-let filtered = $derived(
-  commands.filter(
-    (c) =>
-      c.title.toLowerCase().includes(query.toLowerCase()) ||
-      c.category.toLowerCase().includes(query.toLowerCase()),
-  ),
-);
+const filtered = $derived.by(() => {
+  const q = query.trim().toLowerCase();
+  if (!q) return commands;
+  return commands.filter(
+    (c) => c.title.toLowerCase().includes(q) || c.id.toLowerCase().includes(q),
+  );
+});
 
-function execute(cmd: (typeof commands)[0]) {
-  cmd.action();
+$effect(() => {
+  void query;
+  active = 0;
+});
+
+$effect(() => {
+  if (isOpen) {
+    query = '';
+    input?.focus();
+  }
+});
+
+function run(command: Command | undefined) {
+  if (!command) return;
   isOpen = false;
-  query = '';
+  command.action();
 }
 
-function handleKeydown(e: KeyboardEvent) {
+function onkeydown(e: KeyboardEvent) {
   if (e.key === 'Escape') {
     isOpen = false;
+  } else if (e.key === 'ArrowDown') {
+    e.preventDefault();
+    active = Math.min(active + 1, filtered.length - 1);
+  } else if (e.key === 'ArrowUp') {
+    e.preventDefault();
+    active = Math.max(active - 1, 0);
+  } else if (e.key === 'Enter') {
+    e.preventDefault();
+    run(filtered[active]);
   }
 }
 </script>
 
 {#if isOpen}
-  <!-- Backdrop -->
-  <!-- svelte-ignore a11y_click_events_have_key_events -->
-  <div
-    class="fixed inset-0 bg-black/40 backdrop-blur-xs z-50 flex items-start justify-center pt-24 px-4"
-    onclick={() => (isOpen = false)}
-    role="button"
-    tabindex="-1"
-  >
-    <!-- Modal -->
-    <!-- svelte-ignore a11y_click_events_have_key_events -->
-    <div
-      class="w-full max-w-lg bg-white dark:bg-zinc-900 border border-zinc-200 dark:border-zinc-800 rounded-xl shadow-2xl overflow-hidden flex flex-col"
-      onclick={(e) => e.stopPropagation()}
-      onkeydown={handleKeydown}
-      role="dialog"
+  <div class="fixed inset-0 z-50 flex items-start justify-center px-4 pt-[12vh]">
+    <button
+      type="button"
+      class="absolute inset-0 cursor-default bg-[rgb(20_18_30/0.38)]"
+      aria-label={t('common.close')}
       tabindex="-1"
+      onclick={() => (isOpen = false)}
+    ></button>
+    <div
+      class="relative flex w-full max-w-lg flex-col overflow-hidden rounded-[22px] bg-card shadow-[var(--k-pop)]"
+      role="dialog"
+      aria-modal="true"
+      aria-label={t('shell.search')}
     >
-      <div class="flex items-center gap-3 px-4 py-3 border-b border-zinc-200 dark:border-zinc-800">
-        <Search class="w-4.5 h-4.5 text-zinc-400" />
-        <!-- svelte-ignore a11y_autofocus -->
+      <div class="flex items-center gap-3 border-b border-line px-5">
+        <Search size={18} strokeWidth={2.2} class="shrink-0 text-fg3" />
         <input
-          type="text"
+          bind:this={input}
           bind:value={query}
-          placeholder="Type a command or jump to page..."
-          class="w-full bg-transparent text-sm sm:text-base text-zinc-900 dark:text-zinc-100 placeholder-zinc-400 focus:outline-hidden"
-          autofocus
+          {onkeydown}
+          type="text"
+          role="combobox"
+          aria-expanded="true"
+          aria-controls="palette-list"
+          aria-activedescendant={filtered[active] ? `palette-${active}` : undefined}
+          placeholder={t('palette.placeholder')}
+          class="h-14 w-full bg-transparent text-[15.5px] text-fg outline-none placeholder:text-fg3"
         />
-        <kbd class="px-2 py-0.5 text-xs font-mono bg-zinc-100 dark:bg-zinc-800 border border-zinc-200 dark:border-zinc-700 rounded text-zinc-400">ESC</kbd>
+        <kbd class="shrink-0 font-sans text-[12px] text-fg3">Esc</kbd>
       </div>
-
-      <div class="max-h-80 overflow-y-auto p-2 space-y-1">
+      <div id="palette-list" role="listbox" class="scroll-thin max-h-[52vh] overflow-y-auto p-2">
         {#if filtered.length === 0}
-          <div class="px-3 py-6 text-center text-sm text-zinc-400">No matching commands found</div>
+          <p class="m-0 px-3 py-8 text-center text-[14px] text-fg2">{t('palette.empty')}</p>
         {:else}
-          {#each filtered as item}
-            {@const Icon = item.icon}
+          {#each filtered as command, index (command.id)}
+            {@const Icon = command.icon}
+            {#if index === 0 || filtered[index - 1].group !== command.group}
+              <div class="px-3 pt-2.5 pb-1 text-[12.5px] font-bold text-fg3">{command.group}</div>
+            {/if}
             <button
-              onclick={() => execute(item)}
-              class="w-full flex items-center justify-between px-3.5 py-2.5 rounded-lg text-sm text-zinc-700 dark:text-zinc-300 hover:bg-zinc-100 dark:hover:bg-zinc-800 hover:text-zinc-900 dark:hover:text-zinc-100 transition cursor-pointer text-left"
+              id="palette-{index}"
+              type="button"
+              role="option"
+              aria-selected={index === active}
+              onmousemove={() => (active = index)}
+              onclick={() => run(command)}
+              class="flex h-11 w-full items-center gap-3 rounded-xl px-3 text-left text-[14.5px] font-semibold {index ===
+              active
+                ? 'bg-accent-tint text-accent-fg'
+                : 'text-fg'}"
             >
-              <div class="flex items-center gap-3">
-                <Icon class="w-4 h-4 text-zinc-400" />
-                <span class="font-medium">{item.title}</span>
-              </div>
-              <span class="text-xs font-mono text-zinc-400">{item.category}</span>
+              <Icon size={17} strokeWidth={2.1} class="shrink-0 {index === active ? 'text-accent' : 'text-fg3'}" />
+              <span class="min-w-0 flex-1 truncate">{command.title}</span>
+              {#if index === active}
+                <CornerDownLeft size={15} strokeWidth={2.2} class="shrink-0 text-accent" />
+              {/if}
             </button>
           {/each}
         {/if}

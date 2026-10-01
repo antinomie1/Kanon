@@ -4,9 +4,10 @@ import type { LogLevel, LogRecord } from '../types';
 class LogStore {
   records = $state<LogRecord[]>([]);
   status = $state<WsStatus>('disconnected');
+  /** Records received since the page loaded, including ones the ring buffer has since dropped. */
+  received = $state(0);
   filterLevel = $state<LogLevel | 'ALL'>('ALL');
   searchQuery = $state<string>('');
-  autoScroll = $state<boolean>(true);
 
   private wsBuffer: WsRingBuffer<unknown>;
 
@@ -36,6 +37,7 @@ class LogStore {
             timestamp_ms: rec.timestamp_ms || Date.now(),
           };
           this.records = [...this.records.slice(-999), normalized];
+          this.received++;
         }
       },
       onStatusChange: (status) => {
@@ -52,23 +54,22 @@ class LogStore {
     this.wsBuffer.reconnect();
   }
 
+  /** Whether a record passes the current level filter and search. */
+  matches(rec: LogRecord): boolean {
+    if (!rec?.message) return false;
+    const lvl = rec.level ? String(rec.level).toUpperCase() : 'INFO';
+    if (this.filterLevel !== 'ALL' && lvl !== this.filterLevel) return false;
+    const q = this.searchQuery.trim().toLowerCase();
+    return (
+      !q ||
+      rec.message.toLowerCase().includes(q) ||
+      (rec.target?.toLowerCase().includes(q) ?? false) ||
+      lvl.toLowerCase().includes(q)
+    );
+  }
+
   get filteredRecords(): LogRecord[] {
-    return this.records.filter((rec) => {
-      if (!rec?.message) return false;
-      const lvl = rec.level ? String(rec.level).toUpperCase() : 'INFO';
-      if (this.filterLevel !== 'ALL' && lvl !== this.filterLevel) {
-        return false;
-      }
-      if (this.searchQuery.trim()) {
-        const q = this.searchQuery.toLowerCase();
-        return (
-          rec.message.toLowerCase().includes(q) ||
-          rec.target?.toLowerCase().includes(q) ||
-          lvl.toLowerCase().includes(q)
-        );
-      }
-      return true;
-    });
+    return this.records.filter((rec) => this.matches(rec));
   }
 
   clear() {

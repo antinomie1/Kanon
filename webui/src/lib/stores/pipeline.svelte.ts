@@ -14,6 +14,8 @@ class PipelineStore {
    * monotonic for the lifetime of the page and cannot collide.
    */
   private nextSeq = 0;
+  /** Records received since the page loaded, including ones the ring buffer has since dropped. */
+  received = $state(0);
   status = $state<WsStatus>('disconnected');
   selectedStage = $state<string>('ALL');
   searchQuery = $state<string>('');
@@ -50,6 +52,7 @@ class PipelineStore {
             },
           };
           this.records = [...this.records.slice(-999), normalized];
+          this.received++;
         }
       },
       onStatusChange: (status) => {
@@ -92,41 +95,29 @@ class PipelineStore {
     return counts;
   }
 
+  /** Whether a record passes the current stage filter and search. */
+  matches(rec: TraceRecord): boolean {
+    if (!rec?.event) return false;
+    const stage = rec.event.stage || '';
+    switch (this.selectedStage) {
+      case 'ALL':
+        break;
+      case 'breaker':
+        if (stage !== 'circuit_breaker_tripped') return false;
+        break;
+      case 'ingested':
+        if (stage !== 'ingested') return false;
+        break;
+      default:
+        // The remaining groups (pre_filter, command, llm, tool, outbound) are stage prefixes.
+        if (!stage.startsWith(this.selectedStage)) return false;
+    }
+    const q = this.searchQuery.trim().toLowerCase();
+    return !q || JSON.stringify(rec.event).toLowerCase().includes(q);
+  }
+
   get filteredRecords(): TraceRecord[] {
-    return this.records.filter((rec) => {
-      if (!rec?.event) return false;
-      const stage = rec.event.stage || '';
-      if (this.selectedStage !== 'ALL') {
-        if (
-          this.selectedStage === 'pre_filter' &&
-          !stage.startsWith('pre_filter')
-        )
-          return false;
-        if (this.selectedStage === 'command' && !stage.startsWith('command'))
-          return false;
-        if (this.selectedStage === 'llm' && !stage.startsWith('llm'))
-          return false;
-        if (this.selectedStage === 'tool' && !stage.startsWith('tool'))
-          return false;
-        if (this.selectedStage === 'outbound' && !stage.startsWith('outbound'))
-          return false;
-        if (
-          this.selectedStage === 'breaker' &&
-          stage !== 'circuit_breaker_tripped'
-        )
-          return false;
-        if (this.selectedStage === 'ingested' && stage !== 'ingested')
-          return false;
-      }
-
-      if (this.searchQuery.trim()) {
-        const q = this.searchQuery.toLowerCase();
-        const json = JSON.stringify(rec.event).toLowerCase();
-        return json.includes(q);
-      }
-
-      return true;
-    });
+    return this.records.filter((rec) => this.matches(rec));
   }
 
   clear() {

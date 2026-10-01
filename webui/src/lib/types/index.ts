@@ -1,3 +1,8 @@
+import type { House } from 'lucide-svelte';
+
+/** Any lucide icon component; every icon is generated with the same component type. */
+export type IconComponent = typeof House;
+
 // Node health & metrics types
 export interface MemorySection {
   resident_bytes: number | null;
@@ -720,24 +725,31 @@ export interface MilkyTestReport {
 }
 
 // Sessions & Personas
+/** One tracked conversation, as `GET /api/v1/sessions` lists it. */
 export interface SessionSummary {
-  session_id: string;
-  session_key?: string;
+  /**
+   * Session key. Instance conversations read `instance:<id>:<conversation>#<generation>`, where
+   * the generation grows each time `/new` starts the conversation over.
+   */
+  session_key: string;
+  /** Epoch seconds of the first message. */
+  created_at: number;
+  /** Epoch seconds of the latest message. */
+  last_active_at: number;
   turn_count: number;
   total_tokens_used: number;
-  active_persona?: string;
-  persona_id?: string | null;
-  last_updated_at?: number;
-  last_active_at?: number;
+  /** Persona bound to the session; `null` uses the base assistant. */
+  persona_id: string | null;
 }
 
+/** One page of `GET /api/v1/sessions`, most recently active first. */
 export interface SessionsResponse {
+  items: SessionSummary[];
+  page: number;
+  page_size: number;
+  /** Sessions matching the search, across every page. */
   total: number;
-  items?: SessionSummary[];
-  sessions?: SessionSummary[];
-  page?: number;
-  page_size?: number;
-  total_pages?: number;
+  total_pages: number;
 }
 
 /** Where a persona comes from, which decides who may change it. */
