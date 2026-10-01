@@ -4,7 +4,8 @@ use kanon_adapter_qqofficial::{QqOfficialAdapter, QqOfficialConfig, mapping::EVE
 use kanon_core::PlatformAdapter;
 use kanon_proto::v1::message_segment::Segment;
 use kanon_proto::v1::{
-    AudioSegment, DeliverMessageRequest, ImageSegment, MessageSegment, ReplySegment, TextSegment,
+    AudioSegment, DeliverMessageRequest, FileSegment, ImageSegment, MessageSegment, ReplySegment,
+    TextSegment, VideoSegment,
 };
 
 /// Reply with text, a quote, and a configurable number of native media messages.
@@ -21,10 +22,11 @@ fn reply(scene: &str, event_id: &str, media: usize) -> DeliverMessageRequest {
     ];
     for n in 0..media {
         segments.push(MessageSegment {
-            segment: Some(if n % 2 == 0 {
-                Segment::Image(ImageSegment::default())
-            } else {
-                Segment::Audio(AudioSegment::default())
+            segment: Some(match n % 4 {
+                0 => Segment::Image(ImageSegment::default()),
+                1 => Segment::Audio(AudioSegment::default()),
+                2 => Segment::Video(VideoSegment::default()),
+                _ => Segment::File(FileSegment::default()),
             }),
         });
     }
@@ -77,5 +79,34 @@ fn scenarios_without_a_passive_budget_do_not_create_additional_deliveries() {
             1,
             "splitting must not add text deliveries when media already exhausts the budget"
         );
+    }
+}
+
+#[test]
+fn videos_and_files_reserve_native_messages_including_mixed_attachments() {
+    let adapter = QqOfficialAdapter::new(QqOfficialConfig::default()).unwrap();
+    let video = Segment::Video(VideoSegment::default());
+    let file = Segment::File(FileSegment::default());
+    for attachments in [
+        vec![video.clone()],
+        vec![file.clone()],
+        vec![Segment::Image(ImageSegment::default()), video, file],
+    ] {
+        for (scene, budget) in [("group", 5), ("c2c", 4)] {
+            let mut request = reply(scene, "message-id", 0);
+            request.segments.extend(
+                attachments
+                    .iter()
+                    .cloned()
+                    .map(|segment| MessageSegment {
+                        segment: Some(segment),
+                    }),
+            );
+            assert_eq!(
+                adapter.reply_message_limit(&request),
+                budget - attachments.len(),
+                "text deliveries must leave room for every native attachment in {scene}",
+            );
+        }
     }
 }

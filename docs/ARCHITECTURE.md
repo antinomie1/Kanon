@@ -217,216 +217,27 @@ kanon/
 
 ## 3. 插件清单规范 (Plugin Manifest Spec)
 
-每个插件放置于独立目录下，以静态 `plugin.toml` 声明其所有元数据与静态能力。
+每个插件放置于独立目录下，以静态 `plugin.toml` 声明身份、运行时、入口、优先级、配置 Schema 与可选的平台适配器声明。完整字段说明与示例见 [PLUGIN_GUIDE.md §3](./PLUGIN_GUIDE.md)。
 
-```toml
-[plugin]
-id = "org.kanon.plugin.weather"
-name = "实时天气与穿衣指南"
-version = "1.0.0"
-author = "Kanon Dev"
-description = "提供 /weather 命令并向 LLM 注册天气检索工具"
-runtime = "rust" # "rust" | "python" | "typescript"
-entrypoint = "target/release/weather_plugin" # 或 "main.py" / "src/index.ts"
-isolated = false
+架构层面的约束：
 
-# WebUI 配置项 JSON Schema (核心可不启动子进程直接渲染前端配置表单)
-[config_schema]
-type = "object"
-properties = {
-    api_key = { type = "string", title = "天气服务 API Key", description = "用于请求和风天气等三方服务的凭证" },
-    default_city = { type = "string", title = "默认城市", default = "北京" },
-    enable_cache = { type = "boolean", title = "启用本地响应缓存", default = true }
-}
-required = ["api_key"]
-
-[[commands]]
-name = "weather"
-description = "根据城市名称查询天气"
-usage = "/weather <城市名>"
-priority = 100
-
-[[tools]]
-name = "fetch_weather"
-description = "根据指定城市名称实时获取当前气温、风向与穿衣出行建议"
-parameters = { type = "object", properties = { city = { type = "string", description = "城市名称，例如：北京、上海、杭州" } }, required = ["city"] }
-
-# 平台适配器声明（可选）：声明后本插件成为该平台的适配器
-# 核心据此把 platform 匹配的出站消息路由到本宿主（OnDeliverMessage），
-# 插件侧再通过 BotApiService.IngestEvent 把平台入站消息推回流水线。
-# 能力声明放在静态清单而非 PluginMeta：核心必须在收到第一条消息之前就知道平台归属。
-[adapter]
-platform = "weather_im"
-display_name = "Weather IM Adapter"
-capabilities = ["sender_name", "quote_reply"]   # 可选：声明实现了哪些通用能力（见 9.5）
-```
-
-`plugin.toml` 不声明第三方依赖，出现未知小节（包括旧的 `[dependencies]`）会直接解析失败。Python 插件的依赖写在插件目录的 `pyproject.toml`（附 `uv.lock`），TypeScript 插件写在 `package.json`（附锁文件），由各自的原生工具在插件目录内安装到 `.venv` / `node_modules`。
+- **清单是静态的**：核心无需启动子进程即可据此渲染配置表单、确定平台归属与调度优先级；命令、触发器、工具等运行期能力以握手时的 `GetPluginMeta` 为准，清单中的 `[[commands]]` / `[[tools]]` 仅供控制台离线展示。
+- **严格解析**：未知小节或字段（包括旧的 `[dependencies]`）直接解析失败。
+- **清单不声明依赖**：Python 依赖写在 `pyproject.toml`（附 `uv.lock`），TypeScript 写在 `package.json`（附锁文件），由原生工具安装到插件目录内的 `.venv` / `node_modules`；缺失即 `RuntimeUnavailable`。
 
 ---
 
 ## 4. 通信协议规范 (Protocol Buffers IDL)
 
-协议采用强类型 `oneof` 联合体与 `google.protobuf.Struct` 双模载荷，显著降低 JSON 字符串二次序列化开销与二进制载荷的内存膨胀：
+协议采用强类型 `oneof` 联合体与 `google.protobuf.Struct` 双模载荷，避免 JSON 字符串二次序列化与二进制载荷的内存膨胀。三个服务的分工：
 
-```protobuf
-syntax = "proto3";
-package kanon.plugin.v1;
+| 服务 | 运行在 | 职责 |
+| --- | --- | --- |
+| `PluginHostService` | 宿主 | 存活探测、配置热更新、能力握手、管理动作 |
+| `MessagePipelineService` | 宿主 | 前置过滤、命令/触发器、工具调用、事件通知、出站投递（适配器）、回复装饰 |
+| `BotApiService` | 核心 | 宿主注册、入站事件、回复与主动发送、独立模型调用、平台原生 API |
 
-import "google/protobuf/struct.proto";
-
-// 1. 插件宿主生命周期服务 (运行在 Host 端)
-service PluginHostService {
-  rpc Ping (PingRequest) returns (PingResponse);
-  rpc ReloadPluginConfig (ReloadPluginConfigRequest) returns (ReloadPluginConfigResponse);
-}
-
-// 2. 消息与事件管道服务 (运行在 Host 端，Core 寻址连接各 Host 端点发起调用)
-service MessagePipelineService {
-  rpc OnPreFilter (PipelineEventRequest) returns (PreFilterResult);
-  rpc OnExecuteCommand (CommandExecuteRequest) returns (CommandExecuteResponse);
-  rpc OnCallTool (ToolCallRequest) returns (ToolCallResponse);
-  rpc OnEvent (EventNotification) returns (EventAck);
-  rpc OnDeliverMessage (DeliverMessageRequest) returns (DeliverMessageResponse);
-}
-
-// 3. 核心 API 服务 (运行在 Core 端，监听 core.sock，Host 连接调用)
-service BotApiService {
-  rpc RegisterHost (RegisterHostRequest) returns (RegisterHostResponse);
-  rpc IngestEvent (IngestEventRequest) returns (IngestEventResponse);
-  rpc SendMessage (SendMessageRequest) returns (SendMessageResponse);
-  rpc RequestLLM (LLMRequest) returns (stream LLMChunk);
-  rpc SetStorage (SetStorageRequest) returns (SetStorageResponse);
-  rpc GetStorage (GetStorageRequest) returns (GetStorageResponse);
-}
-
-// --- 强类型消息段定义 (彻底废除 map<string, string> 反模式) ---
-
-message MessageSegment {
-  oneof segment {
-    TextSegment text = 1;
-    ImageSegment image = 2;
-    AudioSegment audio = 3;
-    MentionSegment mention = 4;
-    ReplySegment reply = 5;
-    RawCustomSegment custom = 6;
-  }
-}
-
-message TextSegment {
-  string content = 1;
-}
-
-message ImageSegment {
-  oneof source {
-    string url = 1;
-    string file_path = 2; // 本地物理路径，支持零拷贝直读
-    bytes raw_bytes = 3;  // 裸二进制，避免 base64 膨胀
-  }
-  optional string mime_type = 4;
-  optional string filename = 5;
-}
-
-message AudioSegment {
-  oneof source {
-    string url = 1;
-    string file_path = 2;
-    bytes raw_bytes = 3;
-  }
-  optional int32 duration_seconds = 4;
-}
-
-message MentionSegment {
-  string target_user_id = 1;
-  string display_name = 2;
-  bool is_all = 3;
-}
-
-message ReplySegment {
-  string target_message_id = 1;
-  string snippet = 2;
-}
-
-message RawCustomSegment {
-  string type_name = 1;
-  google.protobuf.Struct payload = 2;
-}
-
-// --- 流水线事件与前置过滤核心定义 (含关键枚举) ---
-
-message PipelineEventRequest {
-  string event_id = 1;
-  string platform = 2;
-  string channel_id = 3;
-  string sender_id = 4;
-  string raw_text = 5;
-  repeated MessageSegment segments = 6;
-  google.protobuf.Struct metadata = 7;
-}
-
-message PreFilterResult {
-  enum Action {
-    PASS = 0;
-    BLOCK = 1;
-    MODIFY = 2;
-  }
-  Action action = 1;
-  string modified_text = 2;
-  repeated MessageSegment reply_messages = 3;
-}
-
-// --- Tool Calling 双模载荷定义 (消除四次序列化损耗) ---
-
-message ToolCallRequest {
-  string call_id = 1;
-  string tool_name = 2;
-  string session_id = 3;
-  oneof payload {
-    google.protobuf.Struct structured_args = 4; // 字典/参数对象零字符串解析
-    bytes raw_bytes = 5;                        // 极速二进制通道
-  }
-}
-
-message ToolCallResponse {
-  string call_id = 1;
-  bool success = 2;
-  string error_message = 3;
-  oneof payload {
-    google.protobuf.Struct structured_result = 4;
-    bytes raw_bytes = 5;
-  }
-}
-
-// --- 插件生命周期与 CAS 配置更新消息 ---
-
-message ReloadPluginConfigRequest {
-  string plugin_id = 1;
-  google.protobuf.Struct config = 2;
-  uint64 version = 3; // CAS 乐观锁版本向量，防止并发覆盖
-}
-
-message ReloadPluginConfigResponse {
-  bool success = 1;
-  string error_message = 2;
-  uint64 applied_version = 3; // 宿主实际生效的配置版本
-}
-
-// --- 平台消息投递消息 ---
-
-message DeliverMessageRequest {
-  string platform = 1;
-  string channel_id = 2;
-  string recipient_id = 3;
-  repeated MessageSegment segments = 4;
-  string event_id = 5; // 全链路追踪与死信队列归档关联 ID
-}
-
-message DeliverMessageResponse {
-  bool success = 1;
-  string message_id = 2;
-  string error_message = 3;
-}
-```
+IDL 唯一事实来源为 [`proto/kanon/v1/plugin.proto`](../proto/kanon/v1/plugin.proto)；逐个 RPC 的语义、时限、错误码与数据类型见 [PLUGIN_API.md](./PLUGIN_API.md)。
 
 ### 4.1 OnPreFilter 拦截链执行顺序与性能预算 (Pipeline Deadline & Priority)
 
@@ -444,106 +255,9 @@ message DeliverMessageResponse {
 
 ## 5. 多语言 SDK 开发者体验规范 (Rust / Python / TypeScript)
 
-### 5.1 Rust SDK 开发形态 (`sdks/rust/kanon-sdk`)
+SDK 只是协议的封装：三语言提供同一套能力（命令、正则触发器、多轮对话、LLM 工具、管理动作、事件订阅、回复装饰，以及回复、主动发送、独立模型调用与平台原生 API），名称按语言习惯调整。能力对照表与三语言示例见 [PLUGIN_GUIDE.md](./PLUGIN_GUIDE.md)。
 
-Rust 插件享有无缝的一等公民支持，天然类型安全，且无需任何 Python/Node 外部运行时：
-
-```rust
-use kanon_sdk::prelude::*;
-
-#[derive(Default)]
-pub struct MathPlugin;
-
-#[async_trait]
-impl Plugin for MathPlugin {
-    async fn on_load(&mut self, ctx: &mut PluginContext) -> KanonResult<()> {
-        println!("Rust 插件已加载，当前工作配置: {:?}", ctx.config);
-        Ok(())
-    }
-}
-
-// 注册命令响应器
-#[command("calc")]
-async fn handle_calc(ctx: Context, expr: String) -> KanonResult<()> {
-    let result = evaluate_math(&expr)?;
-    ctx.reply(vec![MessageSegment::text(format!("【Rust 计算引擎】结果: {}", result))]).await?;
-    Ok(())
-}
-
-// 注册高性能 LLM Tool Calling
-#[tool(name = "fast_prime_check", description = "高性能超大整数素数性检测工具")]
-async fn check_prime(params: PrimeCheckParams) -> KanonResult<serde_json::Value> {
-    let is_p = miller_rabin(params.number);
-    Ok(serde_json::json!({ "number": params.number, "is_prime": is_p }))
-}
-
-#[tokio::main]
-async fn main() -> KanonResult<()> {
-    KanonHost::new(MathPlugin)
-        .register_command(handle_calc)
-        .register_tool(check_prime)
-        .run()
-        .await
-}
-```
-
-### 5.2 Python SDK 开发形态 (`sdks/python/kanon-sdk-python`)
-
-```python
-from kanon_sdk import Plugin, Context, MessageSegment, command, tool
-
-class WeatherPlugin(Plugin):
-    async def on_load(self):
-        # 自动由 Rust 核心下发的配置字典
-        self.api_key = self.config.get("api_key")
-
-    @command("weather")
-    async def handle_weather(self, ctx: Context, city: str = "北京"):
-        """响应 /weather <city> 指令"""
-        weather_text = f"{city}天气晴朗，气温 25℃"
-        await ctx.reply([
-            MessageSegment.text(weather_text)
-        ])
-
-    @tool("fetch_weather")
-    async def fetch_weather_tool(self, city: str) -> dict:
-        """提供给 LLM Function Calling 的结构化工具"""
-        return {
-            "city": city,
-            "condition": "晴朗",
-            "temperature": 25,
-            "advice": "适宜外出活动"
-        }
-```
-
-### 5.3 TypeScript SDK 开发形态 (`sdks/typescript/kanon-sdk-ts`)
-
-```typescript
-import { Plugin, Context, Command, Tool, MessageSegment } from "@kanon/sdk";
-
-export default class GreetingPlugin extends Plugin {
-  @Command("greet")
-  async handleGreet(ctx: Context, name?: string): Promise<void> {
-    const target = name || ctx.sender.name;
-    await ctx.reply([
-      MessageSegment.text(`你好，${target}！来自 Kanon TypeScript 插件的高性能问候。`)
-    ]);
-  }
-
-  @Tool({
-    name: "calculate_tax",
-    description: "计算输入金额的所得税"
-  })
-  async calculateTax(params: { amount: number; rate: number }): Promise<object> {
-    const tax = params.amount * (params.rate / 100);
-    return {
-      gross: params.amount,
-      tax: tax,
-      net: params.amount - tax
-    };
-  }
-}
-```
+**`wait_next` 的实现约束**：核心流水线逐条串行处理消息，绝不阻塞等待插件"听到"下一条消息。因此 SDK 把命令处理器放在独立任务里运行，当前 RPC 只等待处理器的下一个"让出点"：处理器结束，或调用 `wait_next`。`wait_next(t)` 立即结束当前 RPC（携带已收集的回复与 `capture_seconds = t`），核心把同一发送者在同一会话的下一条消息作为 `continuation` 路由回来，SDK 再唤醒挂起的处理器。同一会话的新等待会取代旧等待（旧等待收到超时）；宿主重启后到达的 continuation 会以 `continuation = true` 重新调用命令处理器。没有 RPC 在等待时的回复（例如等待超时后）经 `ReplyMessage` 单独投递。
 
 ---
 
@@ -711,7 +425,8 @@ sequenceDiagram
 | Method | Endpoint | Description |
 | :--- | :--- | :--- |
 | `GET` | `/api/v1/health` | 核心健康状态与基础运行指标 (Memory, Uptime, 插件与会话计数) |
-| `GET` | `/api/v1/plugins` | 查询所有已发现插件清单、运行状态与静态元数据 |
+| `GET` | `/api/v1/plugins` | 查询插件清单、运行状态与静态元数据；目录部分来自最近一次扫描（启动时或手动重新扫描），读取清单本身不扫描磁盘 |
+| `POST` | `/api/v1/plugins/rescan` | 重新扫描 `./plugins` 并返回刷新后的清单；手动放进目录的插件只有经过这一步才会被节点识别 |
 | `GET` | `/api/v1/plugins/{id}/config` | 获取指定插件的配置项当前值、JSON Schema 及当前单调递增版本号 `version` |
 | `PUT` | `/api/v1/plugins/{id}/config` | 校验配置 → 检查 CAS 乐观锁版本向量 → 触发跨进程热重载 → 原子持久化（版本冲突返回 409，宿主拒绝则不落盘） |
 | `POST` | `/api/v1/plugins/{id}/restart` | 重启指定插件所在的宿主进程（依赖 Supervisor 记录的启动配方） |
@@ -929,20 +644,3 @@ sequenceDiagram
 ### 12.5 单机拓扑与容灾边界 (Single-Node Topology & HA Scope)
 - **单节点进程模型**：微内核当前设计为单机单节点运行形态，Supervisor 仅负责管理本机子进程，不包含跨主机心跳、主备选举或分布式协同功能。
 - **高可用建议**：生产部署时建议通过外部进程管理工具（如 `systemd`、Docker Compose 或 Kubernetes）提供进程级与容器级的高可用拉起守护。
-
-### Asynchronous plugin replies and delivery receipts
-
-`BotApiService.ReplyMessage(DeliverMessageRequest)` preserves the original inbound
-`event_id`, platform, channel and recipient. It enters the same bounded outbound
-FIFO and platform circuit breaker as ordinary command replies. Its response is
-the platform adapter delivery result; `success=true` is never queue admission.
-The RPC waits at most 30 seconds. Timeout or disconnection is an unknown outcome;
-callers must not automatically retry or authorize a write based on that failure.
-Canceled requests still waiting in the queue are skipped. In-flight platform I/O
-may already have committed and cannot be assumed undone.
-
-Python plugins use `ctx.core.reply_to(event, segments)` on the existing shared
-Core channel. Return long-running commands promptly, then use this method for
-progress and final replies. `SendMessage` retains its existing proactive-message
-Fast-ACK contract. PreFilter must return within its 30ms chain budget; image
-downloads, local audit writes and business operations belong outside that callback.

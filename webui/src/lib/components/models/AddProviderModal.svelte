@@ -5,9 +5,11 @@ import { modelsStore } from '../../stores/models.svelte';
 import { providersStore } from '../../stores/providers.svelte';
 import { toasts } from '../../stores/toast.svelte';
 import type { ProviderPreset, UpsertProviderRequest } from '../../types';
+import Button from '../ui/Button.svelte';
 import Modal from '../ui/Modal.svelte';
 import SecretInput from '../ui/SecretInput.svelte';
 import Select from '../ui/Select.svelte';
+import TextField from '../ui/TextField.svelte';
 
 /**
  * Connects a new model provider. Picking one of the well-known services fills in its format and
@@ -114,14 +116,15 @@ async function add() {
         <div class="flex flex-wrap gap-2">
           {#each presets as choice (choice.id)}
             {@const on = preset === choice.id}
-            <button
+            <Button
               type="button"
+              variant={on ? 'tonal' : 'outlined'}
+              size="sm"
               aria-pressed={on}
               onclick={() => usePreset(choice)}
-              class="btn btn-sm {on ? 'bg-accent-tint! text-accent-fg! shadow-[inset_0_0_0_2px_var(--k-accent)]' : ''}"
             >
               {choice.name}
-            </button>
+            </Button>
           {/each}
         </div>
         <p class="m-0 mt-2 hint">{t('llm.presets_hint')}</p>
@@ -131,9 +134,9 @@ async function add() {
     <div class="grid gap-4 sm:grid-cols-2">
       <div>
         <label class="label" for="new-provider-name">{t('llm.name')}</label>
-        <input
+        <TextField
           id="new-provider-name"
-          class="input mono"
+          mono
           spellcheck="false"
           autocomplete="off"
           placeholder="openai"
@@ -153,9 +156,9 @@ async function add() {
 
     <div>
       <label class="label" for="new-provider-url">{t('llm.base_url')}</label>
-      <input
+      <TextField
         id="new-provider-url"
-        class="input mono"
+        mono
         spellcheck="false"
         placeholder={protocolInfo?.default_base_url ?? 'https://'}
         bind:value={baseUrl}
@@ -173,16 +176,16 @@ async function add() {
   </form>
 
   {#snippet footer()}
-    <button type="button" class="btn" disabled={providersStore.pending} onclick={onclose}>
+    <Button type="button" disabled={providersStore.pending} onclick={onclose}>
       {t('common.cancel')}
-    </button>
-    <button
+    </Button>
+    <Button
       type="submit"
       form="add-provider"
-      class="btn btn-primary"
+      variant="filled"
       disabled={!name.trim() || providersStore.pending}
     >
       {providersStore.pending ? t('llm.adding') : t('llm.add_provider')}
-    </button>
+    </Button>
   {/snippet}
 </Modal>

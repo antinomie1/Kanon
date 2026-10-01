@@ -17,10 +17,11 @@ use kanon_proto::v1::message_pipeline_service_server::{
 };
 use kanon_proto::v1::plugin_host_service_server::{PluginHostService, PluginHostServiceServer};
 use kanon_proto::v1::{
-    CommandExecuteRequest, CommandExecuteResponse, DeliverMessageRequest, DeliverMessageResponse,
-    EventAck, EventNotification, GetPluginMetaRequest, GetPluginMetaResponse, PipelineEventRequest,
-    PreFilterResult, RegisterHostRequest, ReloadPluginConfigRequest, ReloadPluginConfigResponse,
-    ToolCallRequest, ToolCallResponse,
+    CommandExecuteRequest, CommandExecuteResponse, DecorateReplyRequest, DecorateReplyResult,
+    DeliverMessageRequest, DeliverMessageResponse, EventAck, EventNotification,
+    GetPluginMetaRequest, GetPluginMetaResponse, PipelineEventRequest, PreFilterResult,
+    PrepareTurnRequest, PrepareTurnResult, RegisterHostRequest, ReloadPluginConfigRequest,
+    ReloadPluginConfigResponse, ToolCallRequest, ToolCallResponse,
 };
 use kanon_transport::{IpcListener, connect_ipc};
 
@@ -257,35 +258,9 @@ fn read_stored_config(
     match serde_json::from_str::<serde_json::Value>(&raw)
         .map_err(|err| format!("invalid {}: {err}", path.display()))?
     {
-        serde_json::Value::Object(fields) => Ok(Some(json_struct(fields))),
+        serde_json::Value::Object(fields) => Ok(Some(crate::json::to_struct(fields))),
         _ => Err(format!("{} must contain a JSON object", path.display()).into()),
     }
-}
-
-/// Converts a JSON object into the protobuf `Struct` the plugin API carries.
-fn json_struct(fields: serde_json::Map<String, serde_json::Value>) -> prost_types::Struct {
-    prost_types::Struct {
-        fields: fields
-            .into_iter()
-            .map(|(key, value)| (key, json_value(value)))
-            .collect(),
-    }
-}
-
-/// Converts one JSON value; protobuf numbers are doubles, as they are on the wire.
-fn json_value(value: serde_json::Value) -> prost_types::Value {
-    use prost_types::value::Kind;
-    let kind = match value {
-        serde_json::Value::Null => Kind::NullValue(0),
-        serde_json::Value::Bool(flag) => Kind::BoolValue(flag),
-        serde_json::Value::Number(number) => Kind::NumberValue(number.as_f64().unwrap_or_default()),
-        serde_json::Value::String(text) => Kind::StringValue(text),
-        serde_json::Value::Array(items) => Kind::ListValue(prost_types::ListValue {
-            values: items.into_iter().map(json_value).collect(),
-        }),
-        serde_json::Value::Object(fields) => Kind::StructValue(json_struct(fields)),
-    };
-    prost_types::Value { kind: Some(kind) }
 }
 
 /// Implementation of [`PluginHostService`] for managing host lifecycle and inspection.
@@ -363,16 +338,44 @@ impl<P: Plugin> PluginHostService for HostServiceImpl<P> {
 
     /// Serves a control-plane management action.
     ///
-    /// Actions are the operator-facing counterpart of tools: they are never advertised to the
-    /// model. The Rust SDK does not declare any yet, so an incoming action is answered with an
-    /// explicit `unimplemented` status instead of being silently dropped.
+    /// Failures are answered as `success = false` with the reason, never as a transport error,
+    /// so the console can show the plugin's own explanation.
     async fn invoke_action(
         &self,
-        _request: Request<kanon_proto::v1::PluginActionRequest>,
+        request: Request<kanon_proto::v1::PluginActionRequest>,
     ) -> Result<Response<kanon_proto::v1::PluginActionResponse>, Status> {
-        Err(Status::unimplemented(
-            "This Rust plugin host declares no management actions",
-        ))
+        let request = request.into_inner();
+        let params = request
+            .parameters
+            .map(|params| serde_json::Value::Object(crate::json::from_struct(params)))
+            .unwrap_or(serde_json::Value::Null);
+        let outcome = self
+            .plugin
+            .read()
+            .await
+            .on_invoke_action(&request.action, params)
+            .await;
+        Ok(Response::new(match outcome {
+            Ok(serde_json::Value::Null) => kanon_proto::v1::PluginActionResponse {
+                success: true,
+                ..Default::default()
+            },
+            Ok(serde_json::Value::Object(fields)) => kanon_proto::v1::PluginActionResponse {
+                success: true,
+                error_message: String::new(),
+                result: Some(crate::json::to_struct(fields)),
+            },
+            Ok(_) => kanon_proto::v1::PluginActionResponse {
+                success: false,
+                error_message: format!("action '{}' returned a non-object result", request.action),
+                result: None,
+            },
+            Err(err) => kanon_proto::v1::PluginActionResponse {
+                success: false,
+                error_message: format!("Action failed: {err}"),
+                result: None,
+            },
+        }))
     }
 
     async fn get_plugin_meta(
@@ -422,6 +425,9 @@ impl<P: Plugin> MessagePipelineService for PipelineServiceImpl<P> {
                 success: false,
                 replies: vec![],
                 error_message: e.to_string(),
+                capture_seconds: 0,
+                pass_to_model: false,
+                model_text: None,
             })),
         }
     }
@@ -446,9 +452,43 @@ impl<P: Plugin> MessagePipelineService for PipelineServiceImpl<P> {
 
     async fn on_event(
         &self,
-        _request: Request<EventNotification>,
+        request: Request<EventNotification>,
     ) -> Result<Response<EventAck>, Status> {
+        let plugin = self.plugin.read().await;
+        // Events are fire-and-forget for the core, so a handler failure is only logged here.
+        if let Err(err) = plugin.on_event(request.into_inner()).await {
+            tracing::warn!(error = %err, "Plugin event handler failed");
+        }
         Ok(Response::new(EventAck { received: true }))
+    }
+
+    async fn on_decorate_reply(
+        &self,
+        request: Request<DecorateReplyRequest>,
+    ) -> Result<Response<DecorateReplyResult>, Status> {
+        let plugin = self.plugin.read().await;
+        match plugin.on_decorate_reply(request.into_inner()).await {
+            Ok(Some(segments)) => Ok(Response::new(DecorateReplyResult {
+                modified: true,
+                segments,
+            })),
+            Ok(None) => Ok(Response::new(DecorateReplyResult::default())),
+            // A failed decorator must not eat the reply: report an error and the core keeps the
+            // reply as it was.
+            Err(err) => Err(Status::internal(err.to_string())),
+        }
+    }
+
+    async fn on_prepare_turn(
+        &self,
+        request: Request<PrepareTurnRequest>,
+    ) -> Result<Response<PrepareTurnResult>, Status> {
+        let plugin = self.plugin.read().await;
+        match plugin.on_prepare_turn(request.into_inner()).await {
+            Ok(text) => Ok(Response::new(PrepareTurnResult { text })),
+            // Reported as an error so the core logs it; the turn goes ahead without this context.
+            Err(err) => Err(Status::internal(err.to_string())),
+        }
     }
 
     async fn on_deliver_message(

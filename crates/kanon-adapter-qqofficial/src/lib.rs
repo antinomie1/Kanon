@@ -25,7 +25,7 @@ use kanon_core::{AdapterError, Capability, EventIngress, PlatformAdapter};
 use kanon_proto::v1::message_segment::Segment;
 use kanon_proto::v1::{
     DeliverMessageRequest, DeliverMessageResponse, PipelineEventRequest, audio_segment,
-    image_segment,
+    file_segment, image_segment, video_segment,
 };
 use serde::Serialize;
 use serde_json::{Value, json};
@@ -386,7 +386,12 @@ impl PlatformAdapter for QqOfficialAdapter {
             .filter(|segment| {
                 matches!(
                     segment.segment.as_ref(),
-                    Some(Segment::Image(_) | Segment::Audio(_)),
+                    Some(
+                        Segment::Image(_)
+                            | Segment::Audio(_)
+                            | Segment::Video(_)
+                            | Segment::File(_)
+                    ),
                 )
             })
             .count();
@@ -509,6 +514,38 @@ impl PlatformAdapter for QqOfficialAdapter {
                         }))
                         .await?,
                 }),
+                Some(Segment::Video(video)) => media.push(Media {
+                    kind: MediaKind::Video,
+                    name: video.filename.clone(),
+                    source: self
+                        .media_source(video.source.as_ref().map(|source| match source {
+                            video_segment::Source::Url(url) => Source::Url(url),
+                            video_segment::Source::FilePath(path) => Source::Path(path),
+                            video_segment::Source::RawBytes(bytes) => Source::Bytes(bytes),
+                        }))
+                        .await?,
+                }),
+                Some(Segment::File(file)) => {
+                    if file.name.is_empty() {
+                        return Err(self.delivery_error("file segment has no name"));
+                    }
+                    media.push(Media {
+                        kind: MediaKind::File,
+                        name: Some(file.name.clone()),
+                        source: self
+                            .media_source(file.source.as_ref().map(|source| match source {
+                                file_segment::Source::Url(url) => Source::Url(url),
+                                file_segment::Source::FilePath(path) => Source::Path(path),
+                                file_segment::Source::RawBytes(bytes) => Source::Bytes(bytes),
+                            }))
+                            .await?,
+                    });
+                }
+                // The open API has no plain emoji segment; failing beats sending the message
+                // without it.
+                Some(Segment::Face(_)) => {
+                    return Err(self.delivery_error("QQ Official cannot send face segments"));
+                }
                 Some(Segment::Custom(custom)) => {
                     return Err(self.delivery_error(format!(
                         "QQ Official cannot send custom segment '{}'",

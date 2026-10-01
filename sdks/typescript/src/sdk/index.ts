@@ -11,6 +11,18 @@ import * as path from "node:path";
 import * as grpc from "@grpc/grpc-js";
 import * as protoLoader from "@grpc/proto-loader";
 
+import {
+  CommandEvent,
+  Conversations,
+  MessageEvent,
+  Session,
+  Turn,
+  WaitTimeoutError,
+  runTurn,
+} from "./event.js";
+import { LlmMessage, MessageSegmentItem, Replyable, toSegments } from "./segments.js";
+import { fromProtoStruct, fromProtoValue, toProtoStruct } from "./struct.js";
+
 export interface PluginContext {
   /** Dedicated filesystem directory for this plugin's local persistent storage. */
   dataDir: string;
@@ -121,6 +133,21 @@ interface BotApiServiceClient {
   ): grpc.ClientUnaryCall;
   waitForReady(deadline: grpc.Deadline, callback: (error?: Error) => void): void;
   close(): void;
+  /** Other unary and streaming methods, called by name; see the `CoreHandle` wrappers. */
+  [method: string]: any;
+}
+
+/** Options of {@link CoreHandle.requestLlm}; set exactly one of `prompt` and `messages`. */
+export interface LlmRequestOptions {
+  /** A single user turn. */
+  prompt?: string;
+  /** A whole exchange, oldest first (see `llmMessage`). */
+  messages?: LlmMessage[];
+  systemPrompt?: string;
+  /** `<provider>/<model-id>`; empty uses the node's default model. */
+  model?: string;
+  temperature?: number;
+  maxTokens?: number;
 }
 
 /**
@@ -252,6 +279,162 @@ export class CoreHandle {
       // Echoed by the Core; the SDK does not invent an id the Core never acknowledged.
       eventId: response.event_id ?? "",
     };
+  }
+
+  /**
+   * Replies to an inbound event and waits for the platform's delivery result
+   * (`BotApiService.ReplyMessage`).
+   *
+   * Success here is the adapter's delivery outcome, not mere queue admission. An RPC failure or
+   * timeout is ambiguous — the message may have gone out — so never retry a reply automatically.
+   *
+   * @param event The `PipelineEventRequest` being answered.
+   * @param content Text, a segment, or a list of either.
+   */
+  async replyTo(event: any, content: Replyable): Promise<any> {
+    return this.unary(
+      "ReplyMessage",
+      {
+        platform: event.platform,
+        channel_id: event.channel_id,
+        recipient_id: event.sender_id,
+        event_id: event.event_id,
+        segments: toSegments(content),
+      },
+      35_000,
+    );
+  }
+
+  /**
+   * Sends a message on the bot's own initiative: reminders, broadcasts, subscriptions
+   * (`BotApiService.SendMessage`).
+   *
+   * Success means Core accepted the message into its outbound queue, not that the platform
+   * delivered it; use {@link replyTo} when the delivery outcome matters.
+   *
+   * @param channelId Conversation to send to, as events report it (`"group:123"`).
+   */
+  async sendMessage(
+    platform: string,
+    channelId: string,
+    content: Replyable,
+    recipientId = "",
+  ): Promise<{ success: boolean; accepted: boolean; message_id: string; error_message: string }> {
+    return this.unary("SendMessage", {
+      platform,
+      channel_id: channelId,
+      recipient_id: recipientId,
+      segments: toSegments(content),
+    });
+  }
+
+  /**
+   * Asks the node's model one question and returns the complete answer.
+   *
+   * The call is independent of every chat conversation: nothing is read from or written to any
+   * session's memory. Pass a prompt string (one user turn) or `messages` (a whole exchange,
+   * oldest first; see `llmMessage`).
+   *
+   * @throws A gRPC error: `UNAVAILABLE` when the node has no model configured,
+   *   `INVALID_ARGUMENT` for messages the model cannot take.
+   */
+  async requestLlm(prompt: string | LlmRequestOptions): Promise<string> {
+    let answer = "";
+    for await (const delta of this.streamLlm(prompt)) {
+      answer += delta;
+    }
+    return answer;
+  }
+
+  /** Like {@link requestLlm}, but yields the answer as it is generated. */
+  async *streamLlm(prompt: string | LlmRequestOptions): AsyncGenerator<string> {
+    const options: LlmRequestOptions = typeof prompt === "string" ? { prompt } : prompt;
+    if ((options.prompt === undefined) === (options.messages === undefined)) {
+      throw new Error("pass exactly one of prompt and messages");
+    }
+    const request: Record<string, any> = {
+      model: options.model ?? "",
+      system_prompt: options.systemPrompt ?? "",
+      messages:
+        options.prompt !== undefined
+          ? [{ role: "LLM_ROLE_USER", text: options.prompt, images: [] }]
+          : options.messages,
+    };
+    // Optional scalars: leaving them unset keeps the provider's own defaults.
+    if (options.temperature !== undefined) {
+      request.temperature = options.temperature;
+    }
+    if (options.maxTokens !== undefined) {
+      request.max_tokens = options.maxTokens;
+    }
+    // A grpc-js server stream is an async iterable; a stream error surfaces as a throw here.
+    for await (const chunk of this.client.RequestLLM(request)) {
+      if (chunk?.delta_text) {
+        yield chunk.delta_text as string;
+      }
+    }
+  }
+
+  /**
+   * Calls one action of a built-in adapter's platform API and returns its result
+   * (`BotApiService.CallPlatformApi`).
+   *
+   * This reaches what the generic contract does not model, e.g. OneBot's
+   * `get_group_member_list` or Milky's `set_group_member_mute`. The result is plain JSON data;
+   * `null` when the action returns nothing.
+   *
+   * @throws A gRPC error: `NOT_FOUND` for an unknown platform, `UNIMPLEMENTED` when the adapter
+   *   offers no API, `UNAVAILABLE` when the platform refused the call.
+   */
+  async callPlatformApi(
+    platform: string,
+    action: string,
+    params: Record<string, any> = {},
+  ): Promise<any> {
+    const response = await this.unary("CallPlatformApi", {
+      platform,
+      action,
+      params: toProtoStruct(params),
+    });
+    return response?.result ? fromProtoValue(response.result) : null;
+  }
+
+  /**
+   * Reads the model conversation `event` belongs to (`BotApiService.GetConversationHistory`):
+   * the same session the model would continue when answering it.
+   *
+   * Only user and assistant turns are returned; tool calls, tool results and the model's
+   * reasoning are left out. History is read-only.
+   *
+   * @param event A {@link MessageEvent} or a raw `PipelineEventRequest`.
+   * @param limit Keep only this many of the most recent messages; 0 keeps all.
+   * @throws `NOT_FOUND` when no bot instance answers on the platform, `UNAVAILABLE` when no
+   *   model is configured.
+   */
+  async conversationHistory(event: any, limit = 0): Promise<ConversationHistory> {
+    const raw = event instanceof MessageEvent ? event.raw : event;
+    const response = await this.unary("GetConversationHistory", { context: raw, limit });
+    return {
+      sessionId: response?.session_id ?? "",
+      summary: response?.summary ?? "",
+      messages: (response?.messages ?? []).map((message: any) => ({
+        role: message.role === "LLM_ROLE_ASSISTANT" ? "assistant" : "user",
+        text: message.text ?? "",
+      })),
+    };
+  }
+
+  /** Issues one unary RPC on the shared channel. */
+  private unary(method: string, request: any, timeoutMs?: number): Promise<any> {
+    return new Promise((resolve, reject) => {
+      const callback = (error: grpc.ServiceError | null, value?: any) =>
+        error ? reject(error) : resolve(value);
+      if (timeoutMs === undefined) {
+        this.client[method](request, callback);
+      } else {
+        this.client[method](request, { deadline: Date.now() + timeoutMs }, callback);
+      }
+    });
   }
 
   /**
@@ -423,19 +606,89 @@ export function loadKanonProto(): grpc.GrpcObject {
   return cachedProtoDescriptor;
 }
 
+/** Access levels a command or trigger may declare; the operator's command policy overrides them. */
+export type CommandAccess = "everyone" | "admins_in_groups" | "admins";
+
+const ACCESS_LEVELS: Record<CommandAccess, string> = {
+  everyone: "COMMAND_ACCESS_EVERYONE",
+  admins_in_groups: "COMMAND_ACCESS_ADMINS_IN_GROUPS",
+  admins: "COMMAND_ACCESS_ADMINS",
+};
+
+/** Lifecycle events a plugin may subscribe to with {@link OnEvent}. */
+export type EventKind = "message_sent" | "notice" | "llm_response";
+
+const EVENT_KINDS: Record<EventKind, string> = {
+  message_sent: "EVENT_KIND_MESSAGE_SENT",
+  notice: "EVENT_KIND_NOTICE",
+  llm_response: "EVENT_KIND_LLM_RESPONSE",
+};
+
+/** Conversation kinds a command or trigger may be limited to. */
+export type ConversationKind = "private" | "group" | "channel";
+
+const CONVERSATION_KINDS: Record<ConversationKind, string> = {
+  private: "CONVERSATION_KIND_PRIVATE",
+  group: "CONVERSATION_KIND_GROUP",
+  channel: "CONVERSATION_KIND_CHANNEL",
+};
+
+/** Platform and conversation-kind limits of a command or trigger; empty lists allow all. */
+export interface ScopeOptions {
+  /** Platforms the handler answers on. Elsewhere Core treats it as undeclared. */
+  platforms?: string[];
+  /** Conversation kinds the handler answers in. */
+  conversationKinds?: ConversationKind[];
+}
+
+/** Validates scope options and converts them to their wire form. */
+function scopeValue(options?: ScopeOptions): {
+  platforms: string[];
+  conversation_kinds: string[];
+} {
+  return {
+    platforms: [...(options?.platforms ?? [])],
+    conversation_kinds: (options?.conversationKinds ?? []).map((kind) => {
+      const value = CONVERSATION_KINDS[kind];
+      if (!value) {
+        throw new Error(`unknown conversation kind '${kind}'`);
+      }
+      return value;
+    }),
+  };
+}
+
+/** Wire shape of `CommandMeta`. */
 export interface CommandMeta {
   name: string;
   description?: string;
   usage?: string;
   priority?: number;
+  aliases?: string[];
+  access?: string;
+  platforms?: string[];
+  conversation_kinds?: string[];
 }
 
+/** Wire shape of `TriggerMeta`. */
+export interface TriggerMeta {
+  name: string;
+  description?: string;
+  pattern: string;
+  priority?: number;
+  access?: string;
+  platforms?: string[];
+  conversation_kinds?: string[];
+}
+
+/** Wire shape of `ToolMeta`. */
 export interface ToolMeta {
   name: string;
   description?: string;
   parameters?: Record<string, any>;
 }
 
+/** Wire shape of `PluginMeta`. */
 export interface PluginMeta {
   id: string;
   name: string;
@@ -444,97 +697,166 @@ export interface PluginMeta {
   description?: string;
   commands?: CommandMeta[];
   tools?: ToolMeta[];
+  triggers?: TriggerMeta[];
+  events?: string[];
+  decorates_replies?: boolean;
+  prepares_turns?: boolean;
 }
 
-export interface MessageSegmentItem {
-  text?: { content: string };
-  image?: {
-    url?: string;
-    file_path?: string;
-    raw_bytes?: Buffer | Uint8Array;
-    mime_type?: string;
-    filename?: string;
-  };
-  audio?: {
-    url?: string;
-    file_path?: string;
-    raw_bytes?: Buffer | Uint8Array;
-    duration_seconds?: number;
-  };
-  mention?: {
-    target_user_id: string;
-    display_name?: string;
-    is_all?: boolean;
-  };
-  reply?: {
-    target_message_id: string;
-    snippet?: string;
-  };
-  custom?: {
-    type_name: string;
-    payload?: Record<string, any>;
-  };
+/** A model conversation as returned by {@link CoreHandle.conversationHistory}. */
+export interface ConversationHistory {
+  /** The session the conversation is stored under (stable until `/new`). */
+  sessionId: string;
+  /** Summary of compacted older turns; `""` if never compacted. */
+  summary: string;
+  /** Oldest first. */
+  messages: Array<{ role: "user" | "assistant"; text: string }>;
 }
 
-export class MessageSegment {
-  /** Creates a plain text message segment. */
-  static text(content: string): MessageSegmentItem {
-    return { text: { content } };
-  }
+/** A reply about to be delivered, as seen by a {@link DecorateReply} handler. */
+export interface Reply {
+  /** The message being answered. */
+  event: MessageEvent;
+  /** The reply's segments. */
+  segments: MessageSegmentItem[];
+  /** `"llm"` for a model answer, `"command"` for a command or trigger answer. */
+  source: "llm" | "command" | "";
+  /** The command or trigger name when `source === "command"`. */
+  command: string;
+}
 
-  /** Creates an image message segment referencing a remote URL. */
-  static imageUrl(
-    url: string,
-    mimeType?: string,
-    filename?: string,
-  ): MessageSegmentItem {
-    return {
-      image: {
-        url,
-        mime_type: mimeType,
-        filename,
-      },
+/** Declarations collected by the decorators, kept per class. */
+interface Declarations {
+  commands: Array<CommandMeta & { methodName: string | symbol }>;
+  triggers: Array<TriggerMeta & { methodName: string | symbol }>;
+  tools: Array<ToolMeta & { methodName: string | symbol }>;
+  actions: Array<{ name: string; methodName: string | symbol }>;
+  events: Array<{ kind: EventKind; methodName: string | symbol }>;
+  decorator?: string | symbol;
+  preparer?: string | symbol;
+}
+
+const DECLARATIONS = Symbol("kanon.declarations");
+
+/**
+ * Returns the declarations of `prototype`'s own class, starting from a copy of its parent's.
+ *
+ * Copying instead of sharing keeps a subclass's decorators from leaking into its base class
+ * and into sibling subclasses.
+ */
+function declarations(prototype: any): Declarations {
+  if (!Object.prototype.hasOwnProperty.call(prototype, DECLARATIONS)) {
+    const inherited: Declarations | undefined = prototype[DECLARATIONS];
+    prototype[DECLARATIONS] = {
+      commands: [...(inherited?.commands ?? [])],
+      triggers: [...(inherited?.triggers ?? [])],
+      tools: [...(inherited?.tools ?? [])],
+      actions: [...(inherited?.actions ?? [])],
+      events: [...(inherited?.events ?? [])],
+      decorator: inherited?.decorator,
+      preparer: inherited?.preparer,
     };
   }
-
-  /** Creates an image message segment referencing a local physical file. */
-  static imageFile(
-    filePath: string,
-    mimeType?: string,
-    filename?: string,
-  ): MessageSegmentItem {
-    return {
-      image: {
-        file_path: filePath,
-        mime_type: mimeType,
-        filename,
-      },
-    };
-  }
+  return prototype[DECLARATIONS];
 }
 
-/** Decorator for declaring command handler methods. */
+function accessValue(level: CommandAccess | undefined): string {
+  const value = ACCESS_LEVELS[level ?? "everyone"];
+  if (!value) {
+    throw new Error(`unknown access level '${level}'`);
+  }
+  return value;
+}
+
+/**
+ * Declares a slash command handler.
+ *
+ * The handler receives a {@link CommandEvent} and its arguments, and answers by returning text
+ * or segments, or with `await event.reply(...)`.
+ *
+ * @param name Command name without the slash.
+ * @param options.aliases Other names that invoke the command; the handler always sees `name`.
+ * @param options.access Default access level, which the operator can override.
+ * @param options.priority Lower wins when several plugins declare the same name.
+ * @param options.platforms Platforms the command answers on; empty means all. Elsewhere Core
+ *   treats it as undeclared, so another plugin's command of the same name may answer.
+ * @param options.conversationKinds Conversation kinds the command answers in; empty means all.
+ */
 export function Command(
   name: string,
-  options?: { description?: string; usage?: string; priority?: number },
+  options?: {
+    description?: string;
+    usage?: string;
+    priority?: number;
+    aliases?: string[];
+    access?: CommandAccess;
+  } & ScopeOptions,
 ): MethodDecorator {
-  return (
-    target: any,
-    propertyKey: string | symbol,
-    descriptor: PropertyDescriptor,
-  ) => {
-    target._kanon_commands = target._kanon_commands || [];
-    target._kanon_commands.push({
+  const access = accessValue(options?.access);
+  const scope = scopeValue(options);
+  return (target: any, propertyKey: string | symbol) => {
+    const canonical = name.replace(/^\//, "");
+    declarations(target).commands.push({
       methodName: propertyKey,
-      name,
-      description: options?.description || "",
-      usage: options?.usage || `/${name}`,
-      priority: options?.priority || 500,
+      name: canonical,
+      description: options?.description ?? "",
+      usage: options?.usage ?? `/${canonical}`,
+      priority: options?.priority ?? 500,
+      aliases: (options?.aliases ?? []).map((alias) => alias.replace(/^\//, "")),
+      access,
+      ...scope,
     });
   };
 }
 
-/** Decorator for declaring LLM tool calling methods. */
+/**
+ * Declares a handler for plain messages matching a regular expression.
+ *
+ * Core matches the pattern (Rust `regex` syntax, which shares JavaScript's common subset)
+ * against the message text; the handler's `event.args` holds the capture groups, with `""` for
+ * a group that did not participate. Triggers run after slash commands and before the model.
+ *
+ * @param pattern Regular expression; anchor it (`^...$`) unless it may match anywhere.
+ * @param options.name Name used for routing and logs; defaults to the method name.
+ * @param options.description Shown in `/help`; leave empty to keep the trigger unlisted.
+ * @param options.platforms As for {@link Command}; elsewhere the trigger never matches.
+ * @param options.conversationKinds As for {@link Command}.
+ */
+export function Trigger(
+  pattern: string,
+  options?: {
+    name?: string;
+    description?: string;
+    priority?: number;
+    access?: CommandAccess;
+  } & ScopeOptions,
+): MethodDecorator {
+  const access = accessValue(options?.access);
+  const scope = scopeValue(options);
+  // Validate early: a pattern JavaScript rejects is almost certainly a mistake, and an invalid
+  // pattern would otherwise only show up as a warning in Core's log.
+  new RegExp(pattern);
+  return (target: any, propertyKey: string | symbol) => {
+    declarations(target).triggers.push({
+      methodName: propertyKey,
+      name: options?.name ?? String(propertyKey),
+      description: options?.description ?? "",
+      pattern,
+      priority: options?.priority ?? 500,
+      access,
+      ...scope,
+    });
+  };
+}
+
+/**
+ * Declares an LLM tool call handler.
+ *
+ * The handler receives the model's arguments and the {@link MessageEvent} the model was
+ * answering (`undefined` when the call did not come from a chat message), so a tool knows who
+ * asked without trusting the model to pass it along. Operator-only operations belong in
+ * {@link Action} instead.
+ */
 export function Tool(
   nameOrOptions:
     | string
@@ -544,23 +866,98 @@ export function Tool(
         parameters?: Record<string, any>;
       },
 ): MethodDecorator {
-  return (
-    target: any,
-    propertyKey: string | symbol,
-    descriptor: PropertyDescriptor,
-  ) => {
-    target._kanon_tools = target._kanon_tools || [];
+  return (target: any, propertyKey: string | symbol) => {
     const info =
       typeof nameOrOptions === "string"
         ? { name: nameOrOptions, description: "", parameters: undefined }
         : nameOrOptions;
-    target._kanon_tools.push({
+    declarations(target).tools.push({
       methodName: propertyKey,
       name: info.name,
-      description: info.description || "",
+      description: info.description ?? "",
       parameters: info.parameters,
     });
   };
+}
+
+/**
+ * Declares a management action invoked by the control plane
+ * (`POST /api/v1/plugins/{id}/actions/{action}`).
+ *
+ * Actions are never advertised to the model, so credential binding and similar flows cannot
+ * be triggered by a chat message. The handler receives the parameters and returns a JSON
+ * object (or nothing).
+ */
+export function Action(name: string): MethodDecorator {
+  return (target: any, propertyKey: string | symbol) => {
+    declarations(target).actions.push({ name, methodName: propertyKey });
+  };
+}
+
+/**
+ * Subscribes a handler to a lifecycle event.
+ *
+ * - `"message_sent"`: the `MessageSentEvent` for every message the bot delivered;
+ * - `"notice"`: a {@link MessageEvent} for a platform notice (join, poke, recall, ...);
+ * - `"llm_response"`: the `LlmResponseEvent` with the model's answer and the message it answered.
+ *
+ * Events are notifications: Core never waits on them and ignores the return value.
+ */
+export function OnEvent(kind: EventKind): MethodDecorator {
+  if (!EVENT_KINDS[kind]) {
+    throw new Error(`unknown event kind '${kind}'`);
+  }
+  return (target: any, propertyKey: string | symbol) => {
+    declarations(target).events.push({ kind, methodName: propertyKey });
+  };
+}
+
+/**
+ * Marks the plugin's reply decorator.
+ *
+ * The handler receives a {@link Reply} and returns `undefined` to leave it alone, or new
+ * content to replace it; an empty list suppresses the reply. Core gives each decorator three
+ * seconds and keeps the reply unchanged if it fails or times out. Decoration never changes
+ * what the model remembers saying.
+ */
+export function DecorateReply(): MethodDecorator {
+  return (target: any, propertyKey: string | symbol) => {
+    const declared = declarations(target);
+    if (declared.decorator !== undefined && declared.decorator !== propertyKey) {
+      throw new Error("a plugin may declare only one @DecorateReply handler");
+    }
+    declared.decorator = propertyKey;
+  };
+}
+
+/**
+ * Marks the plugin's turn preparer.
+ *
+ * Before the model answers a message, the handler receives the {@link MessageEvent} and the
+ * conversation's session id and returns text to prepend to the current user message (retrieved
+ * knowledge, long-term memory); `undefined` or `""` adds nothing. The text never reaches the
+ * system prompt, so the cached request prefix stays stable, and it becomes part of the
+ * conversation history. Core gives each preparer three seconds and goes ahead without it on
+ * error or timeout.
+ */
+export function PrepareTurn(): MethodDecorator {
+  return (target: any, propertyKey: string | symbol) => {
+    const declared = declarations(target);
+    if (declared.preparer !== undefined && declared.preparer !== propertyKey) {
+      throw new Error("a plugin may declare only one @PrepareTurn handler");
+    }
+    declared.preparer = propertyKey;
+  };
+}
+
+/** Whether a handler's return value is a command response rather than reply content. */
+function isCommandResponse(value: any): boolean {
+  return (
+    value !== null &&
+    typeof value === "object" &&
+    !Array.isArray(value) &&
+    ("success" in value || "replies" in value || "error_message" in value)
+  );
 }
 
 /** Base class for Kanon out-of-process TypeScript plugins. */
@@ -571,36 +968,58 @@ export abstract class Plugin {
   author: string = "Kanon Dev";
   description: string = "Default TypeScript plugin";
   priority: number = 500;
+  /** Event kinds to subscribe to besides those of `@OnEvent` handlers (for `onEvent` overrides). */
+  events: EventKind[] = [];
 
+  /** Set by the host before `onLoad`, so overriding `onLoad` without `super` is fine. */
   context?: PluginContext;
+
+  private readonly conversations = new Conversations();
+
+  /** The host's Core handle, or `undefined` in standalone mode. */
+  get core(): CoreHandle | undefined {
+    return this.context?.core;
+  }
+
+  /** The declarations of this plugin's class, validated. */
+  private declared(): Declarations {
+    const declared = declarations(Object.getPrototypeOf(this));
+    // Core sends commands and triggers through the same RPC, naming either in `command`, so
+    // the two share one namespace.
+    const commandNames = new Set(declared.commands.map((c) => c.name));
+    const clash = declared.triggers.filter((t) => commandNames.has(t.name)).map((t) => t.name);
+    if (clash.length > 0) {
+      throw new Error(`names used by both a command and a trigger: ${clash.join(", ")}`);
+    }
+    return declared;
+  }
 
   /** Returns static metadata describing this plugin's identity, commands, and tools. */
   meta(): PluginMeta {
-    const proto = Object.getPrototypeOf(this);
-    const declaredCommands: any[] = proto._kanon_commands || [];
-    const declaredTools: any[] = proto._kanon_tools || [];
-
-    const commands: CommandMeta[] = declaredCommands.map((c) => ({
-      name: c.name,
-      description: c.description,
-      usage: c.usage,
-      priority: c.priority,
-    }));
-
-    const tools: ToolMeta[] = declaredTools.map((t) => ({
-      name: t.name,
-      description: t.description,
-      parameters: t.parameters ? (toProtoStruct(t.parameters) as any) : undefined,
-    }));
-
+    const declared = this.declared();
+    const strip = <T extends { methodName: unknown }>({ methodName, ...rest }: T) => rest;
+    const kinds = new Set<EventKind>([...declared.events.map((e) => e.kind), ...this.events]);
     return {
       id: this.id,
       name: this.name,
       version: this.version,
       author: this.author,
       description: this.description,
-      commands,
-      tools,
+      commands: declared.commands.map(strip),
+      triggers: declared.triggers.map(strip),
+      tools: declared.tools.map((t) => ({
+        name: t.name,
+        description: t.description,
+        parameters: t.parameters ? toProtoStruct(t.parameters) : undefined,
+      })),
+      events: [...kinds].map((kind) => {
+        if (!EVENT_KINDS[kind]) {
+          throw new Error(`unknown event kind '${kind}' in ${this.id}.events`);
+        }
+        return EVENT_KINDS[kind];
+      }),
+      decorates_replies: declared.decorator !== undefined,
+      prepares_turns: declared.preparer !== undefined,
     };
   }
 
@@ -629,85 +1048,203 @@ export abstract class Plugin {
     return null;
   }
 
-  /** Executes a matched slash command. */
+  /**
+   * Runs a command, trigger or continuation and answers once the handler yields.
+   *
+   * A continuation resumes the handler suspended in `waitNext` for this conversation; if none
+   * is waiting (the plugin captured with an explicit `capture_seconds`, or the host restarted),
+   * the handler named by `req.command` is called with `continuation` set.
+   */
   async onExecuteCommand(req: any): Promise<any> {
-    const proto = Object.getPrototypeOf(this);
-    const declaredCommands: any[] = proto._kanon_commands || [];
-    const entry = declaredCommands.find((c) => c.name === req.command);
-
-    if (entry && typeof (this as any)[entry.methodName] === "function") {
-      const res = await (this as any)[entry.methodName](req, req.args);
-      if (typeof res === "string") {
-        return {
-          success: true,
-          replies: [MessageSegment.text(res)],
-          error_message: "",
-        };
-      } else if (Array.isArray(res)) {
-        return {
-          success: true,
-          replies: res,
-          error_message: "",
-        };
-      } else if (res && typeof res === "object") {
-        return {
-          success: res.success ?? true,
-          replies: res.replies || [],
-          error_message: res.error_message || "",
-        };
+    if (req.continuation) {
+      const key = new MessageEvent(req.context ?? {}).conversationKey;
+      const waiting = this.conversations.take(key);
+      if (waiting) {
+        const [session, next] = waiting;
+        const turn = (session.turn = new Turn());
+        next.resolve(new CommandEvent(req, this.core, session));
+        return runTurn(turn);
       }
-      return { success: true, replies: [], error_message: "" };
     }
 
-    return {
-      success: false,
-      replies: [],
-      error_message: `Unknown command: ${req.command}`,
-    };
+    const declared = this.declared();
+    const entry =
+      declared.commands.find((c) => c.name === req.command) ??
+      declared.triggers.find((t) => t.name === req.command);
+    const handler = entry && (this as any)[entry.methodName];
+    if (typeof handler !== "function") {
+      return {
+        success: false,
+        replies: [],
+        error_message: `Unknown command: ${req.command}`,
+        capture_seconds: 0,
+      };
+    }
+
+    const session = new Session(this.conversations);
+    const turn = (session.turn = new Turn());
+    const event = new CommandEvent(req, this.core, session);
+    // Not awaited: the handler may outlive this RPC by suspending in waitNext. runHandler never
+    // rejects, so nothing is left unhandled.
+    void this.runHandler(handler.bind(this), event, session);
+    return runTurn(turn);
+  }
+
+  /** Runs one command handler to completion, across as many turns as it takes. */
+  private async runHandler(
+    handler: (event: CommandEvent, args: string[]) => any,
+    event: CommandEvent,
+    session: Session,
+  ): Promise<void> {
+    let result: any;
+    try {
+      result = await handler(event, event.args);
+      if (isCommandResponse(result)) {
+        // An explicit response: its replies join the turn and its fields are honoured.
+        await event.reply(result.replies ?? []);
+        if (result.pass_to_model) {
+          event.passToModel(result.model_text ?? undefined);
+        }
+        session.turn?.finish(
+          Number(result.capture_seconds ?? 0),
+          result.success ?? true,
+          result.error_message ?? "",
+        );
+        return;
+      }
+      if (result !== undefined && result !== null) {
+        await event.reply(result);
+      }
+      session.turn?.finish();
+    } catch (err: any) {
+      if (err instanceof WaitTimeoutError) {
+        // The user never answered a waitNext; nothing is waiting for this handler anymore.
+        session.turn?.finish();
+      } else if (session.turn) {
+        session.turn.finish(0, false, err?.message ?? String(err));
+      } else {
+        console.error(`[kanon-sdk] command '${event.command}' failed:`, err);
+      }
+    }
   }
 
   /** Executes an LLM tool call dispatched by the Core microkernel. */
   async onCallTool(req: any): Promise<any> {
-    const proto = Object.getPrototypeOf(this);
-    const declaredTools: any[] = proto._kanon_tools || [];
-    const entry = declaredTools.find((t) => t.name === req.tool_name);
-
-    if (entry && typeof (this as any)[entry.methodName] === "function") {
-      const args = req.structured_args ? fromProtoStruct(req.structured_args) : {};
-      const res = await (this as any)[entry.methodName](args);
-
-      if (Buffer.isBuffer(res) || res instanceof Uint8Array) {
-        return {
-          call_id: req.call_id,
-          success: true,
-          error_message: "",
-          raw_bytes: res,
-        };
-      } else if (res && typeof res === "object") {
-        return {
-          call_id: req.call_id,
-          success: true,
-          error_message: "",
-          structured_result: toProtoStruct(res),
-        };
-      }
+    const entry = this.declared().tools.find((t) => t.name === req.tool_name);
+    const handler = entry && (this as any)[entry.methodName];
+    if (typeof handler !== "function") {
       return {
         call_id: req.call_id,
-        success: true,
-        error_message: "",
-        structured_result: toProtoStruct({ result: String(res) }),
+        success: false,
+        error_message: `Unknown tool: ${req.tool_name}`,
       };
     }
 
+    const args = req.structured_args ? fromProtoStruct(req.structured_args) : {};
+    const event = req.context ? new MessageEvent(req.context, this.core) : undefined;
+    let res: any;
+    try {
+      res = await handler.call(this, args, event);
+    } catch (err: any) {
+      // The model is told the tool failed and can explain or retry.
+      return { call_id: req.call_id, success: false, error_message: err?.message ?? String(err) };
+    }
+
+    if (Buffer.isBuffer(res) || res instanceof Uint8Array) {
+      return { call_id: req.call_id, success: true, error_message: "", raw_bytes: res };
+    }
+    const result = res && typeof res === "object" && !Array.isArray(res) ? res : { result: String(res) };
     return {
       call_id: req.call_id,
-      success: false,
-      error_message: `Unknown tool: ${req.tool_name}`,
+      success: true,
+      error_message: "",
+      structured_result: toProtoStruct(result),
     };
   }
 
-  /** Processes an event notification broadcast from Core. */
-  async onEvent(req: any): Promise<void> {}
+  /**
+   * Dispatches a control-plane management action to its `@Action` handler.
+   *
+   * Unknown actions and handler failures are reported as structured errors rather than
+   * thrown through the gRPC layer.
+   */
+  async onInvokeAction(action: string, parameters: Record<string, any>): Promise<any> {
+    const declared = this.declared();
+    const entry = declared.actions.find((a) => a.name === action);
+    const handler = entry && (this as any)[entry.methodName];
+    if (typeof handler !== "function") {
+      return {
+        success: false,
+        error_message:
+          `Unknown action '${action}' for plugin '${this.id}'; declared actions: ` +
+          JSON.stringify(declared.actions.map((a) => a.name)),
+      };
+    }
+    try {
+      const result = await handler.call(this, parameters);
+      return {
+        success: true,
+        error_message: "",
+        result: toProtoStruct(result && typeof result === "object" ? result : {}),
+      };
+    } catch (err: any) {
+      return { success: false, error_message: `Action failed: ${err?.message ?? err}` };
+    }
+  }
+
+  /** Dispatches a lifecycle event to the plugin's `@OnEvent` handlers. */
+  async onEvent(req: any): Promise<void> {
+    const kind = req?.detail as EventKind | undefined;
+    if (!kind) {
+      return;
+    }
+    const detail = kind === "notice" ? new MessageEvent(req.notice, this.core) : req[kind];
+    for (const entry of this.declared().events.filter((e) => e.kind === kind)) {
+      try {
+        await (this as any)[entry.methodName](detail);
+      } catch (err) {
+        // One failing subscriber must not stop the others.
+        console.error(`[kanon-sdk] ${kind} handler failed:`, err);
+      }
+    }
+  }
+
+  /** Runs the plugin's `@DecorateReply` handler on one reply. */
+  async onDecorateReply(req: any): Promise<any> {
+    const method = this.declared().decorator;
+    if (method === undefined) {
+      return { modified: false, segments: [] };
+    }
+    const reply: Reply = {
+      event: new MessageEvent(req.context ?? {}, this.core),
+      segments: req.segments ?? [],
+      source:
+        req.source === "REPLY_SOURCE_LLM"
+          ? "llm"
+          : req.source === "REPLY_SOURCE_COMMAND"
+            ? "command"
+            : "",
+      command: req.command ?? "",
+    };
+    const result = await (this as any)[method](reply);
+    if (result === undefined || result === null) {
+      return { modified: false, segments: [] };
+    }
+    return { modified: true, segments: toSegments(result) };
+  }
+
+  /** Runs the plugin's `@PrepareTurn` handler for the turn the model is about to answer. */
+  async onPrepareTurn(req: any): Promise<any> {
+    const method = this.declared().preparer;
+    if (method === undefined) {
+      return { text: "" };
+    }
+    const text = await (this as any)[method](
+      new MessageEvent(req.context ?? {}, this.core),
+      req.session_id ?? "",
+    );
+    return { text: text ?? "" };
+  }
 
   /**
    * Delivers an outbound message to a target platform.
@@ -730,60 +1267,19 @@ export abstract class Plugin {
   }
 }
 
-/** Converts a JS primitive/object to a Protobuf Value descriptor. */
-export function toProtoValue(val: any): any {
-  if (val === null || val === undefined) {
-    return { nullValue: 0 };
-  } else if (typeof val === "number") {
-    return { numberValue: val };
-  } else if (typeof val === "string") {
-    return { stringValue: val };
-  } else if (typeof val === "boolean") {
-    return { boolValue: val };
-  } else if (Array.isArray(val)) {
-    return { listValue: { values: val.map(toProtoValue) } };
-  } else if (typeof val === "object") {
-    return { structValue: toProtoStruct(val) };
-  }
-  return { stringValue: String(val) };
-}
-
-/** Converts a standard JS object dictionary into a google.protobuf.Struct payload. */
-export function toProtoStruct(obj: Record<string, any>): {
-  fields: Record<string, any>;
-} {
-  const fields: Record<string, any> = {};
-  if (obj && typeof obj === "object") {
-    for (const [k, v] of Object.entries(obj)) {
-      fields[k] = toProtoValue(v);
-    }
-  }
-  return { fields };
-}
-
-/** Converts a Protobuf Value descriptor back to a standard JS value. */
-export function fromProtoValue(val: any): any {
-  if (!val) return null;
-  if ("numberValue" in val) return val.numberValue;
-  if ("stringValue" in val) return val.stringValue;
-  if ("boolValue" in val) return val.boolValue;
-  if ("nullValue" in val) return null;
-  if ("listValue" in val) return (val.listValue?.values || []).map(fromProtoValue);
-  if ("structValue" in val) return fromProtoStruct(val.structValue);
-  return null;
-}
-
-/** Converts a google.protobuf.Struct payload back into a standard JS object dictionary. */
-export function fromProtoStruct(structObj: any): Record<string, any> {
-  const res: Record<string, any> = {};
-  if (structObj && structObj.fields) {
-    for (const [k, v] of Object.entries(structObj.fields)) {
-      res[k] = fromProtoValue(v);
-    }
-  }
-  return res;
-}
-
+export {
+  CommandEvent,
+  MAX_WAIT_SECONDS,
+  MessageEvent,
+  WaitTimeoutError,
+} from "./event.js";
+export {
+  MessageSegment,
+  llmMessage,
+  toSegments,
+} from "./segments.js";
+export type { LlmMessage, MessageSegmentItem, Replyable } from "./segments.js";
+export { fromProtoStruct, fromProtoValue, toProtoStruct, toProtoValue } from "./struct.js";
 
 export {
   startCoreWatchdog,

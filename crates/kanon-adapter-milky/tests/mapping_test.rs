@@ -304,6 +304,9 @@ fn inbound_segments_map_to_native_or_custom_segments() {
             Segment::Reply(_) => "reply",
             Segment::Image(_) => "image",
             Segment::Audio(_) => "audio",
+            Segment::Video(_) => "video",
+            Segment::File(_) => "file",
+            Segment::Face(_) => "face",
             Segment::Custom(custom) => custom.type_name.as_str(),
         };
 
@@ -617,4 +620,43 @@ fn json_struct_conversion_round_trips() {
 
     let structured = mapping::json_to_struct(&value);
     assert_eq!(mapping::struct_to_json(&structured), value);
+}
+
+/// Typed video and face segments map to Milky's own; a file cannot travel inside a message, so
+/// it is refused instead of silently dropped.
+#[test]
+fn typed_video_and_face_map_and_files_are_refused() {
+    use kanon_proto::v1::{FaceSegment, FileSegment, VideoSegment, file_segment, video_segment};
+
+    let video = MessageSegment {
+        segment: Some(Segment::Video(VideoSegment {
+            source: Some(video_segment::Source::FilePath("/tmp/v.mp4".into())),
+            ..Default::default()
+        })),
+    };
+    assert_eq!(
+        serde_json::to_value(outbound_segment(&video).unwrap()).unwrap(),
+        json!({ "type": "video", "data": { "uri": "file:///tmp/v.mp4" } })
+    );
+
+    let face = MessageSegment {
+        segment: Some(Segment::Face(FaceSegment { id: "76".into() })),
+    };
+    assert_eq!(
+        serde_json::to_value(outbound_segment(&face).unwrap()).unwrap(),
+        json!({ "type": "face", "data": { "face_id": "76", "is_large": false } })
+    );
+
+    let file = MessageSegment {
+        segment: Some(Segment::File(FileSegment {
+            source: Some(file_segment::Source::Url(
+                "https://cdn.example/r.pdf".into(),
+            )),
+            name: "r.pdf".into(),
+        })),
+    };
+    assert!(matches!(
+        outbound_segment(&file),
+        Err(MappingError::Unsupported(_))
+    ));
 }

@@ -16,7 +16,7 @@ use async_trait::async_trait;
 use kanon_core::{AdapterError, Capability, EventIngress, PlatformAdapter};
 use kanon_proto::v1::{
     DeliverMessageRequest, DeliverMessageResponse, PipelineEventRequest, audio_segment,
-    image_segment, message_segment::Segment,
+    file_segment, image_segment, message_segment::Segment, video_segment,
 };
 use serde::Serialize;
 use std::sync::{Arc, RwLock};
@@ -43,6 +43,7 @@ const CAPABILITIES: &[Capability] = &[
     Capability::Recall,
     Capability::FriendRequests,
     Capability::GroupInvites,
+    Capability::PlatformApi,
 ];
 
 /// Observable lifecycle of the universal connection.
@@ -305,6 +306,25 @@ impl PlatformAdapter for OneBotAdapter {
             .map_err(|error| self.delivery_error(error.to_string()))
     }
 
+    /// Passes the call to the OneBot action of the same name.
+    ///
+    /// Failures are returned to the calling plugin and not recorded as the adapter's last error:
+    /// a plugin asking for an action the implementation lacks says nothing about the connection.
+    async fn call_api(
+        &self,
+        action: &str,
+        params: serde_json::Value,
+    ) -> Result<serde_json::Value, AdapterError> {
+        self.client()
+            .call_raw(action, &params)
+            .await
+            .map_err(|error| AdapterError::Api {
+                platform: self.platform.clone(),
+                action: action.to_string(),
+                reason: error.to_string(),
+            })
+    }
+
     async fn start(&self, ingress: EventIngress) -> Result<(), AdapterError> {
         let lifecycle = self.lifecycle.clone();
         let state = self.state.clone();
@@ -374,6 +394,26 @@ impl PlatformAdapter for OneBotAdapter {
                             ))
                         })?;
                         audio.source = Some(audio_segment::Source::RawBytes(bytes));
+                    }
+                }
+                Some(Segment::Video(video)) => {
+                    if let Some(video_segment::Source::FilePath(path)) = video.source.as_ref() {
+                        let bytes = tokio::fs::read(path).await.map_err(|error| {
+                            self.delivery_error(format!(
+                                "cannot read OneBot video attachment: {error}"
+                            ))
+                        })?;
+                        video.source = Some(video_segment::Source::RawBytes(bytes));
+                    }
+                }
+                Some(Segment::File(file)) => {
+                    if let Some(file_segment::Source::FilePath(path)) = file.source.as_ref() {
+                        let bytes = tokio::fs::read(path).await.map_err(|error| {
+                            self.delivery_error(format!(
+                                "cannot read OneBot file attachment: {error}"
+                            ))
+                        })?;
+                        file.source = Some(file_segment::Source::RawBytes(bytes));
                     }
                 }
                 _ => {}

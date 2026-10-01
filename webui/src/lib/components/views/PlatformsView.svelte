@@ -15,6 +15,7 @@ import type { AdapterItem } from '../../types';
 import MilkyPanel from '../platforms/MilkyPanel.svelte';
 import OneBotPanel from '../platforms/OneBotPanel.svelte';
 import QqOfficialPanel from '../platforms/QqOfficialPanel.svelte';
+import Button from '../ui/Button.svelte';
 import EmptyState from '../ui/EmptyState.svelte';
 import Modal from '../ui/Modal.svelte';
 import PageHead from '../ui/PageHead.svelte';
@@ -211,10 +212,10 @@ async function save() {
     {/if}
   {/snippet}
   {#snippet actions()}
-    <button type="button" class="btn" disabled={loading} onclick={() => void load()}>
-      <RefreshCw size={16} strokeWidth={2.4} class={loading ? 'animate-spin' : ''} />
+    <Button type="button" disabled={loading} onclick={() => void load()}>
+      <RefreshCw size={16} strokeWidth={2} class={loading ? 'animate-spin' : ''} />
       {t('platforms.refresh')}
-    </button>
+    </Button>
   {/snippet}
 </PageHead>
 
@@ -229,17 +230,17 @@ async function save() {
     <EmptyState icon={Plug} title={t('platforms.empty_title')} text={t('platforms.empty_text')} />
   </div>
 {:else if adapters.length > 0}
-  <div class="flex flex-col gap-3">
+  <div class="group-list">
     {#each adapters as adapter (adapter.platform)}
       {@const builtin = builtinOf(adapter.platform)}
       {@const store = builtin ? STORES[builtin] : null}
       {@const level = tone(adapter)}
       {@const owner = owners.get(adapter.platform)}
       {@const who = account(builtin)}
-      <article class="card flex flex-wrap items-center gap-x-6 gap-y-3 px-[22px] py-[18px]">
+      <article class="flex flex-wrap items-center gap-x-6 gap-y-3 py-5">
         <div class="flex min-w-0 flex-1 basis-[320px] flex-col gap-1.5">
           <div class="flex flex-wrap items-center gap-x-2.5 gap-y-1">
-            <h2 class="m-0 text-[17px] font-extrabold">{adapter.display_name}</h2>
+            <h2 class="m-0 text-[17px] font-semibold">{adapter.display_name}</h2>
             <span class="chip chip-sm {CHIP[level]}">
               {#if DOT[level]}<i class="dot {DOT[level]}"></i>{/if}
               {stateLabel(adapter)}
@@ -248,26 +249,26 @@ async function save() {
           <dl class="m-0 flex flex-wrap gap-x-5 gap-y-0.5 text-[13.5px]">
             <div class="flex gap-1.5">
               <dt class="text-fg2">{t('platforms.used_by')}</dt>
-              <dd class="m-0 font-bold">
+              <dd class="m-0 font-medium">
                 {#if owner}
-                  <a href="#/instances/{encodeURIComponent(owner.id)}" class="text-fg hover:text-accent-fg">
+                  <a href="#/instances/{encodeURIComponent(owner.id)}" class="text-fg hover:text-accent">
                     {owner.name}
                   </a>
                 {:else}
-                  <span class="font-semibold text-fg3">{t('platforms.unused')}</span>
+                  <span class="font-medium text-fg3">{t('platforms.unused')}</span>
                 {/if}
               </dd>
             </div>
             {#if who}
               <div class="flex min-w-0 gap-1.5">
                 <dt class="text-fg2">{t('platforms.account')}</dt>
-                <dd class="m-0 truncate font-bold">{who}</dd>
+                <dd class="m-0 truncate font-medium">{who}</dd>
               </div>
             {/if}
             {#if adapter.kind === 'plugin' && adapter.plugin_id}
               <div class="flex gap-1.5">
                 <dt class="text-fg2">{t('platforms.plugin')}</dt>
-                <dd class="m-0 font-bold"><code class="text-[12.5px]">{adapter.plugin_id}</code></dd>
+                <dd class="m-0 font-medium"><code class="text-[12.5px]">{adapter.plugin_id}</code></dd>
               </div>
             {/if}
           </dl>
@@ -287,9 +288,9 @@ async function save() {
 
         {#if builtin && store}
           <div class="ml-auto flex items-center gap-3">
-            <button type="button" class="btn btn-sm" onclick={() => openSettings(adapter.platform)}>
+            <Button type="button" size="sm" onclick={() => openSettings(adapter.platform)}>
               {t('platforms.settings')}
-            </button>
+            </Button>
             <Switch
               checked={store.status?.enabled ?? false}
               disabled={store.loading || store.applyingEnabled || store.unavailable}
@@ -323,8 +324,8 @@ async function save() {
         {#if DOT[level]}<i class="dot {DOT[level]}"></i>{/if}
         {stateLabel(openAdapter)}
       </span>
-      {#if who}<span class="min-w-0 truncate text-[13.5px] font-bold">{who}</span>{/if}
-      <span class="ml-auto flex items-center gap-2.5 text-[14px] font-bold">
+      {#if who}<span class="min-w-0 truncate text-[13.5px] font-medium">{who}</span>{/if}
+      <span class="ml-auto flex items-center gap-2.5 text-[14px] font-medium">
         {t('platforms.power')}
         <Switch
           checked={openStore.status?.enabled ?? false}
@@ -357,25 +358,25 @@ async function save() {
   {#snippet footer()}
     {#if openStore && !openStore.unavailable}
       {#if openBuiltin === 'milky'}
-        <button
+        <Button
           type="button"
-          class="btn"
+         
           disabled={milkyStore.testing || milkyStore.saving}
           onclick={() => void milkyStore.test()}
         >
           {milkyStore.testing ? t('adapters.milky_testing') : t('adapters.milky_test')}
-        </button>
+        </Button>
       {/if}
-      <button
+      <Button
         type="button"
-        class="btn btn-primary"
+        variant="filled"
         disabled={openStore.saving || openStore.loading}
         onclick={() => void save()}
       >
         {openStore.saving ? t('platforms.saving') : t('platforms.save')}
-      </button>
+      </Button>
     {:else}
-      <button type="button" class="btn" onclick={closeSettings}>{t('common.close')}</button>
+      <Button type="button" onclick={closeSettings}>{t('common.close')}</Button>
     {/if}
   {/snippet}
 </Modal>

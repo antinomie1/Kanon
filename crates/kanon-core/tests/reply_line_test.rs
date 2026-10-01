@@ -21,8 +21,8 @@ use kanon_llm::tool_router::ToolRouter;
 use kanon_llm::{Agent, GatewayError, LlmProvider};
 use kanon_proto::v1::message_segment::Segment;
 use kanon_proto::v1::{
-    DeliverMessageRequest, DeliverMessageResponse, ImageSegment, IngestEventRequest,
-    MessageSegment, PipelineEventRequest, ReplySegment, TextSegment,
+    DeliverMessageRequest, DeliverMessageResponse, FileSegment, ImageSegment, IngestEventRequest,
+    MessageSegment, PipelineEventRequest, ReplySegment, TextSegment, VideoSegment,
 };
 use tokio::sync::{Semaphore, mpsc};
 
@@ -576,4 +576,40 @@ async fn failed_or_shutdown_batch_records_only_the_undelivered_suffix() {
             "synthetic delivery failure"
         }));
     }
+}
+
+#[test]
+fn capped_reply_keeps_video_and_file_on_the_last_message_without_duplication() {
+    let video = MessageSegment {
+        segment: Some(Segment::Video(VideoSegment {
+            source: Some(kanon_proto::v1::video_segment::Source::Url(
+                "https://example.invalid/clip.mp4".to_string(),
+            )),
+            ..Default::default()
+        })),
+    };
+    let file = MessageSegment {
+        segment: Some(Segment::File(FileSegment {
+            name: "report.pdf".to_string(),
+            source: Some(kanon_proto::v1::file_segment::Source::Url(
+                "https://example.invalid/report.pdf".to_string(),
+            )),
+            ..Default::default()
+        })),
+    };
+    assert_eq!(
+        reply::split_reply_lines(
+            &[
+                quote(),
+                text("first\n\nsecond\nthird\nlast"),
+                video.clone(),
+                file.clone(),
+            ],
+            2,
+        ),
+        vec![
+            vec![quote(), text("first")],
+            vec![text("second\nthird\nlast"), video, file],
+        ],
+    );
 }

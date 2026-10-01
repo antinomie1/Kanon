@@ -8,8 +8,10 @@ import { personasStore } from '../../stores/personas.svelte';
 import { router } from '../../stores/router.svelte';
 import { toasts } from '../../stores/toast.svelte';
 import type { PersonaItem } from '../../types';
+import Button from '../ui/Button.svelte';
 import Modal from '../ui/Modal.svelte';
 import PageHead from '../ui/PageHead.svelte';
+import TextField from '../ui/TextField.svelte';
 
 /**
  * Persona library: the instruction text placed at the top of every request, which decides who the
@@ -125,10 +127,10 @@ function isLong(prompt: string): boolean {
     <span class="max-w-[72ch]">{t('personas.sub')}</span>
   {/snippet}
   {#snippet actions()}
-    <button type="button" class="btn btn-primary" onclick={openCreate}>
-      <Plus size={16} strokeWidth={2.6} />
+    <Button type="button" variant="filled" onclick={openCreate}>
+      <Plus size={16} strokeWidth={2.2} />
       {t('personas.add')}
-    </button>
+    </Button>
   {/snippet}
 </PageHead>
 
@@ -148,7 +150,7 @@ function isLong(prompt: string): boolean {
         <div class="flex flex-wrap items-start gap-x-6 gap-y-2">
           <div class="min-w-0 flex-1 basis-[300px]">
             <div class="flex flex-wrap items-center gap-x-2.5 gap-y-1">
-              <h2 class="m-0 text-[17px] font-extrabold">{persona.name}</h2>
+              <h2 class="m-0 text-[17px] font-semibold">{persona.name}</h2>
               {#if builtin}<span class="chip chip-sm chip-muted">{t('personas.builtin')}</span>{/if}
             </div>
             {#if persona.description}
@@ -156,29 +158,29 @@ function isLong(prompt: string): boolean {
             {/if}
           </div>
           <div class="ml-auto flex items-center gap-2">
-            <button type="button" class="btn btn-sm btn-quiet" onclick={() => tryOut(persona)}>
-              <MessageCircle size={15} strokeWidth={2.2} />
+            <Button type="button" variant="text" size="sm" onclick={() => tryOut(persona)}>
+              <MessageCircle size={15} strokeWidth={2} />
               {t('personas.try')}
-            </button>
+            </Button>
             {#if !builtin}
-              <button type="button" class="btn btn-sm" onclick={() => openEdit(persona)}>
+              <Button type="button" size="sm" onclick={() => openEdit(persona)}>
                 {t('personas.edit')}
-              </button>
-              <button
+              </Button>
+              <Button
                 type="button"
-                class="btn btn-sm btn-quiet btn-icon"
+                variant="text" size="sm" square
                 aria-label={t('personas.delete_title', { name: persona.name })}
                 title={inUse ? t('personas.in_use_block') : t('personas.delete')}
                 disabled={inUse || personasStore.saving}
                 onclick={() => void remove(persona)}
               >
-                <Trash2 size={16} strokeWidth={2.2} />
-              </button>
+                <Trash2 size={16} strokeWidth={2} />
+              </Button>
             {/if}
           </div>
         </div>
 
-        <div class="rounded-[14px] bg-sunk px-4 py-3">
+        <div class="rounded-xl bg-sunk px-4 py-3">
           <p
             class="m-0 text-[14px] leading-relaxed break-words whitespace-pre-wrap text-fg2 {open
               ? ''
@@ -189,7 +191,7 @@ function isLong(prompt: string): boolean {
           {#if isLong(persona.prompt)}
             <button
               type="button"
-              class="mt-1.5 cursor-pointer text-[13px] font-bold text-accent-fg hover:underline"
+              class="mt-1.5 cursor-pointer text-[13px] font-medium text-accent hover:underline"
               aria-expanded={open}
               onclick={() => (expanded = { ...expanded, [persona.id]: !open })}
             >
@@ -213,10 +215,10 @@ function isLong(prompt: string): boolean {
     {#if customCount === 0}
       <div class="card flex flex-wrap items-center justify-between gap-3 px-[22px] py-4">
         <p class="m-0 text-[14px] text-fg2">{t('personas.empty')}</p>
-        <button type="button" class="btn btn-sm" onclick={openCreate}>
-          <Plus size={15} strokeWidth={2.6} />
+        <Button type="button" size="sm" onclick={openCreate}>
+          <Plus size={15} strokeWidth={2.2} />
           {t('personas.add')}
-        </button>
+        </Button>
       </div>
     {/if}
   </div>
@@ -240,13 +242,13 @@ function isLong(prompt: string): boolean {
     <div class="grid gap-4 sm:grid-cols-2">
       <div>
         <label class="label" for="persona-name">{t('personas.name')}</label>
-        <input id="persona-name" class="input" placeholder={t('personas.name_placeholder')} bind:value={draft.name} />
+        <TextField id="persona-name" placeholder={t('personas.name_placeholder')} bind:value={draft.name} />
       </div>
       <div>
         <label class="label" for="persona-description">{t('personas.description')}</label>
-        <input
+        <TextField
           id="persona-description"
-          class="input"
+         
           placeholder={t('llm.optional')}
           bind:value={draft.description}
         />
@@ -268,15 +270,15 @@ function isLong(prompt: string): boolean {
   </form>
 
   {#snippet footer()}
-    <button type="button" class="btn" disabled={personasStore.saving} onclick={() => (editorOpen = false)}>
+    <Button type="button" disabled={personasStore.saving} onclick={() => (editorOpen = false)}>
       {t('common.cancel')}
-    </button>
-    <button type="submit" form="persona-editor" class="btn btn-primary" disabled={!canSave}>
+    </Button>
+    <Button type="submit" form="persona-editor" variant="filled" disabled={!canSave}>
       {personasStore.saving
         ? t('instances.saving')
         : draft.id === null
           ? t('personas.create')
           : t('instances.save_changes')}
-    </button>
+    </Button>
   {/snippet}
 </Modal>

@@ -1,6 +1,7 @@
 <script lang="ts">
 import { confirmStore } from '../../stores/confirm.svelte';
 import { t } from '../../stores/i18n.svelte';
+import Button from './Button.svelte';
 import Modal from './Modal.svelte';
 
 const pending = $derived(confirmStore.pending);
@@ -16,15 +17,15 @@ const pending = $derived(confirmStore.pending);
     <p class="m-0 text-[14.5px] leading-relaxed text-fg2">{pending.message}</p>
   {/if}
   {#snippet footer()}
-    <button type="button" class="btn" onclick={() => confirmStore.answer(false)}>
+    <Button type="button" onclick={() => confirmStore.answer(false)}>
       {pending?.cancel ?? t('common.cancel')}
-    </button>
-    <button
+    </Button>
+    <Button
       type="button"
-      class="btn {pending?.danger ? 'btn-danger-solid' : 'btn-primary'}"
+      variant={pending?.danger ? 'danger-filled' : 'filled'}
       onclick={() => confirmStore.answer(true)}
     >
       {pending?.confirm ?? ''}
-    </button>
+    </Button>
   {/snippet}
 </Modal>

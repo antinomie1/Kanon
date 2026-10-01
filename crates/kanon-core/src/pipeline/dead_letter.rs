@@ -217,6 +217,22 @@ fn segment_to_json(segment: &MessageSegment) -> Value {
             "type": "audio",
             "duration_seconds": aud.duration_seconds,
         }),
+        Some(Segment::Video(video)) => serde_json::json!({
+            "type": "video",
+            "filename": video.filename,
+            "url": match video.source.as_ref() {
+                Some(kanon_proto::v1::video_segment::Source::Url(url)) => Some(url.clone()),
+                _ => None,
+            },
+        }),
+        Some(Segment::File(file)) => serde_json::json!({
+            "type": "file",
+            "name": file.name,
+        }),
+        Some(Segment::Face(face)) => serde_json::json!({
+            "type": "face",
+            "id": face.id,
+        }),
         Some(Segment::Mention(m)) => serde_json::json!({
             "type": "mention",
             "target_user_id": m.target_user_id,

@@ -102,6 +102,7 @@ impl PluginHostService for MockHostService {
                 description: "Test".to_string(),
                 commands: vec![],
                 tools: vec![],
+                ..Default::default()
             }],
         }))
     }
@@ -128,6 +129,7 @@ impl MessagePipelineService for MockHostService {
             success: true,
             replies: vec![],
             error_message: String::new(),
+            ..Default::default()
         }))
     }
 
@@ -149,6 +151,24 @@ impl MessagePipelineService for MockHostService {
         _request: tonic::Request<EventNotification>,
     ) -> Result<tonic::Response<EventAck>, tonic::Status> {
         Ok(tonic::Response::new(EventAck { received: true }))
+    }
+
+    async fn on_decorate_reply(
+        &self,
+        _request: tonic::Request<kanon_proto::v1::DecorateReplyRequest>,
+    ) -> Result<tonic::Response<kanon_proto::v1::DecorateReplyResult>, tonic::Status> {
+        Ok(tonic::Response::new(
+            kanon_proto::v1::DecorateReplyResult::default(),
+        ))
+    }
+
+    async fn on_prepare_turn(
+        &self,
+        _request: tonic::Request<kanon_proto::v1::PrepareTurnRequest>,
+    ) -> Result<tonic::Response<kanon_proto::v1::PrepareTurnResult>, tonic::Status> {
+        Ok(tonic::Response::new(
+            kanon_proto::v1::PrepareTurnResult::default(),
+        ))
     }
 
     async fn on_deliver_message(
@@ -230,8 +250,8 @@ async fn test_unified_host_registration_into_supervisor() {
         .expect("Host must exist in Supervisor unified registry");
 
     assert_eq!(managed_host.host_id, "ext_host_1");
-    assert_eq!(managed_host.meta.len(), 1);
-    assert_eq!(managed_host.meta[0].id, "test.plugin");
+    assert_eq!(managed_host.metas().len(), 1);
+    assert_eq!(managed_host.metas()[0].id, "test.plugin");
 
     // Clean up
     let _ = host_shutdown_tx.send(());

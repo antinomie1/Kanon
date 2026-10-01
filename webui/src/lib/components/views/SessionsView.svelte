@@ -9,10 +9,12 @@ import { instancesStore } from '../../stores/instances.svelte';
 import { personasStore } from '../../stores/personas.svelte';
 import { toasts } from '../../stores/toast.svelte';
 import type { SessionSummary } from '../../types';
+import Button from '../ui/Button.svelte';
 import EmptyState from '../ui/EmptyState.svelte';
 import Modal from '../ui/Modal.svelte';
 import PageHead from '../ui/PageHead.svelte';
 import Select from '../ui/Select.svelte';
+import TextField from '../ui/TextField.svelte';
 
 /**
  * Conversations the node remembers, most recently active first.
@@ -175,23 +177,24 @@ async function applyPersona() {
     <span>{t('sessions.sub')}</span>
   {/snippet}
   {#snippet actions()}
-    <button type="button" class="btn" disabled={loading} onclick={() => void load()}>
-      <RefreshCw size={16} strokeWidth={2.4} class={loading ? 'animate-spin' : ''} />
+    <Button type="button" disabled={loading} onclick={() => void load()}>
+      <RefreshCw size={16} strokeWidth={2} class={loading ? 'animate-spin' : ''} />
       {t('platforms.refresh')}
-    </button>
+    </Button>
   {/snippet}
 </PageHead>
 
 <div class="flex flex-wrap items-center justify-between gap-3">
-  <div class="relative min-w-[200px] flex-1 sm:max-w-[360px]">
-    <Search size={16} strokeWidth={2.2} class="pointer-events-none absolute top-1/2 left-3.5 -translate-y-1/2 text-fg3" />
-    <input
-      class="input pl-10"
+  <div class="min-w-[200px] flex-1 sm:max-w-[360px]">
+    <TextField
+      pill
       type="search"
       aria-label={t('common.search')}
       placeholder={t('sessions.search')}
       bind:value={search}
-    />
+    >
+      {#snippet leading()}<Search size={16} strokeWidth={2} class="text-fg3" />{/snippet}
+    </TextField>
   </div>
   {#if loaded && !error}
     <span class="px-1 text-[13.5px] text-fg2">
@@ -219,60 +222,58 @@ async function applyPersona() {
     {/if}
   </div>
 {:else if sessions.length > 0}
-  <div class="card">
-    <ul class="m-0 list-none p-0">
-      {#each sessions as session (session.session_key)}
-        {@const info = parse(session.session_key)}
-        <li class="flex flex-wrap items-center gap-x-6 gap-y-2.5 border-t border-line px-[22px] py-4 first:border-t-0">
-          <div class="min-w-0 flex-1 basis-[340px]">
-            <div class="flex flex-wrap items-center gap-x-2.5 gap-y-1">
-              <h2 class="m-0 min-w-0 truncate text-[16px] font-extrabold">{info.name}</h2>
-              {#if session.persona_id}
-                <span class="chip chip-sm chip-muted">{personaName(session.persona_id, info.instanceId)}</span>
-              {/if}
-            </div>
-            <p class="m-0 mt-0.5 flex flex-wrap gap-x-4 gap-y-0.5 text-[13.5px] text-fg2">
-              {#if info.conversation}
-                <span class="max-w-full truncate" title={info.conversation}>
-                  {t('sessions.conversation', { id: info.conversation })}
-                </span>
-              {/if}
-              <span>
-                {session.turn_count === 1
-                  ? t('sessions.turns_one')
-                  : t('sessions.turns_n', { n: session.turn_count })}
-              </span>
-              {#if session.total_tokens_used > 0}
-                <span>{t('sessions.tokens_n', { n: session.total_tokens_used.toLocaleString() })}</span>
-              {/if}
-              <span title={new Date(session.last_active_at * 1000).toLocaleString()}>
-                {ago(session.last_active_at)}
-              </span>
-              {#if info.generation > 0}
-                <span>{t('sessions.restarted', { n: info.generation })}</span>
-              {/if}
-            </p>
-            <p class="m-0 mt-0.5 truncate font-mono text-[12px] text-fg3" title={session.session_key}>
-              {session.session_key}
-            </p>
+  <ul class="group-list m-0 list-none p-0">
+    {#each sessions as session (session.session_key)}
+      {@const info = parse(session.session_key)}
+      <li class="flex flex-wrap items-center gap-x-6 gap-y-2.5 py-4">
+        <div class="min-w-0 flex-1 basis-[340px]">
+          <div class="flex flex-wrap items-center gap-x-2.5 gap-y-1">
+            <h2 class="m-0 min-w-0 truncate text-[16px] font-semibold">{info.name}</h2>
+            {#if session.persona_id}
+              <span class="chip chip-sm chip-muted">{personaName(session.persona_id, info.instanceId)}</span>
+            {/if}
           </div>
-          <div class="ml-auto flex items-center gap-2">
-            <button type="button" class="btn btn-sm" onclick={() => openPersona(session, info)}>
-              {t('sessions.persona_btn')}
-            </button>
-            <button
-              type="button"
-              class="btn btn-sm btn-quiet"
-              disabled={busy[session.session_key] || session.turn_count === 0}
-              onclick={() => void reset(session, info.name)}
-            >
-              {t('sessions.reset')}
-            </button>
-          </div>
-        </li>
-      {/each}
-    </ul>
-  </div>
+          <p class="m-0 mt-0.5 flex flex-wrap gap-x-4 gap-y-0.5 text-[13.5px] text-fg2">
+            {#if info.conversation}
+              <span class="max-w-full truncate" title={info.conversation}>
+                {t('sessions.conversation', { id: info.conversation })}
+              </span>
+            {/if}
+            <span>
+              {session.turn_count === 1
+                ? t('sessions.turns_one')
+                : t('sessions.turns_n', { n: session.turn_count })}
+            </span>
+            {#if session.total_tokens_used > 0}
+              <span>{t('sessions.tokens_n', { n: session.total_tokens_used.toLocaleString() })}</span>
+            {/if}
+            <span title={new Date(session.last_active_at * 1000).toLocaleString()}>
+              {ago(session.last_active_at)}
+            </span>
+            {#if info.generation > 0}
+              <span>{t('sessions.restarted', { n: info.generation })}</span>
+            {/if}
+          </p>
+          <p class="m-0 mt-0.5 truncate font-mono text-[12px] text-fg3" title={session.session_key}>
+            {session.session_key}
+          </p>
+        </div>
+        <div class="ml-auto flex items-center gap-2">
+          <Button type="button" size="sm" onclick={() => openPersona(session, info)}>
+            {t('sessions.persona_btn')}
+          </Button>
+          <Button
+            type="button"
+            variant="text" size="sm"
+            disabled={busy[session.session_key] || session.turn_count === 0}
+            onclick={() => void reset(session, info.name)}
+          >
+            {t('sessions.reset')}
+          </Button>
+        </div>
+      </li>
+    {/each}
+  </ul>
 {/if}
 
 <Modal
@@ -311,11 +312,11 @@ async function applyPersona() {
   {/if}
 
   {#snippet footer()}
-    <button type="button" class="btn" disabled={bindSaving} onclick={() => (binding = null)}>
+    <Button type="button" disabled={bindSaving} onclick={() => (binding = null)}>
       {t('common.cancel')}
-    </button>
-    <button type="submit" form="session-persona" class="btn btn-primary" disabled={bindSaving}>
+    </Button>
+    <Button type="submit" form="session-persona" variant="filled" disabled={bindSaving}>
       {t('sessions.persona_apply')}
-    </button>
+    </Button>
   {/snippet}
 </Modal>

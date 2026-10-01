@@ -17,8 +17,8 @@ use kanon_adapter_onebot::OneBotAdapter;
 use kanon_adapter_qqofficial::QqOfficialAdapter;
 use kanon_core::{
     BashAvailabilityHook, BashPolicyStore, BashTool, CommandPolicyStore, ContextPolicyStore,
-    EventIngress, EventPolicyStore, InstanceRegistry, McpConfigStore, McpPool, ModelBashReviewer,
-    ReplyPolicyStore, SkillStore, Supervisor, ToggleStore,
+    DiscoveredPlugin, EventIngress, EventPolicyStore, InstanceRegistry, McpConfigStore, McpPool,
+    ModelBashReviewer, PluginScanner, ReplyPolicyStore, SkillStore, Supervisor, ToggleStore,
 };
 use kanon_llm::{
     Agent, AgentConfig, AgentFactory, AgentSlot, InMemory, LlmProvider, Memory, PersonaRegistry,
@@ -105,6 +105,13 @@ struct ApiStateInner {
     ingress: Option<EventIngress>,
     /// Base directory where discovered and installed plugins are stored.
     plugins_dir: PathBuf,
+    /// Plugins the last scan of `plugins_dir` found, plus any installed through the gateway since.
+    ///
+    /// The directory is never scanned behind the operator's back: the node scans it once at startup
+    /// and again only when the console asks for a rescan, so a folder dropped into it shows up on
+    /// the next manual refresh rather than on the next catalog read. Listing a stopped plugin and
+    /// enabling it both read this snapshot, so the two can never disagree about what is on disk.
+    plugins_on_disk: RwLock<Vec<DiscoveredPlugin>>,
 }
 
 impl ApiState {
@@ -438,6 +445,44 @@ impl ApiState {
     /// Plugins directory handle.
     pub fn plugins_dir(&self) -> &std::path::Path {
         &self.inner.plugins_dir
+    }
+
+    /// Plugins found on disk by the last scan, plus any installed through the gateway since.
+    pub fn plugins_on_disk(&self) -> Vec<DiscoveredPlugin> {
+        self.inner
+            .plugins_on_disk
+            .read()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone()
+    }
+
+    /// Scans the plugins directory and replaces the snapshot with what it finds.
+    ///
+    /// This is the only way a plugin copied into the directory by hand becomes known to the node:
+    /// the composition root calls it once at startup and the console calls it from its refresh
+    /// button. A failed scan leaves the previous snapshot in place and reports the error.
+    pub fn rescan_plugins(&self) -> Result<Vec<DiscoveredPlugin>, std::io::Error> {
+        let found = PluginScanner::scan(&self.inner.plugins_dir)?;
+        *self
+            .inner
+            .plugins_on_disk
+            .write()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = found.clone();
+        Ok(found)
+    }
+
+    /// Records a plugin the gateway just installed, replacing an earlier entry with the same id.
+    ///
+    /// Installing is an explicit operator action, so the plugin is known straight away even when
+    /// its host then fails to start, without rescanning the rest of the directory.
+    pub(crate) fn record_installed_plugin(&self, plugin: DiscoveredPlugin) {
+        let mut on_disk = self
+            .inner
+            .plugins_on_disk
+            .write()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        on_disk.retain(|known| known.manifest.plugin.id != plugin.manifest.plugin.id);
+        on_disk.push(plugin);
     }
 }
 
@@ -843,6 +888,9 @@ impl ApiStateBuilder {
                 observability,
                 ingress: self.ingress,
                 plugins_dir,
+                // Empty until the first scan: the composition root runs it before the gateway
+                // starts serving, so no request ever reads the unscanned state.
+                plugins_on_disk: RwLock::new(Vec::new()),
             }),
         }
     }

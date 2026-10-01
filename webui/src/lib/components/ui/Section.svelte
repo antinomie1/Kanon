@@ -4,8 +4,9 @@ import type { Snippet } from 'svelte';
 /**
  * A settings section: what it is and why on the left, the controls on the right.
  *
- * Sections are separated by a hairline when stacked; on narrow screens the explanation moves
- * above the controls.
+ * The container decides how stacked sections are separated: hairlines inside an editor card,
+ * gaps in the settings page's grouped list. On narrow screens the explanation moves above the
+ * controls.
  */
 let {
   title,
@@ -22,10 +23,10 @@ let {
 </script>
 
 <section
-  class="grid gap-x-8 gap-y-3 py-6 [&+&]:border-t [&+&]:border-line md:grid-cols-[220px_minmax(0,1fr)]"
+  class="grid gap-x-8 gap-y-3 py-6 md:grid-cols-[220px_minmax(0,1fr)]"
 >
   <div class="min-w-0">
-    <h3 class="m-0 mb-1 text-[15.5px] font-extrabold">{title}</h3>
+    <h3 class="m-0 mb-1 text-[16px] font-semibold">{title}</h3>
     {#if hint}<p class="m-0 hint">{hint}</p>{/if}
     {#if aside}{@render aside()}{/if}
   </div>

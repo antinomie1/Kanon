@@ -7,16 +7,21 @@
 //! - [`PipelineObserver`]: Fire-and-forget lifecycle observation hook for control-plane tracing.
 //! - [`build_user_message`]: Translation of inbound segments into the model-visible user message.
 
+pub mod capture;
 pub mod command;
 pub mod context;
 pub mod dead_letter;
 pub mod engine;
 pub mod group_log;
+pub mod hooks;
 pub mod observer;
 pub mod pre_filter;
 mod reply;
 
-pub use command::{CommandRouter, MatchedCommand};
+pub use capture::{Capture, CaptureRegistry, MAX_CAPTURE};
+pub use command::{
+    CommandRouter, MatchedCommand, MatchedTrigger, ParsedCommand, TriggerMatcher, split_args,
+};
 pub use context::build_user_message;
 pub use dead_letter::{
     DEFAULT_DEAD_LETTER_DIR, DeadLetterDirection, DeadLetterRecord, DeadLetterWriter,

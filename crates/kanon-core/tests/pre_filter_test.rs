@@ -60,6 +60,7 @@ impl MessagePipelineService for MockPipeline {
             success: true,
             replies: vec![],
             error_message: String::new(),
+            ..Default::default()
         }))
     }
 
@@ -81,6 +82,24 @@ impl MessagePipelineService for MockPipeline {
         _req: Request<EventNotification>,
     ) -> Result<Response<EventAck>, Status> {
         Ok(Response::new(EventAck { received: true }))
+    }
+
+    async fn on_decorate_reply(
+        &self,
+        _request: tonic::Request<kanon_proto::v1::DecorateReplyRequest>,
+    ) -> Result<tonic::Response<kanon_proto::v1::DecorateReplyResult>, tonic::Status> {
+        Ok(tonic::Response::new(
+            kanon_proto::v1::DecorateReplyResult::default(),
+        ))
+    }
+
+    async fn on_prepare_turn(
+        &self,
+        _request: tonic::Request<kanon_proto::v1::PrepareTurnRequest>,
+    ) -> Result<tonic::Response<kanon_proto::v1::PrepareTurnResult>, tonic::Status> {
+        Ok(tonic::Response::new(
+            kanon_proto::v1::PrepareTurnResult::default(),
+        ))
     }
 
     async fn on_deliver_message(

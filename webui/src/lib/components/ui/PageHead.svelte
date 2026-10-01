@@ -15,7 +15,7 @@ let {
 
 <header class="flex flex-wrap items-center justify-between gap-x-5 gap-y-3 px-1 pt-2">
   <div class="min-w-0">
-    <h1 class="m-0 text-[29px] leading-tight font-extrabold tracking-[-0.015em]">{title}</h1>
+    <h1 class="m-0 text-[36px] leading-[44px] font-[560] tracking-[-0.01em]">{title}</h1>
     {#if sub}
       <div class="mt-1.5 flex flex-wrap gap-x-6 gap-y-1 text-[14.5px] text-fg2">
         {@render sub()}

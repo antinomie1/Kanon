@@ -10,9 +10,12 @@ import type {
   TestProviderRequest,
   UpsertProviderRequest,
 } from '../../types';
+import Button from '../ui/Button.svelte';
+import Checkbox from '../ui/Checkbox.svelte';
 import SecretInput from '../ui/SecretInput.svelte';
 import Section from '../ui/Section.svelte';
 import Select from '../ui/Select.svelte';
+import TextField from '../ui/TextField.svelte';
 import { optionalNumber } from './modelFormat';
 
 /**
@@ -173,7 +176,7 @@ async function remove() {
 <section class="card relative px-5 pb-6 sm:px-7">
   <div class="flex flex-wrap items-center gap-x-4 gap-y-3 pt-5 pb-2">
     <div class="flex min-w-0 flex-1 flex-col leading-tight">
-      <h2 class="m-0 truncate text-[22px] font-extrabold">{provider.name}</h2>
+      <h2 class="m-0 truncate text-[22px] font-semibold">{provider.name}</h2>
       <span class="mt-1 flex flex-wrap items-center gap-x-3 gap-y-1 text-[13.5px] text-fg2">
         <span>{protocols.find((p) => p.id === provider.protocol)?.name ?? provider.protocol}</span>
         <span class="flex items-center gap-1.5 whitespace-nowrap">
@@ -185,23 +188,23 @@ async function remove() {
         </span>
       </span>
     </div>
-    <button
+    <Button
       type="button"
-      class="btn btn-sm btn-icon btn-danger"
+      variant="danger" size="sm" square
       title={t('llm.delete_title', { name: provider.name })}
       aria-label={t('llm.delete_title', { name: provider.name })}
       disabled={providersStore.pending}
       onclick={remove}
     >
-      <Trash2 size={16} strokeWidth={2.2} />
-    </button>
+      <Trash2 size={16} strokeWidth={2} />
+    </Button>
   </div>
 
   {#if formError}
     <div class="notice notice-bad mt-2" role="alert"><span class="min-w-0 break-words">{formError}</span></div>
   {/if}
 
-  <div>
+  <div class="divide-y divide-line">
     <Section title={t('llm.sec_connection')} hint={t('llm.sec_connection_hint')}>
       <div>
         <label class="label" for="provider-protocol">{t('llm.protocol')}</label>
@@ -216,9 +219,9 @@ async function remove() {
       </div>
       <div>
         <label class="label" for="provider-url">{t('llm.base_url')}</label>
-        <input
+        <TextField
           id="provider-url"
-          class="input mono"
+          mono
           spellcheck="false"
           placeholder={protocolInfo?.default_base_url ?? 'https://'}
           bind:value={baseUrl}
@@ -233,7 +236,7 @@ async function remove() {
         />
         {#if provider.api_key_configured}
           <label class="mt-2.5 flex items-center gap-2.5 text-[14px] text-fg2">
-            <input type="checkbox" class="check" bind:checked={clearKey} />
+            <Checkbox bind:checked={clearKey} label={t('llm.key_clear')} />
             {t('llm.key_clear')}
           </label>
         {:else}
@@ -260,15 +263,15 @@ async function remove() {
             {/each}
           </datalist>
         </div>
-        <button type="button" class="btn" disabled={testing} onclick={() => void test()}>
-          <PlugZap size={16} strokeWidth={2.2} />
+        <Button type="button" disabled={testing} onclick={() => void test()}>
+          <PlugZap size={16} strokeWidth={2} />
           {testing ? t('llm.testing') : t('llm.test')}
-        </button>
+        </Button>
       </div>
       {#if testResult && !testing}
         {#if testResult.status === 'ok'}
           <div class="notice notice-ok flex-col gap-1">
-            <b class="font-extrabold">
+            <b class="font-semibold">
               {t('llm.test_ok', { ms: testResult.latency_ms })}
             </b>
             {#if testResult.reply}
@@ -277,7 +280,7 @@ async function remove() {
           </div>
         {:else}
           <div class="notice notice-bad flex-col gap-1">
-            <b class="font-extrabold">{t('llm.test_failed')}</b>
+            <b class="font-semibold">{t('llm.test_failed')}</b>
             <span class="min-w-0 break-words">{testResult.error}</span>
           </div>
         {/if}
@@ -289,9 +292,9 @@ async function remove() {
         <div class="grid gap-3.5 sm:grid-cols-2">
           <div>
             <label class="label" for="provider-temperature">{t('llm.temperature')}</label>
-            <input
+            <TextField
               id="provider-temperature"
-              class="input"
+             
               inputmode="decimal"
               placeholder={t('llm.unset')}
               bind:value={temperature}
@@ -299,9 +302,9 @@ async function remove() {
           </div>
           <div>
             <label class="label" for="provider-max-tokens">{t('llm.max_tokens')}</label>
-            <input
+            <TextField
               id="provider-max-tokens"
-              class="input"
+             
               inputmode="numeric"
               placeholder={t('llm.unset')}
               bind:value={maxTokens}
@@ -313,15 +316,17 @@ async function remove() {
   </div>
 
   <div class="flex flex-wrap items-center gap-x-3.5 gap-y-1 border-t border-line pt-5 pb-1">
-    <button
+    <Button
       type="button"
-      class="btn btn-quiet h-8! px-0! text-accent-fg!"
+      variant="text"
+      size="sm"
+      class="kanon-btn-flush"
       aria-expanded={showAdvanced}
       onclick={() => (showAdvanced = !showAdvanced)}
     >
       {showAdvanced ? t('instances.hide_advanced') : t('instances.show_advanced')}
-      <ChevronDown size={16} strokeWidth={2.4} class="transition-transform {showAdvanced ? 'rotate-180' : ''}" />
-    </button>
+      <ChevronDown size={16} strokeWidth={2} class="transition-transform {showAdvanced ? 'rotate-180' : ''}" />
+    </Button>
     {#if !showAdvanced}
       <span class="text-[13.5px] text-fg2">{t('llm.advanced_summary')}</span>
     {/if}
@@ -330,29 +335,32 @@ async function remove() {
   {#if changeCount > 0}
     <div class="sticky bottom-4 z-10 mt-6 flex justify-center">
       <div
-        class="flex max-w-full items-center gap-3 rounded-[26px] bg-bar py-2 pr-2 pl-5 text-[14.5px] font-bold text-on-bar shadow-[var(--k-pop)]"
+        class="flex max-w-full items-center gap-3 rounded-full bg-bar py-2 pr-2 pl-5 text-[14.5px] font-medium text-on-bar shadow-[var(--k-pop)]"
       >
         <span class="truncate">
           {changeCount === 1
             ? t('instances.bar_changed_one')
             : t('instances.bar_changed', { n: changeCount })}
         </span>
-        <button
+        <Button
           type="button"
-          class="btn btn-quiet btn-sm text-on-bar! opacity-75 hover:opacity-100 hover:bg-transparent!"
+          variant="inverse-plain"
+          size="sm"
+          class="opacity-75 hover:opacity-100"
           disabled={providersStore.pending}
           onclick={reset}
         >
           {t('instances.discard')}
-        </button>
-        <button
+        </Button>
+        <Button
           type="button"
-          class="btn btn-primary btn-sm"
+          variant="inverse-filled"
+          size="sm"
           disabled={providersStore.pending}
           onclick={() => void save()}
         >
           {providersStore.pending ? t('instances.saving') : t('instances.save_changes')}
-        </button>
+        </Button>
       </div>
     </div>
   {/if}

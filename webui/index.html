@@ -5,6 +5,32 @@
     <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>Kanon</title>
+    <script>
+      // Applies the saved theme before the first paint. The stylesheet is render-blocking but the
+      // app bundle is a deferred module, so without this a dark-mode visitor sees the light page
+      // (and the default accent's tint) flash until `theme.svelte.ts` runs. That store stays the
+      // source of truth: it re-reads the same keys on start-up, drops any value it does not know,
+      // and owns every later change.
+      (() => {
+        const root = document.documentElement;
+        let mode = null;
+        let accent = null;
+        try {
+          mode = localStorage.getItem('kanon-theme');
+          accent = localStorage.getItem('kanon-accent');
+        } catch {
+          // Storage is blocked: fall through to the system preference and the default accent.
+        }
+        const dark =
+          mode === 'dark' ||
+          (mode !== 'light' && matchMedia('(prefers-color-scheme: dark)').matches);
+        root.classList.toggle('dark', dark);
+        // Graphite is the base token set and the default accent, so it needs no attribute.
+        if (accent && accent !== 'graphite') {
+          root.setAttribute('data-accent', accent);
+        }
+      })();
+    </script>
   </head>
   <body>
     <div id="app"></div>

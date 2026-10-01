@@ -1,14 +1,10 @@
 export type ThemeMode = 'light' | 'dark' | 'system';
 
-/** Accent colours offered in Settings → Appearance; each maps to a `data-accent` token set in `app.css`. */
-export const ACCENTS = [
-  'violet',
-  'blue',
-  'teal',
-  'coral',
-  'rose',
-  'graphite',
-] as const;
+/**
+ * Accent colours offered in Settings → Appearance, in picker order; each maps to a `data-accent`
+ * token set in `app.css`. The first entry is the default: it is the attribute-less `:root` set.
+ */
+export const ACCENTS = ['graphite', 'violet', 'blue', 'teal', 'rose'] as const;
 export type Accent = (typeof ACCENTS)[number];
 
 const MODE_KEY = 'kanon-theme';
@@ -39,7 +35,8 @@ function writePref(key: string, value: string) {
 class ThemeStore {
   private mode = $state<ThemeMode>('system');
   private isDark = $state(false);
-  private accentValue = $state<Accent>('violet');
+  /** Accent for `<html>`; starts at the default, which is the attribute-less base token set. */
+  private accentValue = $state<Accent>('graphite');
 
   constructor() {
     if (typeof window !== 'undefined') {
@@ -102,8 +99,8 @@ class ThemeStore {
   }
 
   private applyAccent() {
-    // Violet is the base token set, so it needs no attribute.
-    if (this.accentValue === 'violet') {
+    // Graphite is the base token set (the default accent), so it needs no attribute.
+    if (this.accentValue === 'graphite') {
       document.documentElement.removeAttribute('data-accent');
     } else {
       document.documentElement.setAttribute('data-accent', this.accentValue);

@@ -10,6 +10,7 @@ import AddProviderModal from '../models/AddProviderModal.svelte';
 import DefaultModelCard from '../models/DefaultModelCard.svelte';
 import ProviderEditor from '../models/ProviderEditor.svelte';
 import ProviderModels from '../models/ProviderModels.svelte';
+import Button from '../ui/Button.svelte';
 import EmptyState from '../ui/EmptyState.svelte';
 import PageHead from '../ui/PageHead.svelte';
 
@@ -101,10 +102,10 @@ function onDeleted() {
     {/if}
   {/snippet}
   {#snippet actions()}
-    <button type="button" class="btn btn-primary" onclick={() => (addOpen = true)}>
-      <Plus size={16} strokeWidth={2.6} />
+    <Button type="button" variant="filled" onclick={() => (addOpen = true)}>
+      <Plus size={16} strokeWidth={2.2} />
       {t('llm.add_provider')}
-    </button>
+    </Button>
   {/snippet}
 </PageHead>
 
@@ -118,10 +119,10 @@ function onDeleted() {
   <div class="card">
     <EmptyState icon={Server} title={t('llm.empty_title')} text={t('llm.empty_text')}>
       {#snippet action()}
-        <button type="button" class="btn btn-primary" onclick={() => (addOpen = true)}>
-          <Plus size={16} strokeWidth={2.6} />
+        <Button type="button" variant="filled" onclick={() => (addOpen = true)}>
+          <Plus size={16} strokeWidth={2.2} />
           {t('llm.add_provider')}
-        </button>
+        </Button>
       {/snippet}
     </EmptyState>
   </div>
@@ -129,6 +130,7 @@ function onDeleted() {
   <DefaultModelCard />
 
   <div class="grid items-start gap-4 lg:grid-cols-[264px_minmax(0,1fr)]">
+    <!-- Drawn like the Settings navigation: pills with Material's 8% hover layer, on a card. -->
     <nav class="card flex flex-col gap-0.5 p-2" aria-label={t('llm.providers')}>
       {#each providers as provider (provider.name)}
         {@const on = provider.name === openedName}
@@ -140,12 +142,12 @@ function onDeleted() {
             e.preventDefault();
             if (!on) router.navigate('models', provider.name);
           }}
-          class="flex flex-col rounded-xl px-3 py-2.5 leading-[1.35] text-fg no-underline {on
+          class="flex flex-col rounded-full px-5 py-2.5 leading-[1.35] text-fg no-underline transition-colors {on
             ? 'bg-accent-tint'
-            : 'hover:bg-sunk'}"
+            : 'hover:bg-fg/8'}"
         >
           <span class="flex min-w-0 items-center gap-2">
-            <span class="truncate text-[15px] font-extrabold {on ? 'text-accent-fg' : ''}">{provider.name}</span>
+            <span class="truncate text-[15px] font-semibold {on ? 'text-accent-fg' : ''}">{provider.name}</span>
             {#if servesDefault(provider.name)}
               <span class="chip chip-sm chip-accent">{t('llm.default_chip')}</span>
             {/if}

@@ -406,7 +406,19 @@ async fn config_hot_reload_enforces_cas_version_vectors() {
             &self,
             _: Request<GetPluginMetaRequest>,
         ) -> Result<Response<GetPluginMetaResponse>, Status> {
-            Ok(Response::new(GetPluginMetaResponse { plugins: vec![] }))
+            // The advertised tool depends on the applied configuration, like a plugin whose tool
+            // only exists once an API key is configured.
+            let version = self.version.load(Ordering::SeqCst);
+            Ok(Response::new(GetPluginMetaResponse {
+                plugins: vec![PluginMeta {
+                    id: "org.kanon.plugin.cas_test".to_string(),
+                    tools: vec![kanon_proto::v1::ToolMeta {
+                        name: format!("tool_v{version}"),
+                        ..Default::default()
+                    }],
+                    ..PluginMeta::default()
+                }],
+            }))
         }
     }
 
@@ -449,7 +461,7 @@ async fn config_hot_reload_enforces_cas_version_vectors() {
         vec![plugin],
         500,
     ));
-    supervisor.register_managed_host(host).await;
+    supervisor.register_managed_host(host.clone()).await;
 
     // Initial version is 0
     assert_eq!(supervisor.config_version(plugin_id).await, 0);
@@ -483,6 +495,8 @@ async fn config_hot_reload_enforces_cas_version_vectors() {
         .expect("CAS reload with expected version 1 succeeds");
     assert_eq!(v2, 2);
     assert_eq!(supervisor.config_version(plugin_id).await, 2);
+    // An accepted reload refreshes the metadata, so configuration-dependent tools appear.
+    assert_eq!(host.metas()[0].tools[0].name, "tool_v2");
 
     // 4. Stale update with expected_version = 1 fails (since current is 2)
     let err2 = supervisor

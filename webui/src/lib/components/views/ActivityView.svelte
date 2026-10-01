@@ -9,8 +9,10 @@ import { pipelineStore } from '../../stores/pipeline.svelte';
 import { router } from '../../stores/router.svelte';
 import type { LogLevel, LogRecord, TraceRecord } from '../../types';
 import { describe, STAGE_GROUPS, type StageGroup } from '../activity/describe';
+import Button from '../ui/Button.svelte';
 import PageHead from '../ui/PageHead.svelte';
 import Seg from '../ui/Seg.svelte';
+import TextField from '../ui/TextField.svelte';
 
 /**
  * Live activity of the node: what happened to each message, and the server's own log.
@@ -138,7 +140,7 @@ const LEVELS: (LogLevel | 'ALL')[] = ['ALL', 'ERROR', 'WARN', 'INFO', 'DEBUG'];
 
 const LEVEL_CLASS: Record<LogLevel, string> = {
   ERROR: 'text-danger',
-  WARN: 'text-warn-fg',
+  WARN: 'text-warn',
   INFO: 'text-fg2',
   DEBUG: 'text-fg3',
 };
@@ -165,10 +167,10 @@ function fullTime(ms: number): string {
   {/snippet}
   {#snippet actions()}
     {#if !live}
-      <button type="button" class="btn btn-sm" onclick={reconnect}>
-        <RefreshCw size={15} strokeWidth={2.4} />
+      <Button type="button" size="sm" onclick={reconnect}>
+        <RefreshCw size={15} strokeWidth={2} />
         {t('activity.reconnect')}
-      </button>
+      </Button>
     {/if}
     <Seg
       label={t('nav.activity')}
@@ -202,40 +204,45 @@ function fullTime(ms: number): string {
       />
     {/if}
   </div>
-  <div class="relative min-w-[180px] flex-1 basis-[220px] sm:max-w-[320px]">
-    <Search size={16} strokeWidth={2.2} class="pointer-events-none absolute top-1/2 left-3.5 -translate-y-1/2 text-fg3" />
+  <div class="min-w-[180px] flex-1 basis-[220px] sm:max-w-[320px]">
     {#if tab === 'events'}
-      <input
-        class="input h-[34px]! pl-10"
+      <TextField
+        pill
+        small
         type="search"
         aria-label={t('common.search')}
         placeholder={t('activity.search_events')}
         bind:value={pipelineStore.searchQuery}
-      />
+      >
+        {#snippet leading()}<Search size={16} strokeWidth={2} class="text-fg3" />{/snippet}
+      </TextField>
     {:else}
-      <input
-        class="input h-[34px]! pl-10"
+      <TextField
+        pill
+        small
         type="search"
         aria-label={t('common.search')}
         placeholder={t('activity.search_logs')}
         bind:value={logStore.searchQuery}
-      />
+      >
+        {#snippet leading()}<Search size={16} strokeWidth={2} class="text-fg3" />{/snippet}
+      </TextField>
     {/if}
   </div>
   <div class="ml-auto flex items-center gap-2">
-    <button type="button" class="btn btn-sm" aria-pressed={paused} onclick={togglePause}>
+    <Button type="button" size="sm" aria-pressed={paused} onclick={togglePause}>
       {#if paused}
-        <Play size={15} strokeWidth={2.4} />
+        <Play size={15} strokeWidth={2} />
         {waiting > 0 ? t('activity.resume_n', { n: waiting }) : t('activity.resume')}
       {:else}
-        <Pause size={15} strokeWidth={2.4} />
+        <Pause size={15} strokeWidth={2} />
         {t('activity.pause')}
       {/if}
-    </button>
-    <button type="button" class="btn btn-sm btn-quiet" onclick={clearList}>
-      <Trash2 size={15} strokeWidth={2.2} />
+    </Button>
+    <Button type="button" variant="text" size="sm" onclick={clearList}>
+      <Trash2 size={15} strokeWidth={2} />
       {t('activity.clear')}
-    </button>
+    </Button>
   </div>
 </div>
 
@@ -244,15 +251,15 @@ function fullTime(ms: number): string {
     {#if events.length === 0}
       <div class="flex flex-col items-center gap-3 px-6 py-14 text-center">
         {#if status !== 'connected'}
-          <p class="m-0 max-w-[46ch] text-[15px] font-bold">{t('activity.offline')}</p>
-          <button type="button" class="btn btn-sm" onclick={reconnect}>
-            <RefreshCw size={15} strokeWidth={2.4} />
+          <p class="m-0 max-w-[46ch] text-[15px] font-medium">{t('activity.offline')}</p>
+          <Button type="button" size="sm" onclick={reconnect}>
+            <RefreshCw size={15} strokeWidth={2} />
             {t('activity.reconnect')}
-          </button>
+          </Button>
         {:else if pipelineStore.records.length > 0}
-          <p class="m-0 text-[15px] font-bold">{t('activity.no_match')}</p>
+          <p class="m-0 text-[15px] font-medium">{t('activity.no_match')}</p>
         {:else}
-          <p class="m-0 max-w-[46ch] text-[15px] font-bold">{t('activity.empty_events')}</p>
+          <p class="m-0 max-w-[46ch] text-[15px] font-medium">{t('activity.empty_events')}</p>
           {#if (nodeStore.health?.instances?.enabled ?? 0) === 0}
             <!-- The usual reason for silence: no instance claims the platform, so inbound
                  messages are dropped before any stage is reported. -->
@@ -272,7 +279,7 @@ function fullTime(ms: number): string {
             <div class="min-w-0">
               <div class="flex items-center gap-2">
                 <i class="dot {info.tone === 'idle' ? '' : `dot-${info.tone}`}"></i>
-                <span class="min-w-0 truncate text-[14.5px] font-bold {info.tone === 'bad' ? 'text-danger' : ''}">
+                <span class="min-w-0 truncate text-[14.5px] font-medium {info.tone === 'bad' ? 'text-danger' : ''}">
                   {info.title}
                 </span>
               </div>
@@ -284,7 +291,7 @@ function fullTime(ms: number): string {
                   {#if eventId && pipelineStore.searchQuery.trim() !== eventId}
                     <button
                       type="button"
-                      class="cursor-pointer font-mono text-[12px] text-fg3 hover:text-accent-fg hover:underline"
+                      class="cursor-pointer font-mono text-[12px] text-fg3 hover:text-accent hover:underline"
                       title={t('activity.follow_event')}
                       onclick={() => followEvent(eventId)}
                     >
@@ -301,15 +308,15 @@ function fullTime(ms: number): string {
   {:else if logs.length === 0}
     <div class="flex flex-col items-center gap-3 px-6 py-14 text-center">
       {#if status !== 'connected'}
-        <p class="m-0 max-w-[46ch] text-[15px] font-bold">{t('activity.offline')}</p>
-        <button type="button" class="btn btn-sm" onclick={reconnect}>
-          <RefreshCw size={15} strokeWidth={2.4} />
+        <p class="m-0 max-w-[46ch] text-[15px] font-medium">{t('activity.offline')}</p>
+        <Button type="button" size="sm" onclick={reconnect}>
+          <RefreshCw size={15} strokeWidth={2} />
           {t('activity.reconnect')}
-        </button>
+        </Button>
       {:else if logStore.records.length > 0}
-        <p class="m-0 text-[15px] font-bold">{t('activity.no_match')}</p>
+        <p class="m-0 text-[15px] font-medium">{t('activity.no_match')}</p>
       {:else}
-        <p class="m-0 text-[15px] font-bold">{t('activity.empty_logs')}</p>
+        <p class="m-0 text-[15px] font-medium">{t('activity.empty_logs')}</p>
         {#if logStore.filterLevel !== 'ALL'}
           <p class="m-0 hint">
             {t('activity.level_hint', { level: t(`activity.l_${logStore.filterLevel.toLowerCase()}`) })}
@@ -324,7 +331,7 @@ function fullTime(ms: number): string {
           <time class="shrink-0 text-fg3 tabular-nums" title={fullTime(record.timestamp_ms)}>
             {formatClock(record.timestamp_ms)}
           </time>
-          <span class="w-11 shrink-0 font-bold {LEVEL_CLASS[record.level]}">{record.level}</span>
+          <span class="w-11 shrink-0 font-medium {LEVEL_CLASS[record.level]}">{record.level}</span>
           <span class="hidden w-[180px] shrink-0 truncate text-fg3 md:inline" title={record.target}>
             {shortTarget(record.target)}
           </span>
