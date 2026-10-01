@@ -280,6 +280,16 @@ class MessagePipelineServiceStub:
                 request_serializer=plugin__pb2.PrepareTurnRequest.SerializeToString,
                 response_deserializer=plugin__pb2.PrepareTurnResult.FromString,
                 _registered_method=True)
+        self.OnLlmRequest = channel.unary_unary(
+                '/kanon.plugin.v1.MessagePipelineService/OnLlmRequest',
+                request_serializer=plugin__pb2.LlmRequestHookRequest.SerializeToString,
+                response_deserializer=plugin__pb2.LlmRequestHookResult.FromString,
+                _registered_method=True)
+        self.OnHttpRequest = channel.unary_unary(
+                '/kanon.plugin.v1.MessagePipelineService/OnHttpRequest',
+                request_serializer=plugin__pb2.HttpRequest.SerializeToString,
+                response_deserializer=plugin__pb2.HttpResponse.FromString,
+                _registered_method=True)
 
 
 class MessagePipelineServiceServicer:
@@ -334,6 +344,31 @@ class MessagePipelineServiceServicer:
         context.set_details('Method not implemented!')
         raise NotImplementedError('Method not implemented!')
 
+    def OnLlmRequest(self, request, context):
+        """Rewrites the system prompt of a model conversation; called only for plugins with
+        `PluginMeta.rewrites_system_prompt`, in host priority order, each seeing the previous result.
+        Called once per turn before the first model request (the result is reused for the turn's
+        tool rounds and its compaction), and never for a plugin's own `RequestLLM`/`RunAgent` calls
+        unless they run inside the conversation.
+
+        The system prompt is the first thing in every request, so its bytes decide the provider's
+        prompt cache: a rewrite must be deterministic for a given conversation (no clocks, counters
+        or per-message data — those belong in `OnPrepareTurn`). A failing or slow plugin (deadline
+        as `OnPrepareTurn`) leaves the prompt as it was.
+        """
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
+    def OnHttpRequest(self, request, context):
+        """Serves an HTTP request addressed to the plugin's web routes; called only for plugins with
+        `PluginMeta.serves_http`. The management gateway forwards
+        `/api/v1/plugins/<plugin_id>/http/<path>` here; the plugin routes on `path` itself.
+        """
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
 
 def add_MessagePipelineServiceServicer_to_server(servicer, server):
     rpc_method_handlers = {
@@ -371,6 +406,16 @@ def add_MessagePipelineServiceServicer_to_server(servicer, server):
                     servicer.OnPrepareTurn,
                     request_deserializer=plugin__pb2.PrepareTurnRequest.FromString,
                     response_serializer=plugin__pb2.PrepareTurnResult.SerializeToString,
+            ),
+            'OnLlmRequest': grpc.unary_unary_rpc_method_handler(
+                    servicer.OnLlmRequest,
+                    request_deserializer=plugin__pb2.LlmRequestHookRequest.FromString,
+                    response_serializer=plugin__pb2.LlmRequestHookResult.SerializeToString,
+            ),
+            'OnHttpRequest': grpc.unary_unary_rpc_method_handler(
+                    servicer.OnHttpRequest,
+                    request_deserializer=plugin__pb2.HttpRequest.FromString,
+                    response_serializer=plugin__pb2.HttpResponse.SerializeToString,
             ),
     }
     generic_handler = grpc.method_handlers_generic_handler(
@@ -573,6 +618,60 @@ class MessagePipelineService:
             metadata,
             _registered_method=True)
 
+    @staticmethod
+    def OnLlmRequest(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(
+            request,
+            target,
+            '/kanon.plugin.v1.MessagePipelineService/OnLlmRequest',
+            plugin__pb2.LlmRequestHookRequest.SerializeToString,
+            plugin__pb2.LlmRequestHookResult.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
+    @staticmethod
+    def OnHttpRequest(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(
+            request,
+            target,
+            '/kanon.plugin.v1.MessagePipelineService/OnHttpRequest',
+            plugin__pb2.HttpRequest.SerializeToString,
+            plugin__pb2.HttpResponse.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
 
 class BotApiServiceStub:
     """3. 核心 API 服务 (运行在 Core 端，监听 core.sock / loopback，Host 主动连接调用)
@@ -624,6 +723,16 @@ class BotApiServiceStub:
                 request_serializer=plugin__pb2.GetStorageRequest.SerializeToString,
                 response_deserializer=plugin__pb2.GetStorageResponse.FromString,
                 _registered_method=True)
+        self.DeleteStorage = channel.unary_unary(
+                '/kanon.plugin.v1.BotApiService/DeleteStorage',
+                request_serializer=plugin__pb2.DeleteStorageRequest.SerializeToString,
+                response_deserializer=plugin__pb2.DeleteStorageResponse.FromString,
+                _registered_method=True)
+        self.ListStorage = channel.unary_unary(
+                '/kanon.plugin.v1.BotApiService/ListStorage',
+                request_serializer=plugin__pb2.ListStorageRequest.SerializeToString,
+                response_deserializer=plugin__pb2.ListStorageResponse.FromString,
+                _registered_method=True)
         self.Ping = channel.unary_unary(
                 '/kanon.plugin.v1.BotApiService/Ping',
                 request_serializer=plugin__pb2.PingRequest.SerializeToString,
@@ -633,6 +742,61 @@ class BotApiServiceStub:
                 '/kanon.plugin.v1.BotApiService/GetConversationHistory',
                 request_serializer=plugin__pb2.ConversationHistoryRequest.SerializeToString,
                 response_deserializer=plugin__pb2.ConversationHistoryResponse.FromString,
+                _registered_method=True)
+        self.ListConversations = channel.unary_unary(
+                '/kanon.plugin.v1.BotApiService/ListConversations',
+                request_serializer=plugin__pb2.ConversationsRequest.SerializeToString,
+                response_deserializer=plugin__pb2.ConversationList.FromString,
+                _registered_method=True)
+        self.NewConversation = channel.unary_unary(
+                '/kanon.plugin.v1.BotApiService/NewConversation',
+                request_serializer=plugin__pb2.ConversationsRequest.SerializeToString,
+                response_deserializer=plugin__pb2.ConversationList.FromString,
+                _registered_method=True)
+        self.SwitchConversation = channel.unary_unary(
+                '/kanon.plugin.v1.BotApiService/SwitchConversation',
+                request_serializer=plugin__pb2.SelectConversationRequest.SerializeToString,
+                response_deserializer=plugin__pb2.ConversationList.FromString,
+                _registered_method=True)
+        self.DeleteConversation = channel.unary_unary(
+                '/kanon.plugin.v1.BotApiService/DeleteConversation',
+                request_serializer=plugin__pb2.SelectConversationRequest.SerializeToString,
+                response_deserializer=plugin__pb2.ConversationList.FromString,
+                _registered_method=True)
+        self.AppendConversation = channel.unary_unary(
+                '/kanon.plugin.v1.BotApiService/AppendConversation',
+                request_serializer=plugin__pb2.AppendConversationRequest.SerializeToString,
+                response_deserializer=plugin__pb2.AppendConversationResponse.FromString,
+                _registered_method=True)
+        self.ListPersonas = channel.unary_unary(
+                '/kanon.plugin.v1.BotApiService/ListPersonas',
+                request_serializer=plugin__pb2.ListPersonasRequest.SerializeToString,
+                response_deserializer=plugin__pb2.ListPersonasResponse.FromString,
+                _registered_method=True)
+        self.UpsertPersona = channel.unary_unary(
+                '/kanon.plugin.v1.BotApiService/UpsertPersona',
+                request_serializer=plugin__pb2.Persona.SerializeToString,
+                response_deserializer=plugin__pb2.UpsertPersonaResponse.FromString,
+                _registered_method=True)
+        self.DeletePersona = channel.unary_unary(
+                '/kanon.plugin.v1.BotApiService/DeletePersona',
+                request_serializer=plugin__pb2.DeletePersonaRequest.SerializeToString,
+                response_deserializer=plugin__pb2.DeletePersonaResponse.FromString,
+                _registered_method=True)
+        self.RunAgent = channel.unary_unary(
+                '/kanon.plugin.v1.BotApiService/RunAgent',
+                request_serializer=plugin__pb2.RunAgentRequest.SerializeToString,
+                response_deserializer=plugin__pb2.RunAgentResponse.FromString,
+                _registered_method=True)
+        self.RefreshPluginMeta = channel.unary_unary(
+                '/kanon.plugin.v1.BotApiService/RefreshPluginMeta',
+                request_serializer=plugin__pb2.RefreshPluginMetaRequest.SerializeToString,
+                response_deserializer=plugin__pb2.RefreshPluginMetaResponse.FromString,
+                _registered_method=True)
+        self.RenderImage = channel.unary_unary(
+                '/kanon.plugin.v1.BotApiService/RenderImage',
+                request_serializer=plugin__pb2.RenderImageRequest.SerializeToString,
+                response_deserializer=plugin__pb2.RenderImageResponse.FromString,
                 _registered_method=True)
 
 
@@ -684,13 +848,28 @@ class BotApiServiceServicer:
         raise NotImplementedError('Method not implemented!')
 
     def SetStorage(self, request, context):
-        """Missing associated documentation comment in .proto file."""
+        """Central key-value store, one namespace per plugin, persisted by the core in `data/kv.db`.
+        Values are opaque bytes (the SDKs store JSON). A key that expired reads as absent.
+        """
         context.set_code(grpc.StatusCode.UNIMPLEMENTED)
         context.set_details('Method not implemented!')
         raise NotImplementedError('Method not implemented!')
 
     def GetStorage(self, request, context):
         """Missing associated documentation comment in .proto file."""
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
+    def DeleteStorage(self, request, context):
+        """Missing associated documentation comment in .proto file."""
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
+    def ListStorage(self, request, context):
+        """Lists the plugin's live keys starting with `prefix`, sorted.
+        """
         context.set_code(grpc.StatusCode.UNIMPLEMENTED)
         context.set_details('Method not implemented!')
         raise NotImplementedError('Method not implemented!')
@@ -711,6 +890,93 @@ class BotApiServiceServicer:
         """Reads the model conversation an inbound message belongs to. Read-only: history is
         append-only and only the core writes it. NOT_FOUND when no enabled instance claims the
         platform, UNAVAILABLE when no model is configured, INVALID_ARGUMENT without a context.
+        """
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
+    def ListConversations(self, request, context):
+        """--- Conversations: the sessions of one chat, as `/ls`, `/new`, `/switch` and `/del` see them.
+        Every call names the chat by an inbound message (`context`), resolved exactly as when the
+        core answers that message. NOT_FOUND when no enabled instance claims it.
+        """
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
+    def NewConversation(self, request, context):
+        """Starts a new, empty conversation and makes it current (what `/new` does).
+        """
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
+    def SwitchConversation(self, request, context):
+        """Makes another conversation of the same chat current. NOT_FOUND for an unknown session.
+        """
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
+    def DeleteConversation(self, request, context):
+        """Deletes a conversation's history and records. Deleting the current one leaves the chat on a
+        new, empty conversation. NOT_FOUND for an unknown session.
+        """
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
+    def AppendConversation(self, request, context):
+        """Appends finished turns to the current conversation, e.g. a command exchange the model should
+        remember. Messages must alternate user/assistant, starting with user and ending with
+        assistant; anything else is INVALID_ARGUMENT. Append-only: nothing already stored changes.
+        """
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
+    def ListPersonas(self, request, context):
+        """--- Personas: the operator's persona catalog (`data/personas.json`).
+        """
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
+    def UpsertPersona(self, request, context):
+        """Creates or replaces a persona. INVALID_ARGUMENT for an empty id or prompt, FAILED_PRECONDITION
+        for the built-in read-only persona.
+        """
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
+    def DeletePersona(self, request, context):
+        """Missing associated documentation comment in .proto file."""
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
+    def RunAgent(self, request, context):
+        """Runs the node's agent (model + tool loop) for a plugin and returns its final answer. Unlike
+        `RequestLLM` it can use tools and can run inside a chat's conversation. UNAVAILABLE when no
+        model is configured, NOT_FOUND when `context` names a chat no enabled instance claims.
+        """
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
+    def RefreshPluginMeta(self, request, context):
+        """Asks the core to fetch this host's `GetPluginMeta` again, so tools, commands and triggers a
+        plugin added or removed at runtime take effect for the next turn. NOT_FOUND for an unknown
+        host.
+        """
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
+    def RenderImage(self, request, context):
+        """Renders text (or SVG) into a PNG in the plugin's data directory, for sending as an image.
+        INVALID_ARGUMENT for empty input or malformed SVG; UNAVAILABLE when no usable font exists.
         """
         context.set_code(grpc.StatusCode.UNIMPLEMENTED)
         context.set_details('Method not implemented!')
@@ -759,6 +1025,16 @@ def add_BotApiServiceServicer_to_server(servicer, server):
                     request_deserializer=plugin__pb2.GetStorageRequest.FromString,
                     response_serializer=plugin__pb2.GetStorageResponse.SerializeToString,
             ),
+            'DeleteStorage': grpc.unary_unary_rpc_method_handler(
+                    servicer.DeleteStorage,
+                    request_deserializer=plugin__pb2.DeleteStorageRequest.FromString,
+                    response_serializer=plugin__pb2.DeleteStorageResponse.SerializeToString,
+            ),
+            'ListStorage': grpc.unary_unary_rpc_method_handler(
+                    servicer.ListStorage,
+                    request_deserializer=plugin__pb2.ListStorageRequest.FromString,
+                    response_serializer=plugin__pb2.ListStorageResponse.SerializeToString,
+            ),
             'Ping': grpc.unary_unary_rpc_method_handler(
                     servicer.Ping,
                     request_deserializer=plugin__pb2.PingRequest.FromString,
@@ -768,6 +1044,61 @@ def add_BotApiServiceServicer_to_server(servicer, server):
                     servicer.GetConversationHistory,
                     request_deserializer=plugin__pb2.ConversationHistoryRequest.FromString,
                     response_serializer=plugin__pb2.ConversationHistoryResponse.SerializeToString,
+            ),
+            'ListConversations': grpc.unary_unary_rpc_method_handler(
+                    servicer.ListConversations,
+                    request_deserializer=plugin__pb2.ConversationsRequest.FromString,
+                    response_serializer=plugin__pb2.ConversationList.SerializeToString,
+            ),
+            'NewConversation': grpc.unary_unary_rpc_method_handler(
+                    servicer.NewConversation,
+                    request_deserializer=plugin__pb2.ConversationsRequest.FromString,
+                    response_serializer=plugin__pb2.ConversationList.SerializeToString,
+            ),
+            'SwitchConversation': grpc.unary_unary_rpc_method_handler(
+                    servicer.SwitchConversation,
+                    request_deserializer=plugin__pb2.SelectConversationRequest.FromString,
+                    response_serializer=plugin__pb2.ConversationList.SerializeToString,
+            ),
+            'DeleteConversation': grpc.unary_unary_rpc_method_handler(
+                    servicer.DeleteConversation,
+                    request_deserializer=plugin__pb2.SelectConversationRequest.FromString,
+                    response_serializer=plugin__pb2.ConversationList.SerializeToString,
+            ),
+            'AppendConversation': grpc.unary_unary_rpc_method_handler(
+                    servicer.AppendConversation,
+                    request_deserializer=plugin__pb2.AppendConversationRequest.FromString,
+                    response_serializer=plugin__pb2.AppendConversationResponse.SerializeToString,
+            ),
+            'ListPersonas': grpc.unary_unary_rpc_method_handler(
+                    servicer.ListPersonas,
+                    request_deserializer=plugin__pb2.ListPersonasRequest.FromString,
+                    response_serializer=plugin__pb2.ListPersonasResponse.SerializeToString,
+            ),
+            'UpsertPersona': grpc.unary_unary_rpc_method_handler(
+                    servicer.UpsertPersona,
+                    request_deserializer=plugin__pb2.Persona.FromString,
+                    response_serializer=plugin__pb2.UpsertPersonaResponse.SerializeToString,
+            ),
+            'DeletePersona': grpc.unary_unary_rpc_method_handler(
+                    servicer.DeletePersona,
+                    request_deserializer=plugin__pb2.DeletePersonaRequest.FromString,
+                    response_serializer=plugin__pb2.DeletePersonaResponse.SerializeToString,
+            ),
+            'RunAgent': grpc.unary_unary_rpc_method_handler(
+                    servicer.RunAgent,
+                    request_deserializer=plugin__pb2.RunAgentRequest.FromString,
+                    response_serializer=plugin__pb2.RunAgentResponse.SerializeToString,
+            ),
+            'RefreshPluginMeta': grpc.unary_unary_rpc_method_handler(
+                    servicer.RefreshPluginMeta,
+                    request_deserializer=plugin__pb2.RefreshPluginMetaRequest.FromString,
+                    response_serializer=plugin__pb2.RefreshPluginMetaResponse.SerializeToString,
+            ),
+            'RenderImage': grpc.unary_unary_rpc_method_handler(
+                    servicer.RenderImage,
+                    request_deserializer=plugin__pb2.RenderImageRequest.FromString,
+                    response_serializer=plugin__pb2.RenderImageResponse.SerializeToString,
             ),
     }
     generic_handler = grpc.method_handlers_generic_handler(
@@ -998,6 +1329,60 @@ class BotApiService:
             _registered_method=True)
 
     @staticmethod
+    def DeleteStorage(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(
+            request,
+            target,
+            '/kanon.plugin.v1.BotApiService/DeleteStorage',
+            plugin__pb2.DeleteStorageRequest.SerializeToString,
+            plugin__pb2.DeleteStorageResponse.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
+    @staticmethod
+    def ListStorage(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(
+            request,
+            target,
+            '/kanon.plugin.v1.BotApiService/ListStorage',
+            plugin__pb2.ListStorageRequest.SerializeToString,
+            plugin__pb2.ListStorageResponse.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
+    @staticmethod
     def Ping(request,
             target,
             options=(),
@@ -1041,6 +1426,303 @@ class BotApiService:
             '/kanon.plugin.v1.BotApiService/GetConversationHistory',
             plugin__pb2.ConversationHistoryRequest.SerializeToString,
             plugin__pb2.ConversationHistoryResponse.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
+    @staticmethod
+    def ListConversations(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(
+            request,
+            target,
+            '/kanon.plugin.v1.BotApiService/ListConversations',
+            plugin__pb2.ConversationsRequest.SerializeToString,
+            plugin__pb2.ConversationList.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
+    @staticmethod
+    def NewConversation(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(
+            request,
+            target,
+            '/kanon.plugin.v1.BotApiService/NewConversation',
+            plugin__pb2.ConversationsRequest.SerializeToString,
+            plugin__pb2.ConversationList.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
+    @staticmethod
+    def SwitchConversation(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(
+            request,
+            target,
+            '/kanon.plugin.v1.BotApiService/SwitchConversation',
+            plugin__pb2.SelectConversationRequest.SerializeToString,
+            plugin__pb2.ConversationList.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
+    @staticmethod
+    def DeleteConversation(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(
+            request,
+            target,
+            '/kanon.plugin.v1.BotApiService/DeleteConversation',
+            plugin__pb2.SelectConversationRequest.SerializeToString,
+            plugin__pb2.ConversationList.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
+    @staticmethod
+    def AppendConversation(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(
+            request,
+            target,
+            '/kanon.plugin.v1.BotApiService/AppendConversation',
+            plugin__pb2.AppendConversationRequest.SerializeToString,
+            plugin__pb2.AppendConversationResponse.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
+    @staticmethod
+    def ListPersonas(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(
+            request,
+            target,
+            '/kanon.plugin.v1.BotApiService/ListPersonas',
+            plugin__pb2.ListPersonasRequest.SerializeToString,
+            plugin__pb2.ListPersonasResponse.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
+    @staticmethod
+    def UpsertPersona(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(
+            request,
+            target,
+            '/kanon.plugin.v1.BotApiService/UpsertPersona',
+            plugin__pb2.Persona.SerializeToString,
+            plugin__pb2.UpsertPersonaResponse.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
+    @staticmethod
+    def DeletePersona(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(
+            request,
+            target,
+            '/kanon.plugin.v1.BotApiService/DeletePersona',
+            plugin__pb2.DeletePersonaRequest.SerializeToString,
+            plugin__pb2.DeletePersonaResponse.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
+    @staticmethod
+    def RunAgent(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(
+            request,
+            target,
+            '/kanon.plugin.v1.BotApiService/RunAgent',
+            plugin__pb2.RunAgentRequest.SerializeToString,
+            plugin__pb2.RunAgentResponse.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
+    @staticmethod
+    def RefreshPluginMeta(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(
+            request,
+            target,
+            '/kanon.plugin.v1.BotApiService/RefreshPluginMeta',
+            plugin__pb2.RefreshPluginMetaRequest.SerializeToString,
+            plugin__pb2.RefreshPluginMetaResponse.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
+    @staticmethod
+    def RenderImage(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(
+            request,
+            target,
+            '/kanon.plugin.v1.BotApiService/RenderImage',
+            plugin__pb2.RenderImageRequest.SerializeToString,
+            plugin__pb2.RenderImageResponse.FromString,
             options,
             channel_credentials,
             insecure,

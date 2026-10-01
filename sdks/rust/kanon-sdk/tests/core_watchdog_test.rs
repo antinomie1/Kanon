@@ -25,6 +25,96 @@ struct StubCore;
 
 #[async_trait]
 impl BotApiService for StubCore {
+    async fn delete_storage(
+        &self,
+        _request: tonic::Request<kanon_proto::v1::DeleteStorageRequest>,
+    ) -> Result<tonic::Response<kanon_proto::v1::DeleteStorageResponse>, tonic::Status> {
+        Err(tonic::Status::unimplemented("delete_storage"))
+    }
+
+    async fn list_storage(
+        &self,
+        _request: tonic::Request<kanon_proto::v1::ListStorageRequest>,
+    ) -> Result<tonic::Response<kanon_proto::v1::ListStorageResponse>, tonic::Status> {
+        Err(tonic::Status::unimplemented("list_storage"))
+    }
+
+    async fn list_conversations(
+        &self,
+        _request: tonic::Request<kanon_proto::v1::ConversationsRequest>,
+    ) -> Result<tonic::Response<kanon_proto::v1::ConversationList>, tonic::Status> {
+        Err(tonic::Status::unimplemented("list_conversations"))
+    }
+
+    async fn new_conversation(
+        &self,
+        _request: tonic::Request<kanon_proto::v1::ConversationsRequest>,
+    ) -> Result<tonic::Response<kanon_proto::v1::ConversationList>, tonic::Status> {
+        Err(tonic::Status::unimplemented("new_conversation"))
+    }
+
+    async fn switch_conversation(
+        &self,
+        _request: tonic::Request<kanon_proto::v1::SelectConversationRequest>,
+    ) -> Result<tonic::Response<kanon_proto::v1::ConversationList>, tonic::Status> {
+        Err(tonic::Status::unimplemented("switch_conversation"))
+    }
+
+    async fn delete_conversation(
+        &self,
+        _request: tonic::Request<kanon_proto::v1::SelectConversationRequest>,
+    ) -> Result<tonic::Response<kanon_proto::v1::ConversationList>, tonic::Status> {
+        Err(tonic::Status::unimplemented("delete_conversation"))
+    }
+
+    async fn append_conversation(
+        &self,
+        _request: tonic::Request<kanon_proto::v1::AppendConversationRequest>,
+    ) -> Result<tonic::Response<kanon_proto::v1::AppendConversationResponse>, tonic::Status> {
+        Err(tonic::Status::unimplemented("append_conversation"))
+    }
+
+    async fn list_personas(
+        &self,
+        _request: tonic::Request<kanon_proto::v1::ListPersonasRequest>,
+    ) -> Result<tonic::Response<kanon_proto::v1::ListPersonasResponse>, tonic::Status> {
+        Err(tonic::Status::unimplemented("list_personas"))
+    }
+
+    async fn upsert_persona(
+        &self,
+        _request: tonic::Request<kanon_proto::v1::Persona>,
+    ) -> Result<tonic::Response<kanon_proto::v1::UpsertPersonaResponse>, tonic::Status> {
+        Err(tonic::Status::unimplemented("upsert_persona"))
+    }
+
+    async fn delete_persona(
+        &self,
+        _request: tonic::Request<kanon_proto::v1::DeletePersonaRequest>,
+    ) -> Result<tonic::Response<kanon_proto::v1::DeletePersonaResponse>, tonic::Status> {
+        Err(tonic::Status::unimplemented("delete_persona"))
+    }
+
+    async fn run_agent(
+        &self,
+        _request: tonic::Request<kanon_proto::v1::RunAgentRequest>,
+    ) -> Result<tonic::Response<kanon_proto::v1::RunAgentResponse>, tonic::Status> {
+        Err(tonic::Status::unimplemented("run_agent"))
+    }
+
+    async fn refresh_plugin_meta(
+        &self,
+        _request: tonic::Request<kanon_proto::v1::RefreshPluginMetaRequest>,
+    ) -> Result<tonic::Response<kanon_proto::v1::RefreshPluginMetaResponse>, tonic::Status> {
+        Err(tonic::Status::unimplemented("refresh_plugin_meta"))
+    }
+
+    async fn render_image(
+        &self,
+        _request: tonic::Request<kanon_proto::v1::RenderImageRequest>,
+    ) -> Result<tonic::Response<kanon_proto::v1::RenderImageResponse>, tonic::Status> {
+        Err(tonic::Status::unimplemented("render_image"))
+    }
     async fn ping(&self, request: Request<PingRequest>) -> Result<Response<PingResponse>, Status> {
         Ok(Response::new(PingResponse {
             timestamp: request.into_inner().timestamp,

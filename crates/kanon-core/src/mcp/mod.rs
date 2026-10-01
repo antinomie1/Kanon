@@ -652,6 +652,8 @@ impl McpServer {
             events: Vec::new(),
             decorates_replies: false,
             prepares_turns: false,
+            rewrites_system_prompt: false,
+            serves_http: false,
         }];
 
         Ok(())

@@ -382,6 +382,24 @@ impl ManagedHost {
         Ok(client.on_prepare_turn(req).await?.into_inner())
     }
 
+    /// Asks a plugin to rewrite the system prompt of the turn about to be answered.
+    pub async fn rewrite_system_prompt(
+        &self,
+        req: kanon_proto::v1::LlmRequestHookRequest,
+    ) -> Result<kanon_proto::v1::LlmRequestHookResult, tonic::Status> {
+        let mut client = self.pipeline_client.clone();
+        Ok(client.on_llm_request(req).await?.into_inner())
+    }
+
+    /// Forwards an HTTP request to one of the plugin's web routes.
+    pub async fn http_request(
+        &self,
+        req: kanon_proto::v1::HttpRequest,
+    ) -> Result<kanon_proto::v1::HttpResponse, tonic::Status> {
+        let mut client = self.pipeline_client.clone();
+        Ok(client.on_http_request(req).await?.into_inner())
+    }
+
     /// Queries the host for fresh plugin metadata.
     pub async fn get_plugin_meta(&self) -> Result<Vec<PluginMeta>, tonic::Status> {
         let mut client = self.host_client.clone();
@@ -1500,6 +1518,8 @@ impl Supervisor {
                         events: vec![],
                         decorates_replies: false,
                         prepares_turns: false,
+                        rewrites_system_prompt: false,
+                        serves_http: false,
                     })
                     .collect()
             }

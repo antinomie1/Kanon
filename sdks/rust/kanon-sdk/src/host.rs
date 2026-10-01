@@ -396,6 +396,24 @@ struct PipelineServiceImpl<P: Plugin> {
 
 #[tonic::async_trait]
 impl<P: Plugin> MessagePipelineService for PipelineServiceImpl<P> {
+    /// Not supported by the Rust SDK yet: the system prompt is left unchanged.
+    async fn on_llm_request(
+        &self,
+        _request: Request<kanon_proto::v1::LlmRequestHookRequest>,
+    ) -> Result<Response<kanon_proto::v1::LlmRequestHookResult>, Status> {
+        Ok(Response::new(kanon_proto::v1::LlmRequestHookResult {
+            system_prompt: None,
+        }))
+    }
+
+    /// Not supported by the Rust SDK yet.
+    async fn on_http_request(
+        &self,
+        _request: Request<kanon_proto::v1::HttpRequest>,
+    ) -> Result<Response<kanon_proto::v1::HttpResponse>, Status> {
+        Err(Status::unimplemented("this plugin serves no HTTP routes"))
+    }
+
     async fn on_pre_filter(
         &self,
         request: Request<PipelineEventRequest>,

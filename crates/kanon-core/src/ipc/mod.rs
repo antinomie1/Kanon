@@ -3,6 +3,11 @@
 //! Provides the central gRPC endpoint (`core.sock`) through which plugin hosts
 //! communicate with the Core microkernel via [`BotApiService`].
 
+mod agent;
+mod conversations;
+mod render;
+mod storage;
+
 use crate::pipeline::engine::{HistoryError, OutboundMessage, PipelineEngine};
 use std::future::Future;
 use std::path::{Path, PathBuf};
@@ -15,10 +20,9 @@ use tonic::{Request, Response, Status};
 use kanon_proto::v1::bot_api_service_server::{BotApiService, BotApiServiceServer};
 use kanon_proto::v1::{
     ConversationHistoryRequest, ConversationHistoryResponse, DeliverMessageRequest,
-    DeliverMessageResponse, GetStorageRequest, GetStorageResponse, IngestEventRequest,
-    IngestEventResponse, LlmChunk, LlmRequest, PlatformApiRequest, PlatformApiResponse,
-    RegisterHostRequest, RegisterHostResponse, SendMessageRequest, SendMessageResponse,
-    SetStorageRequest, SetStorageResponse,
+    DeliverMessageResponse, IngestEventRequest, IngestEventResponse, LlmChunk, LlmRequest,
+    PlatformApiRequest, PlatformApiResponse, RegisterHostRequest, RegisterHostResponse,
+    SendMessageRequest, SendMessageResponse,
 };
 use kanon_transport::{IpcListener, core_socket_path};
 
@@ -554,32 +558,111 @@ impl BotApiService for CoreApiService {
         }
     }
 
-    /// Sets an embedded KV key-value pair.
-    ///
-    /// Centralized KV storage via gRPC is unsupported. Plugins should persist state
-    /// locally within their dedicated `./data/plugins/<id>/` directory (e.g. SQLite / DuckDB)
-    /// to avoid RPC data amplification.
+    // The RPCs below live in submodules, one file per concern.
+
     async fn set_storage(
         &self,
-        _request: Request<SetStorageRequest>,
-    ) -> Result<Response<SetStorageResponse>, Status> {
-        Err(Status::unimplemented(
-            "Centralized KV storage via gRPC is unsupported; plugins must persist locally in their dedicated data directory",
-        ))
+        request: Request<kanon_proto::v1::SetStorageRequest>,
+    ) -> Result<Response<kanon_proto::v1::SetStorageResponse>, Status> {
+        self.set_storage_rpc(request).await
     }
 
-    /// Retrieves an embedded KV key-value pair.
-    ///
-    /// Centralized KV storage via gRPC is unsupported. Plugins should persist state
-    /// locally within their dedicated `./data/plugins/<id>/` directory (e.g. SQLite / DuckDB)
-    /// to avoid RPC data amplification.
     async fn get_storage(
         &self,
-        _request: Request<GetStorageRequest>,
-    ) -> Result<Response<GetStorageResponse>, Status> {
-        Err(Status::unimplemented(
-            "Centralized KV storage via gRPC is unsupported; plugins must persist locally in their dedicated data directory",
-        ))
+        request: Request<kanon_proto::v1::GetStorageRequest>,
+    ) -> Result<Response<kanon_proto::v1::GetStorageResponse>, Status> {
+        self.get_storage_rpc(request).await
+    }
+
+    async fn delete_storage(
+        &self,
+        request: Request<kanon_proto::v1::DeleteStorageRequest>,
+    ) -> Result<Response<kanon_proto::v1::DeleteStorageResponse>, Status> {
+        self.delete_storage_rpc(request).await
+    }
+
+    async fn list_storage(
+        &self,
+        request: Request<kanon_proto::v1::ListStorageRequest>,
+    ) -> Result<Response<kanon_proto::v1::ListStorageResponse>, Status> {
+        self.list_storage_rpc(request).await
+    }
+
+    async fn list_conversations(
+        &self,
+        request: Request<kanon_proto::v1::ConversationsRequest>,
+    ) -> Result<Response<kanon_proto::v1::ConversationList>, Status> {
+        self.list_conversations_rpc(request).await
+    }
+
+    async fn new_conversation(
+        &self,
+        request: Request<kanon_proto::v1::ConversationsRequest>,
+    ) -> Result<Response<kanon_proto::v1::ConversationList>, Status> {
+        self.new_conversation_rpc(request).await
+    }
+
+    async fn switch_conversation(
+        &self,
+        request: Request<kanon_proto::v1::SelectConversationRequest>,
+    ) -> Result<Response<kanon_proto::v1::ConversationList>, Status> {
+        self.switch_conversation_rpc(request).await
+    }
+
+    async fn delete_conversation(
+        &self,
+        request: Request<kanon_proto::v1::SelectConversationRequest>,
+    ) -> Result<Response<kanon_proto::v1::ConversationList>, Status> {
+        self.delete_conversation_rpc(request).await
+    }
+
+    async fn append_conversation(
+        &self,
+        request: Request<kanon_proto::v1::AppendConversationRequest>,
+    ) -> Result<Response<kanon_proto::v1::AppendConversationResponse>, Status> {
+        self.append_conversation_rpc(request).await
+    }
+
+    async fn list_personas(
+        &self,
+        request: Request<kanon_proto::v1::ListPersonasRequest>,
+    ) -> Result<Response<kanon_proto::v1::ListPersonasResponse>, Status> {
+        self.list_personas_rpc(request).await
+    }
+
+    async fn upsert_persona(
+        &self,
+        request: Request<kanon_proto::v1::Persona>,
+    ) -> Result<Response<kanon_proto::v1::UpsertPersonaResponse>, Status> {
+        self.upsert_persona_rpc(request).await
+    }
+
+    async fn delete_persona(
+        &self,
+        request: Request<kanon_proto::v1::DeletePersonaRequest>,
+    ) -> Result<Response<kanon_proto::v1::DeletePersonaResponse>, Status> {
+        self.delete_persona_rpc(request).await
+    }
+
+    async fn run_agent(
+        &self,
+        request: Request<kanon_proto::v1::RunAgentRequest>,
+    ) -> Result<Response<kanon_proto::v1::RunAgentResponse>, Status> {
+        self.run_agent_rpc(request).await
+    }
+
+    async fn refresh_plugin_meta(
+        &self,
+        request: Request<kanon_proto::v1::RefreshPluginMetaRequest>,
+    ) -> Result<Response<kanon_proto::v1::RefreshPluginMetaResponse>, Status> {
+        self.refresh_plugin_meta_rpc(request).await
+    }
+
+    async fn render_image(
+        &self,
+        request: Request<kanon_proto::v1::RenderImageRequest>,
+    ) -> Result<Response<kanon_proto::v1::RenderImageResponse>, Status> {
+        self.render_image_rpc(request).await
     }
 }
 

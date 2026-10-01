@@ -650,7 +650,8 @@ impl Plugin for Router {
             Some(event_notification::Detail::LlmResponse(answer)) => {
                 (EventKind::LlmResponse, Event::LlmResponse(answer))
             }
-            None => return Ok(()),
+            // Agent and tool events are not routed to handlers yet.
+            Some(_) | None => return Ok(()),
         };
         for (_, handler) in self.events.iter().filter(|(k, _)| *k == kind) {
             // One failing subscriber must not stop the others.

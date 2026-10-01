@@ -29,6 +29,19 @@ struct MockPipeline {
 
 #[tonic::async_trait]
 impl MessagePipelineService for MockPipeline {
+    async fn on_llm_request(
+        &self,
+        _request: tonic::Request<kanon_proto::v1::LlmRequestHookRequest>,
+    ) -> Result<tonic::Response<kanon_proto::v1::LlmRequestHookResult>, tonic::Status> {
+        Err(tonic::Status::unimplemented("on_llm_request"))
+    }
+
+    async fn on_http_request(
+        &self,
+        _request: tonic::Request<kanon_proto::v1::HttpRequest>,
+    ) -> Result<tonic::Response<kanon_proto::v1::HttpResponse>, tonic::Status> {
+        Err(tonic::Status::unimplemented("on_http_request"))
+    }
     async fn on_pre_filter(
         &self,
         _req: Request<PipelineEventRequest>,

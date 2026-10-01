@@ -48,6 +48,21 @@ service MessagePipelineService {
   // plugins with `PluginMeta.prepares_turns`. The text is prepended to the current user message,
   // never to the system prompt or the history, so the cached request prefix stays stable.
   rpc OnPrepareTurn (PrepareTurnRequest) returns (PrepareTurnResult);
+  // Rewrites the system prompt of a model conversation; called only for plugins with
+  // `PluginMeta.rewrites_system_prompt`, in host priority order, each seeing the previous result.
+  // Called once per turn before the first model request (the result is reused for the turn's
+  // tool rounds and its compaction), and never for a plugin's own `RequestLLM`/`RunAgent` calls
+  // unless they run inside the conversation.
+  //
+  // The system prompt is the first thing in every request, so its bytes decide the provider's
+  // prompt cache: a rewrite must be deterministic for a given conversation (no clocks, counters
+  // or per-message data — those belong in `OnPrepareTurn`). A failing or slow plugin (deadline
+  // as `OnPrepareTurn`) leaves the prompt as it was.
+  rpc OnLlmRequest (LlmRequestHookRequest) returns (LlmRequestHookResult);
+  // Serves an HTTP request addressed to the plugin's web routes; called only for plugins with
+  // `PluginMeta.serves_http`. The management gateway forwards
+  // `/api/v1/plugins/<plugin_id>/http/<path>` here; the plugin routes on `path` itself.
+  rpc OnHttpRequest (HttpRequest) returns (HttpResponse);
 }
 
 // 3. 核心 API 服务 (运行在 Core 端，监听 core.sock / loopback，Host 主动连接调用)
@@ -65,8 +80,13 @@ service BotApiService {
   // UNIMPLEMENTED when the adapter offers no API, INVALID_ARGUMENT for a malformed action,
   // UNAVAILABLE when the platform rejected or could not take the call.
   rpc CallPlatformApi (PlatformApiRequest) returns (PlatformApiResponse);
+  // Central key-value store, one namespace per plugin, persisted by the core in `data/kv.db`.
+  // Values are opaque bytes (the SDKs store JSON). A key that expired reads as absent.
   rpc SetStorage (SetStorageRequest) returns (SetStorageResponse);
   rpc GetStorage (GetStorageRequest) returns (GetStorageResponse);
+  rpc DeleteStorage (DeleteStorageRequest) returns (DeleteStorageResponse);
+  // Lists the plugin's live keys starting with `prefix`, sorted.
+  rpc ListStorage (ListStorageRequest) returns (ListStorageResponse);
   // Liveness probe answered by the core itself, without touching the pipeline.
   //
   // Hosts use it to notice that the core they registered with has exited: a host whose core is
@@ -78,6 +98,43 @@ service BotApiService {
   // append-only and only the core writes it. NOT_FOUND when no enabled instance claims the
   // platform, UNAVAILABLE when no model is configured, INVALID_ARGUMENT without a context.
   rpc GetConversationHistory (ConversationHistoryRequest) returns (ConversationHistoryResponse);
+
+  // --- Conversations: the sessions of one chat, as `/ls`, `/new`, `/switch` and `/del` see them.
+  // Every call names the chat by an inbound message (`context`), resolved exactly as when the
+  // core answers that message. NOT_FOUND when no enabled instance claims it.
+  rpc ListConversations (ConversationsRequest) returns (ConversationList);
+  // Starts a new, empty conversation and makes it current (what `/new` does).
+  rpc NewConversation (ConversationsRequest) returns (ConversationList);
+  // Makes another conversation of the same chat current. NOT_FOUND for an unknown session.
+  rpc SwitchConversation (SelectConversationRequest) returns (ConversationList);
+  // Deletes a conversation's history and records. Deleting the current one leaves the chat on a
+  // new, empty conversation. NOT_FOUND for an unknown session.
+  rpc DeleteConversation (SelectConversationRequest) returns (ConversationList);
+  // Appends finished turns to the current conversation, e.g. a command exchange the model should
+  // remember. Messages must alternate user/assistant, starting with user and ending with
+  // assistant; anything else is INVALID_ARGUMENT. Append-only: nothing already stored changes.
+  rpc AppendConversation (AppendConversationRequest) returns (AppendConversationResponse);
+
+  // --- Personas: the operator's persona catalog (`data/personas.json`).
+  rpc ListPersonas (ListPersonasRequest) returns (ListPersonasResponse);
+  // Creates or replaces a persona. INVALID_ARGUMENT for an empty id or prompt, FAILED_PRECONDITION
+  // for the built-in read-only persona.
+  rpc UpsertPersona (Persona) returns (UpsertPersonaResponse);
+  rpc DeletePersona (DeletePersonaRequest) returns (DeletePersonaResponse);
+
+  // Runs the node's agent (model + tool loop) for a plugin and returns its final answer. Unlike
+  // `RequestLLM` it can use tools and can run inside a chat's conversation. UNAVAILABLE when no
+  // model is configured, NOT_FOUND when `context` names a chat no enabled instance claims.
+  rpc RunAgent (RunAgentRequest) returns (RunAgentResponse);
+
+  // Asks the core to fetch this host's `GetPluginMeta` again, so tools, commands and triggers a
+  // plugin added or removed at runtime take effect for the next turn. NOT_FOUND for an unknown
+  // host.
+  rpc RefreshPluginMeta (RefreshPluginMetaRequest) returns (RefreshPluginMetaResponse);
+
+  // Renders text (or SVG) into a PNG in the plugin's data directory, for sending as an image.
+  // INVALID_ARGUMENT for empty input or malformed SVG; UNAVAILABLE when no usable font exists.
+  rpc RenderImage (RenderImageRequest) returns (RenderImageResponse);
 }
 
 // --- 握手与注册 ---
@@ -149,6 +206,10 @@ message CommandMeta {
   repeated string platforms = 7;
   // Conversation kinds the command answers in; empty means every kind. Same effect as `platforms`.
   repeated ConversationKind conversation_kinds = 8;
+  // Subcommands of a command group (`/<name> <sub> ...`), for help listings only: the core still
+  // routes the whole command to `name` with the subcommand as the first argument, and the SDK
+  // dispatches on it.
+  repeated CommandMeta subcommands = 9;
 }
 
 // A message pattern that runs a plugin handler without a slash command.
@@ -191,6 +252,10 @@ message PluginMeta {
   bool decorates_replies = 10;
   // Whether `OnPrepareTurn` should be called for this plugin.
   bool prepares_turns = 11;
+  // Whether `OnLlmRequest` should be called for this plugin.
+  bool rewrites_system_prompt = 12;
+  // Whether HTTP requests under `/api/v1/plugins/<id>/http/` are forwarded to `OnHttpRequest`.
+  bool serves_http = 13;
 }
 
 message GetPluginMetaResponse {
@@ -383,6 +448,14 @@ enum EventKind {
   EVENT_KIND_NOTICE = 2;
   // The model answered a conversational message.
   EVENT_KIND_LLM_RESPONSE = 3;
+  // The agent started answering a conversational message.
+  EVENT_KIND_AGENT_BEGIN = 4;
+  // The agent finished a turn, with an answer or an error.
+  EVENT_KIND_AGENT_DONE = 5;
+  // The model asked for a tool call (sent before the tool runs; observation only).
+  EVENT_KIND_TOOL_CALL = 6;
+  // A tool call finished.
+  EVENT_KIND_TOOL_RESULT = 7;
 }
 
 // One lifecycle event, addressed to one subscribing plugin. The set `detail` is the event kind.
@@ -395,6 +468,10 @@ message EventNotification {
     // The notice exactly as the adapter reported it (kind in `metadata`, see `META_NOTICE`).
     PipelineEventRequest notice = 5;
     LlmResponseEvent llm_response = 6;
+    AgentBeginEvent agent_begin = 7;
+    AgentDoneEvent agent_done = 8;
+    ToolCallEvent tool_call = 9;
+    ToolResultEvent tool_result = 10;
   }
 }
 
@@ -409,6 +486,42 @@ message LlmResponseEvent {
   PipelineEventRequest context = 1;
   // The model's final text, before reply decoration.
   string content = 2;
+}
+
+message AgentBeginEvent {
+  // The message the agent is answering.
+  PipelineEventRequest context = 1;
+  string session_id = 2;
+}
+
+message AgentDoneEvent {
+  PipelineEventRequest context = 1;
+  string session_id = 2;
+  bool success = 3;
+  // The final answer when `success`, before reply decoration.
+  string content = 4;
+  // Why the turn ended without an answer (failure category, or "stopped"), when not `success`.
+  string error = 5;
+  // Tools the turn called, in order.
+  repeated string tools = 6;
+}
+
+message ToolCallEvent {
+  // The message whose turn called the tool; absent outside a platform conversation.
+  PipelineEventRequest context = 1;
+  string session_id = 2;
+  // The name the model used (namespaced as `<plugin>__<tool>` when names collide).
+  string tool_name = 3;
+  google.protobuf.Struct arguments = 4;
+}
+
+message ToolResultEvent {
+  PipelineEventRequest context = 1;
+  string session_id = 2;
+  string tool_name = 3;
+  bool success = 4;
+  // The result text the model reads.
+  string result = 5;
 }
 
 // Where a decorated reply came from.
@@ -447,6 +560,46 @@ message PrepareTurnResult {
   // Text prepended to the current user message; empty adds nothing. It becomes part of the
   // turn and therefore of the conversation history, like everything the model reads.
   string text = 1;
+}
+
+message LlmRequestHookRequest {
+  string plugin_id = 1;
+  // The inbound message the model is about to answer.
+  PipelineEventRequest context = 2;
+  string session_id = 3;
+  // The system prompt as built so far (instance prompt or persona, skill catalog, and earlier
+  // plugins' rewrites).
+  string system_prompt = 4;
+}
+
+message LlmRequestHookResult {
+  // Replaces the system prompt when set; unset leaves it unchanged. An empty string is rejected
+  // (the prompt is left unchanged and the plugin is logged).
+  optional string system_prompt = 1;
+}
+
+message HttpHeader {
+  string name = 1;
+  string value = 2;
+}
+
+message HttpRequest {
+  string plugin_id = 1;
+  // Upper-case method, e.g. "GET".
+  string method = 2;
+  // Path below the plugin's route root, starting with "/" ("/" for the root itself).
+  string path = 3;
+  // Raw query string without the leading "?", empty when absent.
+  string query = 4;
+  repeated HttpHeader headers = 5;
+  bytes body = 6;
+}
+
+message HttpResponse {
+  // HTTP status; 0 is treated as 200.
+  uint32 status = 1;
+  repeated HttpHeader headers = 2;
+  bytes body = 3;
 }
 
 message EventAck {
@@ -518,8 +671,8 @@ enum LLMRole {
 message LLMMessage {
   LLMRole role = 1;
   string text = 2;
-  // Images for the model to look at; user turns only. `raw_bytes` is not accepted: write the
-  // image to the plugin's data directory and pass `file_path`.
+  // Images for the model to look at; user turns only. Any source is accepted: URL, file path, or
+  // raw bytes (with `mime_type`).
   repeated ImageSegment images = 3;
 }
 
@@ -562,6 +715,25 @@ message GetStorageResponse {
   bytes value = 2;
 }
 
+message DeleteStorageRequest {
+  string plugin_id = 1;
+  string key = 2;
+}
+
+message DeleteStorageResponse {
+  // Whether a live key was removed.
+  bool deleted = 1;
+}
+
+message ListStorageRequest {
+  string plugin_id = 1;
+  string prefix = 2;
+}
+
+message ListStorageResponse {
+  repeated string keys = 1;
+}
+
 message ConversationHistoryRequest {
   // The inbound message whose conversation is read; the core derives the session exactly as it
   // does when answering that message.
@@ -583,4 +755,130 @@ message ConversationHistoryResponse {
   string summary = 2;
   // Oldest first.
   repeated HistoryMessage messages = 3;
+}
+
+message ConversationsRequest {
+  // An inbound message of the chat whose conversations are meant.
+  PipelineEventRequest context = 1;
+}
+
+message SelectConversationRequest {
+  PipelineEventRequest context = 1;
+  // `ConversationInfo.session_id` of the conversation to act on.
+  string session_id = 2;
+}
+
+message ConversationInfo {
+  string session_id = 1;
+  // Whether the chat's next message continues this conversation.
+  bool current = 2;
+  // First user message, shortened; empty for a conversation without messages.
+  string title = 3;
+  // User and assistant messages stored (summarized ones excluded).
+  uint32 message_count = 4;
+  // Unix seconds of the last turn; 0 when it never had one.
+  int64 last_active_at = 5;
+}
+
+message ConversationList {
+  // Oldest first; `/ls` numbers them from 1 in this order.
+  repeated ConversationInfo conversations = 1;
+}
+
+message AppendConversationRequest {
+  PipelineEventRequest context = 1;
+  repeated HistoryMessage messages = 2;
+}
+
+message AppendConversationResponse {
+  string session_id = 1;
+}
+
+message Persona {
+  string id = 1;
+  string name = 2;
+  // The fixed system text placed at the top of every request of a conversation using it.
+  string prompt = 3;
+  // Whether the persona ships with the node and cannot be changed or deleted.
+  bool builtin = 4;
+}
+
+message ListPersonasRequest {}
+
+message ListPersonasResponse {
+  repeated Persona personas = 1;
+}
+
+message UpsertPersonaResponse {
+  // Whether an existing persona was replaced (false: created).
+  bool replaced = 1;
+}
+
+message DeletePersonaRequest {
+  string id = 1;
+}
+
+message DeletePersonaResponse {
+  bool deleted = 1;
+}
+
+message RunAgentRequest {
+  string plugin_id = 1;
+  // The user message for the agent; must not be empty unless `images` are given.
+  string prompt = 2;
+  repeated ImageSegment images = 3;
+  // The chat the run serves. Sets the instance (its model, tools and policies) and is passed to
+  // tools as their context. Optional unless `in_conversation` is set.
+  PipelineEventRequest context = 4;
+  // Run inside the chat's current conversation: the turn is answered with the conversation's
+  // history and persona and appended to it, exactly as if the model had answered the message.
+  // When false the run uses a fresh, private session that is discarded afterwards.
+  bool in_conversation = 5;
+  // Instructions for a private run; ignored in a conversation, whose system prompt is fixed.
+  string system_prompt = 6;
+  // `<provider>/<model-id>`; empty uses the instance's model, else the node's default model.
+  string model = 7;
+  // Whether the agent may call tools (those the instance allows: plugins, MCP, built-in).
+  bool use_tools = 8;
+  // Tool rounds allowed; 0 uses the agent's default.
+  uint32 max_steps = 9;
+}
+
+message RunAgentResponse {
+  // Final answer, with reasoning removed.
+  string content = 1;
+  repeated ToolAttachment attachments = 2;
+  // Tools called, in order.
+  repeated string tools = 3;
+  // The session the run used (the conversation's, or the discarded private one).
+  string session_id = 4;
+}
+
+message RefreshPluginMetaRequest {
+  string host_id = 1;
+}
+
+message RefreshPluginMetaResponse {
+  // Plugins whose metadata the core now holds.
+  repeated string plugin_ids = 1;
+}
+
+message RenderImageRequest {
+  string plugin_id = 1;
+  oneof source {
+    // Plain text laid out as a card: wrapped to `width`, blank lines separate paragraphs, a line
+    // starting with "# " is a heading. CJK and emoji render with the system's fonts.
+    string text = 2;
+    // A complete SVG document, rendered as is.
+    string svg = 3;
+  }
+  // Output width in pixels for text (default 720, 200..=2000); SVG keeps its own size.
+  uint32 width = 4;
+}
+
+message RenderImageResponse {
+  // Absolute path of the PNG under `data/plugins/<plugin_id>/render/`.
+  string file_path = 1;
+  uint32 width = 2;
+  uint32 height = 3;
 }
