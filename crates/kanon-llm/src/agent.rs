@@ -493,14 +493,14 @@ impl Agent {
     /// the prefix the summarization request will re-send, and in the background so the user never
     /// waits for it. The size comes from the provider's own token count when it reports one (it
     /// includes the system block and tools) and from an estimate otherwise; the reply is added
-    /// because it becomes part of the next request.
+    /// because it becomes part of the next request, including reasoning replayed with tools.
     fn schedule_compaction(
         &self,
         session_id: &str,
         tools: &[ToolDefinition],
         request: &ChatRequest,
         usage: Option<&TokenUsage>,
-        reply: &str,
+        reply: &ChatMessage,
     ) {
         let Some(policy) = self.config.compaction else {
             return;
@@ -513,7 +513,7 @@ impl Agent {
         let reply_tokens = usage
             .map(|usage| usage.completion_tokens as usize)
             .filter(|tokens| *tokens > 0)
-            .unwrap_or_else(|| crate::token::estimate_text_tokens(reply));
+            .unwrap_or_else(|| crate::token::estimate_message_tokens(reply));
 
         if !policy.is_exceeded(prompt_tokens + reply_tokens, self.config.context_length) {
             return;
@@ -616,10 +616,9 @@ impl Agent {
 
             // Terminal state: Model completed generation without requesting tools
             if response.tool_calls.is_empty() {
+                let reply = response.assistant_message();
                 if response.content.is_some() || response.reasoning_content.is_some() {
-                    self.memory
-                        .push_message(session_id, response.assistant_message())
-                        .await?;
+                    self.memory.push_message(session_id, reply.clone()).await?;
                 }
                 let final_content = response.content.clone().unwrap_or_default();
 
@@ -630,7 +629,7 @@ impl Agent {
                         .map(|u| u.total_tokens as usize)
                         .unwrap_or_else(|| {
                             crate::token::estimate_text_tokens(&user_input)
-                                + crate::token::estimate_text_tokens(&final_content)
+                                + crate::token::estimate_message_tokens(&reply)
                         });
                     sm.record_turn(session_id, tokens_used);
                 }
@@ -640,7 +639,7 @@ impl Agent {
                     &tools,
                     &request,
                     response.usage.as_ref(),
-                    &final_content,
+                    &reply,
                 );
 
                 return Ok(AgentOutput {
@@ -665,15 +664,17 @@ impl Agent {
                 });
                 let mut message = ChatMessage::assistant(&fallback);
                 message.reasoning_content = response.reasoning_content;
-                self.memory.push_message(session_id, message).await?;
+                self.memory
+                    .push_message(session_id, message.clone())
+                    .await?;
 
                 if let Some(ref sm) = self.session_manager {
                     let tokens_used = crate::token::estimate_text_tokens(&user_input)
-                        + crate::token::estimate_text_tokens(&fallback);
+                        + crate::token::estimate_message_tokens(&message);
                     sm.record_turn(session_id, tokens_used);
                 }
 
-                self.schedule_compaction(session_id, &tools, &request, None, &fallback);
+                self.schedule_compaction(session_id, &tools, &request, None, &message);
 
                 return Ok(AgentOutput {
                     content: fallback,
@@ -1142,10 +1143,19 @@ impl Agent {
             }
 
             // Persist both channels before announcing completion, including reasoning-only turns.
-            if let Err(error) = memory
-                .push_message(&sid, response.assistant_message())
-                .await
-            {
+            // A terminal marker or empty delta is not an assistant turn in append-only history.
+            let reply = response.assistant_message();
+            let has_reply = reply.content.as_ref().is_some_and(|text| !text.is_empty())
+                || reply
+                    .reasoning_content
+                    .as_ref()
+                    .is_some_and(|text| !text.is_empty());
+            let reply_tokens = if has_reply {
+                crate::token::estimate_message_tokens(&reply)
+            } else {
+                0
+            };
+            if has_reply && let Err(error) = memory.push_message(&sid, reply).await {
                 let _ = tx
                     .send(Err(crate::error::GatewayError::InvalidResponse(format!(
                         "Failed to persist streaming assistant response: {error}"
@@ -1154,11 +1164,7 @@ impl Agent {
                 return;
             }
             if let Some(ref sm) = sm_opt {
-                sm.record_turn(
-                    &sid,
-                    user_toks
-                        + crate::token::estimate_message_tokens(&response.assistant_message()),
-                );
+                sm.record_turn(&sid, user_toks + reply_tokens);
             }
             for hook in &hooks {
                 let _ = hook.on_llm_response(&sid, &mut response).await;

@@ -210,6 +210,58 @@ impl LlmProvider for StreamFixture {
 }
 
 #[tokio::test]
+async fn empty_streams_complete_without_appending_blank_assistant_history() {
+    for chunks in [
+        vec![],
+        vec![ChatChunk::done(Some("stop".into()))],
+        vec![ChatChunk::delta("")],
+        vec![ChatChunk::reasoning(""), ChatChunk::done(None)],
+        vec![ChatChunk::delta("<thi"), ChatChunk::done(None)],
+    ] {
+        let memory = Arc::new(InMemory::new());
+        let previous = ChatMessage::assistant("previous synthetic answer");
+        Memory::push_message(memory.as_ref(), "s", previous.clone())
+            .await
+            .unwrap();
+        let sessions = Arc::new(kanon_llm::SessionManager::new(memory.clone()));
+        let agent = Agent::builder(
+            "fixture",
+            Arc::new(StreamFixture {
+                chunks,
+                fail: false,
+            }),
+        )
+        .memory(memory.clone())
+        .session_manager(sessions.clone())
+        .compaction(None)
+        .build();
+        let mut stream = agent.run_standalone_stream("s", "question").await.unwrap();
+        let mut finished = 0;
+        while let Some(chunk) = stream.next().await {
+            let chunk = chunk.unwrap();
+            assert!(chunk.delta_text.is_empty());
+            assert!(
+                chunk
+                    .reasoning_text
+                    .as_deref()
+                    .unwrap_or_default()
+                    .is_empty()
+            );
+            finished += usize::from(chunk.is_finished);
+        }
+        assert_eq!(finished, 1);
+        assert_eq!(
+            sessions.get_metadata("s").unwrap().total_tokens_used,
+            kanon_llm::token::estimate_text_tokens("question")
+        );
+        assert_eq!(
+            Memory::get_messages(memory.as_ref(), "s").await.unwrap(),
+            vec![previous, ChatMessage::user("question")]
+        );
+    }
+}
+
+#[tokio::test]
 async fn streaming_separates_fragmented_legacy_envelopes_and_persists_both_channels() {
     for (text, expected, private) in [
         (
