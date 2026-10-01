@@ -279,6 +279,8 @@ import "google/protobuf/struct.proto";
 service PluginHostService {
   rpc Ping (PingRequest) returns (PingResponse);
   rpc ReloadPluginConfig (ReloadPluginConfigRequest) returns (ReloadPluginConfigResponse);
+  rpc GetPluginMeta (GetPluginMetaRequest) returns (GetPluginMetaResponse);
+  rpc InvokeAction (PluginActionRequest) returns (PluginActionResponse);
 }
 
 // 2. 消息与事件管道服务 (运行在 Host 端，Core 寻址连接各 Host 端点发起调用)
@@ -288,6 +290,7 @@ service MessagePipelineService {
   rpc OnCallTool (ToolCallRequest) returns (ToolCallResponse);
   rpc OnEvent (EventNotification) returns (EventAck);
   rpc OnDeliverMessage (DeliverMessageRequest) returns (DeliverMessageResponse);
+  rpc OnDecorateReply (DecorateReplyRequest) returns (DecorateReplyResult);
 }
 
 // 3. 核心 API 服务 (运行在 Core 端，监听 core.sock，Host 连接调用)
@@ -295,7 +298,9 @@ service BotApiService {
   rpc RegisterHost (RegisterHostRequest) returns (RegisterHostResponse);
   rpc IngestEvent (IngestEventRequest) returns (IngestEventResponse);
   rpc SendMessage (SendMessageRequest) returns (SendMessageResponse);
+  rpc ReplyMessage (DeliverMessageRequest) returns (DeliverMessageResponse);
   rpc RequestLLM (LLMRequest) returns (stream LLMChunk);
+  rpc CallPlatformApi (PlatformApiRequest) returns (PlatformApiResponse);
   rpc SetStorage (SetStorageRequest) returns (SetStorageResponse);
   rpc GetStorage (GetStorageRequest) returns (GetStorageResponse);
 }
@@ -444,103 +449,105 @@ message DeliverMessageResponse {
 
 ## 5. 多语言 SDK 开发者体验规范 (Rust / Python / TypeScript)
 
-### 5.1 Rust SDK 开发形态 (`sdks/rust/kanon-sdk`)
+三语言 SDK 提供同一套能力，名称按语言习惯调整：
 
-Rust 插件享有无缝的一等公民支持，天然类型安全，且无需任何 Python/Node 外部运行时：
+| 能力 | 协议承载 | Python | TypeScript | Rust |
+| --- | --- | --- | --- | --- |
+| 斜杠命令（别名、默认权限） | `CommandMeta` + `OnExecuteCommand` | `@command(name, aliases=, access=)` | `@Command(name, {aliases, access})` | `.command(CommandSpec, handler)` |
+| 正则触发器（捕获组即参数） | `TriggerMeta` + `OnExecuteCommand` | `@trigger(pattern)` | `@Trigger(pattern)` | `.trigger(TriggerSpec, handler)` |
+| 多轮对话 | `CommandExecuteResponse.capture_seconds` + `continuation` | `await event.wait_next(60)` | `await event.waitNext(60)` | `event.wait_next(Duration)` |
+| LLM 工具（可拿到发问消息） | `ToolMeta` + `OnCallTool` | `@tool`，`(params, event)` | `@Tool`，`(params, event)` | `.tool(ToolSpec, handler)` |
+| 管理动作（不对模型可见） | `InvokeAction` | `@action` | `@Action` | `.action(name, handler)` |
+| 事件订阅 | `PluginMeta.events` + `OnEvent` | `@on_event("notice")` | `@OnEvent("notice")` | `.subscribe(EventKind, handler)` |
+| 回复装饰 | `PluginMeta.decorates_replies` + `OnDecorateReply` | `@decorate_reply` | `@DecorateReply()` | `.decorate_reply(handler)` |
+| 回复 / 主动发送 | `ReplyMessage` / `SendMessage` | `event.reply` / `core.send_message` | `event.reply` / `core.sendMessage` | `event.reply` / `core.send_message` |
+| 独立模型调用 | `RequestLLM`（`LLMMessage` 多轮、采样参数） | `core.request_llm` / `stream_llm` | `core.requestLlm` / `streamLlm` | `core.request_llm` / `stream_llm` |
+| 平台原生 API | `CallPlatformApi`（仅内置适配器） | `core.call_platform_api` | `core.callPlatformApi` | `core.call_platform_api` |
+
+处理器收到的是事件对象（`MessageEvent` / `CommandEvent`），而不是原始请求：返回文本、消息段或二者的列表即作为回复；也可以在处理过程中多次 `reply`。
+
+**`wait_next` 的实现约束**：核心流水线逐条串行处理消息，绝不阻塞等待插件"听到"下一条消息。因此 SDK 把命令处理器放在独立任务里运行，当前 RPC 只等待处理器的下一个"让出点"：处理器结束，或调用 `wait_next`。`wait_next(t)` 立即结束当前 RPC（携带已收集的回复与 `capture_seconds = t`），核心把同一发送者在同一会话的下一条消息作为 `continuation` 路由回来，SDK 再唤醒挂起的处理器。同一会话的新等待会取代旧等待（旧等待收到超时）；宿主重启后到达的 continuation 会以 `continuation = true` 重新调用命令处理器。没有 RPC 在等待时的回复（例如等待超时后）经 `ReplyMessage` 单独投递。
+
+### 5.1 Rust SDK (`sdks/rust/kanon-sdk`)
+
+不使用过程宏：`Router` 由闭包组装并实现 `Plugin`，命令声明与处理器写在一起，元数据自动生成。需要完全控制时仍可直接实现 `Plugin` trait。
 
 ```rust
+use std::time::Duration;
 use kanon_sdk::prelude::*;
 
-#[derive(Default)]
-pub struct MathPlugin;
-
-#[async_trait]
-impl Plugin for MathPlugin {
-    async fn on_load(&mut self, ctx: &mut PluginContext) -> KanonResult<()> {
-        println!("Rust 插件已加载，当前工作配置: {:?}", ctx.config);
+let plugin = Router::new("org.example.quiz", "Quiz", "0.1.0")
+    .command(CommandSpec::new("quiz").alias("q"), |event| async move {
+        event.reply("2 + 2 = ?").await?;
+        match event.wait_next(Duration::from_secs(30)).await {
+            Ok(answer) if answer.text().trim() == "4" => answer.reply("Correct!").await?,
+            Ok(answer) => answer.reply("Wrong.").await?,
+            Err(WaitTimeout) => event.reply("Time is up.").await?,
+        }
         Ok(())
-    }
-}
-
-// 注册命令响应器
-#[command("calc")]
-async fn handle_calc(ctx: Context, expr: String) -> KanonResult<()> {
-    let result = evaluate_math(&expr)?;
-    ctx.reply(vec![MessageSegment::text(format!("【Rust 计算引擎】结果: {}", result))]).await?;
-    Ok(())
-}
-
-// 注册高性能 LLM Tool Calling
-#[tool(name = "fast_prime_check", description = "高性能超大整数素数性检测工具")]
-async fn check_prime(params: PrimeCheckParams) -> KanonResult<serde_json::Value> {
-    let is_p = miller_rabin(params.number);
-    Ok(serde_json::json!({ "number": params.number, "is_prime": is_p }))
-}
-
-#[tokio::main]
-async fn main() -> KanonResult<()> {
-    KanonHost::new(MathPlugin)
-        .register_command(handle_calc)
-        .register_tool(check_prime)
-        .run()
-        .await
-}
+    })
+    .trigger(TriggerSpec::new("ping", "^ping$"), |event| async move {
+        Ok(vec![segment::quote(event.event_id()), segment::text("pong")])
+    });
+KanonHost::new(plugin).run().await?;
 ```
 
-### 5.2 Python SDK 开发形态 (`sdks/python/kanon-sdk-python`)
+### 5.2 Python SDK (`sdks/python/kanon_sdk`)
 
 ```python
-from kanon_sdk import Plugin, Context, MessageSegment, command, tool
+from kanon_sdk import CommandEvent, MessageSegment, Plugin, command, on_event, tool, trigger
+
 
 class WeatherPlugin(Plugin):
-    async def on_load(self):
-        # 自动由 Rust 核心下发的配置字典
-        self.api_key = self.config.get("api_key")
+    id = "org.example.weather"
 
-    @command("weather")
-    async def handle_weather(self, ctx: Context, city: str = "北京"):
-        """响应 /weather <city> 指令"""
-        weather_text = f"{city}天气晴朗，气温 25℃"
-        await ctx.reply([
-            MessageSegment.text(weather_text)
-        ])
+    @command("weather", aliases=("w",), usage="/weather <city>")
+    async def weather(self, event: CommandEvent) -> str:
+        if event.args:
+            city = event.raw_args
+        else:
+            await event.reply("Which city?")
+            city = (await event.wait_next(60)).text
+        return f"{city}: sunny, 25°C"
 
-    @tool("fetch_weather")
-    async def fetch_weather_tool(self, city: str) -> dict:
-        """提供给 LLM Function Calling 的结构化工具"""
-        return {
-            "city": city,
-            "condition": "晴朗",
-            "temperature": 25,
-            "advice": "适宜外出活动"
-        }
+    @trigger(r"^早安$")
+    async def morning(self, event: CommandEvent) -> list:
+        return [MessageSegment.quote(event.event_id), "早安！"]
+
+    @tool("fetch_weather", parameters={"type": "object", "properties": {"city": {"type": "string"}}})
+    async def fetch_weather(self, params: dict, event) -> dict:
+        return {"city": params["city"], "asked_by": event.sender_id if event else None}
+
+    @on_event("notice")
+    async def welcome(self, event) -> None:
+        if event.notice == "member_join":
+            await event.send("Welcome!")
 ```
 
-### 5.3 TypeScript SDK 开发形态 (`sdks/typescript/kanon-sdk-ts`)
+### 5.3 TypeScript SDK (`sdks/typescript`)
 
 ```typescript
-import { Plugin, Context, Command, Tool, MessageSegment } from "@kanon/sdk";
+import { Command, CommandEvent, Plugin, Tool, WaitTimeoutError } from "@kanon/sdk-and-host";
 
 export default class GreetingPlugin extends Plugin {
-  @Command("greet")
-  async handleGreet(ctx: Context, name?: string): Promise<void> {
-    const target = name || ctx.sender.name;
-    await ctx.reply([
-      MessageSegment.text(`你好，${target}！来自 Kanon TypeScript 插件的高性能问候。`)
-    ]);
+  id = "org.example.greeting";
+
+  @Command("greet", { aliases: ["hi"] })
+  async greet(event: CommandEvent, args: string[]) {
+    if (args.length > 0) return `Hello, ${args.join(" ")}!`;
+    await event.reply("What is your name?");
+    try {
+      const answer = await event.waitNext(60);
+      return `Hello, ${answer.text}!`;
+    } catch (err) {
+      if (err instanceof WaitTimeoutError) return "Never mind.";
+      throw err;
+    }
   }
 
-  @Tool({
-    name: "calculate_tax",
-    description: "计算输入金额的所得税"
-  })
-  async calculateTax(params: { amount: number; rate: number }): Promise<object> {
-    const tax = params.amount * (params.rate / 100);
-    return {
-      gross: params.amount,
-      tax: tax,
-      net: params.amount - tax
-    };
+  @Tool({ name: "calculate_tax", parameters: { type: "object" } })
+  async calculateTax(params: { amount: number; rate: number }) {
+    return { tax: params.amount * (params.rate / 100) };
   }
 }
 ```
