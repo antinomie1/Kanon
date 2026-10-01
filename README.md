@@ -82,6 +82,13 @@ files under `./data/`:
 
 To deploy a preconfigured node (a container image, CI), ship a prepared `data/system.json`.
 
+For custom OpenAI-compatible endpoints that require `reasoning_content` in assistant history,
+select **OpenAI Compatible + reasoning_content replay** (`protocol: "openai_reasoning"`).
+The default `openai` mode omits this extension for other endpoints, while automatically retaining
+it for `https://api.deepseek.com` (including `/v1`) so existing official DeepSeek configurations
+keep working. This only controls history replay; it does not disable thinking or discard stored
+reasoning. Choose the extension only when the endpoint documents support for it.
+
 ## Console
 
 The WebUI (`webui/`, built with Svelte 5 and served by the node) manages everything above:

@@ -617,7 +617,7 @@ impl Agent {
             // Terminal state: Model completed generation without requesting tools
             if response.tool_calls.is_empty() {
                 let reply = response.assistant_message();
-                if response.content.is_some() || response.reasoning_content.is_some() {
+                if response.has_assistant_payload() {
                     self.memory.push_message(session_id, reply.clone()).await?;
                 }
                 let final_content = response.content.clone().unwrap_or_default();
@@ -948,7 +948,7 @@ impl Agent {
 
             // If no tools were called, this is the final response
             if response.tool_calls.is_empty() {
-                if response.content.is_some() || response.reasoning_content.is_some() {
+                if response.has_assistant_payload() {
                     self.memory
                         .push_message(session_id, response.assistant_message())
                         .await?;
@@ -1145,11 +1145,7 @@ impl Agent {
             // Persist both channels before announcing completion, including reasoning-only turns.
             // A terminal marker or empty delta is not an assistant turn in append-only history.
             let reply = response.assistant_message();
-            let has_reply = reply.content.as_ref().is_some_and(|text| !text.is_empty())
-                || reply
-                    .reasoning_content
-                    .as_ref()
-                    .is_some_and(|text| !text.is_empty());
+            let has_reply = response.has_assistant_payload();
             let reply_tokens = if has_reply {
                 crate::token::estimate_message_tokens(&reply)
             } else {

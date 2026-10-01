@@ -133,7 +133,12 @@ impl LlmGateway {
 pub type ProviderSetup = (Arc<dyn LlmProvider>, String);
 
 /// Protocol identifiers accepted by [`build_provider`].
-pub const SUPPORTED_PROTOCOLS: [&str; 3] = ["openai", "openai_responses", "anthropic"];
+pub const SUPPORTED_PROTOCOLS: [&str; 4] = [
+    "openai",
+    "openai_reasoning",
+    "openai_responses",
+    "anthropic",
+];
 
 /// Instantiates the wire client for one provider configuration.
 ///
@@ -141,8 +146,10 @@ pub const SUPPORTED_PROTOCOLS: [&str; 3] = ["openai", "openai_responses", "anthr
 /// saved directory or from the console, goes through here, so a protocol accepted in one path can
 /// never be rejected by another.
 ///
-/// `protocol` accepts `openai` (alias `openai_chat`), `openai_responses` and `anthropic`;
-/// any other value is rejected explicitly instead of silently falling back to a default.
+/// `protocol` accepts `openai` (alias `openai_chat`), `openai_reasoning`, `openai_responses`
+/// and `anthropic`. `openai_reasoning` explicitly enables the `reasoning_content` request
+/// extension for compatible custom endpoints; `openai` only enables it for known endpoints.
+/// Any other value is rejected explicitly instead of silently falling back to a default.
 pub fn build_provider(
     protocol: &str,
     base_url: impl Into<String>,
@@ -160,6 +167,9 @@ pub fn build_provider(
 
     let provider: Arc<dyn LlmProvider> = match protocol {
         "openai" | "openai_chat" => Arc::new(OpenAiChatProvider::new(base_url, api_key, model)),
+        "openai_reasoning" => {
+            Arc::new(OpenAiChatProvider::new(base_url, api_key, model).with_reasoning_content(true))
+        }
         // The Responses API carries the credential in its own constructor, so the key is
         // required here rather than optional.
         "openai_responses" => Arc::new(

@@ -76,7 +76,7 @@ pub fn provider_presets() -> Vec<ProviderPresetDef> {
         ProviderPresetDef {
             id: "deepseek",
             name: "DeepSeek",
-            protocol: "openai",
+            protocol: "openai_reasoning",
             base_url: "https://api.deepseek.com/v1",
         },
         ProviderPresetDef {
@@ -184,7 +184,7 @@ impl NodeSettings {
 /// providers existed. Read only to migrate such a document.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct LlmProviderConfig {
-    /// Wire protocol: `openai`, `openai_responses` or `anthropic`.
+    /// Wire protocol: `openai`, `openai_reasoning`, `openai_responses` or `anthropic`.
     pub protocol: String,
     /// Provider base URL (without the trailing `/chat/completions`).
     pub base_url: String,

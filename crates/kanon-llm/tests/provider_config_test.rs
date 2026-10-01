@@ -47,6 +47,41 @@ fn build_provider_accepts_every_documented_protocol() {
 }
 
 #[test]
+fn only_the_documented_endpoint_automatically_enables_reasoning_replay() {
+    use kanon_llm::OpenAiChatProvider;
+    for url in [
+        "https://api.deepseek.com",
+        "https://api.deepseek.com/v1/",
+        "https://api.deepseek.com/v1/chat/completions",
+    ] {
+        let provider = OpenAiChatProvider::new(url, None, "any-model");
+        assert!(provider.replays_reasoning_content(), "{url}");
+        assert!(
+            !provider
+                .with_reasoning_content(false)
+                .replays_reasoning_content()
+        );
+    }
+    for url in [
+        "https://api.openai.com/v1",
+        "http://127.0.0.1:1234/v1",
+        "https://api.deepseek.com.example.invalid/v1",
+        "https://example.invalid/api.deepseek.com",
+        "https://api.deepseek.com@example.invalid/v1",
+        "http://api.deepseek.com/v1",
+        "https://api.deepseek.com:8443/v1",
+    ] {
+        let provider = OpenAiChatProvider::new(url, None, "deepseek-flash");
+        assert!(!provider.replays_reasoning_content(), "{url}");
+        assert!(
+            provider
+                .with_reasoning_content(true)
+                .replays_reasoning_content()
+        );
+    }
+}
+
+#[test]
 fn build_provider_rejects_unknown_protocol_and_blank_base_url() {
     // `.err()` rather than `.expect_err()`: the success type is a trait object without `Debug`.
     let err = build_provider("grpc-ish", "https://example.invalid/v1", None, "m")

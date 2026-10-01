@@ -90,7 +90,8 @@ impl ProviderInfo {
 pub struct UpsertProviderRequest {
     /// Provider name; also the prefix of every model reference it serves.
     pub name: String,
-    /// Wire protocol: `openai` (alias `openai_chat`), `openai_responses` or `anthropic`.
+    /// Wire protocol: `openai` (alias `openai_chat`), `openai_reasoning`,
+    /// `openai_responses` or `anthropic`.
     pub protocol: String,
     /// Endpoint base URL.
     pub base_url: String,
@@ -152,7 +153,7 @@ pub struct TestProviderRequest {
     /// Configured endpoint to test.
     #[serde(default)]
     pub provider: Option<String>,
-    /// Protocol wire format: `openai`, `openai_responses`, or `anthropic`.
+    /// Protocol wire format: `openai`, `openai_reasoning`, `openai_responses`, or `anthropic`.
     #[serde(default)]
     pub protocol: Option<String>,
     /// Target base URL.
@@ -198,6 +199,11 @@ async fn list_providers(
             id: "openai",
             name: "OpenAI / Compatible (v1/chat/completions)",
             default_base_url: "https://api.openai.com/v1",
+        },
+        ProtocolDescriptor {
+            id: "openai_reasoning",
+            name: "OpenAI Compatible + reasoning_content replay",
+            default_base_url: "https://api.deepseek.com/v1",
         },
         ProtocolDescriptor {
             id: "openai_responses",

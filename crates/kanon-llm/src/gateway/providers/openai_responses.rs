@@ -125,6 +125,9 @@ mod wire {
     pub enum ResponsesOutputContentPart {
         #[serde(rename = "output_text")]
         OutputText { text: String },
+        /// A user-visible refusal is final answer content, not private reasoning.
+        #[serde(rename = "refusal")]
+        Refusal { refusal: String },
         #[serde(other)]
         Other,
     }
@@ -372,7 +375,8 @@ impl LlmProvider for OpenAiResponsesProvider {
                 wire::ResponsesOutputWire::Message { content, .. } => {
                     for part in content {
                         match part {
-                            wire::ResponsesOutputContentPart::OutputText { text } => {
+                            wire::ResponsesOutputContentPart::OutputText { text }
+                            | wire::ResponsesOutputContentPart::Refusal { refusal: text } => {
                                 final_content.push_str(&text);
                             }
                             wire::ResponsesOutputContentPart::Other => {}
@@ -574,7 +578,9 @@ impl LlmProvider for OpenAiResponsesProvider {
                     if let Ok(val) = serde_json::from_str::<serde_json::Value>(&ev.data) {
                         let event_type = ev.event.as_deref().or_else(|| val["type"].as_str());
 
-                        if let Some("response.output_text.delta") = event_type {
+                        if let Some("response.output_text.delta" | "response.refusal.delta") =
+                            event_type
+                        {
                             if let Some(delta) = val["delta"].as_str()
                                 && tx.send(Ok(ChatChunk::delta(delta))).await.is_err()
                             {

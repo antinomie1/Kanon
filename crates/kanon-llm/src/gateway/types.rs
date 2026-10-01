@@ -322,6 +322,19 @@ pub struct ChatResponse {
 }
 
 impl ChatResponse {
+    /// Whether this response contains an assistant payload worth retaining in history.
+    ///
+    /// Empty optional strings are not data. Tool calls and reasoning-only replies are data even
+    /// without a visible answer; whitespace is retained verbatim rather than normalized here.
+    pub fn has_assistant_payload(&self) -> bool {
+        !self.tool_calls.is_empty()
+            || self.content.as_ref().is_some_and(|text| !text.is_empty())
+            || self
+                .reasoning_content
+                .as_ref()
+                .is_some_and(|text| !text.is_empty())
+    }
+
     /// Separates legacy envelopes before tool recovery, persistence, or delivery.
     pub fn separate_reasoning(&mut self) {
         super::reasoning::separate(&mut self.content, &mut self.reasoning_content);

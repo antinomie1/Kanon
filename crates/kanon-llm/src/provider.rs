@@ -29,7 +29,7 @@ use crate::model::ModelRef;
 pub struct ProviderEntry {
     /// Operator-chosen name used as the prefix of every model reference it serves.
     pub name: String,
-    /// Wire protocol: `openai`, `openai_responses` or `anthropic`.
+    /// Wire protocol: `openai`, `openai_reasoning`, `openai_responses` or `anthropic`.
     pub protocol: String,
     /// Endpoint base URL, e.g. `https://api.xiaomimimo.com/v1`.
     pub base_url: String,

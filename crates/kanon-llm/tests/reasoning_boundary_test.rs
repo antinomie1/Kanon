@@ -61,7 +61,7 @@ async fn tool_rounds_and_later_turns_replay_separate_reasoning_after_restart() {
             |_, _| async { Ok("synthetic result".into()) },
         )
     };
-    let provider = Arc::new(OpenAiChatProvider::new(url, None, "fixture"));
+    let provider = kanon_llm::build_provider("openai_reasoning", url, None, "fixture").unwrap();
     {
         let memory = Arc::new(SqliteMemory::open(&path).unwrap());
         let agent = Agent::builder("fixture", provider.clone())
@@ -207,6 +207,215 @@ impl LlmProvider for StreamFixture {
         }
         Ok(Box::pin(tokio_stream::iter(chunks)))
     }
+}
+
+/// A non-streaming response also used by the tool-enabled streaming preflight.
+struct FinalResponseFixture(ChatResponse);
+
+#[async_trait]
+impl LlmProvider for FinalResponseFixture {
+    async fn chat(&self, _: &ChatRequest) -> Result<ChatResponse, GatewayError> {
+        Ok(self.0.clone())
+    }
+}
+
+#[tokio::test]
+async fn empty_final_responses_are_not_persisted_in_either_agent_entrypoint() {
+    for streaming in [false, true] {
+        for (content, reasoning, keep) in [
+            (None, None, false),
+            (Some(""), None, false),
+            (None, Some(""), false),
+            (Some(""), Some(""), false),
+            (Some("<think></think>"), None, false),
+            (Some("answer"), None, true),
+            (None, Some("private"), true),
+            (Some(""), Some("private"), true),
+            (Some("<think>private</think>"), None, true),
+        ] {
+            let response = ChatResponse {
+                content: content.map(str::to_owned),
+                reasoning_content: reasoning.map(str::to_owned),
+                finish_reason: Some("stop".into()),
+                ..ChatResponse::default()
+            };
+            let memory = Arc::new(InMemory::new());
+            let agent = Agent::builder("fixture", Arc::new(FinalResponseFixture(response)))
+                .memory(memory.clone())
+                // Offering a tool selects the non-streaming preflight in run_stream.
+                .tool(NativeTool::new(
+                    ToolDefinition {
+                        name: "unused".into(),
+                        description: "Synthetic fixture".into(),
+                        parameters: json!({"type":"object"}),
+                    },
+                    |_, _| async { panic!("the final response must not invoke a tool") },
+                ))
+                .compaction(None)
+                .build();
+            if streaming {
+                let mut stream = agent.run_standalone_stream("s", "question").await.unwrap();
+                let mut finished = 0;
+                while let Some(chunk) = stream.next().await {
+                    let chunk = chunk.unwrap();
+                    assert!(!chunk.delta_text.contains("private"));
+                    finished += usize::from(chunk.is_finished);
+                }
+                assert_eq!(finished, 1);
+            } else {
+                let output = agent.run_standalone("s", "question").await.unwrap();
+                assert!(!output.content.contains("private"));
+            }
+            let messages = Memory::get_messages(memory.as_ref(), "s").await.unwrap();
+            assert_eq!(
+                messages.len(),
+                1 + usize::from(keep),
+                "streaming={streaming}, content={content:?}, reasoning={reasoning:?}"
+            );
+            assert_eq!(messages[0], ChatMessage::user("question"));
+            if keep {
+                assert_eq!(
+                    messages[1].content.as_deref().unwrap_or_default(),
+                    if content == Some("answer") {
+                        "answer"
+                    } else {
+                        ""
+                    }
+                );
+                assert_eq!(
+                    messages[1].reasoning_content.as_deref(),
+                    if content == Some("answer") {
+                        None
+                    } else {
+                        Some("private")
+                    }
+                );
+            }
+        }
+    }
+}
+
+#[tokio::test]
+async fn strict_openai_requests_omit_reasoning_without_mutating_shared_history() {
+    let captured = Arc::new(Mutex::new(Vec::<Value>::new()));
+    let received = captured.clone();
+    let url = server(Router::new().route("/v1/chat/completions", post(move |Json(body): Json<Value>| {
+        let received = received.clone();
+        async move {
+            received.lock().unwrap().push(body.clone());
+            if body["messages"].as_array().unwrap().iter().any(|m| m.get("reasoning_content").is_some()) {
+                return (axum::http::StatusCode::BAD_REQUEST, "unexpected reasoning_content".to_string());
+            }
+            if body["stream"] == true {
+                (axum::http::StatusCode::OK, "data: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\"answer\"},\"finish_reason\":\"stop\"}]}\n\ndata: [DONE]\n\n".into())
+            } else {
+                (axum::http::StatusCode::OK, json!({"choices":[{"index":0,"message":{"role":"assistant","content":"answer"},"finish_reason":"stop"}]}).to_string())
+            }
+        }
+    }))).await;
+    let mut assistant = ChatMessage::assistant("public");
+    assistant.reasoning_content = Some("native-private".into());
+    assistant.tool_calls = Some(vec![kanon_llm::ToolCall {
+        id: "call-1".into(),
+        name: "fixture_tool".into(),
+        arguments: json!({}),
+    }]);
+    let mut private_only = ChatMessage::assistant("");
+    private_only.reasoning_content = Some("native-private-only".into());
+    let mut request = request(vec![
+        ChatMessage::user("question"),
+        assistant,
+        ChatMessage::tool_response("call-1", "synthetic result"),
+        ChatMessage::assistant("<think>legacy-private</think>public-final"),
+        private_only,
+        ChatMessage::assistant("<think>legacy-private-only</think>"),
+        ChatMessage::user("next"),
+    ]);
+    request.model = "deepseek-flash".into();
+    let original = request.messages.clone();
+    for protocol in ["openai", "openai_chat"] {
+        // A model name must not opt an otherwise unknown endpoint into extensions.
+        let provider = kanon_llm::build_provider(protocol, &url, None, "deepseek-flash").unwrap();
+        assert_eq!(
+            provider.chat(&request).await.unwrap().content.as_deref(),
+            Some("answer")
+        );
+        let mut stream = provider.chat_stream(&request).await.unwrap();
+        let mut answer = String::new();
+        while let Some(chunk) = stream.next().await {
+            answer.push_str(&chunk.unwrap().delta_text);
+        }
+        assert_eq!(answer, "answer");
+    }
+    assert_eq!(request.messages, original);
+    let requests = captured.lock().unwrap();
+    assert_eq!(requests.len(), 4, "no retry may hide rejected parameters");
+    for body in requests.iter() {
+        assert!(!body.to_string().contains("private"));
+        assert_eq!(body["messages"][1]["content"], "public");
+        assert_eq!(body["messages"][1]["tool_calls"][0]["id"], "call-1");
+        assert_eq!(body["messages"][2]["tool_call_id"], "call-1");
+        assert_eq!(body["messages"][3]["content"], "public-final");
+        assert_eq!(body["messages"].as_array().unwrap().len(), 5);
+    }
+}
+
+#[tokio::test]
+async fn explicitly_enabled_reasoning_replays_verbatim_in_stream_requests() {
+    let received = Arc::new(Mutex::new(Vec::<Value>::new()));
+    let captured = received.clone();
+    let url = server(Router::new().route("/v1/chat/completions", post(move |Json(body): Json<Value>| {
+        let captured = captured.clone();
+        async move {
+            captured.lock().unwrap().push(body);
+            "data: {\"choices\":[{\"index\":0,\"delta\":{\"reasoning_content\":\"new-private\"},\"finish_reason\":null}]}\n\ndata: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\"answer\"},\"finish_reason\":\"stop\"}]}\n\ndata: [DONE]\n\n"
+        }
+    }))).await;
+    let provider = kanon_llm::build_provider("openai_reasoning", url, None, "fixture").unwrap();
+    let mut assistant = ChatMessage::assistant("");
+    assistant.reasoning_content = Some("  native-private\n".into());
+    assistant.tool_calls = Some(vec![kanon_llm::ToolCall {
+        id: "call-1".into(),
+        name: "fixture_tool".into(),
+        arguments: json!({}),
+    }]);
+    let mut request = request(vec![
+        ChatMessage::user("question"),
+        assistant,
+        ChatMessage::tool_response("call-1", "synthetic result"),
+        ChatMessage::assistant("<think>legacy-private</think>public"),
+    ]);
+    request.tools = vec![ToolDefinition {
+        name: "fixture_tool".into(),
+        description: "Synthetic tool".into(),
+        parameters: json!({"type":"object"}),
+    }];
+    let original = request.messages.clone();
+    let mut stream = provider.chat_stream(&request).await.unwrap();
+    let mut answer = String::new();
+    let mut reasoning = String::new();
+    while let Some(chunk) = stream.next().await {
+        let chunk = chunk.unwrap();
+        answer.push_str(&chunk.delta_text);
+        reasoning.push_str(chunk.reasoning_text.as_deref().unwrap_or_default());
+    }
+    assert_eq!(answer, "answer");
+    assert_eq!(reasoning, "new-private");
+    assert_eq!(request.messages, original);
+    let requests = received.lock().unwrap();
+    assert_eq!(requests.len(), 1);
+    let body = &requests[0];
+    assert_eq!(
+        body["messages"][1]["reasoning_content"],
+        "  native-private\n"
+    );
+    assert_eq!(body["messages"][1]["content"], "");
+    assert_eq!(body["messages"][1]["tool_calls"][0]["id"], "call-1");
+    assert_eq!(body["messages"][2]["tool_call_id"], "call-1");
+    assert_eq!(body["messages"][3]["reasoning_content"], "legacy-private");
+    assert_eq!(body["messages"][3]["content"], "public");
+    assert!(body["messages"][0].get("reasoning_content").is_none());
+    assert_eq!(body["tools"].as_array().unwrap().len(), 1);
 }
 
 #[tokio::test]
@@ -438,10 +647,7 @@ async fn provider_history_conversion_preserves_user_literals_and_separates_legac
         if protocol == "openai" {
             assert_eq!(body["messages"][0]["content"], literal);
             assert_eq!(body["messages"][1]["content"], "public");
-            assert_eq!(
-                body["messages"][1]["reasoning_content"],
-                "private-a\n\nprivate-b"
-            );
+            assert!(body["messages"][1].get("reasoning_content").is_none());
         } else {
             let items = if protocol == "anthropic" {
                 &body["messages"]
@@ -535,4 +741,90 @@ fn native_reasoning_round_trips_verbatim_even_when_content_echoes_a_legacy_envel
     let mut message = response.assistant_message();
     message.separate_reasoning();
     assert_eq!(message.reasoning_content, response.reasoning_content);
+}
+
+#[tokio::test]
+async fn responses_refusal_deltas_are_visible_and_persisted_once() {
+    for event_header in [false, true] {
+        let events = [
+            json!({"type":"response.reasoning_summary_text.delta","delta":"private"}),
+            json!({"type":"response.function_call_arguments.delta","delta":"internal arguments"}),
+            json!({"type":"response.future_metadata.delta","delta":"internal metadata"}),
+            json!({"type":"response.refusal.delta","delta":"synthetic "}),
+            json!({"type":"response.refusal.delta","delta":"refusal"}),
+            json!({"type":"response.refusal.done","refusal":"synthetic refusal"}),
+            json!({"type":"response.completed"}),
+        ];
+        let body: String = events
+            .iter()
+            .map(|event| {
+                let header = if event_header {
+                    format!("event: {}\n", event["type"].as_str().unwrap())
+                } else {
+                    String::new()
+                };
+                format!("{header}data: {event}\n\n")
+            })
+            .collect();
+        let url = server(Router::new().route(
+            "/v1/responses",
+            post(move || {
+                let body = body.clone();
+                async move { ([("content-type", "text/event-stream")], body) }
+            }),
+        ))
+        .await;
+        let memory = Arc::new(InMemory::new());
+        let agent = Agent::builder(
+            "fixture",
+            Arc::new(kanon_llm::OpenAiResponsesProvider::new("").with_base_url(url)),
+        )
+        .memory(memory.clone())
+        .compaction(None)
+        .build();
+        let mut stream = agent
+            .run_standalone_stream("s", "synthetic question")
+            .await
+            .unwrap();
+        let mut answer = String::new();
+        let mut reasoning = String::new();
+        let mut finished = 0;
+        while let Some(chunk) = stream.next().await {
+            let chunk = chunk.unwrap();
+            answer.push_str(&chunk.delta_text);
+            reasoning.push_str(chunk.reasoning_text.as_deref().unwrap_or_default());
+            finished += usize::from(chunk.is_finished);
+        }
+        assert_eq!(answer, "synthetic refusal");
+        assert_eq!(reasoning, "private");
+        assert_eq!(finished, 1);
+        let messages = Memory::get_messages(memory.as_ref(), "s").await.unwrap();
+        assert_eq!(messages.len(), 2);
+        assert_eq!(messages[1].content.as_deref(), Some("synthetic refusal"));
+        assert_eq!(messages[1].reasoning_content.as_deref(), Some("private"));
+    }
+}
+
+#[tokio::test]
+async fn responses_refusal_content_is_retained_in_non_streaming_replies() {
+    let url = server(Router::new().route("/v1/responses", post(|| async {
+        Json(json!({"output":[{"type":"message","role":"assistant","content":[{"type":"refusal","refusal":"synthetic refusal"}]}],"status":"completed"}))
+    }))).await;
+    let memory = Arc::new(InMemory::new());
+    let agent = Agent::builder(
+        "fixture",
+        Arc::new(kanon_llm::OpenAiResponsesProvider::new("").with_base_url(url)),
+    )
+    .memory(memory.clone())
+    .compaction(None)
+    .build();
+    let output = agent
+        .run_standalone("s", "synthetic question")
+        .await
+        .unwrap();
+    assert_eq!(output.content, "synthetic refusal");
+    let messages = Memory::get_messages(memory.as_ref(), "s").await.unwrap();
+    assert_eq!(messages.len(), 2);
+    assert_eq!(messages[1].content.as_deref(), Some("synthetic refusal"));
+    assert!(messages[1].reasoning_content.is_none());
 }
