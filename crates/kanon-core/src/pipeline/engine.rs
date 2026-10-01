@@ -35,6 +35,7 @@ use crate::mcp::McpPool;
 use crate::notice::{
     EventPolicyStore, META_NOTICE_ACTOR, META_NOTICE_TARGET, NoticeKind, RecallLedger, metadata_str,
 };
+use crate::pipeline::capture::CaptureRegistry;
 use crate::pipeline::command::{CommandRouter, TriggerMatcher};
 use crate::pipeline::context::build_user_message;
 use crate::pipeline::dead_letter::DeadLetterWriter;
@@ -359,42 +360,6 @@ fn strip_leading_mentions(text: &str) -> &str {
     rest
 }
 
-/// Turns a plugin's command (or trigger) response into the pipeline result.
-///
-/// A transport failure is logged and reported as an unsuccessful execution without replies: the
-/// plugin never answered, so there is nothing truthful to send on its behalf.
-fn command_result(
-    command: String,
-    plugin_id: &str,
-    host: &Arc<crate::supervisor::ManagedHost>,
-    outcome: Result<kanon_proto::v1::CommandExecuteResponse, tonic::Status>,
-) -> PipelineResult {
-    match outcome {
-        Ok(response) => PipelineResult::CommandExecuted {
-            command,
-            plugin_id: plugin_id.to_string(),
-            host_id: host.host_id.clone(),
-            success: response.success,
-            replies: response.replies,
-        },
-        Err(status) => {
-            tracing::error!(
-                command = %command,
-                host_id = %host.host_id,
-                error = %status,
-                "Command execution failed with gRPC status"
-            );
-            PipelineResult::CommandExecuted {
-                command,
-                plugin_id: plugin_id.to_string(),
-                host_id: host.host_id.clone(),
-                success: false,
-                replies: vec![],
-            }
-        }
-    }
-}
-
 /// Builds an outbound text reply segment.
 fn text_reply(content: impl Into<String>) -> MessageSegment {
     MessageSegment {
@@ -476,6 +441,8 @@ pub struct PipelineEngine {
     group_log: GroupLog,
     /// Compiled plugin trigger patterns.
     triggers: TriggerMatcher,
+    /// Plugins waiting for a sender's next message.
+    captures: CaptureRegistry,
     /// MCP servers contributing tools alongside plugin hosts.
     mcp: Option<Arc<McpPool>>,
     /// Optional lifecycle observer used by the management control plane for tracing.
@@ -512,6 +479,7 @@ impl PipelineEngine {
             recalls: RecallLedger::default(),
             group_log: GroupLog::default(),
             triggers: TriggerMatcher::default(),
+            captures: CaptureRegistry::default(),
             mcp: None,
             observer: None,
             dead_letter: Arc::new(DeadLetterWriter::default()),
@@ -1312,6 +1280,52 @@ impl PipelineEngine {
             )
         });
 
+        // Phase 2a: Conversation captures.
+        //
+        // A plugin that asked a question gets the sender's next message before anything else may
+        // interpret it — even text that looks like a command is the answer it is waiting for.
+        // The capture is consumed here either way, so a plugin that has been disabled or whose
+        // host is gone cannot keep swallowing the sender's messages.
+        if notice.is_none()
+            && let Some(capture) = self.captures.take(&filtered_event)
+        {
+            match hosts.iter().find(|host| host.host_id == capture.host_id) {
+                Some(host) => {
+                    tracing::debug!(
+                        command = %capture.command,
+                        plugin_id = %capture.plugin_id,
+                        host_id = %host.host_id,
+                        "Routing captured message to the waiting plugin"
+                    );
+                    self.observe(PipelineStage::CommandMatched {
+                        event_id: event_id.clone(),
+                        command: capture.command.clone(),
+                        plugin_id: capture.plugin_id.clone(),
+                        host_id: host.host_id.clone(),
+                    });
+                    let outcome = CommandRouter::dispatch_continuation(
+                        host,
+                        &capture,
+                        command_text,
+                        filtered_event.clone(),
+                    )
+                    .await;
+                    return self.command_result(
+                        capture.command,
+                        &capture.plugin_id,
+                        host,
+                        &filtered_event,
+                        outcome,
+                    );
+                }
+                None => tracing::warn!(
+                    plugin_id = %capture.plugin_id,
+                    host_id = %capture.host_id,
+                    "Captured conversation's plugin is no longer active here; processing the message normally"
+                ),
+            }
+        }
+
         if let Some(parsed) = CommandRouter::parse_command(command_text) {
             let name = parsed.name.clone();
             // `/new` and `/model` act on an instance, so without one they are ordinary names a
@@ -1391,7 +1405,13 @@ impl PipelineEngine {
                 host_id: target.host.host_id.clone(),
             });
             let outcome = CommandRouter::dispatch(&target, parsed, filtered_event.clone()).await;
-            return command_result(command, &target.plugin_id, &target.host, outcome);
+            return self.command_result(
+                command,
+                &target.plugin_id,
+                &target.host,
+                &filtered_event,
+                outcome,
+            );
         }
 
         // Phase 2b: Plugin triggers.
@@ -1430,7 +1450,13 @@ impl PipelineEngine {
                 filtered_event.clone(),
             )
             .await;
-            return command_result(trigger, &target.plugin_id, &target.host, outcome);
+            return self.command_result(
+                trigger,
+                &target.plugin_id,
+                &target.host,
+                &filtered_event,
+                outcome,
+            );
         }
 
         // Phase 2c: Reply policy gate.
@@ -1786,6 +1812,62 @@ impl PipelineEngine {
         }
 
         PipelineResult::Passed(filtered_event)
+    }
+
+    /// Turns a plugin's command (or trigger) response into the pipeline result, recording the
+    /// conversation capture the plugin asked for.
+    ///
+    /// A transport failure is logged and reported as an unsuccessful execution without replies:
+    /// the plugin never answered, so there is nothing truthful to send on its behalf.
+    fn command_result(
+        &self,
+        command: String,
+        plugin_id: &str,
+        host: &Arc<crate::supervisor::ManagedHost>,
+        event: &PipelineEventRequest,
+        outcome: Result<kanon_proto::v1::CommandExecuteResponse, tonic::Status>,
+    ) -> PipelineResult {
+        match outcome {
+            Ok(response) => {
+                if response.capture_seconds > 0
+                    && !self.captures.capture(
+                        event,
+                        &host.host_id,
+                        plugin_id,
+                        &command,
+                        response.capture_seconds,
+                    )
+                {
+                    tracing::warn!(
+                        command = %command,
+                        plugin_id = %plugin_id,
+                        "Plugin asked to capture a conversation whose event names no sender; ignored"
+                    );
+                }
+                PipelineResult::CommandExecuted {
+                    command,
+                    plugin_id: plugin_id.to_string(),
+                    host_id: host.host_id.clone(),
+                    success: response.success,
+                    replies: response.replies,
+                }
+            }
+            Err(status) => {
+                tracing::error!(
+                    command = %command,
+                    host_id = %host.host_id,
+                    error = %status,
+                    "Command execution failed with gRPC status"
+                );
+                PipelineResult::CommandExecuted {
+                    command,
+                    plugin_id: plugin_id.to_string(),
+                    host_id: host.host_id.clone(),
+                    success: false,
+                    replies: vec![],
+                }
+            }
+        }
     }
 
     /// Handles the built-in `/new` command for one conversation.

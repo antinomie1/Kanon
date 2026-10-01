@@ -422,6 +422,7 @@ impl<P: Plugin> MessagePipelineService for PipelineServiceImpl<P> {
                 success: false,
                 replies: vec![],
                 error_message: e.to_string(),
+                capture_seconds: 0,
             })),
         }
     }

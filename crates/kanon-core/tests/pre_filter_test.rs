@@ -60,6 +60,7 @@ impl MessagePipelineService for MockPipeline {
             success: true,
             replies: vec![],
             error_message: String::new(),
+            ..Default::default()
         }))
     }
 

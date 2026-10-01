@@ -503,5 +503,6 @@ async fn default_command_response(req: CommandExecuteRequest) -> CommandExecuteR
         success: true,
         replies: vec![],
         error_message: format!("Command '{}' executed by default stub handler", req.command),
+        ..Default::default()
     }
 }

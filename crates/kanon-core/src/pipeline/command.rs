@@ -15,6 +15,7 @@ use kanon_proto::v1::{
 use regex::Regex;
 
 use crate::access::CommandAccess;
+use crate::pipeline::capture::Capture;
 use crate::supervisor::ManagedHost;
 
 /// A slash command split into its name and arguments.
@@ -161,6 +162,7 @@ impl CommandRouter {
             args: parsed.args,
             context: Some(context),
             raw_args: parsed.raw_args,
+            continuation: false,
         };
 
         target.host.execute_command(req).await
@@ -179,9 +181,33 @@ impl CommandRouter {
             args: target.captures.clone(),
             context: Some(context),
             raw_args: text.to_string(),
+            continuation: false,
         };
 
         target.host.execute_command(req).await
+    }
+
+    /// Delivers a captured sender's next message to the plugin that captured it.
+    ///
+    /// The whole message is the argument text: the plugin asked a question and the message is
+    /// the answer, so nothing (not even a leading slash) is stripped from it.
+    #[allow(clippy::result_large_err)]
+    pub async fn dispatch_continuation(
+        host: &ManagedHost,
+        capture: &Capture,
+        text: &str,
+        context: PipelineEventRequest,
+    ) -> Result<CommandExecuteResponse, tonic::Status> {
+        let text = text.trim();
+        let req = CommandExecuteRequest {
+            plugin_id: capture.plugin_id.clone(),
+            command: capture.command.clone(),
+            args: split_args(text),
+            context: Some(context),
+            raw_args: text.to_string(),
+            continuation: true,
+        };
+        host.execute_command(req).await
     }
 }
 

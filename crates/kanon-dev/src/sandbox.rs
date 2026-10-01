@@ -334,6 +334,7 @@ async fn execute_sandbox_command(
         args: args.to_vec(),
         context: None,
         raw_args: args.join(" "),
+        continuation: false,
     };
 
     println!("[Executing] /{} with args: {:?}", clean_cmd, args);

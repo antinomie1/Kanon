@@ -129,6 +129,7 @@ impl MessagePipelineService for MockHostService {
             success: true,
             replies: vec![],
             error_message: String::new(),
+            ..Default::default()
         }))
     }
 

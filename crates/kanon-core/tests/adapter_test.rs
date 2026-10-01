@@ -71,6 +71,7 @@ impl MessagePipelineService for RecordingHost {
             success: true,
             replies: vec![],
             error_message: String::new(),
+            ..Default::default()
         }))
     }
 

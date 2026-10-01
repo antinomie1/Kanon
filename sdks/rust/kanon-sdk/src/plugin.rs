@@ -57,6 +57,7 @@ pub trait Plugin: Send + Sync + 'static {
             success: true,
             replies: vec![],
             error_message: format!("Command '{}' executed by default stub handler", req.command),
+            capture_seconds: 0,
         })
     }
 

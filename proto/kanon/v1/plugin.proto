@@ -242,12 +242,21 @@ message CommandExecuteRequest {
   PipelineEventRequest context = 4;
   // Everything after the command name, unsplit, for handlers that parse their own syntax.
   string raw_args = 5;
+  // Set when this is the sender's next message, routed here because the previous response for
+  // `command` asked to capture the conversation. `args` and `raw_args` then hold the whole
+  // message text (leading @-mentions removed) and `context` the new event.
+  bool continuation = 6;
 }
 
 message CommandExecuteResponse {
   bool success = 1;
   repeated MessageSegment replies = 2;
   string error_message = 3;
+  // When non-zero, the next message from the same sender in the same channel (within this many
+  // seconds, at most 600) skips commands, triggers and the model and is delivered to this plugin
+  // as a continuation of `command`. One capture covers one message; answer a continuation with
+  // `capture_seconds` again to keep the conversation. Pre-filters still see the message first.
+  uint32 capture_seconds = 4;
 }
 
 // --- Tool Calling 双模载荷定义 (彻底消灭 JSON 字符串二次序列化) ---

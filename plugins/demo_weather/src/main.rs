@@ -112,6 +112,7 @@ impl Plugin for WeatherPlugin {
             success: true,
             replies: vec![reply],
             error_message: String::new(),
+            ..Default::default()
         })
     }
 
