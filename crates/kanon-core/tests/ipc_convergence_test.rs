@@ -162,6 +162,15 @@ impl MessagePipelineService for MockHostService {
         ))
     }
 
+    async fn on_prepare_turn(
+        &self,
+        _request: tonic::Request<kanon_proto::v1::PrepareTurnRequest>,
+    ) -> Result<tonic::Response<kanon_proto::v1::PrepareTurnResult>, tonic::Status> {
+        Ok(tonic::Response::new(
+            kanon_proto::v1::PrepareTurnResult::default(),
+        ))
+    }
+
     async fn on_deliver_message(
         &self,
         _request: tonic::Request<DeliverMessageRequest>,

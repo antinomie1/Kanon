@@ -103,6 +103,13 @@ impl BotApiService for StubCore {
     ) -> Result<Response<GetStorageResponse>, Status> {
         Err(Status::unimplemented("stub core has no storage"))
     }
+
+    async fn get_conversation_history(
+        &self,
+        _request: Request<kanon_sdk::proto::v1::ConversationHistoryRequest>,
+    ) -> Result<Response<kanon_sdk::proto::v1::ConversationHistoryResponse>, Status> {
+        Err(Status::unimplemented("stub core has no conversations"))
+    }
 }
 
 /// Starts a stub core on an ephemeral port and returns a handle plus its server task.

@@ -275,6 +275,11 @@ class MessagePipelineServiceStub:
                 request_serializer=plugin__pb2.DecorateReplyRequest.SerializeToString,
                 response_deserializer=plugin__pb2.DecorateReplyResult.FromString,
                 _registered_method=True)
+        self.OnPrepareTurn = channel.unary_unary(
+                '/kanon.plugin.v1.MessagePipelineService/OnPrepareTurn',
+                request_serializer=plugin__pb2.PrepareTurnRequest.SerializeToString,
+                response_deserializer=plugin__pb2.PrepareTurnResult.FromString,
+                _registered_method=True)
 
 
 class MessagePipelineServiceServicer:
@@ -320,6 +325,15 @@ class MessagePipelineServiceServicer:
         context.set_details('Method not implemented!')
         raise NotImplementedError('Method not implemented!')
 
+    def OnPrepareTurn(self, request, context):
+        """Adds plugin context to the current turn just before the model answers it; called only for
+        plugins with `PluginMeta.prepares_turns`. The text is prepended to the current user message,
+        never to the system prompt or the history, so the cached request prefix stays stable.
+        """
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
 
 def add_MessagePipelineServiceServicer_to_server(servicer, server):
     rpc_method_handlers = {
@@ -352,6 +366,11 @@ def add_MessagePipelineServiceServicer_to_server(servicer, server):
                     servicer.OnDecorateReply,
                     request_deserializer=plugin__pb2.DecorateReplyRequest.FromString,
                     response_serializer=plugin__pb2.DecorateReplyResult.SerializeToString,
+            ),
+            'OnPrepareTurn': grpc.unary_unary_rpc_method_handler(
+                    servicer.OnPrepareTurn,
+                    request_deserializer=plugin__pb2.PrepareTurnRequest.FromString,
+                    response_serializer=plugin__pb2.PrepareTurnResult.SerializeToString,
             ),
     }
     generic_handler = grpc.method_handlers_generic_handler(
@@ -527,6 +546,33 @@ class MessagePipelineService:
             metadata,
             _registered_method=True)
 
+    @staticmethod
+    def OnPrepareTurn(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(
+            request,
+            target,
+            '/kanon.plugin.v1.MessagePipelineService/OnPrepareTurn',
+            plugin__pb2.PrepareTurnRequest.SerializeToString,
+            plugin__pb2.PrepareTurnResult.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
 
 class BotApiServiceStub:
     """3. 核心 API 服务 (运行在 Core 端，监听 core.sock / loopback，Host 主动连接调用)
@@ -582,6 +628,11 @@ class BotApiServiceStub:
                 '/kanon.plugin.v1.BotApiService/Ping',
                 request_serializer=plugin__pb2.PingRequest.SerializeToString,
                 response_deserializer=plugin__pb2.PingResponse.FromString,
+                _registered_method=True)
+        self.GetConversationHistory = channel.unary_unary(
+                '/kanon.plugin.v1.BotApiService/GetConversationHistory',
+                request_serializer=plugin__pb2.ConversationHistoryRequest.SerializeToString,
+                response_deserializer=plugin__pb2.ConversationHistoryResponse.FromString,
                 _registered_method=True)
 
 
@@ -656,6 +707,15 @@ class BotApiServiceServicer:
         context.set_details('Method not implemented!')
         raise NotImplementedError('Method not implemented!')
 
+    def GetConversationHistory(self, request, context):
+        """Reads the model conversation an inbound message belongs to. Read-only: history is
+        append-only and only the core writes it. NOT_FOUND when no enabled instance claims the
+        platform, UNAVAILABLE when no model is configured, INVALID_ARGUMENT without a context.
+        """
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
 
 def add_BotApiServiceServicer_to_server(servicer, server):
     rpc_method_handlers = {
@@ -703,6 +763,11 @@ def add_BotApiServiceServicer_to_server(servicer, server):
                     servicer.Ping,
                     request_deserializer=plugin__pb2.PingRequest.FromString,
                     response_serializer=plugin__pb2.PingResponse.SerializeToString,
+            ),
+            'GetConversationHistory': grpc.unary_unary_rpc_method_handler(
+                    servicer.GetConversationHistory,
+                    request_deserializer=plugin__pb2.ConversationHistoryRequest.FromString,
+                    response_serializer=plugin__pb2.ConversationHistoryResponse.SerializeToString,
             ),
     }
     generic_handler = grpc.method_handlers_generic_handler(
@@ -949,6 +1014,33 @@ class BotApiService:
             '/kanon.plugin.v1.BotApiService/Ping',
             plugin__pb2.PingRequest.SerializeToString,
             plugin__pb2.PingResponse.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
+    @staticmethod
+    def GetConversationHistory(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(
+            request,
+            target,
+            '/kanon.plugin.v1.BotApiService/GetConversationHistory',
+            plugin__pb2.ConversationHistoryRequest.SerializeToString,
+            plugin__pb2.ConversationHistoryResponse.FromString,
             options,
             channel_credentials,
             insecure,

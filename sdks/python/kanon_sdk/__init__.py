@@ -5,6 +5,7 @@ out-of-process Kanon plugins in Python.
 """
 
 from kanon_sdk.context import (
+    ConversationHistory,
     CoreHandle,
     MessageSegment,
     PluginContext,
@@ -22,6 +23,7 @@ from kanon_sdk.plugin import (
     command,
     decorate_reply,
     on_event,
+    prepare_turn,
     tool,
     trigger,
 )
@@ -29,6 +31,7 @@ from kanon_sdk.proto import pb, pb_grpc
 
 __all__ = [
     "CommandEvent",
+    "ConversationHistory",
     "CoreHandle",
     "KanonHost",
     "MessageEvent",
@@ -43,6 +46,7 @@ __all__ = [
     "decorate_reply",
     "llm_message",
     "on_event",
+    "prepare_turn",
     "to_segments",
     "tool",
     "trigger",

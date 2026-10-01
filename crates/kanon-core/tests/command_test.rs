@@ -5,7 +5,7 @@ use std::sync::Arc;
 
 use kanon_core::pipeline::{CommandRouter, TriggerMatcher};
 use kanon_core::supervisor::ManagedHost;
-use kanon_proto::v1::{CommandMeta, PluginMeta, TriggerMeta};
+use kanon_proto::v1::{CommandMeta, PipelineEventRequest, PluginMeta, TriggerMeta};
 
 fn create_mock_host(host_id: &str, priority: i32, commands: Vec<CommandMeta>) -> Arc<ManagedHost> {
     let channel = tonic::transport::Endpoint::from_static("http://127.0.0.1:1").connect_lazy();
@@ -115,15 +115,16 @@ async fn test_resolve_command_priority() {
     );
 
     let hosts = vec![host1.clone(), host2.clone()];
-    let resolved = CommandRouter::resolve("calc", &hosts).expect("Should resolve");
+    let resolved = CommandRouter::resolve("calc", &hosts, &PipelineEventRequest::default())
+        .expect("Should resolve");
     assert_eq!(resolved.host.host_id, "host2");
     assert_eq!(resolved.meta.priority, 50);
 
-    let resolved_slash =
-        CommandRouter::resolve("/calc", &hosts).expect("Should resolve with leading slash");
+    let resolved_slash = CommandRouter::resolve("/calc", &hosts, &PipelineEventRequest::default())
+        .expect("Should resolve with leading slash");
     assert_eq!(resolved_slash.host.host_id, "host2");
 
-    let not_found = CommandRouter::resolve("unknown", &hosts);
+    let not_found = CommandRouter::resolve("unknown", &hosts, &PipelineEventRequest::default());
     assert!(not_found.is_none());
 }
 
@@ -154,7 +155,8 @@ async fn test_resolve_host_priority_fallback() {
     );
 
     let hosts = vec![host1, host2];
-    let resolved = CommandRouter::resolve("echo", &hosts).expect("Should resolve");
+    let resolved = CommandRouter::resolve("echo", &hosts, &PipelineEventRequest::default())
+        .expect("Should resolve");
     assert_eq!(resolved.host.host_id, "host_high_priority");
 }
 
@@ -173,7 +175,8 @@ async fn test_resolve_alias_reports_canonical_name() {
     let hosts = vec![host];
 
     for typed in ["w", "天气", "weather"] {
-        let resolved = CommandRouter::resolve(typed, &hosts).expect("alias resolves");
+        let resolved = CommandRouter::resolve(typed, &hosts, &PipelineEventRequest::default())
+            .expect("alias resolves");
         assert_eq!(resolved.name(), "weather");
     }
 }
@@ -226,15 +229,110 @@ async fn test_trigger_resolution() {
 
     let everyone = |meta: &TriggerMeta| meta.access() == kanon_proto::v1::CommandAccess::Everyone;
     let matched = matcher
-        .resolve("roll 20", &hosts, everyone)
+        .resolve(
+            "roll 20",
+            &PipelineEventRequest::default(),
+            &hosts,
+            everyone,
+        )
         .expect("roll matches");
     assert_eq!(matched.meta.name, "roll");
     assert_eq!(matched.captures, strings(&["20", "", ""]));
 
     let admin = matcher
-        .resolve("roll 20", &hosts, |_| true)
+        .resolve("roll 20", &PipelineEventRequest::default(), &hosts, |_| {
+            true
+        })
         .expect("admins fire the higher-priority trigger");
     assert_eq!(admin.meta.name, "admin_roll");
 
-    assert!(matcher.resolve("hello", &hosts, |_| true).is_none());
+    assert!(
+        matcher
+            .resolve("hello", &PipelineEventRequest::default(), &hosts, |_| true)
+            .is_none()
+    );
+}
+
+/// A message from a group on `platform`, as an adapter reports it.
+fn group_event(platform: &str) -> PipelineEventRequest {
+    PipelineEventRequest {
+        platform: platform.to_string(),
+        metadata: Some(kanon_proto::prost_types::Struct {
+            fields: [(
+                kanon_core::META_CONVERSATION_KIND.to_string(),
+                kanon_proto::prost_types::Value {
+                    kind: Some(kanon_proto::prost_types::value::Kind::StringValue(
+                        "group".to_string(),
+                    )),
+                },
+            )]
+            .into(),
+        }),
+        ..Default::default()
+    }
+}
+
+/// A command or trigger limited to some platforms or conversation kinds does not exist
+/// elsewhere, so a less preferred declaration of the same name answers instead.
+#[tokio::test]
+async fn test_scoped_commands_and_triggers() {
+    use kanon_proto::v1::ConversationKind;
+
+    let hosts = vec![
+        create_mock_host(
+            "host_scoped",
+            1,
+            vec![CommandMeta {
+                name: "kick".to_string(),
+                platforms: vec!["onebot".to_string()],
+                conversation_kinds: vec![ConversationKind::Group as i32],
+                ..Default::default()
+            }],
+        ),
+        create_mock_host(
+            "host_fallback",
+            9,
+            vec![CommandMeta {
+                name: "kick".to_string(),
+                ..Default::default()
+            }],
+        ),
+    ];
+    let resolved = |event: &PipelineEventRequest| {
+        CommandRouter::resolve("kick", &hosts, event).map(|target| target.host.host_id.clone())
+    };
+    assert_eq!(
+        resolved(&group_event("onebot")).as_deref(),
+        Some("host_scoped")
+    );
+    assert_eq!(
+        resolved(&group_event("telegram")).as_deref(),
+        Some("host_fallback")
+    );
+    let private = PipelineEventRequest {
+        platform: "onebot".to_string(),
+        ..Default::default()
+    };
+    assert_eq!(resolved(&private).as_deref(), Some("host_fallback"));
+
+    let triggers = vec![trigger_host(
+        "host_triggers",
+        vec![TriggerMeta {
+            name: "hello".to_string(),
+            pattern: "^hi$".to_string(),
+            conversation_kinds: vec![ConversationKind::Private as i32],
+            ..Default::default()
+        }],
+    )];
+    let matcher = TriggerMatcher::default();
+    assert!(
+        matcher
+            .resolve("hi", &private, &triggers, |_| true)
+            .is_some()
+    );
+    assert!(
+        matcher
+            .resolve("hi", &group_event("onebot"), &triggers, |_| true)
+            .is_none()
+    );
 }

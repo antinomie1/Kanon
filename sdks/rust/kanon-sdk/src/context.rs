@@ -8,9 +8,10 @@ use std::path::PathBuf;
 
 use kanon_proto::v1::bot_api_service_client::BotApiServiceClient;
 use kanon_proto::v1::{
-    DeliverMessageRequest, DeliverMessageResponse, IngestEventRequest, IngestEventResponse,
-    LlmChunk, LlmMessage, LlmRequest, LlmRole, PipelineEventRequest, PlatformApiRequest,
-    RegisterHostRequest, RegisterHostResponse, SendMessageRequest, SendMessageResponse,
+    ConversationHistoryRequest, ConversationHistoryResponse, DeliverMessageRequest,
+    DeliverMessageResponse, IngestEventRequest, IngestEventResponse, LlmChunk, LlmMessage,
+    LlmRequest, LlmRole, PipelineEventRequest, PlatformApiRequest, RegisterHostRequest,
+    RegisterHostResponse, SendMessageRequest, SendMessageResponse,
 };
 use tonic::Streaming;
 use tonic::transport::Channel;
@@ -241,6 +242,30 @@ impl CoreHandle {
             .result
             .map(crate::json::from_value)
             .unwrap_or(serde_json::Value::Null))
+    }
+
+    /// Reads the model conversation `event` belongs to (`BotApiService.GetConversationHistory`):
+    /// the same session the model would continue when answering it.
+    ///
+    /// `limit` keeps only the most recent messages (0 keeps all). Only user and assistant turns
+    /// are returned; tool calls, tool results and the model's reasoning are left out. History
+    /// is read-only. Fails with `NOT_FOUND` when no bot instance answers on the platform and
+    /// `UNAVAILABLE` when no model is configured.
+    pub async fn conversation_history(
+        &self,
+        event: &PipelineEventRequest,
+        limit: u32,
+    ) -> Result<ConversationHistoryResponse, tonic::Status> {
+        let request = ConversationHistoryRequest {
+            context: Some(event.clone()),
+            limit,
+        };
+        Ok(self
+            .client
+            .clone()
+            .get_conversation_history(request)
+            .await?
+            .into_inner())
     }
 
     /// Convenience wrapper building a text-only event for `platform`.

@@ -21,6 +21,7 @@ from kanon_sdk import (
     command,
     decorate_reply,
     on_event,
+    prepare_turn,
     trigger,
 )
 from kanon_sdk.context import CoreHandle
@@ -219,6 +220,88 @@ class TestCoreHandle(unittest.IsolatedAsyncioTestCase):
         handle = CoreHandle(ApiStub())  # type: ignore[arg-type]
         plugin.context = PluginContext(data_dir=Path("."), config={}, core=handle)
         self.assertIs(plugin.core, handle)
+
+
+class Handover(Plugin):
+    id = "test.handover"
+
+    @command("note", platforms=["onebot"], conversation_kinds=["group"])
+    async def note(self, event: CommandEvent) -> str:
+        event.pass_to_model(f"remember {event.raw_args}")
+        return "noted"
+
+    @command("ask")
+    async def ask(self, event: CommandEvent) -> None:
+        # A wait in the same turn cancels the hand-off: this message is not the model's.
+        event.pass_to_model()
+        try:
+            await event.wait_next(timeout=5)
+        except asyncio.TimeoutError:
+            pass
+
+    @prepare_turn
+    def recall(self, event, session_id: str) -> str:
+        return f"[{session_id}] {event.sender_id} likes tea"
+
+
+class TestHandover(unittest.IsolatedAsyncioTestCase):
+    async def test_meta_declares_scopes_and_the_preparer(self) -> None:
+        meta = Handover().meta()
+        note = next(c for c in meta.commands if c.name == "note")
+        self.assertEqual(list(note.platforms), ["onebot"])
+        self.assertEqual(list(note.conversation_kinds), [pb.CONVERSATION_KIND_GROUP])
+        self.assertTrue(meta.prepares_turns)
+
+    def test_unknown_conversation_kind_is_rejected(self) -> None:
+        with self.assertRaises(ValueError):
+            command("x", conversation_kinds=["dm"])
+
+    async def test_a_handler_can_pass_the_message_on(self) -> None:
+        response = await Handover().on_execute_command(request("note", "tea", ["tea"]))
+        self.assertTrue(response.pass_to_model)
+        self.assertEqual(response.model_text, "remember tea")
+        self.assertEqual(texts(response), ["noted"])
+
+    async def test_a_capture_cancels_the_hand_off(self) -> None:
+        response = await Handover().on_execute_command(request("ask"))
+        self.assertEqual(response.capture_seconds, 5)
+        self.assertFalse(response.pass_to_model)
+        self.assertFalse(response.HasField("model_text"))
+
+    async def test_the_preparer_receives_the_message_and_session(self) -> None:
+        result = await Handover().on_prepare_turn(
+            pb.PrepareTurnRequest(context=request("x").context, session_id="s1")
+        )
+        self.assertEqual(result.text, "[s1] u1 likes tea")
+
+
+class HistoryStub:
+    """Fake ``BotApiService`` stub answering GetConversationHistory."""
+
+    def __init__(self) -> None:
+        self.requests: List[pb.ConversationHistoryRequest] = []
+
+    async def GetConversationHistory(self, request):  # noqa: N802
+        self.requests.append(request)
+        return pb.ConversationHistoryResponse(
+            session_id="s1",
+            messages=[
+                pb.HistoryMessage(role=pb.LLM_ROLE_USER, text="hi"),
+                pb.HistoryMessage(role=pb.LLM_ROLE_ASSISTANT, text="hello"),
+            ],
+        )
+
+
+class TestHistory(unittest.IsolatedAsyncioTestCase):
+    async def test_history_reads_the_events_conversation(self) -> None:
+        stub = HistoryStub()
+        handle = CoreHandle(stub)  # type: ignore[arg-type]
+        event = CommandEvent(request("x", "hi"))
+        history = await handle.conversation_history(event, limit=2)
+        self.assertEqual(history.session_id, "s1")
+        self.assertEqual(history.messages, [("user", "hi"), ("assistant", "hello")])
+        self.assertEqual(stub.requests[0].context.sender_id, "u1")
+        self.assertEqual(stub.requests[0].limit, 2)
 
 
 if __name__ == "__main__":

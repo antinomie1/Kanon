@@ -16,8 +16,10 @@ import {
   CoreHandle,
   DecorateReply,
   MessageSegment,
+  MessageEvent,
   OnEvent,
   Plugin,
+  PrepareTurn,
   Reply,
   Trigger,
   WaitTimeoutError,
@@ -164,6 +166,73 @@ test("events dispatch by kind and the decorator rewrites only model replies", as
 
   const cmd = await plugin.onDecorateReply({ source: "REPLY_SOURCE_COMMAND", command: "echo" });
   assert.equal(cmd.modified, false);
+});
+
+class Handover extends Plugin {
+  id = "test.handover";
+
+  @Command("note", { platforms: ["onebot"], conversationKinds: ["group"] })
+  async note(event: CommandEvent, args: string[]) {
+    await event.reply("noted");
+    event.passToModel(`remember: ${args.join(" ")}`);
+  }
+
+  @Command("hold")
+  async hold(event: CommandEvent) {
+    event.passToModel();
+    try {
+      await event.waitNext(10);
+    } catch (err) {
+      if (!(err instanceof WaitTimeoutError)) throw err;
+    }
+  }
+
+  @Command("explicit")
+  async explicit() {
+    return { success: true, pass_to_model: true };
+  }
+
+  @PrepareTurn()
+  async prepare(event: MessageEvent, sessionId: string) {
+    return event.text === "skip" ? undefined : `[${sessionId}] likes tea`;
+  }
+}
+
+test("commands pass messages to the model and preparers add context", async () => {
+  const plugin = new Handover();
+  const meta = plugin.meta();
+  assert.equal(meta.prepares_turns, true);
+  const note = meta.commands!.find((c) => c.name === "note")!;
+  assert.deepEqual(note.platforms, ["onebot"]);
+  assert.deepEqual(note.conversation_kinds, ["CONVERSATION_KIND_GROUP"]);
+  assert.throws(
+    () => Command("x", { conversationKinds: ["room" as any] }),
+    /unknown conversation kind/,
+  );
+
+  const noted = await plugin.onExecuteCommand(request("note", "tea", ["tea"]));
+  assert.deepEqual(texts(noted), ["noted"]);
+  assert.equal(noted.pass_to_model, true);
+  assert.equal(noted.model_text, "remember: tea");
+
+  // A capture wins: the handler is waiting for the next message, so this one stays its own.
+  const held = await plugin.onExecuteCommand(request("hold"));
+  assert.equal(held.capture_seconds, 10);
+  assert.equal(held.pass_to_model, false);
+
+  const explicit = await plugin.onExecuteCommand(request("explicit"));
+  assert.equal(explicit.pass_to_model, true);
+  assert.equal(explicit.model_text, undefined);
+
+  const context = { platform: "onebot", sender_id: "u1", raw_text: "hi" };
+  assert.deepEqual(await plugin.onPrepareTurn({ context, session_id: "s1" }), {
+    text: "[s1] likes tea",
+  });
+  assert.deepEqual(
+    await plugin.onPrepareTurn({ context: { ...context, raw_text: "skip" }, session_id: "s1" }),
+    { text: "" },
+  );
+  assert.deepEqual(await new Demo().onPrepareTurn({ context, session_id: "s1" }), { text: "" });
 });
 
 test("callPlatformApi round-trips JSON over the wire", async () => {

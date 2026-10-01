@@ -15,6 +15,7 @@ use kanon_proto::v1::{
 use regex::Regex;
 
 use crate::access::CommandAccess;
+use crate::conversation::ConversationKind;
 use crate::pipeline::capture::Capture;
 use crate::supervisor::ManagedHost;
 
@@ -107,7 +108,14 @@ impl CommandRouter {
     /// by command priority ascending, host priority ascending, and finally `host_id`
     /// to guarantee deterministic routing. A canonical name and an alias compete on equal terms:
     /// the priority, not the kind of match, decides.
-    pub fn resolve(command_name: &str, hosts: &[Arc<ManagedHost>]) -> Option<MatchedCommand> {
+    ///
+    /// A command whose declared platforms or conversation kinds exclude `event` is not a
+    /// candidate at all, so another plugin's command of the same name may answer instead.
+    pub fn resolve(
+        command_name: &str,
+        hosts: &[Arc<ManagedHost>],
+        event: &PipelineEventRequest,
+    ) -> Option<MatchedCommand> {
         let target_name = command_name.trim_start_matches('/');
         let mut candidates = Vec::new();
 
@@ -118,6 +126,7 @@ impl CommandRouter {
                     if names
                         .map(|name| name.trim_start_matches('/'))
                         .any(|name| name == target_name)
+                        && in_scope(&cmd.platforms, &cmd.conversation_kinds, event)
                     {
                         candidates.push((
                             cmd.priority,
@@ -211,6 +220,22 @@ impl CommandRouter {
     }
 }
 
+/// Whether a command or trigger limited to `platforms` and `kinds` applies to `event`.
+///
+/// An empty list places no limit. The conversation kind is read the same way the reply policy
+/// reads it, so an adapter that reports no kind is treated as a private chat everywhere.
+fn in_scope(platforms: &[String], kinds: &[i32], event: &PipelineEventRequest) -> bool {
+    use kanon_proto::v1::ConversationKind as Declared;
+
+    let kind = match ConversationKind::from_metadata(event.metadata.as_ref()) {
+        ConversationKind::Private => Declared::Private,
+        ConversationKind::Group => Declared::Group,
+        ConversationKind::Channel => Declared::Channel,
+    } as i32;
+    (platforms.is_empty() || platforms.iter().any(|platform| *platform == event.platform))
+        && (kinds.is_empty() || kinds.contains(&kind))
+}
+
 /// Splits command arguments on whitespace, keeping quoted text together.
 ///
 /// `"…"`, `'…'` and the full-width `“…”` (which Chinese input methods produce for a typed `"`)
@@ -272,10 +297,14 @@ const TRIGGER_CACHE_LIMIT: usize = 512;
 
 impl TriggerMatcher {
     /// Finds the first trigger (lowest priority, then host priority, then `host_id`) matching
-    /// `text` whose access level `allowed` accepts.
+    /// the text of `event` whose access level `allowed` accepts.
+    ///
+    /// `text` is the message text with leading mentions removed. Triggers whose declared
+    /// platforms or conversation kinds exclude `event` are never tried.
     pub fn resolve(
         &self,
         text: &str,
+        event: &PipelineEventRequest,
         hosts: &[Arc<ManagedHost>],
         allowed: impl Fn(&TriggerMeta) -> bool,
     ) -> Option<MatchedTrigger> {
@@ -284,6 +313,9 @@ impl TriggerMatcher {
         for host in hosts {
             for plugin in host.metas() {
                 for trigger in plugin.triggers {
+                    if !in_scope(&trigger.platforms, &trigger.conversation_kinds, event) {
+                        continue;
+                    }
                     candidates.push((
                         trigger.priority,
                         host.priority,

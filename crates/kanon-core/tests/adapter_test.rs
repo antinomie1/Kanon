@@ -98,6 +98,15 @@ impl MessagePipelineService for RecordingHost {
         ))
     }
 
+    async fn on_prepare_turn(
+        &self,
+        _request: tonic::Request<kanon_proto::v1::PrepareTurnRequest>,
+    ) -> Result<tonic::Response<kanon_proto::v1::PrepareTurnResult>, tonic::Status> {
+        Ok(tonic::Response::new(
+            kanon_proto::v1::PrepareTurnResult::default(),
+        ))
+    }
+
     async fn on_deliver_message(
         &self,
         request: tonic::Request<DeliverMessageRequest>,
@@ -191,6 +200,15 @@ impl MessagePipelineService for RecordingHostServer {
     ) -> Result<tonic::Response<kanon_proto::v1::DecorateReplyResult>, tonic::Status> {
         Ok(tonic::Response::new(
             kanon_proto::v1::DecorateReplyResult::default(),
+        ))
+    }
+
+    async fn on_prepare_turn(
+        &self,
+        _request: tonic::Request<kanon_proto::v1::PrepareTurnRequest>,
+    ) -> Result<tonic::Response<kanon_proto::v1::PrepareTurnResult>, tonic::Status> {
+        Ok(tonic::Response::new(
+            kanon_proto::v1::PrepareTurnResult::default(),
         ))
     }
 

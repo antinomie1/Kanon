@@ -184,6 +184,10 @@ interface TurnOutcome {
 export class Turn {
   readonly replies: MessageSegmentItem[] = [];
   readonly done = new Deferred<TurnOutcome>();
+  /** Set by {@link CommandEvent.passToModel}. */
+  passToModel = false;
+  /** Text the model reads instead of the message's own, when passing it on. */
+  modelText?: string;
 
   /** Ends the turn; the waiting RPC answers with the replies gathered so far. */
   finish(captureSeconds = 0, success = true, error = ""): void {
@@ -259,6 +263,26 @@ export class CommandEvent extends MessageEvent {
    *   the same conversation replaced this one). The handler may still `reply` afterwards;
    *   those replies are delivered on their own.
    */
+  /**
+   * Hands this message on to the model once the handler returns.
+   *
+   * Core then continues as if no command or trigger had matched: replies made in this turn are
+   * delivered first, and the reply policy and the model decide whether the bot answers. A later
+   * `waitNext` in the same turn cancels the hand-off.
+   *
+   * @param text Replaces the message text the model reads; images are kept. Omit it to pass the
+   *   message on unchanged.
+   * @throws If Core is no longer waiting on this handler (after a `waitNext` timed out).
+   */
+  passToModel(text?: string): void {
+    const turn = this.session?.turn;
+    if (!turn) {
+      throw new Error("Core is no longer waiting on this message; it cannot be passed on");
+    }
+    turn.passToModel = true;
+    turn.modelText = text;
+  }
+
   async waitNext(timeoutSeconds = 60): Promise<CommandEvent> {
     const session = this.session;
     if (!session) {
@@ -318,17 +342,23 @@ export class Conversations {
   }
 }
 
-/** Waits for the session's current turn and turns it into a command response. */
-export async function runTurn(session: Session): Promise<any> {
-  const turn = session.turn;
-  if (!turn) {
-    throw new Error("runTurn needs an open turn");
-  }
+/**
+ * Waits for `turn` to finish and turns it into a command response.
+ *
+ * Takes the turn rather than reading `session.turn`: a handler that calls `waitNext` before its
+ * first `await` finishes and detaches the turn before this function runs.
+ */
+export async function runTurn(turn: Turn): Promise<any> {
   const outcome = await turn.done.promise;
+  // A turn that captures the conversation never hands its message on: the handler is waiting
+  // for the next message, so this one is not the model's.
+  const passing = turn.passToModel && outcome.captureSeconds === 0;
   return {
     success: outcome.success,
     replies: turn.replies,
     error_message: outcome.error,
     capture_seconds: outcome.captureSeconds,
+    pass_to_model: passing,
+    ...(passing && turn.modelText !== undefined ? { model_text: turn.modelText } : {}),
   };
 }

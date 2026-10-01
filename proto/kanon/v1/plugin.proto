@@ -44,6 +44,10 @@ service MessagePipelineService {
   // Rewrites a reply before it is delivered; called only for plugins with
   // `PluginMeta.decorates_replies`, in host priority order, each seeing the previous result.
   rpc OnDecorateReply (DecorateReplyRequest) returns (DecorateReplyResult);
+  // Adds plugin context to the current turn just before the model answers it; called only for
+  // plugins with `PluginMeta.prepares_turns`. The text is prepended to the current user message,
+  // never to the system prompt or the history, so the cached request prefix stays stable.
+  rpc OnPrepareTurn (PrepareTurnRequest) returns (PrepareTurnResult);
 }
 
 // 3. 核心 API 服务 (运行在 Core 端，监听 core.sock / loopback，Host 主动连接调用)
@@ -70,6 +74,10 @@ service BotApiService {
   // platform's long-lived connection) while no bot instance can answer — which shows up as a
   // ghost bot double-handling messages.
   rpc Ping (PingRequest) returns (PingResponse);
+  // Reads the model conversation an inbound message belongs to. Read-only: history is
+  // append-only and only the core writes it. NOT_FOUND when no enabled instance claims the
+  // platform, UNAVAILABLE when no model is configured, INVALID_ARGUMENT without a context.
+  rpc GetConversationHistory (ConversationHistoryRequest) returns (ConversationHistoryResponse);
 }
 
 // --- 握手与注册 ---
@@ -120,6 +128,14 @@ enum CommandAccess {
   COMMAND_ACCESS_ADMINS = 2;
 }
 
+// Kind of conversation a message came from, as reported in `kanon.conversation_kind`.
+enum ConversationKind {
+  CONVERSATION_KIND_UNSPECIFIED = 0;
+  CONVERSATION_KIND_PRIVATE = 1;
+  CONVERSATION_KIND_GROUP = 2;
+  CONVERSATION_KIND_CHANNEL = 3;
+}
+
 message CommandMeta {
   string name = 1;
   string description = 2;
@@ -128,6 +144,11 @@ message CommandMeta {
   // Alternative names routed to the same handler; the handler always receives `name`.
   repeated string aliases = 5;
   CommandAccess access = 6;
+  // Platforms the command answers on; empty means every platform. Elsewhere the command does not
+  // exist: another plugin's command of the same name may answer instead.
+  repeated string platforms = 7;
+  // Conversation kinds the command answers in; empty means every kind. Same effect as `platforms`.
+  repeated ConversationKind conversation_kinds = 8;
 }
 
 // A message pattern that runs a plugin handler without a slash command.
@@ -144,6 +165,9 @@ message TriggerMeta {
   string pattern = 3;
   int32 priority = 4;
   CommandAccess access = 5;
+  // As for `CommandMeta`: a trigger outside these platforms or conversation kinds never matches.
+  repeated string platforms = 6;
+  repeated ConversationKind conversation_kinds = 7;
 }
 
 message ToolMeta {
@@ -165,6 +189,8 @@ message PluginMeta {
   repeated EventKind events = 9;
   // Whether `OnDecorateReply` should be called for this plugin.
   bool decorates_replies = 10;
+  // Whether `OnPrepareTurn` should be called for this plugin.
+  bool prepares_turns = 11;
 }
 
 message GetPluginMetaResponse {
@@ -301,6 +327,13 @@ message CommandExecuteResponse {
   // as a continuation of `command`. One capture covers one message; answer a continuation with
   // `capture_seconds` again to keep the conversation. Pre-filters still see the message first.
   uint32 capture_seconds = 4;
+  // When true the message continues to the model after this handler, as if no command or
+  // trigger had matched: `replies` are delivered first, then the reply policy and the model
+  // decide whether the bot answers. Ignored when `capture_seconds` is set: a plugin waiting for
+  // the next message has not handed this one on.
+  bool pass_to_model = 5;
+  // With `pass_to_model`, replaces the message text the model reads (images are kept).
+  optional string model_text = 6;
 }
 
 // --- Tool Calling 双模载荷定义 (彻底消灭 JSON 字符串二次序列化) ---
@@ -400,6 +433,20 @@ message DecorateReplyResult {
   // replaces the reply; an empty list suppresses it.
   bool modified = 1;
   repeated MessageSegment segments = 2;
+}
+
+message PrepareTurnRequest {
+  string plugin_id = 1;
+  // The inbound message the model is about to answer, after pre-filters.
+  PipelineEventRequest context = 2;
+  // Identifier of the model conversation, stable until `/new`; useful as a memory key.
+  string session_id = 3;
+}
+
+message PrepareTurnResult {
+  // Text prepended to the current user message; empty adds nothing. It becomes part of the
+  // turn and therefore of the conversation history, like everything the model reads.
+  string text = 1;
 }
 
 message EventAck {
@@ -513,4 +560,27 @@ message GetStorageRequest {
 message GetStorageResponse {
   bool found = 1;
   bytes value = 2;
+}
+
+message ConversationHistoryRequest {
+  // The inbound message whose conversation is read; the core derives the session exactly as it
+  // does when answering that message.
+  PipelineEventRequest context = 1;
+  // Most recent messages to return; 0 returns all of them.
+  uint32 limit = 2;
+}
+
+// One user or assistant turn of a model conversation. Tool calls and tool results are omitted,
+// and the model's reasoning is stripped from assistant text.
+message HistoryMessage {
+  LLMRole role = 1;
+  string text = 2;
+}
+
+message ConversationHistoryResponse {
+  string session_id = 1;
+  // Summary of compacted older turns; empty when the conversation was never compacted.
+  string summary = 2;
+  // Oldest first.
+  repeated HistoryMessage messages = 3;
 }

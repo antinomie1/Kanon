@@ -3,7 +3,7 @@
 //! Provides the central gRPC endpoint (`core.sock`) through which plugin hosts
 //! communicate with the Core microkernel via [`BotApiService`].
 
-use crate::pipeline::engine::OutboundMessage;
+use crate::pipeline::engine::{HistoryError, OutboundMessage, PipelineEngine};
 use std::future::Future;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -14,16 +14,18 @@ use tonic::{Request, Response, Status};
 
 use kanon_proto::v1::bot_api_service_server::{BotApiService, BotApiServiceServer};
 use kanon_proto::v1::{
-    DeliverMessageRequest, DeliverMessageResponse, GetStorageRequest, GetStorageResponse,
-    IngestEventRequest, IngestEventResponse, LlmChunk, LlmRequest, PlatformApiRequest,
-    PlatformApiResponse, RegisterHostRequest, RegisterHostResponse, SendMessageRequest,
-    SendMessageResponse, SetStorageRequest, SetStorageResponse,
+    ConversationHistoryRequest, ConversationHistoryResponse, DeliverMessageRequest,
+    DeliverMessageResponse, GetStorageRequest, GetStorageResponse, IngestEventRequest,
+    IngestEventResponse, LlmChunk, LlmRequest, PlatformApiRequest, PlatformApiResponse,
+    RegisterHostRequest, RegisterHostResponse, SendMessageRequest, SendMessageResponse,
+    SetStorageRequest, SetStorageResponse,
 };
 use kanon_transport::{IpcListener, core_socket_path};
 
 use crate::adapter::{AdapterError, EventIngress, IngestError};
 use crate::supervisor::{AdapterRoute, HostRegistration, Supervisor};
-use kanon_llm::{AgentSlot, ChatMessage, ChatRequest, LlmGateway};
+use kanon_llm::{AgentSlot, ChatMessage, ChatRequest, LlmGateway, Role, strip_reasoning_tags};
+use kanon_proto::v1::{HistoryMessage, LlmRole};
 use tokio_stream::StreamExt;
 
 /// Default capacity for the inbound asynchronous event ingest queue.
@@ -33,7 +35,7 @@ use tokio_stream::StreamExt;
 pub const DEFAULT_INGEST_QUEUE_CAPACITY: usize = 10_000;
 
 /// Core implementation of the [`BotApiService`] gRPC service.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct CoreApiService {
     /// Shared Fast-ACK ingest handle; also handed to platform adapters.
     ingress: EventIngress,
@@ -46,6 +48,25 @@ pub struct CoreApiService {
     /// A slot (not a captured gateway) so that a provider configured, replaced or cleared
     /// through the control plane is observed by the next request without a restart.
     llm: Option<Arc<AgentSlot>>,
+    /// Pipeline whose conversations `GetConversationHistory` reads.
+    ///
+    /// Only the pipeline knows how an inbound message maps to a session (instance, group scope,
+    /// `/new` generation), so the lookup is delegated rather than re-derived here.
+    engine: Option<Arc<PipelineEngine>>,
+}
+
+impl std::fmt::Debug for CoreApiService {
+    // Written by hand because the pipeline engine has no `Debug`; the wiring flags are what a
+    // log reader needs anyway.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("CoreApiService")
+            .field("ingress", &self.ingress)
+            .field("supervisor", &self.supervisor.is_some())
+            .field("outbound_sender", &self.outbound_sender.is_some())
+            .field("llm", &self.llm.is_some())
+            .field("engine", &self.engine.is_some())
+            .finish()
+    }
 }
 
 impl CoreApiService {
@@ -59,6 +80,7 @@ impl CoreApiService {
             supervisor: None,
             outbound_sender: None,
             llm: None,
+            engine: None,
         }
     }
 
@@ -76,6 +98,12 @@ impl CoreApiService {
     /// Configures the outbound message queue sender for dispatching external messages.
     pub fn with_outbound_sender(mut self, sender: mpsc::Sender<OutboundMessage>) -> Self {
         self.outbound_sender = Some(sender);
+        self
+    }
+
+    /// Shares the pipeline, enabling `GetConversationHistory` for plugin hosts.
+    pub fn with_engine(mut self, engine: Arc<PipelineEngine>) -> Self {
+        self.engine = Some(engine);
         self
     }
 
@@ -340,6 +368,67 @@ impl BotApiService for CoreApiService {
     ) -> Result<Response<kanon_proto::v1::PingResponse>, Status> {
         Ok(Response::new(kanon_proto::v1::PingResponse {
             timestamp: request.into_inner().timestamp,
+        }))
+    }
+
+    /// Returns the user and assistant turns of the conversation an inbound message belongs to.
+    ///
+    /// Tool calls and tool results are internal to a turn and left out, as is the model's
+    /// reasoning: plugins see the conversation as its participants saw it.
+    async fn get_conversation_history(
+        &self,
+        request: Request<ConversationHistoryRequest>,
+    ) -> Result<Response<ConversationHistoryResponse>, Status> {
+        let req = request.into_inner();
+        let Some(event) = req.context else {
+            return Err(Status::invalid_argument(
+                "GetConversationHistory needs the inbound message as `context`",
+            ));
+        };
+        let Some(engine) = self.engine.as_ref() else {
+            return Err(Status::unavailable(
+                "This core runs no pipeline; there are no conversations to read",
+            ));
+        };
+        let history = engine
+            .conversation_history(&event)
+            .await
+            .map_err(|err| match err {
+                HistoryError::NoInstance(_) => Status::not_found(err.to_string()),
+                HistoryError::NoModel => Status::unavailable(err.to_string()),
+                HistoryError::Ambiguous(_) | HistoryError::Memory(_) => {
+                    Status::internal(err.to_string())
+                }
+            })?;
+
+        let mut messages: Vec<HistoryMessage> = history
+            .messages
+            .into_iter()
+            .filter_map(|message| {
+                let role = match message.role {
+                    Role::User => LlmRole::User,
+                    Role::Assistant => LlmRole::Assistant,
+                    Role::System | Role::Tool => return None,
+                };
+                let text = message.content.unwrap_or_default();
+                let text = match role {
+                    LlmRole::Assistant => strip_reasoning_tags(&text).to_string(),
+                    _ => text,
+                };
+                // An assistant message that only called tools has no words of its own.
+                (!text.trim().is_empty()).then(|| HistoryMessage {
+                    role: role as i32,
+                    text,
+                })
+            })
+            .collect();
+        if req.limit > 0 && messages.len() > req.limit as usize {
+            messages.drain(..messages.len() - req.limit as usize);
+        }
+        Ok(Response::new(ConversationHistoryResponse {
+            session_id: history.session_id,
+            summary: history.summary.unwrap_or_default(),
+            messages,
         }))
     }
 

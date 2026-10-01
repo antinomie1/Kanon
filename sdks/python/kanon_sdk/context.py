@@ -2,13 +2,29 @@
 
 import asyncio
 import uuid
+from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, AsyncIterator, Dict, List, Optional, Sequence, Union
+from typing import Any, AsyncIterator, Dict, List, Optional, Sequence, Tuple, Union
 
 from google.protobuf.json_format import MessageToDict, ParseDict
 from google.protobuf.struct_pb2 import Struct
 
 from kanon_sdk.proto import pb, pb_grpc
+
+
+@dataclass
+class ConversationHistory:
+    """A model conversation as returned by :meth:`CoreHandle.conversation_history`.
+
+    Attributes:
+        session_id: The session the conversation is stored under (stable until ``/new``).
+        summary: Summary of compacted older turns; ``""`` if never compacted.
+        messages: ``(role, text)`` pairs, oldest first, with role ``"user"`` or ``"assistant"``.
+    """
+
+    session_id: str
+    summary: str = ""
+    messages: List[Tuple[str, str]] = field(default_factory=list)
 
 
 class CoreHandle:
@@ -233,6 +249,32 @@ class CoreHandle:
         if not response.HasField("result"):
             return None
         return MessageToDict(response.result)
+
+    async def conversation_history(self, event: Any, limit: int = 0) -> ConversationHistory:
+        """Reads the model conversation ``event`` belongs to.
+
+        It is the same session the model would continue when answering ``event``. Only user
+        and assistant turns are returned; tool calls, tool results and the model's reasoning
+        are left out. History is read-only.
+
+        Args:
+            event: A :class:`~kanon_sdk.event.MessageEvent` (or a ``pb.PipelineEventRequest``).
+            limit: Keep only this many of the most recent messages; ``0`` keeps all.
+
+        Raises:
+            grpc.aio.AioRpcError: ``NOT_FOUND`` when no bot instance answers on the platform,
+                ``UNAVAILABLE`` when no model is configured.
+        """
+        raw = getattr(event, "raw", event)
+        response = await self._stub.GetConversationHistory(
+            pb.ConversationHistoryRequest(context=raw, limit=limit)
+        )
+        roles = {pb.LLM_ROLE_USER: "user", pb.LLM_ROLE_ASSISTANT: "assistant"}
+        return ConversationHistory(
+            session_id=response.session_id,
+            summary=response.summary,
+            messages=[(roles.get(m.role, ""), m.text) for m in response.messages],
+        )
 
     async def ingest_event(
         self,

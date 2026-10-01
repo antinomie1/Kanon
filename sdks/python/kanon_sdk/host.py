@@ -135,6 +135,14 @@ class PipelineServiceImpl(pb_grpc.MessagePipelineServiceServicer):
         # A failing decorator surfaces as an RPC error; Core then keeps the reply unchanged.
         return await self.plugin.on_decorate_reply(request)
 
+    async def OnPrepareTurn(
+        self,
+        request: pb.PrepareTurnRequest,
+        context: grpc.aio.ServicerContext,
+    ) -> pb.PrepareTurnResult:
+        # A failing preparer surfaces as an RPC error; Core then answers without its context.
+        return await self.plugin.on_prepare_turn(request)
+
     async def OnDeliverMessage(
         self,
         request: pb.DeliverMessageRequest,

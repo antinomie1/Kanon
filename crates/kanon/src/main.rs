@@ -281,7 +281,8 @@ async fn main() -> StartupResult<()> {
     let service = CoreApiService::new(ingress.clone())
         .with_supervisor(supervisor.clone())
         .with_outbound_sender(engine.outbound_sender())
-        .with_agent_slot(state.llm_slot().clone());
+        .with_agent_slot(state.llm_slot().clone())
+        .with_engine(engine.clone());
     let ipc_server = CoreIpcServer::new(socket_path.clone(), service);
 
     // --- Graceful shutdown channels ---------------------------------------------------

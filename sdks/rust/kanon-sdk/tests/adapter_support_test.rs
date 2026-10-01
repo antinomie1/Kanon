@@ -172,6 +172,13 @@ impl BotApiService for CoreStub {
     ) -> Result<Response<GetStorageResponse>, Status> {
         Err(Status::unimplemented("not part of this fixture"))
     }
+
+    async fn get_conversation_history(
+        &self,
+        _request: Request<kanon_sdk::proto::v1::ConversationHistoryRequest>,
+    ) -> Result<Response<kanon_sdk::proto::v1::ConversationHistoryResponse>, Status> {
+        Err(Status::unimplemented("not part of this fixture"))
+    }
 }
 
 /// Starts a Core stub serving `BotApiService` on `socket_path`.
@@ -262,6 +269,13 @@ impl BotApiService for CoreStubServer {
         request: Request<GetStorageRequest>,
     ) -> Result<Response<GetStorageResponse>, Status> {
         self.inner.get_storage(request).await
+    }
+
+    async fn get_conversation_history(
+        &self,
+        _request: Request<kanon_sdk::proto::v1::ConversationHistoryRequest>,
+    ) -> Result<Response<kanon_sdk::proto::v1::ConversationHistoryResponse>, Status> {
+        Err(Status::unimplemented("not part of this fixture"))
     }
 }
 

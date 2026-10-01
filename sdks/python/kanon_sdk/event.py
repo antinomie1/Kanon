@@ -155,6 +155,10 @@ class _Turn:
 
     def __init__(self) -> None:
         self.replies: List[pb.MessageSegment] = []
+        # Set by ``pass_to_model``: ``(True, None)`` hands the message on unchanged,
+        # ``(True, text)`` with its text replaced.
+        self.pass_to_model = False
+        self.model_text: Optional[str] = None
         # Resolved with the response fields once the handler yields, finishes or fails.
         self.done: asyncio.Future = asyncio.get_running_loop().create_future()
 
@@ -213,6 +217,27 @@ class CommandEvent(MessageEvent):
             turn.replies.extend(to_segments(content))
         else:
             await self.send(content)
+
+    def pass_to_model(self, text: Optional[str] = None) -> None:
+        """Hands this message on to the model once the handler returns.
+
+        Core then continues as if no command or trigger had matched: replies made in this turn
+        are delivered first, and the reply policy and the model decide whether the bot answers.
+        A later ``wait_next`` in the same turn cancels the hand-off.
+
+        Args:
+            text: Replaces the message text the model reads; images are kept. ``None`` passes
+                the message on unchanged.
+
+        Raises:
+            RuntimeError: If Core is no longer waiting on this handler (after ``wait_next``
+                timed out), since the message has then already been handled.
+        """
+        turn = self._session.turn if self._session is not None else None
+        if turn is None:
+            raise RuntimeError("Core is no longer waiting on this message; it cannot be passed on")
+        turn.pass_to_model = True
+        turn.model_text = text
 
     async def wait_next(self, timeout: float = 60) -> "CommandEvent":
         """Ends this turn and waits for the same sender's next message in this conversation.
@@ -277,9 +302,16 @@ async def run_turn(session: _Session) -> pb.CommandExecuteResponse:
     turn = session.turn
     assert turn is not None, "run_turn needs an open turn"
     success, error, capture_seconds = await turn.done
-    return pb.CommandExecuteResponse(
+    # A turn that captures the conversation never hands its message on: the handler is waiting
+    # for the next message, so this one is not the model's.
+    passing = turn.pass_to_model and capture_seconds == 0
+    response = pb.CommandExecuteResponse(
         success=success,
         replies=turn.replies,
         error_message=error,
         capture_seconds=capture_seconds,
+        pass_to_model=passing,
     )
+    if passing and turn.model_text is not None:
+        response.model_text = turn.model_text
+    return response

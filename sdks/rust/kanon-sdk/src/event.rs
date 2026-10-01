@@ -194,6 +194,9 @@ impl std::error::Error for WaitTimeout {}
 /// One RPC waiting for the handler's next yield point, and the replies it will carry.
 struct Turn {
     replies: Vec<MessageSegment>,
+    /// Set by [`CommandEvent::pass_to_model`]: `Some(None)` hands the message on unchanged,
+    /// `Some(Some(text))` with its text replaced.
+    pass: Option<Option<String>>,
     done: oneshot::Sender<CommandExecuteResponse>,
 }
 
@@ -216,6 +219,7 @@ impl Session {
         let (done, receiver) = oneshot::channel();
         *self.lock() = Some(Turn {
             replies: Vec::new(),
+            pass: None,
             done,
         });
         receiver
@@ -227,15 +231,32 @@ impl Session {
     }
 
     /// Ends the open turn, if any; the waiting RPC answers with the replies gathered so far.
+    ///
+    /// A turn that captures the conversation never hands its message on: the handler is waiting
+    /// for the next message, so this one is not the model's.
     pub(crate) fn finish(&self, capture_seconds: u32, success: bool, error: String) {
         if let Some(turn) = self.lock().take() {
+            let pass = turn.pass.filter(|_| capture_seconds == 0);
             // The RPC may have been cancelled meanwhile; then nobody needs the answer.
             let _ = turn.done.send(CommandExecuteResponse {
                 success,
                 replies: turn.replies,
                 error_message: error,
                 capture_seconds,
+                pass_to_model: pass.is_some(),
+                model_text: pass.flatten(),
             });
+        }
+    }
+
+    /// Marks the open turn as handing its message on to the model.
+    fn pass(&self, text: Option<String>) -> Result<(), ()> {
+        match self.lock().as_mut() {
+            Some(turn) => {
+                turn.pass = Some(text);
+                Ok(())
+            }
+            None => Err(()),
         }
     }
 
@@ -385,6 +406,33 @@ impl CommandEvent {
             self.message.send(segments).await?;
         }
         Ok(())
+    }
+
+    /// Hands this message on to the model once the handler returns, as if no command or
+    /// trigger had matched it. Replies made in this turn are delivered first; the reply policy
+    /// and the model then decide whether the bot answers.
+    ///
+    /// Fails when Core is no longer waiting on this handler (after a `wait_next` timed out), as
+    /// the message has then already been handled. A later `wait_next` in the same turn cancels
+    /// the hand-off.
+    pub fn pass_to_model(&self) -> PluginResult<()> {
+        self.mark_pass(None)
+    }
+
+    /// Like [`pass_to_model`](Self::pass_to_model), but the model reads `text` instead of the
+    /// message's own text. Images and other segments are kept.
+    pub fn pass_to_model_as(&self, text: impl Into<String>) -> PluginResult<()> {
+        self.mark_pass(Some(text.into()))
+    }
+
+    fn mark_pass(&self, text: Option<String>) -> PluginResult<()> {
+        self.session
+            .as_ref()
+            .ok_or(())
+            .and_then(|session| session.pass(text))
+            .map_err(|()| {
+                "Core is no longer waiting on this message; it cannot be passed on".into()
+            })
     }
 
     /// Ends this turn and waits for the same sender's next message in this conversation.

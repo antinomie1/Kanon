@@ -7,7 +7,8 @@ A plugin is a :class:`Plugin` subclass whose methods are marked with decorators:
 * :func:`tool` — a function the model may call;
 * :func:`action` — an operator-only management action (never offered to the model);
 * :func:`on_event` — a lifecycle event (``message_sent``, ``notice``, ``llm_response``);
-* :func:`decorate_reply` — a hook that rewrites the bot's replies before delivery.
+* :func:`decorate_reply` — a hook that rewrites the bot's replies before delivery;
+* :func:`prepare_turn` — a hook that adds context to the message the model is about to answer.
 
 Command and trigger handlers receive a :class:`~kanon_sdk.event.CommandEvent` and may answer by
 returning text/segments or with ``await event.reply(...)``; ``await event.wait_next()`` asks the
@@ -43,6 +44,29 @@ EVENT_KINDS = {
 }
 
 
+#: Conversation kinds a command or trigger may be limited to.
+CONVERSATION_KINDS = {
+    "private": pb.CONVERSATION_KIND_PRIVATE,
+    "group": pb.CONVERSATION_KIND_GROUP,
+    "channel": pb.CONVERSATION_KIND_CHANNEL,
+}
+
+
+def _scope(platforms: Sequence[str], kinds: Sequence[str]) -> Dict[str, List[Any]]:
+    """Validates a command or trigger's platform and conversation-kind limits."""
+    if isinstance(platforms, str) or isinstance(kinds, str):
+        raise TypeError("platforms and conversation_kinds take a list, not a single string")
+    unknown = [kind for kind in kinds if kind not in CONVERSATION_KINDS]
+    if unknown:
+        raise ValueError(
+            f"unknown conversation kinds {unknown}; expected some of {sorted(CONVERSATION_KINDS)}"
+        )
+    return {
+        "platforms": list(platforms),
+        "conversation_kinds": [CONVERSATION_KINDS[kind] for kind in kinds],
+    }
+
+
 def _access(level: str) -> int:
     if level not in ACCESS_LEVELS:
         raise ValueError(f"unknown access level {level!r}; expected one of {sorted(ACCESS_LEVELS)}")
@@ -56,6 +80,8 @@ def command(
     priority: int = 500,
     aliases: Sequence[str] = (),
     access: str = "everyone",
+    platforms: Sequence[str] = (),
+    conversation_kinds: Sequence[str] = (),
 ) -> Callable:
     """Declares a slash command handler.
 
@@ -67,8 +93,12 @@ def command(
         aliases: Other names that invoke the command; the handler always sees ``name``.
         access: ``"everyone"``, ``"admins_in_groups"`` or ``"admins"``. A default the operator
             can override in the node's command policy.
+        platforms: Platforms the command answers on; empty means all. Elsewhere Core treats the
+            command as undeclared, so another plugin's command of the same name may answer.
+        conversation_kinds: ``"private"``, ``"group"`` and/or ``"channel"``; empty means all.
     """
     access_value = _access(access)
+    scope = _scope(platforms, conversation_kinds)
 
     def decorator(fn: Callable) -> Callable:
         fn._kanon_command = {
@@ -78,6 +108,7 @@ def command(
             "priority": priority,
             "aliases": [alias.lstrip("/") for alias in aliases],
             "access": access_value,
+            **scope,
         }
         return fn
 
@@ -91,6 +122,8 @@ def trigger(
     description: str = "",
     priority: int = 500,
     access: str = "everyone",
+    platforms: Sequence[str] = (),
+    conversation_kinds: Sequence[str] = (),
 ) -> Callable:
     """Declares a handler for plain messages matching a regular expression.
 
@@ -104,8 +137,11 @@ def trigger(
         description: Shown under "消息触发" in ``/help``; leave empty to keep it unlisted.
         priority: Lower wins when several triggers match.
         access: As for :func:`command`.
+        platforms: As for :func:`command`; elsewhere the trigger never matches.
+        conversation_kinds: As for :func:`command`.
     """
     access_value = _access(access)
+    scope = _scope(platforms, conversation_kinds)
     # Validate early with Python's engine: a pattern it rejects is almost certainly a mistake,
     # and an invalid pattern would otherwise only show up as a warning in Core's log.
     re.compile(pattern)
@@ -117,6 +153,7 @@ def trigger(
             "description": description,
             "priority": priority,
             "access": access_value,
+            **scope,
         }
         return fn
 
@@ -230,6 +267,21 @@ def decorate_reply(fn: Callable) -> Callable:
     return fn
 
 
+def prepare_turn(fn: Callable) -> Callable:
+    """Marks the plugin's turn preparer.
+
+    Before the model answers a message, the handler receives the
+    :class:`~kanon_sdk.event.MessageEvent` and the conversation's session id (if it accepts a
+    second parameter) and returns text to prepend to the current user message — retrieved
+    knowledge, long-term memory. ``None`` or ``""`` adds nothing. The text never reaches the
+    system prompt, so the cached request prefix stays stable, and it becomes part of the
+    conversation history. Core gives each preparer three seconds and goes ahead without it on
+    error or timeout.
+    """
+    fn._kanon_preparer = True
+    return fn
+
+
 async def _call(handler: Callable, *args: Any) -> Any:
     """Calls a sync or async handler with as many of ``args`` as it accepts."""
     accepted = len(inspect.signature(handler).parameters)
@@ -260,6 +312,7 @@ class Plugin:
         self._action_handlers: Dict[str, Callable] = {}
         self._event_handlers: Dict[str, List[Callable]] = {}
         self._decorator: Optional[Callable] = None
+        self._preparer: Optional[Callable] = None
         self._conversations = Conversations()
         # Handler tasks outlive the RPC that started them (see kanon_sdk.event); keeping a
         # reference stops the event loop from garbage-collecting a suspended handler.
@@ -290,6 +343,10 @@ class Plugin:
                 if self._decorator is not None:
                     raise ValueError(f"{type(self).__name__} declares more than one @decorate_reply")
                 self._decorator = attr
+            if getattr(attr, "_kanon_preparer", False):
+                if self._preparer is not None:
+                    raise ValueError(f"{type(self).__name__} declares more than one @prepare_turn")
+                self._preparer = attr
 
         # Core sends commands and triggers through the same RPC, naming either in `command`, so
         # the two share one namespace.
@@ -318,6 +375,8 @@ class Plugin:
                     priority=info["priority"],
                     aliases=info["aliases"],
                     access=info["access"],
+                    platforms=info["platforms"],
+                    conversation_kinds=info["conversation_kinds"],
                 )
             )
 
@@ -331,6 +390,8 @@ class Plugin:
                     pattern=info["pattern"],
                     priority=info["priority"],
                     access=info["access"],
+                    platforms=info["platforms"],
+                    conversation_kinds=info["conversation_kinds"],
                 )
             )
 
@@ -360,6 +421,7 @@ class Plugin:
             triggers=triggers,
             events=sorted(EVENT_KINDS[kind] for kind in kinds),
             decorates_replies=self._decorator is not None,
+            prepares_turns=self._preparer is not None,
         )
 
     async def on_load(self, ctx: PluginContext) -> None:
@@ -555,6 +617,13 @@ class Plugin:
         if result is None:
             return pb.DecorateReplyResult(modified=False)
         return pb.DecorateReplyResult(modified=True, segments=to_segments(result))
+
+    async def on_prepare_turn(self, req: pb.PrepareTurnRequest) -> pb.PrepareTurnResult:
+        """Runs the plugin's :func:`prepare_turn` handler for the turn the model will answer."""
+        if self._preparer is None:
+            return pb.PrepareTurnResult()
+        text = await _call(self._preparer, MessageEvent(req.context, self.core), req.session_id)
+        return pb.PrepareTurnResult(text=text or "")
 
     async def on_deliver_message(
         self,

@@ -35,8 +35,8 @@ Supervisor 启动宿主时注入的**启动契约**（插件不得把其他环�
 | 服务 | 运行在 | 调用方 | RPC |
 | --- | --- | --- | --- |
 | `PluginHostService` | 宿主 | 核心 | `Ping`、`ReloadPluginConfig`、`GetPluginMeta`、`InvokeAction` |
-| `MessagePipelineService` | 宿主 | 核心 | `OnPreFilter`、`OnExecuteCommand`、`OnCallTool`、`OnEvent`、`OnDeliverMessage`、`OnDecorateReply` |
-| `BotApiService` | 核心 | 宿主 | `RegisterHost`、`Ping`、`IngestEvent`、`SendMessage`、`ReplyMessage`、`RequestLLM`、`CallPlatformApi`、`SetStorage`、`GetStorage` |
+| `MessagePipelineService` | 宿主 | 核心 | `OnPreFilter`、`OnExecuteCommand`、`OnCallTool`、`OnEvent`、`OnDeliverMessage`、`OnDecorateReply`、`OnPrepareTurn` |
+| `BotApiService` | 核心 | 宿主 | `RegisterHost`、`Ping`、`IngestEvent`、`SendMessage`、`ReplyMessage`、`RequestLLM`、`CallPlatformApi`、`GetConversationHistory`、`SetStorage`、`GetStorage` |
 
 ---
 
@@ -62,8 +62,10 @@ Supervisor 启动宿主时注入的**启动契约**（插件不得把其他环�
 
 ```
 实例闸门 → 通知事件（OnEvent: notice）→ OnPreFilter 链 → 内置命令
-  → 会话接管（continuation）→ 斜杠命令 → 正则触发器 → 回复策略 → 模型
+  → 会话接管（continuation）→ 斜杠命令 → 正则触发器 → 回复策略 → OnPrepareTurn → 模型
                                      ↘ 回复经 OnDecorateReply 后投递，成功后 OnEvent: message_sent
+
+命令或触发器返回 pass_to_model 时，其回复照常投递，消息继续进入“回复策略 → 模型”。
 ```
 
 ### `OnPreFilter(PipelineEventRequest) → PreFilterResult`
@@ -93,8 +95,12 @@ Supervisor 启动宿主时注入的**启动契约**（插件不得把其他环�
 | `success` / `error_message` | 失败只记入核心日志，不发给用户；`replies` 仍会发出 |
 | `replies` | 作为**一条**平台消息发出（先经过回复装饰） |
 | `capture_seconds` | 非 0 时，同一平台 + `channel_id` + `sender_id` 的**下一条**消息在该秒数内（最多 600）跳过命令、触发器与模型，以 `continuation = true` 回到本插件的同一 `command`。每次接管只覆盖一条消息；前置过滤仍先执行；同一会话的新接管覆盖旧接管。`sender_id` 为空的事件无法接管 |
+| `pass_to_model` | `true` 时，`replies` 照常（先于模型回复）投递，随后消息继续走回复策略与模型，如同未命中任何命令或触发器。与 `capture_seconds` 同时设置时接管优先，本字段被忽略并记录告警 |
+| `model_text` | 仅在 `pass_to_model` 时生效：以此文本替换消息中的文本段（图片等保留），模型读到的是改写后的文本；未设置则原样交给模型 |
 
 命令与触发器都受命令权限策略约束：插件在 `CommandMeta.access` / `TriggerMeta.access` 中给出默认值，节点的 `command-policy` 可按名称覆盖。
+
+命令与触发器还可用 `platforms` / `conversation_kinds` 限定作用域（空列表不限）。范围之外，该命令视同未声明——同名命令的其他声明者仍可胜出——触发器则不参与匹配。会话类型取自元数据 `kanon.conversation_kind`，缺省按私聊处理。
 
 ### `OnCallTool(ToolCallRequest) → ToolCallResponse`
 
@@ -133,6 +139,18 @@ Supervisor 启动宿主时注入的**启动契约**（插件不得把其他环�
 
 每个装饰器限时 **3 秒**；RPC 出错或超时一律保留原回复。装饰不影响会话记忆。
 
+### `OnPrepareTurn(PrepareTurnRequest) → PrepareTurnResult`
+
+只调用 `PluginMeta.prepares_turns = true` 的插件，且仅当模型即将回答某条消息时（通知、未通过回复策略的消息不会触发）。用于检索知识库、长期记忆等按轮注入的上下文。
+
+| 字段 | 说明 |
+| --- | --- |
+| `context` | 即将被回答的入站消息 |
+| `session_id` | 模型将续写的会话（与 `GetConversationHistory` 返回的一致） |
+| 结果 `text` | 置于本轮用户消息开头的文本；空字符串表示不注入 |
+
+所有准备器**并发**执行，每个限时 **3 秒**；出错、超时或返回空串的不贡献内容。结果按宿主优先级、`host_id`、插件顺序拼接，插在召回提示之后、群聊记录与发送者标签之前。文本只进入当前轮用户消息，从不进入系统提示，因此不破坏请求前缀缓存；它随本轮消息一起写入会话历史。
+
 ### `OnDeliverMessage(DeliverMessageRequest) → DeliverMessageResponse`
 
 仅发给在清单中声明了 `[adapter] platform` 的插件，`platform` 与之匹配。实现必须如实报告：未发送就返回 `success = false`，绝不“假成功”。核心对每个平台维护熔断器与死信队列。
@@ -150,6 +168,7 @@ Supervisor 启动宿主时注入的**启动契约**（插件不得把其他环�
 | `ReplyMessage` | 回复某条入站事件，**等待平台投递结果**（最长 30 秒） | `INVALID_ARGUMENT`：缺 `event_id`/`platform`/`channel_id`；`RESOURCE_EXHAUSTED`：出站队列满；`DEADLINE_EXCEEDED`：投递结果未知，**禁止自动重试** |
 | `RequestLLM` | 独立模型调用，流式返回 `LLMChunk` | `UNAVAILABLE`：未配置模型；`INVALID_ARGUMENT`：消息不合法；`INTERNAL`：上游错误 |
 | `CallPlatformApi` | 调用内置适配器的平台原生 API | 见下 |
+| `GetConversationHistory` | 只读获取某条入站消息所属的模型会话 | 见下 |
 | `SetStorage` / `GetStorage` | 不提供中心化 KV | 恒为 `UNIMPLEMENTED`，请写本地 `data/plugins/<id>/` |
 
 ### `RequestLLM(LLMRequest) → stream LLMChunk`
@@ -174,6 +193,20 @@ Supervisor 启动宿主时注入的**启动契约**（插件不得把其他环�
 | 平台拒绝或调用失败 | `UNAVAILABLE` |
 
 `params` 为 JSON 对象，`result` 为任意 JSON 值（`google.protobuf.Value`）。数字一律为 double。
+
+### `GetConversationHistory(ConversationHistoryRequest) → ConversationHistoryResponse`
+
+按与模型阶段完全相同的规则（实例解析、会话共享策略、会话键）定位 `context` 所属会话，返回模型回答它时将续写的历史。
+
+| 字段 | 说明 |
+| --- | --- |
+| `context` | 入站事件，必填 |
+| `limit` | 只保留最近的若干条消息；`0` 为全部 |
+| 结果 `session_id` | 会话 ID（`/new` 之前保持不变） |
+| 结果 `summary` | 已压缩的早期轮次摘要；从未压缩为空 |
+| 结果 `messages` | `HistoryMessage { role, text }`，时间正序；只含用户与助手轮次，工具调用、工具结果与推理内容均被剔除 |
+
+历史只读，插件无法改写或删除。错误：缺 `context` 为 `INVALID_ARGUMENT`；没有实例接管该平台为 `NOT_FOUND`；未配置模型或核心未就绪为 `UNAVAILABLE`；会话存储读取失败为 `INTERNAL`。
 
 ---
 
@@ -227,11 +260,12 @@ Supervisor 启动宿主时注入的**启动契约**（插件不得把其他环�
 | 字段 | 说明 |
 | --- | --- |
 | `id` / `name` / `version` / `author` / `description` | 身份信息，`id` 必须与清单一致 |
-| `commands` | `CommandMeta`：`name`、`description`、`usage`、`priority`、`aliases`、`access` |
-| `triggers` | `TriggerMeta`：`name`、`description`（空则不在 `/help` 列出）、`pattern`（Rust `regex` 语法）、`priority`、`access` |
+| `commands` | `CommandMeta`：`name`、`description`、`usage`、`priority`、`aliases`、`access`、`platforms`、`conversation_kinds` |
+| `triggers` | `TriggerMeta`：`name`、`description`（空则不在 `/help` 列出）、`pattern`（Rust `regex` 语法）、`priority`、`access`、`platforms`、`conversation_kinds` |
 | `tools` | `ToolMeta`：`name`、`description`、`parameters`（JSON Schema） |
 | `events` | 订阅的 `EventKind` |
 | `decorates_replies` | 是否参与回复装饰 |
+| `prepares_turns` | 是否参与轮次准备（`OnPrepareTurn`） |
 
 命令与触发器共享名称空间；同名命令按 `CommandMeta.priority`、再按宿主优先级决出唯一胜者。内置命令 `help`、`info`、`new`、`model` 不可被覆盖。
 
@@ -243,6 +277,7 @@ Supervisor 启动宿主时注入的**启动契约**（插件不得把其他环�
 | `EventKind` | `EVENT_KIND_UNSPECIFIED`、`EVENT_KIND_MESSAGE_SENT`、`EVENT_KIND_NOTICE`、`EVENT_KIND_LLM_RESPONSE` |
 | `ReplySource` | `REPLY_SOURCE_UNSPECIFIED`、`REPLY_SOURCE_LLM`、`REPLY_SOURCE_COMMAND` |
 | `LLMRole` | `LLM_ROLE_UNSPECIFIED`、`LLM_ROLE_USER`、`LLM_ROLE_ASSISTANT` |
+| `ConversationKind` | `CONVERSATION_KIND_UNSPECIFIED`、`CONVERSATION_KIND_PRIVATE`、`CONVERSATION_KIND_GROUP`、`CONVERSATION_KIND_CHANNEL` |
 
 ---
 
@@ -254,6 +289,7 @@ Supervisor 启动宿主时注入的**启动契约**（插件不得把其他环�
 | 会话接管 `capture_seconds` 上限 | 600 秒 |
 | `OnEvent` 单订阅者等待 | 5 秒 |
 | `OnDecorateReply` 单装饰器 | 3 秒 |
+| `OnPrepareTurn` 单准备器 | 3 秒（并发执行） |
 | `ReplyMessage` 等待投递结果 | 30 秒（SDK 客户端截止时间 35 秒） |
 | 宿主启动就绪等待 | 5 秒 |
 | 宿主停止宽限 | 3 秒 |

@@ -654,6 +654,7 @@ impl McpServer {
             triggers: Vec::new(),
             events: Vec::new(),
             decorates_replies: false,
+            prepares_turns: false,
         }];
 
         Ok(())

@@ -24,10 +24,10 @@ use std::sync::{Arc, RwLock};
 
 use async_trait::async_trait;
 use kanon_proto::v1::{
-    CommandAccess, CommandExecuteRequest, CommandExecuteResponse, CommandMeta,
+    CommandAccess, CommandExecuteRequest, CommandExecuteResponse, CommandMeta, ConversationKind,
     DecorateReplyRequest, EventKind, EventNotification, LlmResponseEvent, MessageSegment,
-    MessageSentEvent, PipelineEventRequest, PluginMeta, PreFilterResult, ReplySource,
-    ToolCallRequest, ToolCallResponse, ToolMeta, TriggerMeta, event_notification,
+    MessageSentEvent, PipelineEventRequest, PluginMeta, PreFilterResult, PrepareTurnRequest,
+    ReplySource, ToolCallRequest, ToolCallResponse, ToolMeta, TriggerMeta, event_notification,
     tool_call_request, tool_call_response,
 };
 
@@ -51,6 +51,8 @@ type ActionHandler =
 type EventHandler = Arc<dyn Fn(Event) -> BoxFuture<PluginResult<()>> + Send + Sync>;
 type DecorateHandler =
     Arc<dyn Fn(Reply) -> BoxFuture<PluginResult<Option<Vec<MessageSegment>>>> + Send + Sync>;
+type PrepareHandler =
+    Arc<dyn Fn(MessageEvent, String) -> BoxFuture<PluginResult<String>> + Send + Sync>;
 type PreFilterHandler =
     Arc<dyn Fn(MessageEvent) -> BoxFuture<PluginResult<Option<PreFilterResult>>> + Send + Sync>;
 
@@ -101,6 +103,20 @@ impl CommandSpec {
         self.0.access = access as i32;
         self
     }
+
+    /// Limits the command to `platform`; call repeatedly to allow several. Without any, every
+    /// platform is allowed. Elsewhere Core treats the command as undeclared.
+    pub fn platform(mut self, platform: impl Into<String>) -> Self {
+        self.0.platforms.push(platform.into());
+        self
+    }
+
+    /// Limits the command to one kind of conversation; call repeatedly to allow several. Without
+    /// any, every kind is allowed.
+    pub fn conversation_kind(mut self, kind: ConversationKind) -> Self {
+        self.0.conversation_kinds.push(kind as i32);
+        self
+    }
 }
 
 /// Declaration of a regular-expression trigger on plain messages.
@@ -137,6 +153,20 @@ impl TriggerSpec {
     /// Default access level; the operator's command policy overrides it.
     pub fn access(mut self, access: CommandAccess) -> Self {
         self.0.access = access as i32;
+        self
+    }
+
+    /// Limits the trigger to `platform`; call repeatedly to allow several. Without any, every
+    /// platform is allowed. Elsewhere Core treats the trigger as undeclared.
+    pub fn platform(mut self, platform: impl Into<String>) -> Self {
+        self.0.platforms.push(platform.into());
+        self
+    }
+
+    /// Limits the trigger to one kind of conversation; call repeatedly to allow several. Without
+    /// any, every kind is allowed.
+    pub fn conversation_kind(mut self, kind: ConversationKind) -> Self {
+        self.0.conversation_kinds.push(kind as i32);
         self
     }
 }
@@ -235,6 +265,7 @@ pub struct Router {
     events: Vec<(EventKind, EventHandler)>,
     decorator: Option<DecorateHandler>,
     pre_filter: Option<PreFilterHandler>,
+    preparer: Option<PrepareHandler>,
     context: ContextSlot,
     conversations: Conversations,
 }
@@ -255,6 +286,7 @@ impl Router {
             events: Vec::new(),
             decorator: None,
             pre_filter: None,
+            preparer: None,
             context: ContextSlot::default(),
             conversations: Conversations::default(),
         }
@@ -385,6 +417,23 @@ impl Router {
     {
         self.meta.decorates_replies = true;
         self.decorator = Some(Arc::new(move |reply| Box::pin(handler(reply))));
+        self
+    }
+
+    /// Sets the turn preparer: before the model answers a message, the handler receives it and
+    /// the conversation's session id, and returns text to prepend to the current user message
+    /// (empty adds nothing). Use it for retrieval and long-term memory; the text becomes part of
+    /// the conversation history. Core gives it three seconds and goes ahead without it on error
+    /// or timeout.
+    pub fn prepare_turn<F, Fut>(mut self, handler: F) -> Self
+    where
+        F: Fn(MessageEvent, String) -> Fut + Send + Sync + 'static,
+        Fut: Future<Output = PluginResult<String>> + Send + 'static,
+    {
+        self.meta.prepares_turns = true;
+        self.preparer = Some(Arc::new(move |event, session_id| {
+            Box::pin(handler(event, session_id))
+        }));
         self
     }
 
@@ -625,6 +674,17 @@ impl Plugin for Router {
             source: ReplySource::try_from(req.source).unwrap_or(ReplySource::Unspecified),
             command: req.command,
         })
+        .await
+    }
+
+    async fn on_prepare_turn(&self, req: PrepareTurnRequest) -> PluginResult<String> {
+        let Some(handler) = &self.preparer else {
+            return Ok(String::new());
+        };
+        handler(
+            MessageEvent::new(req.context.unwrap_or_default(), self.context.core()),
+            req.session_id,
+        )
         .await
     }
 }

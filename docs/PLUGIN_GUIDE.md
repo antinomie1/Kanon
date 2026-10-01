@@ -214,6 +214,7 @@ async def roll(self, event: CommandEvent, args: list) -> str: ...
 - **别名**：路由时与正式名同等对待；处理函数收到的 `command` 永远是正式名。
 - **同名冲突**：多个插件声明同名命令时，命令 `priority` 小者胜出，其次比较插件 `priority`。
 - **内置命令优先**：`/help`、`/info`、`/new`、`/model` 由核心处理，插件无法覆盖。
+- **作用域**：`platforms=("onebot",)`、`conversation_kinds=("group",)` 把命令限定在指定平台或会话类型（`private`、`group`、`channel`），留空即不限。范围之外该命令视同未声明——其他插件的同名命令仍可胜出。TS 为 `{ platforms, conversationKinds }`，Rust 为 `CommandSpec::new(..).platform("onebot").conversation_kind(ConversationKind::Group)`。
 - **权限**：`access` 只是插件给出的默认值——`everyone`、`admins_in_groups`（私聊任何人可用，群内仅管理员）、`admins`。操作员可以在控制台或 `PUT /api/v1/system/command-policy` 中按命令名覆盖；管理员名单格式为 `<platform>:<user id>`，默认群主与群管理员也视为管理员。
 
 ### 5.3 正则触发器
@@ -230,6 +231,7 @@ async def dice(self, event: CommandEvent) -> str:
 - 未锚定的模式会匹配消息中的任意位置，通常应写成 `^...$`。
 - 无效的正则不会匹配任何消息，并在核心日志中告警；Python/TS SDK 在声明时会先用本语言的正则引擎做一次校验。
 - 命令与触发器共享名称空间（核心都通过 `OnExecuteCommand` 下发），同名会在加载时报错。
+- 触发器同样支持 `platforms` / `conversation_kinds` 作用域；范围之外不参与匹配。
 
 ### 5.4 回复
 
@@ -239,7 +241,7 @@ async def dice(self, event: CommandEvent) -> str:
 2. **`await event.reply(...)`**：可多次调用。核心正在等待本处理函数时，回复会被收集，并在处理函数结束或调用 `wait_next` 时作为**一条**平台消息发出。
 3. **`await event.send(...)`**：立即单独发送并等待平台的投递结果，适合长任务中的进度提示（“正在生成…”）。
 
-还可以返回完整的 `CommandExecuteResponse`（Python/TS），这时其中的 `success`、`error_message`、`capture_seconds` 会被沿用。
+还可以返回完整的 `CommandExecuteResponse`（Python/TS），这时其中的 `success`、`error_message`、`capture_seconds`、`pass_to_model`、`model_text` 会被沿用。
 
 处理函数抛出异常时，命令以失败告终：已收集的回复照常发出，错误信息只记入核心日志，不会发给用户。
 
@@ -272,7 +274,30 @@ async def guess(self, event: CommandEvent) -> None:
 
 原理：核心逐条串行处理消息，绝不阻塞等待插件。SDK 把处理函数放在独立任务里运行，当前 RPC 只等到处理函数的下一个“让出点”（结束或 `wait_next`）就返回，并在响应中携带 `capture_seconds`；续接消息到达时 SDK 再唤醒挂起的处理函数。不使用 SDK 时，也可以直接在 `CommandExecuteResponse` 中设置 `capture_seconds`，自己处理 `continuation`。
 
-### 5.6 前置过滤
+### 5.6 交给模型：`pass_to_model`
+
+命令或触发器处理完后，可以让这条消息继续交给模型回答，就像它没有命中任何命令一样：
+
+```python
+@command("remember")
+async def remember(self, event: CommandEvent, args: list) -> None:
+    save_note(event.sender_id, event.raw_args)
+    await event.reply("已记下")
+    event.pass_to_model(f"我刚让你记住：{event.raw_args}，请简短确认。")
+```
+
+| 语言 | 原样交给模型 | 改写文本后交给模型 |
+| --- | --- | --- |
+| Python | `event.pass_to_model()` | `event.pass_to_model(text)` |
+| TypeScript | `event.passToModel()` | `event.passToModel(text)` |
+| Rust | `event.pass_to_model()?` | `event.pass_to_model_as(text)?` |
+
+- 本轮收集的回复照常先发出，随后消息走回复策略与模型；回复策略可能决定不回答（例如群聊未被 @）。
+- 改写只替换消息里的文本，图片等其他段保留；模型和会话历史看到的都是改写后的文本。
+- 与 `wait_next` 互斥：同一轮中之后调用了 `wait_next` 时，接管优先，交给模型被取消。
+- 必须在核心仍在等待处理函数时调用；`wait_next` 超时之后再调用会报错。
+
+### 5.7 前置过滤
 
 前置过滤在所有命令与模型之前按插件 `priority` 依次执行，可以放行（`PASS`）、拦截（`BLOCK`，可附带回复）或改写文本（`MODIFY`）。整条链的总预算只有 **30ms**，单个插件超过 5ms 会被告警，超出预算的后续过滤器会被跳过——这里不要做网络请求。
 
@@ -340,6 +365,26 @@ async def sign(self, reply: Reply):
 
 ---
 
+### 7.3 轮次准备：注入上下文
+
+模型即将回答一条消息时，准备器可以返回一段文本，置于本轮用户消息的开头——适合检索知识库、读取长期记忆：
+
+```python
+@prepare_turn
+async def recall(self, event: MessageEvent, session_id: str):
+    facts = self.memory.search(event.sender_id, event.text)
+    return "已知信息：\n" + "\n".join(facts) if facts else None
+```
+
+TS 用 `@PrepareTurn()` 装饰方法 `(event, sessionId) => string | undefined`；Rust 用 `router.prepare_turn(|event, session_id| async move { Ok(text) })`。
+
+- 只在模型真正要回答时调用；通知、命令、未通过回复策略的消息都不会触发。
+- 所有插件的准备器**并发**执行，每个限时 3 秒；出错或超时就当没有返回。返回 `None`/`undefined`/空串表示不注入。
+- 文本只进入当前轮用户消息，绝不进入系统提示，因此不会破坏请求前缀缓存；它会随本轮消息写入会话历史，后续轮次模型仍能看到。所以只注入与本轮相关、篇幅可控的内容。
+- 每个插件只能有一个准备器。
+
+---
+
 ## 8. 调用核心
 
 以下方法都在 `core` 句柄上（Python/TS：`self.core` 或 `event.core`；Rust：`event.core()` 或 `router.context().core()`），独立运行时不可用。
@@ -381,6 +426,20 @@ members = await self.core.call_platform_api("onebot", "get_group_member_list", g
 - 只对声明了 `platform_api` 能力的**内置**适配器（OneBot、Milky）可用；其他平台返回 `UNIMPLEMENTED`，未知平台返回 `NOT_FOUND`，平台拒绝时返回 `UNAVAILABLE`。
 - 动作名只允许字母、数字、`_` 和 `.`。参数与结果都是普通 JSON；数字经 protobuf 传输后都是浮点数。
 - 这是“逃生舱”：用了它，插件就绑定在特定平台上了。能用通用能力完成的事不要走这里。
+
+### 8.4 读取会话历史
+
+```python
+history = await self.core.conversation_history(event, limit=20)
+for role, text in history.messages:      # role is "user" or "assistant"
+    ...
+```
+
+- 返回模型回答 `event` 时将续写的那个会话：`session_id`、`summary`（早期轮次被压缩后的摘要）与按时间正序的 `messages`。`limit` 只保留最近若干条，`0` 为全部。
+- 只含用户与助手的文本；工具调用、工具结果和模型的推理过程都被剔除。
+- **只读**：插件无法修改或删除会话历史。
+- TS：`await this.core.conversationHistory(event, 20)`，`messages` 为 `{ role, text }`；Rust：`core.conversation_history(event.raw(), 20).await?` 返回原始 `ConversationHistoryResponse`。
+- 没有实例接管该平台时返回 `NOT_FOUND`，节点未配置模型时返回 `UNAVAILABLE`。
 
 ---
 

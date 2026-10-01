@@ -355,6 +355,18 @@ async function main(): Promise<void> {
         callback({ code: grpc.status.INTERNAL, message: err?.message || "Decorate error" });
       }
     },
+    OnPrepareTurn: async (call: any, callback: any) => {
+      if (typeof (plugin as any).onPrepareTurn !== "function") {
+        callback(null, { text: "" });
+        return;
+      }
+      try {
+        callback(null, await plugin.onPrepareTurn(call.request));
+      } catch (err: any) {
+        // Surfaced as an RPC error: Core then answers without this plugin's context.
+        callback({ code: grpc.status.INTERNAL, message: err?.message || "Prepare error" });
+      }
+    },
     OnDeliverMessage: async (call: any, callback: any) => {
       try {
         const res = await plugin.onDeliverMessage(call.request);

@@ -399,6 +399,31 @@ export class CoreHandle {
     return response?.result ? fromProtoValue(response.result) : null;
   }
 
+  /**
+   * Reads the model conversation `event` belongs to (`BotApiService.GetConversationHistory`):
+   * the same session the model would continue when answering it.
+   *
+   * Only user and assistant turns are returned; tool calls, tool results and the model's
+   * reasoning are left out. History is read-only.
+   *
+   * @param event A {@link MessageEvent} or a raw `PipelineEventRequest`.
+   * @param limit Keep only this many of the most recent messages; 0 keeps all.
+   * @throws `NOT_FOUND` when no bot instance answers on the platform, `UNAVAILABLE` when no
+   *   model is configured.
+   */
+  async conversationHistory(event: any, limit = 0): Promise<ConversationHistory> {
+    const raw = event instanceof MessageEvent ? event.raw : event;
+    const response = await this.unary("GetConversationHistory", { context: raw, limit });
+    return {
+      sessionId: response?.session_id ?? "",
+      summary: response?.summary ?? "",
+      messages: (response?.messages ?? []).map((message: any) => ({
+        role: message.role === "LLM_ROLE_ASSISTANT" ? "assistant" : "user",
+        text: message.text ?? "",
+      })),
+    };
+  }
+
   /** Issues one unary RPC on the shared channel. */
   private unary(method: string, request: any, timeoutMs?: number): Promise<any> {
     return new Promise((resolve, reject) => {
@@ -599,6 +624,40 @@ const EVENT_KINDS: Record<EventKind, string> = {
   llm_response: "EVENT_KIND_LLM_RESPONSE",
 };
 
+/** Conversation kinds a command or trigger may be limited to. */
+export type ConversationKind = "private" | "group" | "channel";
+
+const CONVERSATION_KINDS: Record<ConversationKind, string> = {
+  private: "CONVERSATION_KIND_PRIVATE",
+  group: "CONVERSATION_KIND_GROUP",
+  channel: "CONVERSATION_KIND_CHANNEL",
+};
+
+/** Platform and conversation-kind limits of a command or trigger; empty lists allow all. */
+export interface ScopeOptions {
+  /** Platforms the handler answers on. Elsewhere Core treats it as undeclared. */
+  platforms?: string[];
+  /** Conversation kinds the handler answers in. */
+  conversationKinds?: ConversationKind[];
+}
+
+/** Validates scope options and converts them to their wire form. */
+function scopeValue(options?: ScopeOptions): {
+  platforms: string[];
+  conversation_kinds: string[];
+} {
+  return {
+    platforms: [...(options?.platforms ?? [])],
+    conversation_kinds: (options?.conversationKinds ?? []).map((kind) => {
+      const value = CONVERSATION_KINDS[kind];
+      if (!value) {
+        throw new Error(`unknown conversation kind '${kind}'`);
+      }
+      return value;
+    }),
+  };
+}
+
 /** Wire shape of `CommandMeta`. */
 export interface CommandMeta {
   name: string;
@@ -607,6 +666,8 @@ export interface CommandMeta {
   priority?: number;
   aliases?: string[];
   access?: string;
+  platforms?: string[];
+  conversation_kinds?: string[];
 }
 
 /** Wire shape of `TriggerMeta`. */
@@ -616,6 +677,8 @@ export interface TriggerMeta {
   pattern: string;
   priority?: number;
   access?: string;
+  platforms?: string[];
+  conversation_kinds?: string[];
 }
 
 /** Wire shape of `ToolMeta`. */
@@ -637,6 +700,17 @@ export interface PluginMeta {
   triggers?: TriggerMeta[];
   events?: string[];
   decorates_replies?: boolean;
+  prepares_turns?: boolean;
+}
+
+/** A model conversation as returned by {@link CoreHandle.conversationHistory}. */
+export interface ConversationHistory {
+  /** The session the conversation is stored under (stable until `/new`). */
+  sessionId: string;
+  /** Summary of compacted older turns; `""` if never compacted. */
+  summary: string;
+  /** Oldest first. */
+  messages: Array<{ role: "user" | "assistant"; text: string }>;
 }
 
 /** A reply about to be delivered, as seen by a {@link DecorateReply} handler. */
@@ -659,6 +733,7 @@ interface Declarations {
   actions: Array<{ name: string; methodName: string | symbol }>;
   events: Array<{ kind: EventKind; methodName: string | symbol }>;
   decorator?: string | symbol;
+  preparer?: string | symbol;
 }
 
 const DECLARATIONS = Symbol("kanon.declarations");
@@ -679,6 +754,7 @@ function declarations(prototype: any): Declarations {
       actions: [...(inherited?.actions ?? [])],
       events: [...(inherited?.events ?? [])],
       decorator: inherited?.decorator,
+      preparer: inherited?.preparer,
     };
   }
   return prototype[DECLARATIONS];
@@ -702,6 +778,9 @@ function accessValue(level: CommandAccess | undefined): string {
  * @param options.aliases Other names that invoke the command; the handler always sees `name`.
  * @param options.access Default access level, which the operator can override.
  * @param options.priority Lower wins when several plugins declare the same name.
+ * @param options.platforms Platforms the command answers on; empty means all. Elsewhere Core
+ *   treats it as undeclared, so another plugin's command of the same name may answer.
+ * @param options.conversationKinds Conversation kinds the command answers in; empty means all.
  */
 export function Command(
   name: string,
@@ -711,9 +790,10 @@ export function Command(
     priority?: number;
     aliases?: string[];
     access?: CommandAccess;
-  },
+  } & ScopeOptions,
 ): MethodDecorator {
   const access = accessValue(options?.access);
+  const scope = scopeValue(options);
   return (target: any, propertyKey: string | symbol) => {
     const canonical = name.replace(/^\//, "");
     declarations(target).commands.push({
@@ -724,6 +804,7 @@ export function Command(
       priority: options?.priority ?? 500,
       aliases: (options?.aliases ?? []).map((alias) => alias.replace(/^\//, "")),
       access,
+      ...scope,
     });
   };
 }
@@ -738,6 +819,8 @@ export function Command(
  * @param pattern Regular expression; anchor it (`^...$`) unless it may match anywhere.
  * @param options.name Name used for routing and logs; defaults to the method name.
  * @param options.description Shown in `/help`; leave empty to keep the trigger unlisted.
+ * @param options.platforms As for {@link Command}; elsewhere the trigger never matches.
+ * @param options.conversationKinds As for {@link Command}.
  */
 export function Trigger(
   pattern: string,
@@ -746,9 +829,10 @@ export function Trigger(
     description?: string;
     priority?: number;
     access?: CommandAccess;
-  },
+  } & ScopeOptions,
 ): MethodDecorator {
   const access = accessValue(options?.access);
+  const scope = scopeValue(options);
   // Validate early: a pattern JavaScript rejects is almost certainly a mistake, and an invalid
   // pattern would otherwise only show up as a warning in Core's log.
   new RegExp(pattern);
@@ -760,6 +844,7 @@ export function Trigger(
       pattern,
       priority: options?.priority ?? 500,
       access,
+      ...scope,
     });
   };
 }
@@ -845,6 +930,26 @@ export function DecorateReply(): MethodDecorator {
   };
 }
 
+/**
+ * Marks the plugin's turn preparer.
+ *
+ * Before the model answers a message, the handler receives the {@link MessageEvent} and the
+ * conversation's session id and returns text to prepend to the current user message (retrieved
+ * knowledge, long-term memory); `undefined` or `""` adds nothing. The text never reaches the
+ * system prompt, so the cached request prefix stays stable, and it becomes part of the
+ * conversation history. Core gives each preparer three seconds and goes ahead without it on
+ * error or timeout.
+ */
+export function PrepareTurn(): MethodDecorator {
+  return (target: any, propertyKey: string | symbol) => {
+    const declared = declarations(target);
+    if (declared.preparer !== undefined && declared.preparer !== propertyKey) {
+      throw new Error("a plugin may declare only one @PrepareTurn handler");
+    }
+    declared.preparer = propertyKey;
+  };
+}
+
 /** Whether a handler's return value is a command response rather than reply content. */
 function isCommandResponse(value: any): boolean {
   return (
@@ -914,6 +1019,7 @@ export abstract class Plugin {
         return EVENT_KINDS[kind];
       }),
       decorates_replies: declared.decorator !== undefined,
+      prepares_turns: declared.preparer !== undefined,
     };
   }
 
@@ -955,9 +1061,9 @@ export abstract class Plugin {
       const waiting = this.conversations.take(key);
       if (waiting) {
         const [session, next] = waiting;
-        session.turn = new Turn();
+        const turn = (session.turn = new Turn());
         next.resolve(new CommandEvent(req, this.core, session));
-        return runTurn(session);
+        return runTurn(turn);
       }
     }
 
@@ -976,12 +1082,12 @@ export abstract class Plugin {
     }
 
     const session = new Session(this.conversations);
-    session.turn = new Turn();
+    const turn = (session.turn = new Turn());
     const event = new CommandEvent(req, this.core, session);
     // Not awaited: the handler may outlive this RPC by suspending in waitNext. runHandler never
     // rejects, so nothing is left unhandled.
     void this.runHandler(handler.bind(this), event, session);
-    return runTurn(session);
+    return runTurn(turn);
   }
 
   /** Runs one command handler to completion, across as many turns as it takes. */
@@ -996,6 +1102,9 @@ export abstract class Plugin {
       if (isCommandResponse(result)) {
         // An explicit response: its replies join the turn and its fields are honoured.
         await event.reply(result.replies ?? []);
+        if (result.pass_to_model) {
+          event.passToModel(result.model_text ?? undefined);
+        }
         session.turn?.finish(
           Number(result.capture_seconds ?? 0),
           result.success ?? true,
@@ -1122,6 +1231,19 @@ export abstract class Plugin {
       return { modified: false, segments: [] };
     }
     return { modified: true, segments: toSegments(result) };
+  }
+
+  /** Runs the plugin's `@PrepareTurn` handler for the turn the model is about to answer. */
+  async onPrepareTurn(req: any): Promise<any> {
+    const method = this.declared().preparer;
+    if (method === undefined) {
+      return { text: "" };
+    }
+    const text = await (this as any)[method](
+      new MessageEvent(req.context ?? {}, this.core),
+      req.session_id ?? "",
+    );
+    return { text: text ?? "" };
   }
 
   /**

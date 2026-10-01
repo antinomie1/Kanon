@@ -8,7 +8,7 @@ use async_trait::async_trait;
 use kanon_proto::v1::{
     CommandExecuteRequest, CommandExecuteResponse, DecorateReplyRequest, DeliverMessageRequest,
     DeliverMessageResponse, EventNotification, MessageSegment, PipelineEventRequest, PluginMeta,
-    PreFilterResult, ToolCallRequest, ToolCallResponse,
+    PreFilterResult, PrepareTurnRequest, ToolCallRequest, ToolCallResponse,
 };
 
 /// Result alias for plugin operations.
@@ -59,6 +59,8 @@ pub trait Plugin: Send + Sync + 'static {
             replies: vec![],
             error_message: format!("Command '{}' executed by default stub handler", req.command),
             capture_seconds: 0,
+            pass_to_model: false,
+            model_text: None,
         })
     }
 
@@ -126,5 +128,15 @@ pub trait Plugin: Send + Sync + 'static {
         _req: DecorateReplyRequest,
     ) -> PluginResult<Option<Vec<MessageSegment>>> {
         Ok(None)
+    }
+
+    /// Adds context to the turn the model is about to answer; called only when
+    /// `PluginMeta.prepares_turns` is set.
+    ///
+    /// The returned text is prepended to the current user message (never to the system prompt),
+    /// so it becomes part of the conversation history. Return an empty string to add nothing. An
+    /// error, or an answer later than three seconds, adds nothing and the turn goes ahead.
+    async fn on_prepare_turn(&self, _req: PrepareTurnRequest) -> PluginResult<String> {
+        Ok(String::new())
     }
 }

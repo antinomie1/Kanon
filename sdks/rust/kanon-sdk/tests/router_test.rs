@@ -239,3 +239,59 @@ async fn events_dispatch_by_kind_and_the_decorator_sees_the_source() {
         .unwrap();
     assert!(untouched.is_none());
 }
+
+#[tokio::test]
+async fn handlers_can_pass_the_message_on_and_preparers_add_context() {
+    let plugin = Router::new("test.plugin", "Test", "0.1.0")
+        .command(
+            CommandSpec::new("note")
+                .platform("onebot")
+                .conversation_kind(ConversationKind::Group),
+            |event| async move {
+                event.pass_to_model_as(format!("remember {}", event.raw_args()))?;
+                Ok("noted")
+            },
+        )
+        .command(CommandSpec::new("ask"), |event| async move {
+            // A wait in the same turn cancels the hand-off: this message is not the model's.
+            event.pass_to_model()?;
+            let _ = event.wait_next(Duration::from_secs(5)).await;
+            Ok(())
+        })
+        .prepare_turn(|event, session| async move {
+            Ok(format!("[{session}] {} likes tea", event.sender_id()))
+        });
+
+    let meta = plugin.meta();
+    assert!(meta.prepares_turns);
+    assert_eq!(meta.commands[0].platforms, ["onebot"]);
+    assert_eq!(
+        meta.commands[0].conversation_kinds,
+        [ConversationKind::Group as i32]
+    );
+
+    let noted = plugin
+        .on_execute_command(request("note", "tea", &["tea"], false))
+        .await
+        .unwrap();
+    assert!(noted.pass_to_model);
+    assert_eq!(noted.model_text.as_deref(), Some("remember tea"));
+    assert_eq!(texts(&noted), ["noted"]);
+
+    let asked = plugin
+        .on_execute_command(request("ask", "", &[], false))
+        .await
+        .unwrap();
+    assert_eq!(asked.capture_seconds, 5);
+    assert!(!asked.pass_to_model);
+
+    let context = plugin
+        .on_prepare_turn(PrepareTurnRequest {
+            context: request("x", "", &[], false).context,
+            session_id: "s1".into(),
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+    assert_eq!(context, "[s1] u1 likes tea");
+}

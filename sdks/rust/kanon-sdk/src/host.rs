@@ -20,8 +20,8 @@ use kanon_proto::v1::{
     CommandExecuteRequest, CommandExecuteResponse, DecorateReplyRequest, DecorateReplyResult,
     DeliverMessageRequest, DeliverMessageResponse, EventAck, EventNotification,
     GetPluginMetaRequest, GetPluginMetaResponse, PipelineEventRequest, PreFilterResult,
-    RegisterHostRequest, ReloadPluginConfigRequest, ReloadPluginConfigResponse, ToolCallRequest,
-    ToolCallResponse,
+    PrepareTurnRequest, PrepareTurnResult, RegisterHostRequest, ReloadPluginConfigRequest,
+    ReloadPluginConfigResponse, ToolCallRequest, ToolCallResponse,
 };
 use kanon_transport::{IpcListener, connect_ipc};
 
@@ -426,6 +426,8 @@ impl<P: Plugin> MessagePipelineService for PipelineServiceImpl<P> {
                 replies: vec![],
                 error_message: e.to_string(),
                 capture_seconds: 0,
+                pass_to_model: false,
+                model_text: None,
             })),
         }
     }
@@ -473,6 +475,18 @@ impl<P: Plugin> MessagePipelineService for PipelineServiceImpl<P> {
             Ok(None) => Ok(Response::new(DecorateReplyResult::default())),
             // A failed decorator must not eat the reply: report an error and the core keeps the
             // reply as it was.
+            Err(err) => Err(Status::internal(err.to_string())),
+        }
+    }
+
+    async fn on_prepare_turn(
+        &self,
+        request: Request<PrepareTurnRequest>,
+    ) -> Result<Response<PrepareTurnResult>, Status> {
+        let plugin = self.plugin.read().await;
+        match plugin.on_prepare_turn(request.into_inner()).await {
+            Ok(text) => Ok(Response::new(PrepareTurnResult { text })),
+            // Reported as an error so the core logs it; the turn goes ahead without this context.
             Err(err) => Err(Status::internal(err.to_string())),
         }
     }

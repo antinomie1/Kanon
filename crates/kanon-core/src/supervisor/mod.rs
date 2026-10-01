@@ -21,8 +21,8 @@ use kanon_proto::v1::plugin_host_service_client::PluginHostServiceClient;
 use kanon_proto::v1::{
     CommandExecuteRequest, CommandExecuteResponse, DecorateReplyRequest, DecorateReplyResult,
     DeliverMessageRequest, DeliverMessageResponse, EventNotification, GetPluginMetaRequest,
-    PipelineEventRequest, PluginMeta, PreFilterResult, ReloadPluginConfigRequest,
-    ReloadPluginConfigResponse, ToolCallRequest, ToolCallResponse,
+    PipelineEventRequest, PluginMeta, PreFilterResult, PrepareTurnRequest, PrepareTurnResult,
+    ReloadPluginConfigRequest, ReloadPluginConfigResponse, ToolCallRequest, ToolCallResponse,
 };
 use kanon_transport::{connect_ipc, core_socket_path, default_run_dir, host_socket_path};
 
@@ -371,6 +371,15 @@ impl ManagedHost {
     ) -> Result<DecorateReplyResult, tonic::Status> {
         let mut client = self.pipeline_client.clone();
         Ok(client.on_decorate_reply(req).await?.into_inner())
+    }
+
+    /// Asks one of this host's plugins for context to add to the turn the model is about to answer.
+    pub async fn prepare_turn(
+        &self,
+        req: PrepareTurnRequest,
+    ) -> Result<PrepareTurnResult, tonic::Status> {
+        let mut client = self.pipeline_client.clone();
+        Ok(client.on_prepare_turn(req).await?.into_inner())
     }
 
     /// Queries the host for fresh plugin metadata.
@@ -1467,6 +1476,7 @@ impl Supervisor {
                         triggers: vec![],
                         events: vec![],
                         decorates_replies: false,
+                        prepares_turns: false,
                     })
                     .collect()
             }
