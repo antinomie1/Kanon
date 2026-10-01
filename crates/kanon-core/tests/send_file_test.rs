@@ -12,6 +12,7 @@ use kanon_core::{
     BashCaller, BashPolicy, BashPolicyStore, BashTool, CommandPolicy, CommandPolicyStore,
     MAX_SEND_FILE_BYTES, SendFileTool, with_bash_caller,
 };
+use kanon_llm::BuiltinAgent;
 use kanon_llm::{
     Agent, AgentTool, ChatRequest, ChatResponse, GatewayError, LlmProvider, Role, ToolCall,
     ToolOutput,
@@ -192,7 +193,7 @@ async fn an_attached_file_reaches_the_turn_output() {
     std::fs::write(fixture.workspace.path().join("song.mp3"), b"ID3").unwrap();
     let workspace = fixture.workspace;
     let attachments = fixture.attachments;
-    let agent = Agent::builder("sender", Arc::new(SendingModel))
+    let agent = BuiltinAgent::builder("sender", Arc::new(SendingModel))
         .model("test")
         .tool(fixture.tool)
         .build();

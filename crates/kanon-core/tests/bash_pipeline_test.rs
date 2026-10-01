@@ -19,8 +19,9 @@ use kanon_core::{
     BashScope, BashTool, CommandPolicy, CommandPolicyStore, EventPolicy, EventPolicyStore,
     META_CONVERSATION_KIND, META_NOTICE, SessionScope,
 };
+use kanon_llm::BuiltinAgent;
 use kanon_llm::tool_router::ToolRouter;
-use kanon_llm::{Agent, ChatRequest, ChatResponse, GatewayError, LlmProvider, Role, ToolCall};
+use kanon_llm::{ChatRequest, ChatResponse, GatewayError, LlmProvider, Role, ToolCall};
 use kanon_proto::prost_types::{self, value::Kind};
 use kanon_proto::v1::PipelineEventRequest;
 use serde_json::json;
@@ -78,7 +79,7 @@ async fn harness(draft: InstanceDraft) -> (Arc<PipelineEngine>, PathBuf) {
     );
     let commands = tool.command_policy().clone();
     let agent = Arc::new(
-        Agent::builder("bash-pipeline", Arc::new(InsistentModel))
+        BuiltinAgent::builder("bash-pipeline", Arc::new(InsistentModel))
             .model("test")
             .tool_arc(tool.clone())
             .hook(BashAvailabilityHook(tool))

@@ -330,7 +330,7 @@ async fn test_tool_router_max_recursion_limit() {
 
     let memory = Arc::new(InMemory::new());
     // Set max iterations = 2
-    let router = ToolRouter::new(mock_provider, memory, "test-model").with_max_iterations(2);
+    let router = ToolRouter::new(mock_provider, memory, "test-model");
 
     let tool_meta = ToolMeta {
         name: "add_numbers".to_string(),

@@ -4,7 +4,8 @@
 //! session memory, and a general-purpose agent engine with cross-language Tool Calling.
 //!
 //! ## Submodules
-//! - [`agent`]: General-purpose agent engine for conversational bots and autonomous task workers.
+//! - [`agent`]: The [`Agent`] trait that answers conversation turns, and the types agents share.
+//! - [`builtin`]: [`BuiltinAgent`], Kanon's own tool-loop agent and the node's only implementation.
 //! - [`error`]: Granular error types for gateway, agent, and tool routing.
 //! - [`gateway`]: Protocol-level LLM client implementations (OpenAI Chat, OpenAI Responses, Anthropic Messages).
 //! - [`prompt`]: Static personas and the hook that places them at the top of every request.
@@ -20,6 +21,7 @@
 //! - [`tool_router`]: Specialized pipeline router adapter, dynamic tool aggregation, and in-memory Protobuf/JSON translation.
 
 pub mod agent;
+pub mod builtin;
 pub mod compaction;
 pub mod error;
 pub mod factory;
@@ -39,9 +41,10 @@ pub mod tool_router;
 pub mod visible_reply;
 
 pub use agent::{
-    Agent, AgentBuilder, AgentConfig, AgentHook, AgentOutput, AgentTool, NativeTool, NativeToolFn,
-    NoopHost, ToolOutput,
+    Agent, AgentConfig, AgentHook, AgentOutput, AgentTool, NativeTool, NativeToolFn, NoopHost,
+    ToolOutput,
 };
+pub use builtin::{AgentBuilder, BuiltinAgent, FAILED_TOOL_RESULT, STOPPED_TOOL_RESULT};
 pub use compaction::{COMPACTION_INSTRUCTION, CompactionPolicy};
 pub use error::{AgentError, GatewayError, MemoryError, ToolRouterError};
 pub use factory::{AgentFactory, ProviderRuntime};

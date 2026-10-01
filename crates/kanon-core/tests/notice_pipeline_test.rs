@@ -14,10 +14,11 @@ use kanon_core::{
     EventPolicy, EventPolicyStore, META_BOT_MENTIONED, META_CONVERSATION_KIND, META_NOTICE,
     META_NOTICE_ACTOR, META_NOTICE_TARGET, ReplyMode, ReplyPolicy, ReplyPolicyStore,
 };
+use kanon_llm::BuiltinAgent;
 use kanon_llm::gateway::types::{ChatRequest, ChatResponse};
 use kanon_llm::memory::{InMemory, Memory};
 use kanon_llm::tool_router::ToolRouter;
-use kanon_llm::{Agent, GatewayError, LlmProvider};
+use kanon_llm::{GatewayError, LlmProvider};
 use kanon_proto::prost_types::{self, value::Kind};
 use kanon_proto::v1::PipelineEventRequest;
 use kanon_proto::v1::message_segment::Segment;
@@ -76,7 +77,7 @@ async fn harness(
     let turns = Arc::new(Mutex::new(Vec::new()));
     let memory: Arc<dyn Memory> = Arc::new(InMemory::new());
     let agent = Arc::new(
-        Agent::builder(
+        BuiltinAgent::builder(
             "notice-test",
             Arc::new(RecordingProvider {
                 turns: turns.clone(),

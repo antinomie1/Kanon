@@ -184,7 +184,7 @@ async fn completions(
 /// Streams a completion as Server-Sent Events.
 async fn stream_completion(
     state: ApiState,
-    agent: Arc<kanon_llm::Agent>,
+    agent: Arc<dyn kanon_llm::Agent>,
     session_id: String,
     message: String,
     tools: bool,
@@ -286,7 +286,7 @@ fn map_agent_error(err: AgentError) -> ApiError {
 fn resolve_agent(
     state: &ApiState,
     request: &ChatCompletionRequest,
-) -> Result<Arc<Agent>, ApiError> {
+) -> Result<Arc<dyn Agent>, ApiError> {
     if let (Some(proto), Some(url)) = (&request.protocol, &request.base_url) {
         let trimmed_url = url.trim().trim_end_matches('/').to_string();
         if !trimmed_url.is_empty() {

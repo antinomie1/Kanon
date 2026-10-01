@@ -138,7 +138,7 @@ fn clearing_the_provider_removes_the_node_and_its_overrides() {
 
 #[test]
 fn build_with_keeps_the_node_runtime_parts() {
-    let (factory, _provider, memory, sessions, personas) = factory();
+    let (factory, _provider, memory, sessions, _personas) = factory();
     factory.install("node", Arc::new(StubProvider), config("default-model"));
 
     let ephemeral_provider: Arc<dyn LlmProvider> = Arc::new(StubProvider);
@@ -147,16 +147,10 @@ fn build_with_keeps_the_node_runtime_parts() {
     assert_eq!(agent.config().default_model, "sandbox-model");
     assert!(Arc::ptr_eq(agent.memory(), &memory));
     assert!(Arc::ptr_eq(agent.provider(), &ephemeral_provider));
-    // The sandbox agent must still see the node's sessions and personas.
-    assert!(agent.session_manager().is_some());
-    assert!(agent.persona_registry().is_some());
+    // The sandbox agent must still see the node's sessions.
     assert!(Arc::ptr_eq(
         agent.session_manager().expect("session manager"),
         &sessions
-    ));
-    assert!(Arc::ptr_eq(
-        agent.persona_registry().expect("persona registry"),
-        &personas
     ));
 }
 

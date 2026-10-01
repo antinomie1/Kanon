@@ -12,6 +12,7 @@ use axum::Router;
 use axum::routing::post;
 use serde_json::{Value, json};
 
+use kanon_llm::BuiltinAgent;
 use kanon_llm::agent::{Agent, AgentHook, NativeTool};
 use kanon_llm::error::GatewayError;
 use kanon_llm::gateway::LlmProvider;
@@ -48,7 +49,7 @@ impl AgentHook for Availability {
 async fn runtime_tool_permission_changes_only_the_request_tail() {
     let recorder = Arc::new(Recorder::default());
     let allowed = Arc::new(AtomicBool::new(true));
-    let agent = Agent::builder("permission-prefix", recorder.clone())
+    let agent = BuiltinAgent::builder("permission-prefix", recorder.clone())
         .model("test")
         .system_prompt("Fixed persona")
         .tool(tool("bash"))
@@ -120,10 +121,10 @@ fn tool(name: &str) -> NativeTool {
 }
 
 /// Builds an agent over a recorder with tools registered in the given order.
-fn agent_with_tools(recorder: Arc<Recorder>, order: &[&str]) -> Agent {
+fn agent_with_tools(recorder: Arc<Recorder>, order: &[&str]) -> BuiltinAgent {
     let memory = Arc::new(InMemory::new());
     let sessions = Arc::new(SessionManager::new(memory.clone()));
-    let mut builder = Agent::builder("layout", recorder)
+    let mut builder = BuiltinAgent::builder("layout", recorder)
         .memory(memory)
         .session_manager(sessions)
         .persona_registry(Arc::new(PersonaRegistry::default()))
@@ -260,7 +261,7 @@ async fn a_turns_images_go_out_with_that_turn_only() {
     // provider can no longer download fails the whole session; history keeps the words only.
     let model = Arc::new(ToolThenAnswer::default());
     let memory = Arc::new(InMemory::new());
-    let agent = Agent::builder("media", model.clone())
+    let agent = BuiltinAgent::builder("media", model.clone())
         .memory(memory.clone())
         .model("test")
         .tool(tool("alpha"))
@@ -355,7 +356,7 @@ async fn the_static_block_is_one_trimmed_message_however_many_hooks_contribute()
     let recorder = Arc::new(Recorder::default());
     let memory = Arc::new(InMemory::new());
     let sessions = Arc::new(SessionManager::new(memory.clone()));
-    let agent = Agent::builder("layout", recorder.clone())
+    let agent = BuiltinAgent::builder("layout", recorder.clone())
         .memory(memory)
         .session_manager(sessions)
         .persona_registry(Arc::new(PersonaRegistry::default()))

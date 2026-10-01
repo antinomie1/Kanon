@@ -14,10 +14,11 @@ use kanon_core::supervisor::Supervisor;
 use kanon_core::{
     META_BOT_MENTIONED, META_CONVERSATION_KIND, ReplyMode, ReplyPolicy, ReplyPolicyStore,
 };
+use kanon_llm::BuiltinAgent;
 use kanon_llm::gateway::types::{ChatRequest, ChatResponse};
 use kanon_llm::memory::InMemory;
 use kanon_llm::tool_router::ToolRouter;
-use kanon_llm::{Agent, GatewayError, LlmProvider};
+use kanon_llm::{GatewayError, LlmProvider};
 use kanon_proto::prost_types::{self, value::Kind};
 use kanon_proto::v1::message_segment::Segment;
 use kanon_proto::v1::{IngestEventRequest, PipelineEventRequest};
@@ -89,7 +90,7 @@ async fn a_failed_turn_is_reported_once_to_whoever_asked_and_never_retried() {
         .expect("create instance");
     let provider = Arc::new(Rejecting::default());
     let agent = Arc::new(
-        Agent::builder("failure-test", provider.clone())
+        BuiltinAgent::builder("failure-test", provider.clone())
             .memory(Arc::new(InMemory::new()))
             .model("test-model")
             .build(),

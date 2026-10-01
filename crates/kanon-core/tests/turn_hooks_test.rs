@@ -16,10 +16,11 @@ use kanon_core::ipc::CoreApiService;
 use kanon_core::pipeline::{PipelineEngine, PipelineResult};
 use kanon_core::supervisor::{ManagedHost, Supervisor};
 use kanon_core::{AdapterError, Capability, PlatformAdapter};
+use kanon_llm::BuiltinAgent;
 use kanon_llm::gateway::types::{ChatRequest, ChatResponse, Role};
 use kanon_llm::memory::{InMemory, Memory};
 use kanon_llm::tool_router::ToolRouter;
-use kanon_llm::{Agent, GatewayError, LlmProvider};
+use kanon_llm::{GatewayError, LlmProvider};
 use kanon_proto::v1::bot_api_service_server::BotApiService;
 use kanon_proto::v1::message_pipeline_service_server::MessagePipelineServiceServer;
 use kanon_proto::v1::message_segment::Segment;
@@ -265,7 +266,7 @@ async fn fixture() -> Fixture {
     let last_user = Arc::new(Mutex::new(String::new()));
     let memory: Arc<dyn Memory> = Arc::new(InMemory::new());
     let agent = Arc::new(
-        Agent::builder(
+        BuiltinAgent::builder(
             "turns-test",
             Arc::new(Recorder {
                 last_user: last_user.clone(),

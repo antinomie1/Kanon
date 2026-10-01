@@ -7,6 +7,7 @@
 use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
+use kanon_llm::BuiltinAgent;
 use kanon_llm::tool_router::{ToolHost, json_to_prost_struct};
 use kanon_llm::{
     Agent, ChatRequest, ChatResponse, GatewayError, InMemory, LlmProvider, Memory, ToolCall,
@@ -117,7 +118,7 @@ async fn the_generated_file_is_delivered_but_its_path_never_reaches_the_model() 
     });
 
     let memory: Arc<dyn Memory> = Arc::new(InMemory::new());
-    let agent = Agent::builder("redaction", provider)
+    let agent = BuiltinAgent::builder("redaction", provider)
         .memory(memory)
         .max_iterations(3)
         .build();

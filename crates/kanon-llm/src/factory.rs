@@ -19,6 +19,7 @@ use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
 
 use crate::agent::{Agent, AgentConfig, AgentHook, AgentTool};
+use crate::builtin::BuiltinAgent;
 use crate::gateway::LlmProvider;
 use crate::memory::Memory;
 use crate::model::{ModelCatalog, ModelRef, ModelSpec};
@@ -82,7 +83,7 @@ pub struct AgentFactory {
     ///
     /// Bounded by the number of distinct models operators configure, and dropped wholesale when
     /// the directory changes so an override can never outlive the provider it was built for.
-    overrides: RwLock<HashMap<String, Arc<Agent>>>,
+    overrides: RwLock<HashMap<String, Arc<dyn Agent>>>,
 }
 
 impl std::fmt::Debug for AgentFactory {
@@ -236,7 +237,7 @@ impl AgentFactory {
         name: impl Into<String>,
         provider: Arc<dyn LlmProvider>,
         config: AgentConfig,
-    ) -> Arc<Agent> {
+    ) -> Arc<dyn Agent> {
         *self
             .direct
             .write()
@@ -281,7 +282,7 @@ impl AgentFactory {
     }
 
     /// Agent for the node's configured provider.
-    pub fn node_agent(&self) -> Option<Arc<Agent>> {
+    pub fn node_agent(&self) -> Option<Arc<dyn Agent>> {
         self.slot.current()
     }
 
@@ -290,7 +291,7 @@ impl AgentFactory {
     /// `None`, a blank reference, or the node's own default model all resolve to the default agent;
     /// anything else produces (and caches) an agent that shares everything except the endpoint,
     /// model id and model-specific tuning.
-    pub fn agent_for_model(&self, model: Option<&str>) -> Option<Arc<Agent>> {
+    pub fn agent_for_model(&self, model: Option<&str>) -> Option<Arc<dyn Agent>> {
         match model.map(str::trim).filter(|model| !model.is_empty()) {
             Some(requested) => self.agent_for_reference(&ModelRef::parse(requested)),
             // No override: the node's own agent serves the conversation.
@@ -299,7 +300,7 @@ impl AgentFactory {
     }
 
     /// Agent that should serve a conversation for one parsed model reference.
-    pub fn agent_for_reference(&self, reference: &ModelRef) -> Option<Arc<Agent>> {
+    pub fn agent_for_reference(&self, reference: &ModelRef) -> Option<Arc<dyn Agent>> {
         let default_agent = self.slot.current()?;
         if reference.is_empty() {
             return Some(default_agent);
@@ -391,7 +392,11 @@ impl AgentFactory {
     /// Used by the console sandbox, which may run a one-off request against credentials the
     /// operator typed without persisting them; such an agent must still see the same memory,
     /// sessions, personas and trace bus as the node's own.
-    pub fn build_with(&self, provider: Arc<dyn LlmProvider>, config: AgentConfig) -> Arc<Agent> {
+    pub fn build_with(
+        &self,
+        provider: Arc<dyn LlmProvider>,
+        config: AgentConfig,
+    ) -> Arc<dyn Agent> {
         Arc::new(self.build_agent(provider, config))
     }
 
@@ -426,7 +431,7 @@ impl AgentFactory {
     }
 
     /// Builds one agent sharing this factory's memory, sessions, personas and hooks.
-    fn build_agent(&self, provider: Arc<dyn LlmProvider>, config: AgentConfig) -> Agent {
+    fn build_agent(&self, provider: Arc<dyn LlmProvider>, config: AgentConfig) -> BuiltinAgent {
         self.build_agent_named(self.name.clone(), provider, config)
     }
 
@@ -436,10 +441,10 @@ impl AgentFactory {
         name: String,
         provider: Arc<dyn LlmProvider>,
         config: AgentConfig,
-    ) -> Agent {
+    ) -> BuiltinAgent {
         // The builder exposes fluent setters rather than a whole-config setter, so optional
         // sampling knobs are applied only when configured.
-        let mut builder = Agent::builder(name, provider)
+        let mut builder = BuiltinAgent::builder(name, provider)
             .memory(self.memory.clone())
             .session_manager(self.sessions.clone())
             .persona_registry(self.personas.clone())

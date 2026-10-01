@@ -15,10 +15,11 @@ use kanon_core::pipeline::{
 };
 use kanon_core::supervisor::Supervisor;
 use kanon_core::{AdapterError, PlatformAdapter, ReplyPolicy, ReplyPolicyStore};
+use kanon_llm::BuiltinAgent;
 use kanon_llm::gateway::types::{ChatRequest, ChatResponse};
 use kanon_llm::memory::{InMemory, Memory};
 use kanon_llm::tool_router::ToolRouter;
-use kanon_llm::{Agent, GatewayError, LlmProvider};
+use kanon_llm::{GatewayError, LlmProvider};
 use kanon_proto::v1::message_segment::Segment;
 use kanon_proto::v1::{
     DeliverMessageRequest, DeliverMessageResponse, FileSegment, ImageSegment, IngestEventRequest,
@@ -142,7 +143,7 @@ async fn delivered_lines(
         .expect("create instance");
     let memory: Arc<dyn Memory> = Arc::new(InMemory::new());
     let agent = Arc::new(
-        Agent::builder(
+        BuiltinAgent::builder(
             "line-test",
             Arc::new(MultilineProvider(
                 "first\r\n\r\n \t\n  second\nlast".to_string(),
@@ -377,7 +378,7 @@ async fn batch_engine(
         .await
         .expect("create instance");
     let agent = Arc::new(
-        Agent::builder("line-test", Arc::new(MultilineProvider(content)))
+        BuiltinAgent::builder("line-test", Arc::new(MultilineProvider(content)))
             .model("test-model")
             .build(),
     );

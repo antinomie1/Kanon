@@ -11,10 +11,11 @@ use kanon_core::instance::{InstanceDraft, InstanceRegistry, ItemPolicy};
 use kanon_core::pipeline::{PipelineEngine, PipelineObserver, PipelineResult, PipelineStage};
 use kanon_core::supervisor::{ManagedHost, Supervisor};
 use kanon_core::toggle::{PLUGIN_SECTION, ToggleStore};
+use kanon_llm::BuiltinAgent;
 use kanon_llm::gateway::types::{ChatRequest, ChatResponse};
 use kanon_llm::memory::{InMemory, Memory};
 use kanon_llm::tool_router::ToolRouter;
-use kanon_llm::{Agent, GatewayError, LlmProvider};
+use kanon_llm::{GatewayError, LlmProvider};
 use kanon_proto::v1::{PipelineEventRequest, PluginMeta};
 
 /// Provider that answers every turn and counts how often it was asked.
@@ -47,7 +48,7 @@ async fn harness(
     let calls = Arc::new(AtomicUsize::new(0));
     let memory: Arc<dyn Memory> = Arc::new(InMemory::new());
     let agent = Arc::new(
-        Agent::builder(
+        BuiltinAgent::builder(
             "gating-test",
             Arc::new(CountingProvider {
                 calls: calls.clone(),
@@ -313,7 +314,7 @@ async fn a_plugin_disabled_for_an_instance_is_removed_before_pre_filter() {
     let calls = Arc::new(AtomicUsize::new(0));
     let memory: Arc<dyn Memory> = Arc::new(InMemory::new());
     let agent = Arc::new(
-        Agent::builder(
+        BuiltinAgent::builder(
             "policy-test",
             Arc::new(CountingProvider {
                 calls: calls.clone(),
@@ -363,7 +364,7 @@ async fn an_unspecified_plugin_policy_keeps_the_host_in_the_pipeline() {
 
     let calls = Arc::new(AtomicUsize::new(0));
     let agent = Arc::new(
-        Agent::builder(
+        BuiltinAgent::builder(
             "policy-test",
             Arc::new(CountingProvider {
                 calls: calls.clone(),

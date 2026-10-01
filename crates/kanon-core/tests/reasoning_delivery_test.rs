@@ -4,10 +4,11 @@ use async_trait::async_trait;
 use kanon_core::pipeline::{PipelineEngine, PipelineResult};
 use kanon_core::supervisor::Supervisor;
 use kanon_core::{META_CONVERSATION_KIND, ReplyPolicy, ReplyPolicyStore};
+use kanon_llm::BuiltinAgent;
 use kanon_llm::gateway::types::{ChatRequest, ChatResponse};
 use kanon_llm::memory::InMemory;
 use kanon_llm::tool_router::ToolRouter;
-use kanon_llm::{Agent, GatewayError, LlmProvider};
+use kanon_llm::{GatewayError, LlmProvider};
 use kanon_proto::prost_types;
 use kanon_proto::v1::PipelineEventRequest;
 use kanon_proto::v1::message_segment::Segment;
@@ -36,7 +37,7 @@ async fn delivered_texts(
         ..ChatResponse::default()
     });
     let agent = Arc::new(
-        Agent::builder("fixture", Arc::new(provider))
+        BuiltinAgent::builder("fixture", Arc::new(provider))
             .memory(Arc::new(InMemory::new()))
             .compaction(None)
             .build(),

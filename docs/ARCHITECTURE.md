@@ -295,6 +295,7 @@ SDK 只是协议的封装：三语言提供同一套能力（命令、正则触�
 
 ### 8.1 核心职责与架构定位
 Rust 核心全权主导 LLM 的生命周期与推理编排，确保高并发下的 Token 预算控制与流式吞吐：
+- **Agent 抽象**：流水线、控制台聊天与插件网关从不直接驱动模型，而是把一轮对话交给 `kanon_llm::Agent`（trait：`run_message` / `run_stream` / `compact_session`，以及 `config`、`provider`、`memory`），并只依据其 `AgentOutput` 行事。节点目前只有一个实现——内置的 `BuiltinAgent`（`kanon-llm/src/builtin.rs`，基于 `LlmProvider` 的工具循环）；将来换用外部 Agent SDK 时只需新增实现并在 `AgentFactory` 中构建，流水线不变。实现必须遵守同一会话契约：历史仅追加、失败轮次留下可续接的历史、停止信号触发时及时结束。
 - **统一模型网关**：内置支持 OpenAI-compatible、DeepSeek、Claude、Ollama 等多端点协议，支持动态权重与故障自动重试。
 - **全局会话上下文管理 (Session Memory)**：
   - 基于 `channel_id:sender_id` 分配会话上下文，实例会话键为 `instance:<id>:<会话>#<代数>`（`/new` 使代数加一）。

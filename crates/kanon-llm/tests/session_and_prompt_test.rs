@@ -6,6 +6,7 @@ use std::time::Duration;
 use async_trait::async_trait;
 use tokio::sync::RwLock;
 
+use kanon_llm::BuiltinAgent;
 use kanon_llm::agent::Agent;
 use kanon_llm::error::GatewayError;
 use kanon_llm::gateway::LlmProvider;
@@ -68,7 +69,7 @@ async fn injected_system_context_survives_the_persona_hook() {
     let personas = Arc::new(PersonaRegistry::default());
     sessions.set_persona("session-1", "assistant");
 
-    let agent = Agent::builder(
+    let agent = BuiltinAgent::builder(
         "hook-order",
         Arc::new(RecordingProvider { seen: seen.clone() }),
     )
@@ -387,7 +388,7 @@ async fn test_agent_persona_hook_integration() {
         )
         .expect("registered");
 
-    let agent = Agent::builder("persona_agent", provider)
+    let agent = BuiltinAgent::builder("persona_agent", provider)
         .session_manager(session_mgr.clone())
         .persona_registry(persona_reg.clone())
         .build();
@@ -484,7 +485,7 @@ async fn the_persona_hook_owns_the_first_system_message() {
     session_mgr.set_persona("sess_1", "custom-bot");
 
     let hook = Arc::new(PersonaHook::new(session_mgr.clone(), persona_reg));
-    let agent = Agent::builder("hook_agent", provider)
+    let agent = BuiltinAgent::builder("hook_agent", provider)
         .memory(session_mgr.memory().clone())
         .hook_arc(hook)
         .build();

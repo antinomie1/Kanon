@@ -12,10 +12,11 @@ use async_trait::async_trait;
 use kanon_core::pipeline::{PipelineEngine, PipelineResult};
 use kanon_core::supervisor::{ManagedHost, Supervisor};
 use kanon_core::{AdapterError, Capability, PlatformAdapter};
+use kanon_llm::BuiltinAgent;
 use kanon_llm::gateway::types::{ChatRequest, ChatResponse, ToolCall};
 use kanon_llm::memory::{InMemory, Memory};
 use kanon_llm::tool_router::{ToolRouter, json_to_prost_struct};
-use kanon_llm::{Agent, GatewayError, LlmProvider};
+use kanon_llm::{GatewayError, LlmProvider};
 use kanon_proto::v1::message_pipeline_service_server::MessagePipelineServiceServer;
 use kanon_proto::v1::message_segment::Segment;
 use kanon_proto::v1::{
@@ -274,7 +275,7 @@ async fn drawing_turn(
 
     let memory: Arc<dyn Memory> = Arc::new(InMemory::new());
     let agent = Arc::new(
-        Agent::builder(
+        BuiltinAgent::builder(
             "attachment-test",
             Arc::new(DrawingProvider {
                 final_text,

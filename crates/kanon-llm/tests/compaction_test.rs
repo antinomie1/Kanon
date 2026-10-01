@@ -10,6 +10,7 @@ use std::time::Duration;
 use async_trait::async_trait;
 use tokio::sync::Notify;
 
+use kanon_llm::BuiltinAgent;
 use kanon_llm::agent::{Agent, NativeTool};
 use kanon_llm::error::{AgentError, GatewayError};
 use kanon_llm::gateway::LlmProvider;
@@ -130,9 +131,9 @@ impl LlmProvider for ScriptedProvider {
 
 /// An agent with a 1,000-token window (so compaction starts at 700 tokens), one native tool and the
 /// default persona.
-fn agent(provider: Arc<ScriptedProvider>, memory: Arc<InMemory>) -> Agent {
+fn agent(provider: Arc<ScriptedProvider>, memory: Arc<InMemory>) -> BuiltinAgent {
     let sessions = Arc::new(SessionManager::new(memory.clone()));
-    Agent::builder("compaction", provider)
+    BuiltinAgent::builder("compaction", provider)
         .memory(memory)
         .session_manager(sessions)
         .persona_registry(Arc::new(PersonaRegistry::default()))
@@ -199,7 +200,7 @@ async fn fallback_session_tokens_include_reasoning_but_reported_usage_remains_au
         });
         let memory = Arc::new(InMemory::new());
         let sessions = Arc::new(SessionManager::new(memory.clone()));
-        let agent = Agent::builder("accounting", provider)
+        let agent = BuiltinAgent::builder("accounting", provider)
             .memory(memory.clone())
             .session_manager(sessions.clone())
             .max_iterations(0)
@@ -232,7 +233,7 @@ async fn reasoning_triggers_compaction_when_completion_usage_is_missing_or_zero(
                 ..ScriptedProvider::new(0, SummaryMode::Summary("SUMMARY-TEXT"))
             });
             let memory = Arc::new(InMemory::new());
-            let agent = Agent::builder("accounting", provider.clone())
+            let agent = BuiltinAgent::builder("accounting", provider.clone())
                 .memory(memory.clone())
                 .max_iterations(0)
                 .context_length(Some(1_000))
@@ -407,7 +408,7 @@ async fn compaction_can_be_switched_off() {
     let provider = Arc::new(ScriptedProvider::new(900, SummaryMode::Summary("unused")));
     let memory = Arc::new(InMemory::new());
     let sessions = Arc::new(SessionManager::new(memory.clone()));
-    let agent = Agent::builder("off", provider.clone())
+    let agent = BuiltinAgent::builder("off", provider.clone())
         .memory(memory.clone())
         .session_manager(sessions)
         .model("m")

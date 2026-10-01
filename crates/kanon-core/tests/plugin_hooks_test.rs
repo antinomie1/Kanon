@@ -12,10 +12,11 @@ use async_trait::async_trait;
 use kanon_core::pipeline::{PipelineEngine, PipelineResult};
 use kanon_core::supervisor::{ManagedHost, Supervisor};
 use kanon_core::{AdapterError, Capability, META_NOTICE, PlatformAdapter};
+use kanon_llm::BuiltinAgent;
 use kanon_llm::gateway::types::{ChatRequest, ChatResponse};
 use kanon_llm::memory::{InMemory, Memory};
 use kanon_llm::tool_router::ToolRouter;
-use kanon_llm::{Agent, GatewayError, LlmProvider};
+use kanon_llm::{GatewayError, LlmProvider};
 use kanon_proto::prost_types::{self, value::Kind};
 use kanon_proto::v1::event_notification::Detail;
 use kanon_proto::v1::message_pipeline_service_server::MessagePipelineServiceServer;
@@ -258,7 +259,7 @@ async fn engine_with_host(
     let seen = register_hook_host(&supervisor, dir.path().join("host_hooks.sock"), events).await;
     let memory: Arc<dyn Memory> = Arc::new(InMemory::new());
     let agent = Arc::new(
-        Agent::builder("hooks-test", Arc::new(Echo))
+        BuiltinAgent::builder("hooks-test", Arc::new(Echo))
             .memory(memory)
             .model("test-model")
             .build(),

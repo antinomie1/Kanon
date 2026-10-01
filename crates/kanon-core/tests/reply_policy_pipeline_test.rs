@@ -14,12 +14,13 @@ use kanon_core::supervisor::Supervisor;
 use kanon_core::{
     META_BOT_MENTIONED, META_CONVERSATION_KIND, ReplyMode, ReplyPolicy, ReplyPolicyStore,
 };
+use kanon_llm::BuiltinAgent;
 use kanon_llm::gateway::types::{ChatRequest, ChatResponse};
 use kanon_llm::memory::{InMemory, Memory};
 use kanon_llm::tool_router::ToolRouter;
 use kanon_llm::{
-    Agent, AgentFactory, AgentSlot, GatewayError, LlmProvider, ModelSpec, PersonaRegistry,
-    ProviderEntry, ProviderRuntime, SessionManager,
+    AgentFactory, AgentSlot, GatewayError, LlmProvider, ModelSpec, PersonaRegistry, ProviderEntry,
+    ProviderRuntime, SessionManager,
 };
 use kanon_proto::prost_types;
 use kanon_proto::v1::PipelineEventRequest;
@@ -55,7 +56,7 @@ async fn harness(
     let calls = Arc::new(AtomicUsize::new(0));
     let memory: Arc<dyn Memory> = Arc::new(InMemory::new());
     let agent = Arc::new(
-        Agent::builder(
+        BuiltinAgent::builder(
             "policy-test",
             Arc::new(CountingProvider {
                 calls: calls.clone(),
@@ -558,7 +559,7 @@ fn context_harness(
     let requests = Arc::new(std::sync::Mutex::new(Vec::new()));
     let memory: Arc<dyn Memory> = Arc::new(InMemory::new());
     let agent = Arc::new(
-        Agent::builder(
+        BuiltinAgent::builder(
             "context-test",
             Arc::new(RecordingProvider {
                 requests: requests.clone(),

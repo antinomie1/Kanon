@@ -5,6 +5,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use tokio::sync::RwLock;
 
+use kanon_llm::BuiltinAgent;
 use kanon_llm::agent::{Agent, AgentConfig, AgentHook, NativeTool};
 use kanon_llm::gateway::LlmProvider;
 use kanon_llm::gateway::providers::{
@@ -249,7 +250,7 @@ async fn test_agent_builder_and_execution_with_custom_memory() {
     let provider = Arc::new(ScriptedLlmProvider::new(vec![turn1, turn2]));
     let custom_memory = Arc::new(CustomPluginMemory::new());
 
-    let agent = Agent::builder("translator_bot", provider.clone())
+    let agent = BuiltinAgent::builder("translator_bot", provider.clone())
         .system_prompt("You are a string transformation agent.")
         .memory(custom_memory.clone() as Arc<dyn Memory>)
         .model("agent-model-v1")
@@ -350,7 +351,7 @@ async fn test_agent_native_in_process_tool_and_standalone_run() {
         },
     );
 
-    let agent = Agent::builder("math_agent", provider)
+    let agent = BuiltinAgent::builder("math_agent", provider)
         .tool(multiply_tool)
         .build();
 
@@ -407,7 +408,9 @@ async fn test_agent_lifecycle_hooks_and_veto() {
 
     let provider = Arc::new(ScriptedLlmProvider::new(vec![turn1, turn2]));
 
-    let agent = Agent::builder("safety_agent", provider).hook(hook).build();
+    let agent = BuiltinAgent::builder("safety_agent", provider)
+        .hook(hook)
+        .build();
 
     let output = agent
         .run_standalone("sess_guardrail", "Delete all database tables")

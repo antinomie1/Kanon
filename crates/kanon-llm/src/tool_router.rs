@@ -12,6 +12,7 @@ use std::sync::Arc;
 use kanon_proto::v1::{PluginMeta, ToolCallRequest, ToolCallResponse};
 
 use crate::agent::Agent;
+use crate::builtin::BuiltinAgent;
 use crate::error::{AgentError, ToolRouterError};
 use crate::gateway::LlmProvider;
 use crate::gateway::types::ToolDefinition;
@@ -215,10 +216,11 @@ pub fn aggregate_tools(hosts: &[Arc<dyn ToolHost>]) -> Vec<ToolDefinition> {
 
 /// Central Tool Calling state machine router and execution loop.
 ///
-/// Serves as a specialized adapter around the core [`Agent`] engine for pipeline integration.
+/// Serves as a specialized adapter around an [`Agent`] for pipeline integration: it projects the
+/// agent's result and errors into the shape the pipeline acts on.
 #[derive(Clone)]
 pub struct ToolRouter {
-    agent: Arc<Agent>,
+    agent: Arc<dyn Agent>,
 }
 
 impl ToolRouter {
@@ -231,7 +233,7 @@ impl ToolRouter {
         memory: Arc<M>,
         default_model: impl Into<String>,
     ) -> Self {
-        let agent = Agent::builder("tool_router", gateway)
+        let agent = BuiltinAgent::builder("tool_router", gateway)
             .memory(memory as Arc<dyn Memory>)
             .model(default_model)
             .max_iterations(Self::DEFAULT_MAX_ITERATIONS)
@@ -242,21 +244,15 @@ impl ToolRouter {
     }
 
     /// Creates a `ToolRouter` wrapping an existing shared [`Agent`].
-    pub fn from_arc(agent: Arc<Agent>) -> Self {
+    pub fn from_arc(agent: Arc<dyn Agent>) -> Self {
         Self { agent }
     }
 
     /// Creates a `ToolRouter` wrapping an existing [`Agent`].
-    pub fn from_agent(agent: Agent) -> Self {
+    pub fn from_agent(agent: impl Agent + 'static) -> Self {
         Self {
             agent: Arc::new(agent),
         }
-    }
-
-    /// Overrides the maximum tool execution loop iterations.
-    pub fn with_max_iterations(mut self, max: usize) -> Self {
-        self.agent = Arc::new(self.agent.with_max_iterations(max));
-        self
     }
 
     /// Returns a reference to the active memory backend.
@@ -264,13 +260,13 @@ impl ToolRouter {
         self.agent.memory()
     }
 
-    /// Access to the underlying [`Agent`] engine.
-    pub fn agent(&self) -> &Agent {
+    /// Access to the underlying [`Agent`].
+    pub fn agent(&self) -> &Arc<dyn Agent> {
         &self.agent
     }
 
     /// Returns a cloned `Arc` of the underlying [`Agent`] engine.
-    pub fn agent_arc(&self) -> Arc<Agent> {
+    pub fn agent_arc(&self) -> Arc<dyn Agent> {
         Arc::clone(&self.agent)
     }
 

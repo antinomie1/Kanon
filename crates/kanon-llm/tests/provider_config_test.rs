@@ -4,8 +4,8 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use kanon_llm::{
-    Agent, AgentSlot, ChatRequest, ChatResponse, GatewayError, LlmProvider, SUPPORTED_PROTOCOLS,
-    build_provider,
+    AgentSlot, BuiltinAgent, ChatRequest, ChatResponse, GatewayError, LlmProvider,
+    SUPPORTED_PROTOCOLS, build_provider,
 };
 
 /// Minimal provider stub used to observe slot semantics.
@@ -24,9 +24,9 @@ impl LlmProvider for StubProvider {
     }
 }
 
-fn stub_agent(model: &str) -> Arc<Agent> {
+fn stub_agent(model: &str) -> Arc<BuiltinAgent> {
     Arc::new(
-        Agent::builder("slot-test", Arc::new(StubProvider))
+        BuiltinAgent::builder("slot-test", Arc::new(StubProvider))
             .model(model)
             .build(),
     )

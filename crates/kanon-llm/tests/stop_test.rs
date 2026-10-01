@@ -9,7 +9,9 @@ use async_trait::async_trait;
 use serde_json::json;
 use tokio::sync::Notify;
 
-use kanon_llm::agent::{Agent, NativeTool, STOPPED_TOOL_RESULT};
+use kanon_llm::BuiltinAgent;
+use kanon_llm::STOPPED_TOOL_RESULT;
+use kanon_llm::agent::{Agent, NativeTool};
 use kanon_llm::error::GatewayError;
 use kanon_llm::gateway::LlmProvider;
 use kanon_llm::gateway::types::{
@@ -62,7 +64,7 @@ impl Drop for SetOnDrop {
 }
 
 struct Fixture {
-    agent: Agent,
+    agent: BuiltinAgent,
     memory: Arc<InMemory>,
     waiting: Arc<Notify>,
     tool_dropped: Arc<AtomicBool>,
@@ -92,7 +94,7 @@ fn fixture() -> Fixture {
         )
     };
     let memory = Arc::new(InMemory::new());
-    let agent = Agent::builder(
+    let agent = BuiltinAgent::builder(
         "stop",
         Arc::new(Scripted {
             waiting: waiting.clone(),
@@ -241,7 +243,7 @@ async fn a_failed_turn_is_closed_so_the_next_message_does_not_restart_it() {
         },
         |_session, _args| async { Ok("stdlib ok".to_string()) },
     );
-    let agent = Agent::builder("failure", model.clone())
+    let agent = BuiltinAgent::builder("failure", model.clone())
         .memory(memory.clone())
         .model("test")
         .tool(quick)

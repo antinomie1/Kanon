@@ -6,6 +6,7 @@ use axum::routing::post;
 use std::net::SocketAddr;
 use tokio_stream::StreamExt;
 
+use kanon_llm::BuiltinAgent;
 use kanon_llm::gateway::LlmProvider;
 use kanon_llm::gateway::providers::{
     AnthropicMessagesProvider, OpenAiChatProvider, OpenAiResponsesProvider,
@@ -220,7 +221,7 @@ async fn test_agent_run_standalone_stream() {
 
     let memory: Arc<dyn kanon_llm::memory::Memory> = Arc::new(InMemory::new());
     let provider = Arc::new(MockAgentStreamProvider);
-    let agent = Agent::builder("stream_bot", provider)
+    let agent = BuiltinAgent::builder("stream_bot", provider)
         .system_prompt("You are a streaming bot.")
         .memory(memory.clone())
         .build();

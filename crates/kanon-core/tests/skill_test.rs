@@ -12,6 +12,7 @@ use async_trait::async_trait;
 use kanon_core::instance::{InstanceDraft, InstanceRegistry, ItemPolicy};
 use kanon_core::skill::{MAX_SKILL_BYTES, ReadSkillTool, SkillCatalogHook, SkillError, SkillStore};
 use kanon_core::toggle::{SKILL_SECTION, ToggleStore};
+use kanon_llm::BuiltinAgent;
 use kanon_llm::agent::{Agent, AgentHook, AgentTool};
 use kanon_llm::gateway::types::{ChatMessage, ChatRequest, ChatResponse, Role};
 use kanon_llm::memory::InMemory;
@@ -260,7 +261,7 @@ async fn the_skill_catalog_reaches_the_model_alongside_the_persona() {
     let personas = Arc::new(PersonaRegistry::default());
     sessions.set_persona("instance:ai:group:1:user:1#0", "assistant");
 
-    let agent = Agent::builder(
+    let agent = BuiltinAgent::builder(
         "catalog-integration",
         Arc::new(RecordingProvider { seen: seen.clone() }),
     )

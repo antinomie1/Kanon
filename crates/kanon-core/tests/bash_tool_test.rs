@@ -12,6 +12,7 @@ use kanon_core::{
     BashAvailabilityHook, BashCaller, BashPolicy, BashPolicyStore, BashTool, CommandPolicy,
     CommandPolicyStore, with_bash_caller,
 };
+use kanon_llm::BuiltinAgent;
 use kanon_llm::tool_router::ToolRouter;
 use kanon_llm::{
     Agent, AgentTool, ChatMessage, ChatRequest, ChatResponse, ContentPart, GatewayError, InMemory,
@@ -311,7 +312,7 @@ async fn pipeline_identity_enforces_permissions_even_when_the_model_calls_bash()
     let model = Arc::new(InsistentModel::default());
     let tool = Arc::new(bash(dir.path(), policy.clone()));
     let agent = Arc::new(
-        Agent::builder("bash", model.clone())
+        BuiltinAgent::builder("bash", model.clone())
             .model("test")
             .tool_arc(tool.clone())
             .hook(BashAvailabilityHook(tool.clone()))
@@ -436,7 +437,7 @@ async fn availability_keeps_history_and_compaction_prefix_intact() {
     let memory = Arc::new(InMemory::new());
     let model = Arc::new(LayoutModel::default());
     let tool = Arc::new(bash(dir.path(), policy.clone()));
-    let agent = Agent::builder("layout", model.clone())
+    let agent = BuiltinAgent::builder("layout", model.clone())
         .model("test")
         .memory(memory.clone())
         .tool_arc(tool.clone())
@@ -520,7 +521,7 @@ async fn streaming_enriches_the_user_message_once_before_persistence() {
     let memory = Arc::new(InMemory::new());
     let model = Arc::new(LayoutModel::default());
     let tool = Arc::new(bash(dir.path(), policy.clone()));
-    let agent = Agent::builder("stream-layout", model.clone())
+    let agent = BuiltinAgent::builder("stream-layout", model.clone())
         .model("test")
         .memory(memory.clone())
         .tool_arc(tool.clone())

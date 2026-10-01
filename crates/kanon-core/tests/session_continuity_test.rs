@@ -12,10 +12,11 @@ use async_trait::async_trait;
 use kanon_core::instance::{InstanceDraft, InstanceRegistry};
 use kanon_core::pipeline::{PipelineEngine, PipelineResult};
 use kanon_core::supervisor::Supervisor;
+use kanon_llm::BuiltinAgent;
 use kanon_llm::gateway::types::{ChatMessage, ChatRequest, ChatResponse, Role};
 use kanon_llm::tool_router::ToolRouter;
 use kanon_llm::{
-    Agent, GatewayError, LlmProvider, Persona, PersonaRegistry, SessionManager, SqliteMemory,
+    GatewayError, LlmProvider, Persona, PersonaRegistry, SessionManager, SqliteMemory,
     SqliteSessionStore,
 };
 use kanon_proto::v1::PipelineEventRequest;
@@ -68,7 +69,7 @@ async fn start(dir: &Path) -> Node {
 
     let provider = Arc::new(Recorder::default());
     let agent = Arc::new(
-        Agent::builder("continuity", provider.clone())
+        BuiltinAgent::builder("continuity", provider.clone())
             .memory(sessions.memory().clone())
             .session_manager(sessions.clone())
             .persona_registry(personas)

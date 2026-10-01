@@ -154,7 +154,7 @@ impl ApiState {
     ///
     /// Returns a snapshot of the live slot: callers always observe the provider that is
     /// configured *now*, which is what lets the console change it at runtime.
-    pub fn agent(&self) -> Option<Arc<Agent>> {
+    pub fn agent(&self) -> Option<Arc<dyn Agent>> {
         self.inner.factory.node_agent()
     }
 
@@ -162,12 +162,12 @@ impl ApiState {
     ///
     /// A blank or default model resolves to the node agent, so callers never need to compare
     /// model identifiers themselves.
-    pub fn agent_for_model(&self, model: Option<&str>) -> Option<Arc<Agent>> {
+    pub fn agent_for_model(&self, model: Option<&str>) -> Option<Arc<dyn Agent>> {
         self.inner.factory.agent_for_model(model)
     }
 
     /// Requires an agent runtime, failing with `503` when none is configured.
-    pub fn require_agent(&self) -> Result<Arc<Agent>, ApiError> {
+    pub fn require_agent(&self) -> Result<Arc<dyn Agent>, ApiError> {
         self.agent().ok_or_else(|| {
             ApiError::Unavailable(
                 "No LLM provider is configured for this core; chat completions are disabled"
@@ -221,7 +221,7 @@ impl ApiState {
         name: impl Into<String>,
         provider: Arc<dyn LlmProvider>,
         config: AgentConfig,
-    ) -> Arc<Agent> {
+    ) -> Arc<dyn Agent> {
         self.inner.factory.install(name, provider, config)
     }
 
@@ -494,7 +494,7 @@ pub struct ApiStateBuilder {
     personas: Option<Arc<PersonaRegistry>>,
     persona_store: Option<Arc<PersonaStore>>,
     memory: Option<Arc<dyn Memory>>,
-    agent: Option<Arc<Agent>>,
+    agent: Option<Arc<dyn Agent>>,
     pending_llm: Option<PendingLlm>,
     agent_slot: Option<Arc<AgentSlot>>,
     native_tools: Vec<Arc<dyn kanon_llm::AgentTool>>,
@@ -602,7 +602,7 @@ impl ApiStateBuilder {
     /// Prefer [`ApiStateBuilder::with_llm_provider`] unless the agent already carries its own
     /// lifecycle hooks: an agent built elsewhere will not publish tool-calling trace events.
     /// Ignored when an explicit slot is injected, which stays authoritative.
-    pub fn with_agent(mut self, agent: Arc<Agent>) -> Self {
+    pub fn with_agent(mut self, agent: Arc<dyn Agent>) -> Self {
         self.agent = Some(agent);
         self
     }

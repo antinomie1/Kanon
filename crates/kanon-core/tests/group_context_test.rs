@@ -15,10 +15,11 @@ use kanon_core::{
     META_BOT_MENTIONED, META_CONVERSATION_KIND, META_SENDER_NAME, ReplyMode, ReplyPolicy,
     ReplyPolicyStore, SessionScope,
 };
+use kanon_llm::BuiltinAgent;
 use kanon_llm::gateway::types::{ChatMessage, ChatRequest, ChatResponse};
 use kanon_llm::memory::{InMemory, Memory};
 use kanon_llm::tool_router::ToolRouter;
-use kanon_llm::{Agent, GatewayError, LlmProvider};
+use kanon_llm::{GatewayError, LlmProvider};
 use kanon_proto::prost_types::{self, value::Kind};
 use kanon_proto::v1::PipelineEventRequest;
 
@@ -64,7 +65,7 @@ async fn harness(scope: SessionScope, observe: bool) -> (Arc<PipelineEngine>, Re
     let requests: Requests = Arc::default();
     let memory: Arc<dyn Memory> = Arc::new(InMemory::new());
     let agent = Arc::new(
-        Agent::builder(
+        BuiltinAgent::builder(
             "group-test",
             Arc::new(RecordingProvider {
                 requests: requests.clone(),

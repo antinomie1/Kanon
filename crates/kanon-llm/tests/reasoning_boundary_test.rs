@@ -2,6 +2,7 @@
 
 use async_trait::async_trait;
 use axum::{Json, Router, routing::post};
+use kanon_llm::BuiltinAgent;
 use kanon_llm::{
     Agent, ChatChunk, ChatChunkStream, ChatMessage, ChatRequest, ChatResponse, GatewayError,
     InMemory, LlmProvider, Memory, NativeTool, OpenAiChatProvider, Role, SqliteMemory,
@@ -64,7 +65,7 @@ async fn all_retained_tool_rounds_replay_reasoning_after_restart() {
     let provider = kanon_llm::build_provider("openai_reasoning", url, None, "fixture").unwrap();
     {
         let memory = Arc::new(SqliteMemory::open(&path).unwrap());
-        let agent = Agent::builder("fixture", provider.clone())
+        let agent = BuiltinAgent::builder("fixture", provider.clone())
             .memory(memory.clone())
             .tool(tool())
             .compaction(None)
@@ -96,7 +97,7 @@ async fn all_retained_tool_rounds_replay_reasoning_after_restart() {
         }
     }
     let memory = Arc::new(SqliteMemory::open(&path).unwrap());
-    let agent = Agent::builder("fixture", provider)
+    let agent = BuiltinAgent::builder("fixture", provider)
         .memory(memory)
         .tool(tool())
         .compaction(None)
@@ -248,7 +249,7 @@ async fn empty_final_responses_are_not_persisted_in_either_agent_entrypoint() {
                 ..ChatResponse::default()
             };
             let memory = Arc::new(InMemory::new());
-            let agent = Agent::builder("fixture", Arc::new(FinalResponseFixture(response)))
+            let agent = BuiltinAgent::builder("fixture", Arc::new(FinalResponseFixture(response)))
                 .memory(memory.clone())
                 // Offering a tool selects the non-streaming preflight in run_stream.
                 .tool(NativeTool::new(
@@ -441,7 +442,7 @@ async fn empty_streams_complete_without_appending_blank_assistant_history() {
             .await
             .unwrap();
         let sessions = Arc::new(kanon_llm::SessionManager::new(memory.clone()));
-        let agent = Agent::builder(
+        let agent = BuiltinAgent::builder(
             "fixture",
             Arc::new(StreamFixture {
                 chunks,
@@ -509,7 +510,7 @@ async fn streaming_separates_fragmented_legacy_envelopes_and_persists_both_chann
         chunks.extend(text.chars().map(|ch| ChatChunk::delta(ch.to_string())));
         chunks.push(ChatChunk::done(Some("stop".into())));
         let memory = Arc::new(InMemory::new());
-        let agent = Agent::builder(
+        let agent = BuiltinAgent::builder(
             "fixture",
             Arc::new(StreamFixture {
                 chunks,
@@ -559,7 +560,8 @@ async fn final_chunk_data_is_delivered_and_broken_legacy_streams_never_leak() {
                 ..ChatChunk::done(Some("stop".into()))
             }]
         };
-        let agent = Agent::builder("fixture", Arc::new(StreamFixture { chunks, fail })).build();
+        let agent =
+            BuiltinAgent::builder("fixture", Arc::new(StreamFixture { chunks, fail })).build();
         let mut stream = agent.run_standalone_stream("s", "question").await.unwrap();
         let mut answer = String::new();
         let mut error = false;
@@ -784,7 +786,7 @@ async fn responses_refusal_deltas_are_visible_and_persisted_once() {
         ))
         .await;
         let memory = Arc::new(InMemory::new());
-        let agent = Agent::builder(
+        let agent = BuiltinAgent::builder(
             "fixture",
             Arc::new(kanon_llm::OpenAiResponsesProvider::new("").with_base_url(url)),
         )
@@ -820,7 +822,7 @@ async fn responses_refusal_content_is_retained_in_non_streaming_replies() {
         Json(json!({"output":[{"type":"message","role":"assistant","content":[{"type":"refusal","refusal":"synthetic refusal"}]}],"status":"completed"}))
     }))).await;
     let memory = Arc::new(InMemory::new());
-    let agent = Agent::builder(
+    let agent = BuiltinAgent::builder(
         "fixture",
         Arc::new(kanon_llm::OpenAiResponsesProvider::new("").with_base_url(url)),
     )
@@ -891,7 +893,7 @@ async fn replay_toggle_preserves_history_and_new_reasoning_across_restarts() {
                     .provider;
                 let memory = Arc::new(SqliteMemory::open(&path).unwrap());
                 let before = memory.get_messages("s").await.unwrap();
-                let agent = Agent::builder("fixture", provider)
+                let agent = BuiltinAgent::builder("fixture", provider)
                     .memory(memory.clone())
                     .compaction(None)
                     .build();
@@ -1000,7 +1002,7 @@ async fn protocol_reasoning_keeps_literal_answer_tags_through_streams_and_restar
             let path = dir.path().join("sessions.db");
             {
                 let memory = Arc::new(SqliteMemory::open(&path).unwrap());
-                let agent = Agent::builder(
+                let agent = BuiltinAgent::builder(
                     "fixture",
                     Arc::new(OpenAiChatProvider::new(url, None, "fixture")),
                 )

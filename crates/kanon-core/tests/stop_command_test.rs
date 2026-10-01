@@ -11,10 +11,11 @@ use kanon_core::instance::{InstanceDraft, InstanceRegistry};
 use kanon_core::pipeline::PipelineEngine;
 use kanon_core::supervisor::Supervisor;
 use kanon_core::{CommandPolicy, CommandPolicyStore};
+use kanon_llm::BuiltinAgent;
 use kanon_llm::gateway::types::{ChatRequest, ChatResponse};
 use kanon_llm::memory::{InMemory, Memory};
 use kanon_llm::tool_router::ToolRouter;
-use kanon_llm::{Agent, GatewayError, LlmProvider};
+use kanon_llm::{GatewayError, LlmProvider};
 use kanon_proto::v1::message_segment::Segment;
 use kanon_proto::v1::{DeliverMessageRequest, IngestEventRequest, PipelineEventRequest};
 use tokio::sync::{Notify, mpsc};
@@ -95,7 +96,7 @@ async fn an_admins_stop_ends_the_running_turn_and_the_chat_goes_on() {
     let waiting = Arc::new(Notify::new());
     let memory: Arc<dyn Memory> = Arc::new(InMemory::new());
     let agent = Arc::new(
-        Agent::builder(
+        BuiltinAgent::builder(
             "stop-test",
             Arc::new(Stuck {
                 waiting: waiting.clone(),

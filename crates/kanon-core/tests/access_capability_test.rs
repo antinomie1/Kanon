@@ -13,10 +13,11 @@ use kanon_core::{
     EventPolicyStore, META_BOT_MENTIONED, META_CONVERSATION_KIND, META_NOTICE, META_SENDER_ROLE,
     PlatformAdapter, ReplyPolicy, ReplyPolicyStore,
 };
+use kanon_llm::BuiltinAgent;
 use kanon_llm::gateway::types::{ChatRequest, ChatResponse};
 use kanon_llm::memory::{InMemory, Memory};
 use kanon_llm::tool_router::ToolRouter;
-use kanon_llm::{Agent, GatewayError, LlmProvider};
+use kanon_llm::{GatewayError, LlmProvider};
 use kanon_proto::prost_types::{self, value::Kind};
 use kanon_proto::v1::message_segment::Segment;
 use kanon_proto::v1::{DeliverMessageRequest, DeliverMessageResponse, PipelineEventRequest};
@@ -103,7 +104,7 @@ async fn harness(
         .expect("create instance");
     let memory: Arc<dyn Memory> = Arc::new(InMemory::new());
     let agent = Arc::new(
-        Agent::builder("access-test", Arc::new(Echo))
+        BuiltinAgent::builder("access-test", Arc::new(Echo))
             .memory(memory)
             .model("test-model")
             .build(),
