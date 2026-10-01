@@ -1,730 +1,176 @@
 <script lang="ts">
-import {
-  AlertCircle,
-  Bot,
-  CheckCircle2,
-  Cpu,
-  MessageSquarePlus,
-  Pencil,
-  Plus,
-  Power,
-  Trash2,
-  X,
-} from 'lucide-svelte';
-import { describeContextPolicy } from '../../stores/contextPolicy.svelte';
+import { Boxes, Plus } from 'lucide-svelte';
+import { untrack } from 'svelte';
+import { confirmDialog } from '../../stores/confirm.svelte';
 import { t } from '../../stores/i18n.svelte';
-import type { PolicyKind } from '../../stores/instances.svelte';
 import { instancesStore } from '../../stores/instances.svelte';
-import { modelsStore } from '../../stores/models.svelte';
-import { describeReplyPolicy } from '../../stores/replyPolicy.svelte';
-import type { BashScope, ItemPolicy } from '../../types';
-import CommandPolicyEditor from '../ui/CommandPolicyEditor.svelte';
-import SupportBadge from '../ui/SupportBadge.svelte';
+import { router } from '../../stores/router.svelte';
+import InstanceEditor from '../instances/InstanceEditor.svelte';
+import EmptyState from '../ui/EmptyState.svelte';
+import PageHead from '../ui/PageHead.svelte';
 
-/** Policy kinds in the order the form renders them. */
-const policyKinds: PolicyKind[] = ['plugins', 'skills', 'mcp'];
+const instances = $derived(instancesStore.instances);
+const loaded = $derived(instancesStore.catalog !== null);
 
-/** Three-way choices offered per item. */
-const policyChoices: { value: ItemPolicy; labelKey: string }[] = [
-  { value: 'inherit', labelKey: 'instances.policy_inherit' },
-  { value: 'enable', labelKey: 'instances.policy_enable' },
-  { value: 'disable', labelKey: 'instances.policy_disable' },
-];
+/** Route parameter the editor currently shows (an instance id or `new`). */
+let openedFor = $state<string | null>(null);
+/** Set when the route names an instance the catalog does not have. */
+let missing = $state<string | null>(null);
 
-/** Reply-policy choices, in the order the form renders them. */
-const replyChoices: { value: string; labelKey: string }[] = [
-  { value: 'inherit', labelKey: 'reply.inherit' },
-  { value: 'always', labelKey: 'reply.mode_always' },
-  { value: 'mention', labelKey: 'reply.mode_mention' },
-  { value: 'probability', labelKey: 'reply.mode_probability' },
-  { value: 'never', labelKey: 'reply.mode_never' },
-];
+/**
+ * Follows the route: `#/instances/<id>` edits that instance, `#/instances/new` creates one, and
+ * the bare page selects the first instance. Leaving a draft with unsaved changes asks first, and
+ * answering "keep editing" puts the address back.
+ */
+async function follow(param: string | null) {
+  if (param !== null && param === openedFor && instancesStore.isFormOpen)
+    return;
 
-/** Bash scopes in the order the selector lists them, with the hint shown for each. */
-const bashScopes: { value: BashScope; labelKey: string; hintKey: string }[] = [
-  {
-    value: 'disabled',
-    labelKey: 'instances.bash_disabled',
-    hintKey: 'instances.bash_disabled_hint',
-  },
-  {
-    value: 'own_context',
-    labelKey: 'instances.bash_own',
-    hintKey: 'instances.bash_own_hint',
-  },
-  {
-    value: 'shared_context',
-    labelKey: 'instances.bash_shared',
-    hintKey: 'instances.bash_shared_hint',
-  },
-];
+  if (param === null) {
+    const first = instancesStore.instances[0];
+    if (first) router.replaceParam(first.id);
+    return;
+  }
 
-/** Console label of a Bash scope. */
-function bashLabelKey(scope: BashScope): string {
-  return bashScopes.find((choice) => choice.value === scope)?.labelKey ?? '';
-}
+  if (openedFor !== null && instancesStore.changeCount > 0) {
+    const leave = await confirmDialog({
+      title: t('instances.discard_title'),
+      message: t('instances.discard_text'),
+      confirm: t('instances.discard_confirm'),
+      cancel: t('instances.keep_editing'),
+    });
+    if (!leave) {
+      router.replaceParam(openedFor);
+      return;
+    }
+  }
 
-/** Hint for the Bash scope currently selected in the form. */
-const bashHintKey = $derived(
-  bashScopes.find((choice) => choice.value === instancesStore.formBash)
-    ?.hintKey ?? '',
-);
-
-/** Section heading key for one policy kind. */
-function policyTitleKey(kind: PolicyKind): string {
-  switch (kind) {
-    case 'plugins':
-      return 'instances.section_plugins';
-    case 'skills':
-      return 'instances.section_skills';
-    case 'mcp':
-      return 'instances.section_mcp';
+  missing = null;
+  if (param === 'new') {
+    instancesStore.openCreate();
+    openedFor = 'new';
+    return;
+  }
+  const instance = instancesStore.find(param);
+  if (instance) {
+    instancesStore.openEdit(instance);
+    openedFor = param;
+  } else {
+    instancesStore.closeForm();
+    openedFor = null;
+    missing = param;
   }
 }
 
-// Load once when the view mounts; the catalog is small and changes only through this view. The
-// model catalog is loaded alongside it so the model picker can offer canonical references.
 $effect(() => {
-  void instancesStore.load();
-  void modelsStore.load();
+  const param = router.param;
+  if (!loaded) return;
+  untrack(() => void follow(param));
 });
+
+function select(id: string) {
+  if (id === openedFor) return;
+  router.navigate('instances', id);
+}
+
+/** Called by the editor after a save or delete moved the selection. */
+function onSaved(id: string) {
+  openedFor = id;
+  router.replaceParam(id);
+}
+
+function onDeleted() {
+  openedFor = null;
+  router.navigate('instances');
+}
 </script>
 
-<div class="p-6 space-y-6 max-w-7xl mx-auto font-sans">
-  <!-- Gate banner: this is the switch that decides whether anything is answered at all. -->
-  <div
-    class="border rounded-xl p-4 sm:p-5 shadow-xs flex flex-wrap items-start justify-between gap-4
-      {instancesStore.enabledCount > 0
-      ? 'bg-white dark:bg-zinc-900 border-zinc-200 dark:border-zinc-800'
-      : 'bg-amber-50 dark:bg-amber-950/30 border-amber-300 dark:border-amber-800'}"
-  >
-    <div class="flex items-start gap-3.5">
-      <div
-        class="p-2.5 rounded-xl {instancesStore.enabledCount > 0
-          ? 'bg-emerald-500/10 text-emerald-600 dark:text-emerald-400'
-          : 'bg-amber-500/15 text-amber-600 dark:text-amber-400'}"
-      >
-        <Bot class="w-6 h-6" />
-      </div>
-      <div>
-        <div class="flex items-center gap-2.5 flex-wrap">
-          <span class="text-sm text-zinc-500 font-medium">{t('instances.gate_label')}</span>
-          {#if instancesStore.enabledCount > 0}
-            <code
-              class="px-2.5 py-1 rounded-lg font-mono text-sm font-bold bg-emerald-50 dark:bg-emerald-950/80 text-emerald-600 dark:text-emerald-400 border border-emerald-200 dark:border-emerald-800/60"
-            >
-              {instancesStore.enabledCount} / {instancesStore.instances.length}
-            </code>
-          {:else}
-            <span class="text-sm font-medium text-amber-700 dark:text-amber-300">
-              {t('instances.gate_none')}
-            </span>
-          {/if}
-        </div>
-        <p class="text-xs text-zinc-500 mt-1 leading-relaxed">
-          {t('instances.gate_hint')}
-        </p>
-      </div>
-    </div>
-
-    <button
-      onclick={() => instancesStore.openCreate()}
-      class="px-3.5 py-2 bg-indigo-600 hover:bg-indigo-700 text-white rounded-lg text-sm font-medium flex items-center gap-2 transition cursor-pointer shadow-2xs"
-    >
-      <Plus class="w-4 h-4" />
-      <span>{t('instances.new')}</span>
+<PageHead title={t('nav.instances')}>
+  {#snippet sub()}
+    {#if loaded}
+      <span>
+        {t('instances.summary', {
+          total: instances.length,
+          on: instancesStore.enabledCount,
+        })}
+      </span>
+    {/if}
+  {/snippet}
+  {#snippet actions()}
+    <button type="button" class="btn btn-primary" onclick={() => router.navigate('instances', 'new')}>
+      <Plus size={16} strokeWidth={2.6} />
+      {t('instances.new')}
     </button>
-  </div>
+  {/snippet}
+</PageHead>
 
+{#if !loaded}
   {#if instancesStore.error}
-    <p class="text-sm text-rose-600 dark:text-rose-400 flex items-center gap-2">
-      <AlertCircle class="w-4 h-4" /> {instancesStore.error}
-    </p>
-  {/if}
-  {#if instancesStore.notice}
-    <p class="text-sm text-emerald-600 dark:text-emerald-400 flex items-center gap-2">
-      <CheckCircle2 class="w-4 h-4" /> {instancesStore.notice}
-    </p>
-  {/if}
-
-  <!-- Instance list -->
-  {#if instancesStore.loading && instancesStore.instances.length === 0}
-    <p class="text-sm text-zinc-400">{t('instances.loading')}</p>
-  {:else if instancesStore.instances.length === 0}
-    <div
-      class="bg-white dark:bg-zinc-900 border border-zinc-200 dark:border-zinc-800 rounded-2xl p-12 text-center shadow-xs space-y-5"
-    >
-      <div
-        class="w-16 h-16 rounded-2xl bg-zinc-100 dark:bg-zinc-800 border border-zinc-200 dark:border-zinc-700 flex items-center justify-center mx-auto text-zinc-400"
-      >
-        <Bot class="w-8 h-8 stroke-[1.5]" />
-      </div>
-      <div class="max-w-lg mx-auto space-y-2">
-        <h3 class="text-lg font-semibold text-zinc-900 dark:text-zinc-100">
-          {t('instances.empty_title')}
-        </h3>
-        <p class="text-sm text-zinc-500 leading-relaxed">{t('instances.empty_hint')}</p>
-      </div>
-      <button
-        onclick={() => instancesStore.openCreate()}
-        class="px-5 py-2.5 bg-indigo-600 hover:bg-indigo-700 text-white rounded-xl text-sm font-medium inline-flex items-center gap-2 transition cursor-pointer shadow-xs"
-      >
-        <Plus class="w-4.5 h-4.5" />
-        <span>{t('instances.new')}</span>
-      </button>
-    </div>
+    <div class="notice notice-bad">{instancesStore.error}</div>
   {:else}
-    <div class="grid grid-cols-1 gap-4">
-      {#each instancesStore.instances as instance (instance.id)}
-        <div
-          class="bg-white dark:bg-zinc-900 border border-zinc-200 dark:border-zinc-800 rounded-xl p-4 sm:p-5 shadow-xs space-y-4"
+    <p class="m-0 px-1 hint">{t('common.loading')}</p>
+  {/if}
+{:else if instances.length === 0 && openedFor !== 'new'}
+  <div class="card">
+    <EmptyState icon={Boxes} title={t('home.empty_title')} text={t('home.empty_text')}>
+      {#snippet action()}
+        <button type="button" class="btn btn-primary" onclick={() => router.navigate('instances', 'new')}>
+          <Plus size={16} strokeWidth={2.6} />
+          {t('instances.new')}
+        </button>
+      {/snippet}
+    </EmptyState>
+  </div>
+{:else}
+  <div class="grid items-start gap-4 lg:grid-cols-[264px_minmax(0,1fr)]">
+    <nav class="card flex flex-col gap-0.5 p-2" aria-label={t('nav.instances')}>
+      {#each instances as instance (instance.id)}
+        {@const on = instance.id === openedFor}
+        {@const trouble =
+          instance.enabled && instance.adapter_status.some((s) => !(s.known && s.connected))}
+        <a
+          href="#/instances/{encodeURIComponent(instance.id)}"
+          aria-current={on ? 'page' : undefined}
+          onclick={(e) => {
+            e.preventDefault();
+            select(instance.id);
+          }}
+          class="flex flex-col rounded-xl px-3 py-2.5 leading-[1.35] text-fg no-underline {on
+            ? 'bg-accent-tint'
+            : 'hover:bg-sunk'}"
         >
-          <div class="flex flex-wrap items-start justify-between gap-4">
-            <div class="flex items-start gap-3.5">
-              <div
-                class="p-2.5 rounded-xl {instance.enabled
-                  ? 'bg-emerald-500/10 text-emerald-600 dark:text-emerald-400'
-                  : 'bg-zinc-100 dark:bg-zinc-800 text-zinc-400'}"
-              >
-                <Bot class="w-5 h-5" />
-              </div>
-              <div>
-                <div class="flex items-center gap-2.5 flex-wrap">
-                  <span class="font-semibold text-zinc-900 dark:text-zinc-100">{instance.name}</span>
-                  <code class="text-xs font-mono text-zinc-400">{instance.id}</code>
-                  <span
-                    class="px-2 py-0.5 rounded-md text-xs font-medium border
-                      {instance.enabled
-                      ? 'border-emerald-200 dark:border-emerald-800/60 text-emerald-600 dark:text-emerald-400 bg-emerald-50 dark:bg-emerald-950/60'
-                      : 'border-zinc-200 dark:border-zinc-700 text-zinc-500'}"
-                  >
-                    {instance.enabled ? t('instances.running') : t('instances.stopped')}
-                  </span>
-                </div>
-
-                <div class="flex flex-wrap items-center gap-2 mt-2">
-                  {#each instance.adapter_status as adapter (adapter.platform)}
-                    <span
-                      class="px-2 py-0.5 rounded-md text-xs font-mono border flex items-center gap-1.5
-                        {adapter.known && adapter.connected
-                        ? 'border-emerald-200 dark:border-emerald-800/60 text-emerald-600 dark:text-emerald-400'
-                        : 'border-zinc-200 dark:border-zinc-700 text-zinc-500'}"
-                      title={adapter.known
-                        ? `${adapter.display_name} (${adapter.kind})`
-                        : t('instances.adapter_unknown')}
-                    >
-                      <span
-                        class="w-1.5 h-1.5 rounded-full {adapter.known && adapter.connected
-                          ? 'bg-emerald-500'
-                          : 'bg-zinc-400'}"
-                      ></span>
-                      {adapter.platform}
-                    </span>
-                  {/each}
-                  {#if instance.adapters.length === 0}
-                    <span class="text-xs text-zinc-400">{t('instances.no_adapter')}</span>
-                  {/if}
-                </div>
-
-                <div class="flex flex-wrap items-center gap-3 mt-2 text-xs text-zinc-500">
-                  <span class="flex items-center gap-1.5">
-                    <Cpu class="w-3.5 h-3.5" />
-                    {instance.model ?? t('instances.model_default')}
-                  </span>
-                  {#if instance.reply_policy}
-                    <span>
-                      · {t('instances.reply_policy_badge', {
-                        policy: describeReplyPolicy(instance.reply_policy),
-                      })}
-                    </span>
-                  {:else}
-                    <span>· {t('instances.reply_policy')}: {t('reply.inherit')}</span>
-                  {/if}
-                  {#if instance.persona_id}
-                    <span>· {t('instances.persona_label')}: {instance.persona_id}</span>
-                  {/if}
-                  {#if instance.system_prompt}
-                    <span>· {t('instances.custom_prompt')}</span>
-                  {/if}
-                  {#if instance.command_policy}
-                    <span>· {t('instances.own_commands')}</span>
-                  {/if}
-                  {#if instance.bash !== 'own_context'}
-                    <span>· Bash: {t(bashLabelKey(instance.bash))}</span>
-                  {/if}
-                  {#if instancesStore.overrideCount(instance) > 0}
-                    <span>
-                      ·
-                      {t('instances.overrides').replace(
-                        '{count}',
-                        String(instancesStore.overrideCount(instance)),
-                      )}
-                    </span>
-                  {/if}
-                </div>
-              </div>
-            </div>
-
-            <div class="flex items-center gap-2">
-              <button
-                onclick={() => instancesStore.toggleEnabled(instance)}
-                disabled={instancesStore.saving}
-                class="px-3 py-1.5 rounded-lg text-xs font-medium border transition cursor-pointer disabled:opacity-50
-                  {instance.enabled
-                  ? 'border-zinc-200 dark:border-zinc-700 text-zinc-600 dark:text-zinc-300 hover:border-zinc-400'
-                  : 'border-emerald-300 dark:border-emerald-800 text-emerald-600 dark:text-emerald-400 hover:bg-emerald-50 dark:hover:bg-emerald-950/40'}"
-              >
-                <span class="flex items-center gap-1.5">
-                  <Power class="w-3.5 h-3.5" />
-                  {instance.enabled ? t('instances.stop') : t('instances.start')}
-                </span>
-              </button>
-              <button
-                onclick={() => instancesStore.openEdit(instance)}
-                class="p-1.5 rounded-lg text-zinc-500 hover:text-indigo-600 hover:bg-zinc-100 dark:hover:bg-zinc-800 transition cursor-pointer"
-                title={t('instances.edit')}
-              >
-                <Pencil class="w-4 h-4" />
-              </button>
-              <button
-                onclick={() => instancesStore.remove(instance.id)}
-                disabled={instancesStore.saving}
-                class="p-1.5 rounded-lg text-zinc-500 hover:text-rose-600 hover:bg-rose-50 dark:hover:bg-rose-950/30 transition cursor-pointer disabled:opacity-50"
-                title={t('instances.delete')}
-              >
-                <Trash2 class="w-4 h-4" />
-              </button>
-            </div>
-          </div>
-        </div>
+          <span class="truncate text-[15px] font-extrabold {on ? 'text-accent-fg' : ''}">{instance.name}</span>
+          <span class="flex items-center gap-1.5 text-[12.5px] whitespace-nowrap text-fg2">
+            {#if !instance.enabled}
+              {t('instances.state_off')}
+            {:else if trouble}
+              <i class="dot dot-warn"></i>{t('instances.state_trouble')}
+            {:else}
+              <i class="dot dot-ok"></i>{t('instances.state_on')}
+            {/if}
+          </span>
+        </a>
       {/each}
-    </div>
-  {/if}
-
-  <!-- Create / edit modal -->
-  {#if instancesStore.isFormOpen}
-    <div class="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/40 backdrop-blur-sm">
-      <div
-        class="bg-white dark:bg-zinc-900 border border-zinc-200 dark:border-zinc-800 rounded-2xl shadow-xl w-full max-w-2xl max-h-[90vh] overflow-y-auto"
-      >
-        <div
-          class="flex items-center justify-between px-5 py-4 border-b border-zinc-200 dark:border-zinc-800"
-        >
-          <h3 class="text-base font-semibold text-zinc-900 dark:text-zinc-100">
-            {instancesStore.editingId ? t('instances.edit_title') : t('instances.new_title')}
-          </h3>
-          <button
-            onclick={() => instancesStore.closeForm()}
-            class="p-1.5 rounded-lg text-zinc-400 hover:text-zinc-700 dark:hover:text-zinc-200 transition cursor-pointer"
-          >
-            <X class="w-4.5 h-4.5" />
-          </button>
+      {#if openedFor === 'new'}
+        <div class="flex flex-col rounded-xl bg-accent-tint px-3 py-2.5 leading-[1.35]">
+          <span class="truncate text-[15px] font-extrabold text-accent-fg">
+            {instancesStore.formName.trim() || t('instances.new_unnamed')}
+          </span>
+          <span class="text-[12.5px] text-fg2">{t('instances.state_draft')}</span>
         </div>
+      {/if}
+    </nav>
 
-        <div class="p-5 space-y-5">
-          {#if instancesStore.error}
-            <p class="text-sm text-rose-600 dark:text-rose-400 flex items-center gap-2">
-              <AlertCircle class="w-4 h-4" /> {instancesStore.error}
-            </p>
-          {/if}
-
-          <div class="grid grid-cols-1 sm:grid-cols-2 gap-4">
-            <label class="space-y-1.5">
-              <span class="text-xs font-medium text-zinc-500">{t('instances.field_name')}</span>
-              <input
-                bind:value={instancesStore.formName}
-                placeholder="黑猪AI"
-                class="w-full px-3 py-2 text-sm bg-zinc-50 dark:bg-zinc-800 border border-zinc-200 dark:border-zinc-700 rounded-lg focus:outline-hidden focus:border-indigo-400"
-              />
-            </label>
-            <label class="space-y-1.5">
-              <span class="text-xs font-medium text-zinc-500">{t('instances.field_enabled')}</span>
-              <button
-                type="button"
-                onclick={() => (instancesStore.formEnabled = !instancesStore.formEnabled)}
-                class="w-full px-3 py-2 text-sm rounded-lg border transition cursor-pointer flex items-center justify-between
-                  {instancesStore.formEnabled
-                  ? 'border-emerald-300 dark:border-emerald-800 text-emerald-600 dark:text-emerald-400 bg-emerald-50 dark:bg-emerald-950/40'
-                  : 'border-zinc-200 dark:border-zinc-700 text-zinc-500'}"
-              >
-                <span>{instancesStore.formEnabled ? t('instances.running') : t('instances.stopped')}</span>
-                <Power class="w-4 h-4" />
-              </button>
-            </label>
-          </div>
-
-          <div class="space-y-2">
-            <span class="text-xs font-medium text-zinc-500">{t('instances.field_adapters')}</span>
-            <p class="text-xs text-zinc-400">{t('instances.adapters_hint')}</p>
-            <div class="flex flex-wrap gap-2">
-              {#each instancesStore.adapters as adapter (adapter.platform)}
-                {@const owner = instancesStore.ownerOf(adapter.platform)}
-                <button
-                  type="button"
-                  onclick={() => instancesStore.toggleAdapter(adapter.platform)}
-                  disabled={Boolean(owner)}
-                  title={owner ? t('instances.adapter_taken').replace('{name}', owner) : adapter.display_name}
-                  class="px-3 py-1.5 rounded-lg text-xs font-mono border transition cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed
-                    {instancesStore.formAdapters.includes(adapter.platform)
-                    ? 'border-indigo-400 text-indigo-600 dark:text-indigo-400 bg-indigo-50 dark:bg-indigo-950/40'
-                    : 'border-zinc-200 dark:border-zinc-700 text-zinc-600 dark:text-zinc-300'}"
-                >
-                  <span class="flex items-center gap-1.5">
-                    <span
-                      class="w-1.5 h-1.5 rounded-full {adapter.connected ? 'bg-emerald-500' : 'bg-zinc-400'}"
-                    ></span>
-                    {adapter.platform}
-                    <span class="text-[10px] text-zinc-400">({adapter.kind})</span>
-                  </span>
-                </button>
-              {/each}
-              {#if instancesStore.adapters.length === 0}
-                <span class="text-xs text-zinc-400">{t('instances.no_adapters')}</span>
-              {/if}
-            </div>
-          </div>
-
-          <label class="space-y-1.5 block">
-            <span class="text-xs font-medium text-zinc-500">{t('instances.field_persona')}</span>
-            <select
-              bind:value={instancesStore.formPersonaId}
-              class="w-full px-3 py-2 text-sm bg-zinc-50 dark:bg-zinc-800 border border-zinc-200 dark:border-zinc-700 rounded-lg focus:outline-hidden cursor-pointer"
-            >
-              <option value="">{t('instances.persona_none')}</option>
-              {#each instancesStore.personas as persona (persona.id)}
-                <option value={persona.id}>{persona.name}</option>
-              {/each}
-            </select>
-          </label>
-
-          <label class="space-y-1.5 block">
-            <span class="text-xs font-medium text-zinc-500">{t('instances.field_prompt')}</span>
-            <textarea
-              bind:value={instancesStore.formSystemPrompt}
-              rows="3"
-              placeholder={t('instances.prompt_placeholder')}
-              class="w-full px-3 py-2 text-sm bg-zinc-50 dark:bg-zinc-800 border border-zinc-200 dark:border-zinc-700 rounded-lg focus:outline-hidden focus:border-indigo-400 resize-y"
-            ></textarea>
-            <span class="text-xs text-zinc-400">{t('instances.prompt_hint')}</span>
-          </label>
-
-          <label class="space-y-1.5 block">
-            <span class="text-xs font-medium text-zinc-500">{t('instances.field_model')}</span>
-            <select
-              bind:value={instancesStore.formModel}
-              class="w-full px-3 py-2 text-sm font-mono bg-zinc-50 dark:bg-zinc-800 border border-zinc-200 dark:border-zinc-700 rounded-lg focus:outline-hidden cursor-pointer"
-            >
-              <option value="">
-                {instancesStore.nodeDefaultModel
-                  ? t('instances.model_inherit_named', {
-                      model: instancesStore.nodeDefaultModel,
-                    })
-                  : t('instances.model_inherit')}
-              </option>
-              {#each instancesStore.modelReferences as reference (reference)}
-                <option value={reference}>{reference}</option>
-              {/each}
-            </select>
-            <span class="text-xs text-zinc-400">{t('instances.model_hint')}</span>
-            {#if instancesStore.modelReferences.length === 0}
-              <span class="text-xs text-amber-600 dark:text-amber-400">
-                {t('instances.model_catalog_empty')}
-              </span>
-            {/if}
-          </label>
-
-          <!-- Reply policy: deciding whether group messages are answered at all. -->
-          <div class="space-y-2 border-t border-zinc-200 dark:border-zinc-800 pt-4">
-            <div>
-              <span class="text-xs font-medium text-zinc-500">{t('instances.reply_policy')}</span>
-              <p class="text-xs text-zinc-400 mt-0.5">{t('instances.reply_policy_hint')}</p>
-            </div>
-
-            <select
-              bind:value={instancesStore.formReplyPolicyMode}
-              class="w-full px-3 py-2 text-sm bg-zinc-50 dark:bg-zinc-800 border border-zinc-200 dark:border-zinc-700 rounded-lg focus:outline-hidden cursor-pointer"
-            >
-              {#each replyChoices as choice (choice.value)}
-                <option value={choice.value}>{t(choice.labelKey)}</option>
-              {/each}
-            </select>
-
-            {#if instancesStore.formReplyPolicyMode === 'probability'}
-              <div class="flex items-center gap-3">
-                <input
-                  type="range"
-                  min="0"
-                  max="1"
-                  step="0.05"
-                  bind:value={instancesStore.formReplyProbability}
-                  class="flex-1 accent-indigo-600 cursor-pointer"
-                  aria-label={t('reply.probability')}
-                />
-                <span class="w-12 text-right text-xs font-mono text-zinc-600 dark:text-zinc-300">
-                  {Math.round(instancesStore.formReplyProbability * 100)}%
-                </span>
-              </div>
-            {/if}
-
-            {#if instancesStore.formReplyPolicyMode !== 'inherit'}
-              <label class="flex items-center justify-between gap-4 text-sm text-zinc-700 dark:text-zinc-300 cursor-pointer select-none">
-                <span>{t('reply.quote')}</span>
-                <input
-                  type="checkbox"
-                  bind:checked={instancesStore.formReplyQuote}
-                  class="rounded text-indigo-600 focus:ring-0 w-4 h-4"
-                />
-              </label>
-              <label class="flex items-center justify-between gap-4 text-sm text-zinc-700 dark:text-zinc-300 cursor-pointer select-none">
-                <span>{t('reply.acknowledge')}</span>
-                <input
-                  type="checkbox"
-                  bind:checked={instancesStore.formReplyAck}
-                  class="rounded text-indigo-600 focus:ring-0 w-4 h-4"
-                />
-              </label>
-            {/if}
-
-            {#if instancesStore.formReplyPolicyMode === 'inherit'}
-              <p class="text-xs text-zinc-400">
-                {t('instances.reply_inherit_hint')}
-                {#if instancesStore.nodeReplyPolicy}
-                  <span class="font-mono text-zinc-500">
-                    {t('reply.node_current', {
-                      policy: describeReplyPolicy(instancesStore.nodeReplyPolicy),
-                    })}
-                  </span>
-                {/if}
-              </p>
-            {:else}
-              <p class="text-xs text-zinc-400">{t('instances.reply_override_hint')}</p>
-            {/if}
-          </div>
-
-          <!-- Group context: shared or per-member sessions, and observation of the group. -->
-          <div class="space-y-3 border-t border-zinc-200 dark:border-zinc-800 pt-4">
-            <div>
-              <span class="text-xs font-medium text-zinc-500">{t('group.title')}</span>
-              <p class="text-xs text-zinc-400 mt-0.5">{t('group.hint')}</p>
-            </div>
-            <select
-              bind:value={instancesStore.formSessionScope}
-              class="w-full px-3 py-2 text-sm bg-zinc-50 dark:bg-zinc-800 border border-zinc-200 dark:border-zinc-700 rounded-lg focus:outline-hidden cursor-pointer"
-            >
-              <option value="user">{t('group.scope_user')}</option>
-              <option value="group">{t('group.scope_group')}</option>
-            </select>
-            <p class="text-xs text-zinc-400">
-              {instancesStore.formSessionScope === 'group'
-                ? t('group.scope_group_hint')
-                : t('group.scope_user_hint')}
-            </p>
-            <label class="flex items-start justify-between gap-4 text-sm text-zinc-700 dark:text-zinc-300 cursor-pointer select-none">
-              <span>
-                <span class="block">{t('group.observe')}</span>
-                <span class="block text-xs text-zinc-400 mt-0.5">{t('group.observe_hint')}</span>
-                <SupportBadge capabilities={['group_messages']} />
-              </span>
-              <input
-                type="checkbox"
-                bind:checked={instancesStore.formObserveGroup}
-                class="mt-1 rounded text-indigo-600 focus:ring-0 w-4 h-4 shrink-0"
-              />
-            </label>
-          </div>
-
-          <!-- Context extras: whether the sender id and the message time reach the model. -->
-          <div class="space-y-3 border-t border-zinc-200 dark:border-zinc-800 pt-4">
-            <div>
-              <span class="text-xs font-medium text-zinc-500">{t('context.title')}</span>
-              <p class="text-xs text-zinc-400 mt-0.5">{t('context.hint')}</p>
-            </div>
-
-            <label class="flex items-center gap-2 text-sm text-zinc-700 dark:text-zinc-300 cursor-pointer select-none">
-              <input
-                type="checkbox"
-                bind:checked={instancesStore.formContextInherit}
-                class="rounded text-indigo-600 focus:ring-0 w-4 h-4"
-              />
-              <span>{t('reply.inherit')}</span>
-            </label>
-
-            <div class="space-y-2 {instancesStore.formContextInherit ? 'opacity-50 pointer-events-none' : ''}">
-              <label class="flex items-center justify-between gap-4 text-sm text-zinc-700 dark:text-zinc-300 cursor-pointer select-none">
-                <span>{t('context.channel_id')}</span>
-                <input
-                  type="checkbox"
-                  bind:checked={instancesStore.formIncludeChannelId}
-                  class="rounded text-indigo-600 focus:ring-0 w-4 h-4"
-                />
-              </label>
-              <label class="flex items-center justify-between gap-4 text-sm text-zinc-700 dark:text-zinc-300 cursor-pointer select-none">
-                <span>{t('context.sender_id')}</span>
-                <input
-                  type="checkbox"
-                  bind:checked={instancesStore.formIncludeSenderId}
-                  class="rounded text-indigo-600 focus:ring-0 w-4 h-4"
-                />
-              </label>
-              <label class="flex items-center justify-between gap-4 text-sm text-zinc-700 dark:text-zinc-300 cursor-pointer select-none">
-                <span>{t('context.timestamp')}</span>
-                <input
-                  type="checkbox"
-                  bind:checked={instancesStore.formIncludeTimestamp}
-                  class="rounded text-indigo-600 focus:ring-0 w-4 h-4"
-                />
-              </label>
-              <label class="flex items-center justify-between gap-4 text-sm text-zinc-700 dark:text-zinc-300 cursor-pointer select-none">
-                <span>{t('context.expand_forward')}</span>
-                <input
-                  type="checkbox"
-                  bind:checked={instancesStore.formExpandForward}
-                  class="rounded text-indigo-600 focus:ring-0 w-4 h-4"
-                />
-              </label>
-            </div>
-
-            {#if instancesStore.formContextInherit && instancesStore.nodeContextPolicy}
-              <p class="text-xs text-zinc-400">
-                {t('reply.node_current', {
-                  policy: describeContextPolicy(instancesStore.nodeContextPolicy),
-                })}
-              </p>
-            {/if}
-          </div>
-
-          <!-- Command permissions: inherit the node's, or give this bot its own administrators. -->
-          <div class="space-y-3 border-t border-zinc-200 dark:border-zinc-800 pt-4">
-            <div>
-              <span class="text-xs font-medium text-zinc-500">{t('commands.title')}</span>
-              <p class="text-xs text-zinc-400 mt-0.5">{t('instances.commands_hint')}</p>
-            </div>
-
-            <label class="flex items-center gap-2 text-sm text-zinc-700 dark:text-zinc-300 cursor-pointer select-none">
-              <input
-                type="checkbox"
-                bind:checked={instancesStore.formCommandInherit}
-                class="rounded text-indigo-600 focus:ring-0 w-4 h-4"
-              />
-              <span>{t('reply.inherit')}</span>
-            </label>
-
-            {#if instancesStore.formCommandInherit}
-              <p class="text-xs text-zinc-400">
-                {t('instances.commands_inherit_hint', {
-                  admins: instancesStore.nodeCommandPolicy?.admins.join(', ') || '—',
-                })}
-              </p>
-            {:else}
-              <CommandPolicyEditor bind:draft={instancesStore.formCommandDraft} />
-            {/if}
-          </div>
-
-          <!-- Bash: where this bot's administrators may run it; the node-wide switch still wins. -->
-          <div class="space-y-3 border-t border-zinc-200 dark:border-zinc-800 pt-4">
-            <div>
-              <span class="text-xs font-medium text-zinc-500">{t('bash.title')}</span>
-              <p class="text-xs text-zinc-400 mt-0.5">{t('instances.bash_hint')}</p>
-            </div>
-            <select
-              bind:value={instancesStore.formBash}
-              class="w-full px-3 py-2 text-sm bg-zinc-50 dark:bg-zinc-800 border border-zinc-200 dark:border-zinc-700 rounded-lg focus:outline-hidden cursor-pointer"
-            >
-              {#each bashScopes as choice (choice.value)}
-                <option value={choice.value}>{t(choice.labelKey)}</option>
-              {/each}
-            </select>
-            <p class="text-xs text-zinc-400">{t(bashHintKey)}</p>
-            {#if instancesStore.formBash === 'shared_context'}
-              <p class="text-xs text-amber-600 dark:text-amber-400 flex items-start gap-1.5">
-                <AlertCircle class="w-3.5 h-3.5 mt-0.5 shrink-0" />
-                {t('instances.bash_shared_warning')}
-              </p>
-            {:else if instancesStore.formBash === 'own_context' && (instancesStore.formSessionScope === 'group' || instancesStore.formObserveGroup)}
-              <p class="text-xs text-amber-600 dark:text-amber-400 flex items-start gap-1.5">
-                <AlertCircle class="w-3.5 h-3.5 mt-0.5 shrink-0" />
-                {t('instances.bash_groups_excluded')}
-              </p>
-            {/if}
-            {#if !instancesStore.nodeBashEnabled && instancesStore.formBash !== 'disabled'}
-              <p class="text-xs text-zinc-400">{t('instances.bash_node_off')}</p>
-            {/if}
-          </div>
-
-          <!-- Per-item policy: the node-wide switch still wins; these only restrict further or
-               document an explicit opt-in for this instance. -->
-          <div class="space-y-3 border-t border-zinc-200 dark:border-zinc-800 pt-4">
-            <div>
-              <span class="text-xs font-medium text-zinc-500">{t('instances.items_title')}</span>
-              <p class="text-xs text-zinc-400 mt-0.5">{t('instances.items_hint')}</p>
-            </div>
-
-            {#each policyKinds as kind (kind)}
-              {@const items = instancesStore.itemsOf(kind)}
-              <div class="space-y-1.5">
-                <span class="text-xs font-semibold text-zinc-600 dark:text-zinc-300">
-                  {t(policyTitleKey(kind))}
-                </span>
-                {#if items.length === 0}
-                  <p class="text-xs text-zinc-400">{t('instances.no_items')}</p>
-                {:else}
-                  <div class="space-y-1">
-                    {#each items as item (item.id)}
-                      <div class="flex items-center justify-between gap-3">
-                        <span class="text-xs text-zinc-600 dark:text-zinc-300 truncate" title={item.id}>
-                          {item.name}
-                        </span>
-                        <div class="flex rounded-lg bg-zinc-100 dark:bg-zinc-800/80 p-0.5 shrink-0">
-                          {#each policyChoices as choice (choice.value)}
-                            <button
-                              type="button"
-                              onclick={() => instancesStore.setPolicy(kind, item.id, choice.value)}
-                              class="px-2 py-0.5 text-[11px] rounded-md transition cursor-pointer {instancesStore.policyOf(
-                                kind,
-                                item.id,
-                              ) === choice.value
-                                ? 'bg-white dark:bg-zinc-700 text-zinc-900 dark:text-zinc-100 shadow-2xs'
-                                : 'text-zinc-500 hover:text-zinc-800 dark:hover:text-zinc-200'}"
-                            >
-                              {t(choice.labelKey)}
-                            </button>
-                          {/each}
-                        </div>
-                      </div>
-                    {/each}
-                  </div>
-                {/if}
-              </div>
-            {/each}
-          </div>
-
-          {#if instancesStore.formEnabled && instancesStore.formAdapters.length === 0}
-            <p class="text-xs text-amber-600 dark:text-amber-400 flex items-center gap-1.5">
-              <AlertCircle class="w-3.5 h-3.5" />
-              {t('instances.warn_no_adapter')}
-            </p>
-          {/if}
-        </div>
-
-        <div
-          class="flex items-center justify-end gap-2 px-5 py-4 border-t border-zinc-200 dark:border-zinc-800"
-        >
-          <button
-            onclick={() => instancesStore.closeForm()}
-            class="px-3.5 py-2 text-sm rounded-lg border border-zinc-200 dark:border-zinc-700 text-zinc-600 dark:text-zinc-300 transition cursor-pointer"
-          >
-            {t('instances.cancel')}
-          </button>
-          <button
-            onclick={() => instancesStore.save()}
-            disabled={instancesStore.saving || !instancesStore.formName.trim()}
-            class="px-3.5 py-2 text-sm rounded-lg bg-indigo-600 hover:bg-indigo-700 text-white font-medium flex items-center gap-2 transition cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed"
-          >
-            <MessageSquarePlus class="w-4 h-4" />
-            {instancesStore.saving ? t('instances.saving') : t('instances.save')}
-          </button>
-        </div>
+    {#if instancesStore.isFormOpen}
+      <InstanceEditor {onSaved} {onDeleted} />
+    {:else if missing}
+      <div class="card">
+        <EmptyState
+          compact
+          title={t('instances.missing_title')}
+          text={t('instances.missing_text', { id: missing })}
+        />
       </div>
-    </div>
-  {/if}
-</div>
+    {/if}
+  </div>
+{/if}

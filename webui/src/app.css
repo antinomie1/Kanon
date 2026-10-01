@@ -1,8 +1,18 @@
 @import "tailwindcss";
+@import "@fontsource-variable/nunito";
 
 @custom-variant dark (&:where(.dark, .dark *));
 
 @theme {
+  /* Nunito carries Latin text and figures; CJK falls through to the platform's own face, so the
+     bundle never ships a multi-megabyte Chinese font. */
+  --font-sans:
+    "Nunito Variable", "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei UI",
+    "Microsoft YaHei", "Noto Sans CJK SC", "Noto Sans SC", system-ui, sans-serif;
+  --font-mono:
+    ui-monospace, "SF Mono", "Cascadia Mono", "JetBrains Mono", Menlo, Consolas,
+    monospace;
+
   --text-2xs: 0.75rem;
   --text-2xs--line-height: calc(1 / 0.75);
   --text-xs: 0.8125rem;
@@ -13,20 +23,468 @@
   --text-base--line-height: calc(1.625 / 1.0625);
 }
 
+/* Semantic colours. Utilities such as `bg-card`, `text-fg2` or `ring-line` resolve to runtime
+   variables, so the light/dark theme and the accent colour switch without rebuilding classes. */
+@theme inline {
+  --color-page: var(--k-page);
+  --color-card: var(--k-card);
+  --color-sunk: var(--k-sunk);
+  --color-line: var(--k-line);
+  --color-fg: var(--k-fg);
+  --color-fg2: var(--k-fg2);
+  --color-fg3: var(--k-fg3);
+  --color-accent: var(--k-accent);
+  --color-accent-tint: var(--k-accent-tint);
+  --color-accent-fg: var(--k-accent-fg);
+  --color-on-accent: var(--k-on-accent);
+  --color-ok: var(--k-ok);
+  --color-ok-tint: var(--k-ok-tint);
+  --color-warn: var(--k-warn);
+  --color-warn-tint: var(--k-warn-tint);
+  --color-warn-fg: var(--k-warn-fg);
+  --color-danger: var(--k-danger);
+  --color-danger-tint: var(--k-danger-tint);
+  --color-bar: var(--k-bar);
+  --color-on-bar: var(--k-on-bar);
+}
+
 @layer base {
   :root {
     color-scheme: light;
+    --k-page: #f4f3f8;
+    --k-card: #ffffff;
+    --k-sunk: #ecebf2;
+    --k-line: #e3e1eb;
+    --k-fg: #22202c;
+    --k-fg2: #625e70;
+    --k-fg3: #8e8a9b;
+    --k-ok: #178a5b;
+    --k-ok-tint: #e3f4ec;
+    --k-warn: #9c5d00;
+    --k-warn-tint: #fff1d9;
+    --k-warn-fg: #75561f;
+    --k-danger: #c8372f;
+    --k-danger-tint: #fdecea;
+    --k-on-danger: #ffffff;
+    --k-bar: #22202c;
+    --k-on-bar: #ffffff;
+    /* The navigation rail sits a shade deeper than the page, which separates the two without a
+       dividing line; `--k-rail-sunk` is what sunken surfaces become on it (see `.rail`). */
+    --k-rail: #ebe9f1;
+    --k-rail-sunk: #dfdde8;
+    --k-seg-on: #ffffff;
+    --k-switch-off: #d6d2e0;
+    --k-shadow: 0 1px 2px rgb(34 32 44 / 0.06);
+    --k-pop: 0 10px 30px rgb(34 32 44 / 0.16);
+    /* Instance colours for the message timeline, picked by a hash of the instance id. */
+    --k-i0: #f0663f;
+    --k-i1: #129a8b;
+    --k-i2: #d99400;
+    --k-i3: #3f7fe8;
+    --k-i4: #de4b8f;
+    --k-i5: #8465e8;
+    --k-i6: #3a9e52;
+    --k-i7: #7d8599;
+    /* Default accent (violet); `data-accent` below swaps it. */
+    --k-accent: #5b57e0;
+    --k-accent-tint: #ecebfd;
+    --k-accent-fg: #3f3bb8;
+    --k-on-accent: #ffffff;
   }
   :root.dark {
     color-scheme: dark;
+    --k-page: #111318;
+    --k-card: #1a1d24;
+    --k-sunk: #242832;
+    --k-line: #2c303b;
+    --k-fg: #e8eaf0;
+    --k-fg2: #a0a7b5;
+    --k-fg3: #737b8c;
+    --k-ok: #3fd08a;
+    --k-ok-tint: rgb(63 208 138 / 0.13);
+    --k-warn: #f2b04f;
+    --k-warn-tint: rgb(242 176 79 / 0.1);
+    --k-warn-fg: #d9c49a;
+    --k-danger: #ff6b6b;
+    --k-danger-tint: rgb(255 107 107 / 0.13);
+    --k-on-danger: #2a0707;
+    --k-bar: #e8eaf0;
+    --k-on-bar: #111318;
+    --k-rail: #0b0c10;
+    --k-rail-sunk: #1f222b;
+    --k-seg-on: #353a47;
+    --k-switch-off: #3a3f4b;
+    --k-shadow: none;
+    --k-pop: 0 10px 30px rgb(0 0 0 / 0.5);
+    --k-i0: #ff8a6b;
+    --k-i1: #2cc0ae;
+    --k-i2: #f2b64a;
+    --k-i3: #6e9bff;
+    --k-i4: #f07aae;
+    --k-i5: #a390ff;
+    --k-i6: #5cc977;
+    --k-i7: #9aa1b4;
+    --k-accent: #8c86ff;
+    --k-accent-tint: rgb(140 134 255 / 0.16);
+    --k-accent-fg: #b3aeff;
+    --k-on-accent: #15123a;
   }
 
+  /* Accent colours. Light values keep white button text at 4.5:1 or better; dark values are
+     lighter and carry dark text instead. */
+  :root[data-accent="blue"] {
+    --k-accent: #2a66db;
+    --k-accent-tint: #e6eefd;
+    --k-accent-fg: #1d55c4;
+  }
+  :root.dark[data-accent="blue"] {
+    --k-accent: #6e9bff;
+    --k-accent-tint: rgb(110 155 255 / 0.15);
+    --k-accent-fg: #a3c0ff;
+    --k-on-accent: #0b1630;
+  }
+  :root[data-accent="teal"] {
+    --k-accent: #0b7d70;
+    --k-accent-tint: #ddf3ef;
+    --k-accent-fg: #0a6b60;
+  }
+  :root.dark[data-accent="teal"] {
+    --k-accent: #3cc4b4;
+    --k-accent-tint: rgb(60 196 180 / 0.15);
+    --k-accent-fg: #7ddcd0;
+    --k-on-accent: #06201d;
+  }
+  :root[data-accent="coral"] {
+    --k-accent: #c94a22;
+    --k-accent-tint: #fde8e0;
+    --k-accent-fg: #a8401c;
+  }
+  :root.dark[data-accent="coral"] {
+    --k-accent: #ff8a66;
+    --k-accent-tint: rgb(255 138 102 / 0.15);
+    --k-accent-fg: #ffb39a;
+    --k-on-accent: #2b0f05;
+  }
+  :root[data-accent="rose"] {
+    --k-accent: #c23a6e;
+    --k-accent-tint: #fbe6ee;
+    --k-accent-fg: #a62c5c;
+  }
+  :root.dark[data-accent="rose"] {
+    --k-accent: #f2729f;
+    --k-accent-tint: rgb(242 114 159 / 0.15);
+    --k-accent-fg: #f7a6c3;
+    --k-on-accent: #2e0a18;
+  }
+  :root[data-accent="graphite"] {
+    --k-accent: #3d3a48;
+    --k-accent-tint: #e9e8ee;
+    --k-accent-fg: #2a2833;
+  }
+  :root.dark[data-accent="graphite"] {
+    --k-accent: #d9dbe3;
+    --k-accent-tint: rgb(217 219 227 / 0.12);
+    --k-accent-fg: #e8eaf0;
+    --k-on-accent: #16181e;
+  }
+
+  html,
+  body {
+    height: 100%;
+  }
   body {
     margin: 0;
-    font-family:
-      -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue",
-      Arial, sans-serif;
+    background: var(--k-page);
+    color: var(--k-fg);
+    font-family: var(--font-sans);
+    font-size: 15px;
+    line-height: 1.55;
     -webkit-font-smoothing: antialiased;
     -moz-osx-font-smoothing: grayscale;
+  }
+  button,
+  select,
+  [role="button"],
+  [role="switch"] {
+    cursor: pointer;
+  }
+  button:disabled {
+    cursor: not-allowed;
+  }
+  :focus-visible {
+    outline: 2px solid var(--k-accent);
+    outline-offset: 2px;
+  }
+  code,
+  kbd,
+  pre {
+    font-family: var(--font-mono);
+  }
+  ::selection {
+    background: var(--k-accent-tint);
+  }
+  /* Utility classes such as `animate-spin` set their own timing, so only `!important` can switch
+     motion off everywhere for people who ask their system for less of it. */
+  @media (prefers-reduced-motion: reduce) {
+    *,
+    *::before,
+    *::after {
+      /* biome-ignore lint/complexity/noImportantStyles: must win over every utility class. */
+      animation-duration: 0.01ms !important;
+      /* biome-ignore lint/complexity/noImportantStyles: must win over every utility class. */
+      animation-iteration-count: 1 !important;
+      /* biome-ignore lint/complexity/noImportantStyles: must win over every utility class. */
+      transition-duration: 0.01ms !important;
+    }
+  }
+}
+
+@layer components {
+  /* The navigation surface. Fields and tracks on it must still read as sunk, which means darker
+     than the rail rather than than the page, so `--k-sunk` is redefined for everything inside. */
+  .rail {
+    background: var(--k-rail);
+    --k-sunk: var(--k-rail-sunk);
+  }
+
+  .card {
+    background: var(--k-card);
+    border-radius: 18px;
+    box-shadow: var(--k-shadow);
+  }
+
+  /* Buttons are always one line: labels never wrap, they are written short instead. */
+  .btn {
+    height: 40px;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    gap: 8px;
+    padding: 0 18px;
+    border-radius: 999px;
+    border: 0;
+    font: inherit;
+    font-size: 14.5px;
+    font-weight: 700;
+    white-space: nowrap;
+    flex-shrink: 0;
+    background: var(--k-card);
+    color: var(--k-fg);
+    box-shadow: inset 0 0 0 1px var(--k-line);
+    transition:
+      background-color 120ms,
+      box-shadow 120ms,
+      opacity 120ms;
+  }
+  .btn:hover:not(:disabled) {
+    background: var(--k-sunk);
+  }
+  .btn:disabled {
+    opacity: 0.5;
+  }
+  .btn-primary {
+    background: var(--k-accent);
+    color: var(--k-on-accent);
+    box-shadow: none;
+  }
+  .btn-primary:hover:not(:disabled) {
+    background: var(--k-accent);
+    filter: brightness(1.08);
+  }
+  .btn-quiet {
+    background: transparent;
+    box-shadow: none;
+    color: var(--k-fg2);
+  }
+  .btn-quiet:hover:not(:disabled) {
+    color: var(--k-fg);
+  }
+  .btn-danger {
+    color: var(--k-danger);
+  }
+  .btn-danger:hover:not(:disabled) {
+    background: var(--k-danger-tint);
+  }
+  .btn-danger-solid {
+    background: var(--k-danger);
+    color: var(--k-on-danger);
+    box-shadow: none;
+  }
+  .btn-danger-solid:hover:not(:disabled) {
+    background: var(--k-danger);
+    filter: brightness(1.08);
+  }
+  .btn-sm {
+    height: 34px;
+    padding: 0 14px;
+    font-size: 14px;
+  }
+  .btn-xs {
+    height: 28px;
+    padding: 0 11px;
+    font-size: 13px;
+    gap: 6px;
+  }
+  .btn-icon {
+    width: 40px;
+    padding: 0;
+  }
+  .btn-icon.btn-sm {
+    width: 34px;
+  }
+  .btn-icon.btn-xs {
+    width: 28px;
+  }
+
+  .input {
+    width: 100%;
+    min-width: 0;
+    height: 42px;
+    padding: 0 14px;
+    border: 0;
+    border-radius: 12px;
+    background: var(--k-sunk);
+    color: var(--k-fg);
+    font: inherit;
+    font-size: 14.5px;
+    outline: none;
+    box-shadow: inset 0 0 0 1px transparent;
+    transition: box-shadow 120ms;
+  }
+  .input::placeholder {
+    color: var(--k-fg3);
+  }
+  .input:focus {
+    box-shadow: inset 0 0 0 2px var(--k-accent);
+  }
+  .input:disabled {
+    opacity: 0.6;
+  }
+  textarea.input {
+    height: auto;
+    padding: 10px 14px;
+    line-height: 1.55;
+    resize: vertical;
+  }
+  .input.mono {
+    font-family: var(--font-mono);
+    font-size: 13.5px;
+  }
+
+  .label {
+    display: block;
+    font-size: 13px;
+    font-weight: 700;
+    color: var(--k-fg2);
+    margin-bottom: 6px;
+  }
+  .hint {
+    font-size: 13.5px;
+    line-height: 1.55;
+    color: var(--k-fg2);
+  }
+
+  .chip {
+    height: 28px;
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    padding: 0 11px;
+    border-radius: 14px;
+    background: var(--k-sunk);
+    color: var(--k-fg);
+    font-size: 13px;
+    font-weight: 700;
+    white-space: nowrap;
+  }
+  .chip-sm {
+    height: 24px;
+    padding: 0 9px;
+    font-size: 12.5px;
+  }
+  .chip-ok {
+    background: var(--k-ok-tint);
+    color: var(--k-ok);
+  }
+  .chip-warn {
+    background: var(--k-warn-tint);
+    color: var(--k-warn);
+  }
+  .chip-bad {
+    background: var(--k-danger-tint);
+    color: var(--k-danger);
+  }
+  .chip-accent {
+    background: var(--k-accent-tint);
+    color: var(--k-accent-fg);
+  }
+  .chip-muted {
+    color: var(--k-fg2);
+  }
+
+  .dot {
+    width: 7px;
+    height: 7px;
+    border-radius: 50%;
+    display: inline-block;
+    flex-shrink: 0;
+    background: var(--k-fg3);
+  }
+  .dot-ok {
+    background: var(--k-ok);
+  }
+  .dot-warn {
+    background: var(--k-warn);
+  }
+  .dot-bad {
+    background: var(--k-danger);
+  }
+
+  /* A borderless, rounded list row used for adapters, hosts and similar items inside a card. */
+  .tile {
+    border-radius: 14px;
+    background: var(--k-sunk);
+    padding: 12px 14px;
+  }
+
+  .notice {
+    display: flex;
+    align-items: flex-start;
+    gap: 10px;
+    padding: 11px 14px;
+    border-radius: 14px;
+    font-size: 14px;
+    line-height: 1.5;
+  }
+  .notice-bad {
+    background: var(--k-danger-tint);
+    color: var(--k-danger);
+  }
+  .notice-warn {
+    background: var(--k-warn-tint);
+    color: var(--k-warn-fg);
+  }
+  .notice-ok {
+    background: var(--k-ok-tint);
+    color: var(--k-ok);
+  }
+  .notice-info {
+    background: var(--k-sunk);
+    color: var(--k-fg2);
+  }
+
+  .check {
+    width: 18px;
+    height: 18px;
+    accent-color: var(--k-accent);
+    flex-shrink: 0;
+  }
+  input[type="range"] {
+    accent-color: var(--k-accent);
+  }
+
+  .scroll-thin {
+    scrollbar-width: thin;
+    scrollbar-color: var(--k-line) transparent;
   }
 }

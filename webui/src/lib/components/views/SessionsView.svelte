@@ -1,214 +1,321 @@
 <script lang="ts">
-import { RefreshCw, Trash2 } from 'lucide-svelte';
+import { MessagesSquare, RefreshCw, Search } from 'lucide-svelte';
+import { untrack } from 'svelte';
 import { api } from '../../api/client';
+import { errorText, formatDuration } from '../../format';
+import { confirmDialog } from '../../stores/confirm.svelte';
 import { t } from '../../stores/i18n.svelte';
+import { instancesStore } from '../../stores/instances.svelte';
 import { personasStore } from '../../stores/personas.svelte';
+import { toasts } from '../../stores/toast.svelte';
 import type { SessionSummary } from '../../types';
+import EmptyState from '../ui/EmptyState.svelte';
+import Modal from '../ui/Modal.svelte';
+import PageHead from '../ui/PageHead.svelte';
+import Select from '../ui/Select.svelte';
+
+/**
+ * Conversations the node remembers, most recently active first.
+ *
+ * Session keys are made for machines (`instance:<id>:<channel>:<sender>#<generation>`), so each
+ * row names the instance and conversation in words and keeps the raw key underneath for whoever
+ * needs to match it against a log line.
+ */
 
 let sessions = $state<SessionSummary[]>([]);
-let loading = $state(true);
+let total = $state(0);
+let loaded = $state(false);
+let loading = $state(false);
 let error = $state<string | null>(null);
+let search = $state('');
+/** Sessions with a request in flight. */
+let busy = $state<Record<string, boolean>>({});
 
-// Selected session for persona binding modal
-let bindingSession = $state<SessionSummary | null>(null);
-let selectedPersona = $state<string>('');
-let bindingStatus = $state<string | null>(null);
+/** Session whose persona is being chosen, with the choice so far. */
+let binding = $state<{
+  key: string;
+  name: string;
+  persona: string;
+  /** The owning instance sets the persona itself, overriding any binding on its next message. */
+  pinned: boolean;
+} | null>(null);
+let bindError = $state<string | null>(null);
+let bindSaving = $state(false);
 
-async function loadData() {
+async function load() {
   loading = true;
   error = null;
   try {
-    const [sessRes] = await Promise.all([
-      api.getSessions(),
-      personasStore.load(),
-    ]);
-    const rawSessions = sessRes.items ?? sessRes.sessions ?? [];
-    sessions = rawSessions.map((s) => ({
-      ...s,
-      session_id: s.session_id ?? s.session_key ?? '',
-      active_persona: s.active_persona ?? s.persona_id ?? undefined,
-    }));
+    const res = await api.getSessions(search.trim());
+    sessions = res.items;
+    total = res.total;
   } catch (e) {
-    error = e instanceof Error ? e.message : String(e);
+    error = errorText(e);
   } finally {
     loading = false;
+    loaded = true;
   }
 }
 
-async function handleResetSession(sessionId: string) {
-  if (!confirm(t('sessions.reset_confirm', { id: sessionId }))) return;
-  try {
-    await api.resetSession(sessionId);
-    await loadData();
-  } catch (e) {
-    alert(
-      `${t('sessions.reset_failed')}: ${e instanceof Error ? e.message : String(e)}`,
-    );
-  }
-}
-
-async function applyPersonaSwitch() {
-  if (!bindingSession) return;
-  bindingStatus = t('sessions.binding');
-  try {
-    // An empty choice removes the binding: the session then uses the base assistant.
-    await api.setSessionPersona(
-      bindingSession.session_id,
-      selectedPersona || null,
-    );
-    bindingStatus = null;
-    bindingSession = null;
-    await loadData();
-  } catch (e) {
-    bindingStatus = `${t('sessions.bind_failed')}: ${e instanceof Error ? e.message : String(e)}`;
-  }
-}
-
+// Reload as the search changes, a moment after typing stops, so each keystroke is not a request.
 $effect(() => {
-  loadData();
+  void search;
+  const timer = window.setTimeout(
+    () => untrack(() => void load()),
+    loaded ? 250 : 0,
+  );
+  return () => window.clearTimeout(timer);
 });
+
+interface Parsed {
+  /** Who the conversation is with, in words. */
+  name: string;
+  /** Instance that owns the conversation, when it is one. */
+  instanceId: string | null;
+  /** Channel and sender the conversation belongs to, when the key says. */
+  conversation: string | null;
+  /** How many times `/new` started this conversation over. */
+  generation: number;
+}
+
+function parse(key: string): Parsed {
+  const match = /^instance:([^:]+):(.*?)(?:#(\d+))?$/.exec(key);
+  if (match) {
+    const [, id, conversation, generation] = match;
+    return {
+      name:
+        instancesStore.find(id)?.name ?? t('sessions.gone_instance', { id }),
+      instanceId: id,
+      conversation: conversation || null,
+      generation: Number(generation ?? 0),
+    };
+  }
+  if (key === 'webui:chat' || key.startsWith('webui:chat:')) {
+    return {
+      name: t('nav.chat'),
+      instanceId: null,
+      conversation: null,
+      generation: 0,
+    };
+  }
+  return { name: key, instanceId: null, conversation: null, generation: 0 };
+}
+
+/**
+ * Names the persona a session runs with. An instance's own prompt is published as the persona
+ * `instance:<id>`, whose name would only repeat the instance's name shown next to it.
+ */
+function personaName(id: string, instanceId: string | null): string {
+  if (instanceId !== null && id === `instance:${instanceId}`) {
+    return t('sessions.own_prompt');
+  }
+  return personasStore.all.find((persona) => persona.id === id)?.name ?? id;
+}
+
+function ago(seconds: number): string {
+  return t('sessions.active_ago', {
+    time: formatDuration(Date.now() / 1000 - seconds),
+  });
+}
+
+async function reset(session: SessionSummary, name: string) {
+  const yes = await confirmDialog({
+    title: t('sessions.reset_title', { name }),
+    message: t('sessions.reset_text'),
+    confirm: t('sessions.reset'),
+    danger: true,
+  });
+  if (!yes) return;
+  const key = session.session_key;
+  busy = { ...busy, [key]: true };
+  try {
+    await api.resetSession(key);
+    toasts.ok(t('sessions.reset_toast', { name }));
+    await load();
+  } catch (e) {
+    toasts.error(t('sessions.reset_failed', { error: errorText(e) }));
+  } finally {
+    busy = { ...busy, [key]: false };
+  }
+}
+
+function openPersona(session: SessionSummary, info: Parsed) {
+  const owner = info.instanceId
+    ? instancesStore.find(info.instanceId)
+    : undefined;
+  binding = {
+    key: session.session_key,
+    name: info.name,
+    persona: session.persona_id ?? '',
+    pinned: Boolean(owner?.system_prompt?.trim() || owner?.persona_id),
+  };
+  bindError = null;
+}
+
+async function applyPersona() {
+  if (!binding) return;
+  bindSaving = true;
+  bindError = null;
+  try {
+    // An empty choice removes the binding, and the session answers as the base assistant.
+    await api.setSessionPersona(binding.key, binding.persona || null);
+    toasts.ok(t('sessions.persona_toast', { name: binding.name }));
+    binding = null;
+    await load();
+  } catch (e) {
+    bindError = errorText(e);
+  } finally {
+    bindSaving = false;
+  }
+}
 </script>
 
-<div class="p-6 space-y-6 max-w-7xl mx-auto">
-  <!-- Top bar -->
-  <div class="flex items-center justify-between">
-    <div>
-      <h3 class="text-base sm:text-lg font-semibold text-zinc-900 dark:text-zinc-100 tracking-tight">{t('title.sessions')}</h3>
-      <p class="text-xs sm:text-sm text-zinc-500">{t('subtitle.sessions')}</p>
-    </div>
-    <button
-      onclick={loadData}
-      class="px-3 py-1.5 text-xs sm:text-sm font-medium rounded-lg bg-white dark:bg-zinc-800 border border-zinc-200 dark:border-zinc-700 text-zinc-700 dark:text-zinc-300 hover:bg-zinc-50 dark:hover:bg-zinc-700 transition cursor-pointer flex items-center gap-1.5 shadow-2xs"
-    >
-      <RefreshCw class="w-4 h-4" />
-      <span>{t('common.refresh')}</span>
+<PageHead title={t('nav.sessions')}>
+  {#snippet sub()}
+    <span>{t('sessions.sub')}</span>
+  {/snippet}
+  {#snippet actions()}
+    <button type="button" class="btn" disabled={loading} onclick={() => void load()}>
+      <RefreshCw size={16} strokeWidth={2.4} class={loading ? 'animate-spin' : ''} />
+      {t('platforms.refresh')}
     </button>
+  {/snippet}
+</PageHead>
+
+<div class="flex flex-wrap items-center justify-between gap-3">
+  <div class="relative min-w-[200px] flex-1 sm:max-w-[360px]">
+    <Search size={16} strokeWidth={2.2} class="pointer-events-none absolute top-1/2 left-3.5 -translate-y-1/2 text-fg3" />
+    <input
+      class="input pl-10"
+      type="search"
+      aria-label={t('common.search')}
+      placeholder={t('sessions.search')}
+      bind:value={search}
+    />
   </div>
-
-  {#if loading}
-    <div class="p-12 text-center text-sm text-zinc-400">{t('common.loading')}</div>
-  {:else if error}
-    <div class="p-4 rounded-lg bg-rose-500/10 border border-rose-500/20 text-rose-600 dark:text-rose-400 text-sm">
-      {error}
-    </div>
-  {:else}
-    <div class="space-y-3">
-        <h4 class="text-xs sm:text-sm font-semibold text-zinc-700 dark:text-zinc-300 uppercase tracking-wider font-mono">
-          {t('sessions.active_sessions')} ({sessions?.length ?? 0})
-        </h4>
-
-        {#if !sessions || sessions.length === 0}
-          <div class="p-8 rounded-xl border border-dashed border-zinc-300 dark:border-zinc-800 text-center text-zinc-400 text-sm">
-            {t('sessions.no_sessions')}
-          </div>
-        {:else}
-          <div class="space-y-2.5">
-            {#each sessions as session}
-              <div class="p-4 rounded-xl border border-zinc-200 dark:border-zinc-800 bg-white dark:bg-zinc-900 shadow-2xs flex items-center justify-between gap-4">
-                <div class="space-y-1.5 min-w-0">
-                  <div class="flex items-center gap-2">
-                    <span class="font-mono font-bold text-sm sm:text-base text-zinc-900 dark:text-zinc-100 truncate">
-                      {session.session_id}
-                    </span>
-                    {#if session.active_persona}
-                      <span class="px-2 py-0.5 rounded text-xs font-mono bg-violet-500/10 text-violet-600 dark:text-violet-400 border border-violet-500/20">
-                        {session.active_persona}
-                      </span>
-                    {/if}
-                  </div>
-                  <div class="flex items-center gap-3.5 text-xs sm:text-sm text-zinc-500 font-mono">
-                    <span>{t('sessions.turns')}: <b class="text-zinc-800 dark:text-zinc-200 font-semibold">{session.turn_count}</b></span>
-                    <span>{t('sessions.tokens')}: <b class="text-zinc-800 dark:text-zinc-200 font-semibold">{session.total_tokens_used}</b></span>
-                  </div>
-                </div>
-
-                <div class="flex items-center gap-2 shrink-0">
-                  <button
-                    onclick={() => {
-                      bindingSession = session;
-                      selectedPersona = session.active_persona ?? '';
-                    }}
-                    class="px-3 py-1.5 text-xs sm:text-sm text-zinc-600 dark:text-zinc-400 hover:text-zinc-900 dark:hover:text-zinc-100 border border-zinc-200 dark:border-zinc-700 rounded-md hover:bg-zinc-50 dark:hover:bg-zinc-800 transition cursor-pointer"
-                  >
-                    {t('sessions.persona')}
-                  </button>
-                  <button
-                    onclick={() => handleResetSession(session.session_id)}
-                    class="p-1.5 text-zinc-400 hover:text-rose-500 transition cursor-pointer"
-                    title={t('sessions.reset')}
-                  >
-                    <Trash2 class="w-4 h-4" />
-                  </button>
-                </div>
-              </div>
-            {/each}
-          </div>
-        {/if}
-    </div>
+  {#if loaded && !error}
+    <span class="px-1 text-[13.5px] text-fg2">
+      {total > sessions.length
+        ? t('sessions.showing', { shown: sessions.length, total })
+        : total === 1
+          ? t('sessions.count_one')
+          : t('sessions.count', { n: total })}
+    </span>
   {/if}
 </div>
 
-<!-- Persona Switch Modal -->
-{#if bindingSession}
-  <!-- svelte-ignore a11y_click_events_have_key_events -->
-  <div
-    class="fixed inset-0 bg-black/40 backdrop-blur-xs z-50 flex items-center justify-center p-4"
-    onclick={() => (bindingSession = null)}
-    role="button"
-    tabindex="-1"
-  >
-    <!-- svelte-ignore a11y_click_events_have_key_events -->
-    <div
-      class="w-full max-w-md bg-white dark:bg-zinc-900 border border-zinc-200 dark:border-zinc-800 rounded-xl shadow-2xl p-6 space-y-4"
-      onclick={(e) => e.stopPropagation()}
-      role="dialog"
-      tabindex="-1"
-    >
-      <div class="flex items-center justify-between border-b border-zinc-200 dark:border-zinc-800 pb-3">
-        <h3 class="text-base font-semibold text-zinc-900 dark:text-zinc-100">
-          {t('sessions.bind_title')}
-        </h3>
-        <button
-          onclick={() => (bindingSession = null)}
-          class="text-zinc-400 hover:text-zinc-600 dark:hover:text-zinc-200 text-xs sm:text-sm font-mono cursor-pointer"
-        >
-          {t('common.cancel')}
-        </button>
-      </div>
+{#if error}
+  <div class="notice notice-bad">{error}</div>
+{/if}
 
-      <div class="space-y-2">
-        <label for="session-persona-select" class="block text-xs sm:text-sm font-medium text-zinc-600 dark:text-zinc-400">{t('sessions.bind_select')}</label>
-        <select
-          id="session-persona-select"
-          bind:value={selectedPersona}
-          class="w-full p-2.5 bg-zinc-50 dark:bg-zinc-950 border border-zinc-200 dark:border-zinc-800 rounded-lg text-sm font-mono text-zinc-900 dark:text-zinc-100"
-        >
-          <option value="">{t('sessions.bind_none')}</option>
-          {#each personasStore.library as p (p.id)}
-            <option value={p.id}>{p.name}</option>
-          {/each}
-        </select>
-        <p class="text-[11px] text-zinc-400">{t('sessions.bind_hint')}</p>
-      </div>
-
-      {#if bindingStatus}
-        <div class="text-xs sm:text-sm text-rose-500 font-mono">{bindingStatus}</div>
-      {/if}
-
-      <div class="flex justify-end gap-2 pt-2">
-        <button
-          onclick={() => (bindingSession = null)}
-          class="px-3.5 py-2 text-xs sm:text-sm text-zinc-600 dark:text-zinc-400 hover:bg-zinc-100 dark:hover:bg-zinc-800 rounded-lg transition cursor-pointer"
-        >
-          {t('common.cancel')}
-        </button>
-        <button
-          onclick={applyPersonaSwitch}
-          class="px-4 py-2 text-xs sm:text-sm bg-indigo-600 hover:bg-indigo-500 text-white rounded-lg font-medium transition cursor-pointer"
-        >
-          {t('sessions.bind_apply')}
-        </button>
-      </div>
-    </div>
+{#if !loaded}
+  <p class="m-0 px-1 hint">{t('common.loading')}</p>
+{:else if sessions.length === 0 && !error}
+  <div class="card">
+    {#if search.trim()}
+      <EmptyState compact title={t('sessions.no_match')} text={t('sessions.no_match_text')} />
+    {:else}
+      <EmptyState icon={MessagesSquare} title={t('sessions.empty_title')} text={t('sessions.empty_text')} />
+    {/if}
+  </div>
+{:else if sessions.length > 0}
+  <div class="card">
+    <ul class="m-0 list-none p-0">
+      {#each sessions as session (session.session_key)}
+        {@const info = parse(session.session_key)}
+        <li class="flex flex-wrap items-center gap-x-6 gap-y-2.5 border-t border-line px-[22px] py-4 first:border-t-0">
+          <div class="min-w-0 flex-1 basis-[340px]">
+            <div class="flex flex-wrap items-center gap-x-2.5 gap-y-1">
+              <h2 class="m-0 min-w-0 truncate text-[16px] font-extrabold">{info.name}</h2>
+              {#if session.persona_id}
+                <span class="chip chip-sm chip-muted">{personaName(session.persona_id, info.instanceId)}</span>
+              {/if}
+            </div>
+            <p class="m-0 mt-0.5 flex flex-wrap gap-x-4 gap-y-0.5 text-[13.5px] text-fg2">
+              {#if info.conversation}
+                <span class="max-w-full truncate" title={info.conversation}>
+                  {t('sessions.conversation', { id: info.conversation })}
+                </span>
+              {/if}
+              <span>
+                {session.turn_count === 1
+                  ? t('sessions.turns_one')
+                  : t('sessions.turns_n', { n: session.turn_count })}
+              </span>
+              {#if session.total_tokens_used > 0}
+                <span>{t('sessions.tokens_n', { n: session.total_tokens_used.toLocaleString() })}</span>
+              {/if}
+              <span title={new Date(session.last_active_at * 1000).toLocaleString()}>
+                {ago(session.last_active_at)}
+              </span>
+              {#if info.generation > 0}
+                <span>{t('sessions.restarted', { n: info.generation })}</span>
+              {/if}
+            </p>
+            <p class="m-0 mt-0.5 truncate font-mono text-[12px] text-fg3" title={session.session_key}>
+              {session.session_key}
+            </p>
+          </div>
+          <div class="ml-auto flex items-center gap-2">
+            <button type="button" class="btn btn-sm" onclick={() => openPersona(session, info)}>
+              {t('sessions.persona_btn')}
+            </button>
+            <button
+              type="button"
+              class="btn btn-sm btn-quiet"
+              disabled={busy[session.session_key] || session.turn_count === 0}
+              onclick={() => void reset(session, info.name)}
+            >
+              {t('sessions.reset')}
+            </button>
+          </div>
+        </li>
+      {/each}
+    </ul>
   </div>
 {/if}
+
+<Modal
+  open={binding !== null}
+  title={t('sessions.persona_title', { name: binding?.name ?? '' })}
+  locked={bindSaving}
+  onclose={() => (binding = null)}
+>
+  {#if binding}
+    <form
+      id="session-persona"
+      class="flex flex-col gap-3"
+      onsubmit={(e) => {
+        e.preventDefault();
+        void applyPersona();
+      }}
+    >
+      <div>
+        <label class="label" for="session-persona-select">{t('nav.personas')}</label>
+        <Select id="session-persona-select" bind:value={binding.persona}>
+          <option value="">{t('sessions.persona_none')}</option>
+          {#each personasStore.library as persona (persona.id)}
+            <option value={persona.id}>{persona.name}</option>
+          {/each}
+        </Select>
+      </div>
+      {#if binding.pinned}
+        <div class="notice notice-info">{t('sessions.persona_pinned')}</div>
+      {:else}
+        <p class="m-0 hint">{t('sessions.persona_hint')}</p>
+      {/if}
+      {#if bindError}
+        <div class="notice notice-bad"><span class="min-w-0 break-words">{bindError}</span></div>
+      {/if}
+    </form>
+  {/if}
+
+  {#snippet footer()}
+    <button type="button" class="btn" disabled={bindSaving} onclick={() => (binding = null)}>
+      {t('common.cancel')}
+    </button>
+    <button type="submit" form="session-persona" class="btn btn-primary" disabled={bindSaving}>
+      {t('sessions.persona_apply')}
+    </button>
+  {/snippet}
+</Modal>

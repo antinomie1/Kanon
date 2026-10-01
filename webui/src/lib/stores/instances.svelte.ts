@@ -26,6 +26,17 @@ export interface PolicyItem {
   name: string;
 }
 
+/** A platform that an enabled instance answers on but that cannot deliver messages right now. */
+export interface AdapterProblem {
+  instanceId: string;
+  instanceName: string;
+  platform: string;
+  /** Adapter name as the node reports it, falling back to the platform id. */
+  displayName: string;
+  /** `unknown` means no adapter on the node registers this platform (usually a typo or a removed plugin). */
+  reason: 'disconnected' | 'unknown';
+}
+
 /** Which policy map an override belongs to. */
 export type PolicyKind = 'plugins' | 'skills' | 'mcp';
 
@@ -42,7 +53,7 @@ export type ReplyPolicyChoice = 'inherit' | ReplyMode;
  *
  * Instances are a node-level catalog: adapters only declare where messages come from, while an
  * instance decides whether a bot answers them at all. This store keeps that catalog, the adapter
- * and persona choices it can be built from, and the form state shared by the create/edit modal.
+ * and persona choices it can be built from, and the draft of the instance open in the editor.
  */
 class InstancesStore {
   catalog = $state<InstancesResponse | null>(null);
@@ -62,6 +73,12 @@ class InstancesStore {
   /** Instance currently being edited, or `null` when the form creates a new one. */
   editingId = $state<string | null>(null);
   isFormOpen = $state(false);
+  /**
+   * The request the open form would have sent when it was opened. Comparing the live payload with
+   * it is what tells the editor whether (and how much) the operator changed, so the save bar only
+   * appears when there is something to save.
+   */
+  private baseline = $state.raw<InstanceRequest | null>(null);
 
   // Form fields
   formName = $state('');
@@ -142,6 +159,71 @@ class InstancesStore {
     return modelsStore.defaultModel;
   }
 
+  /**
+   * Platforms enabled instances rely on that are not delivering messages.
+   *
+   * Only claimed platforms count: an unused adapter that is offline affects nobody, while a claimed
+   * one silently drops every message for that instance, which is exactly what needs attention.
+   */
+  get adapterProblems(): AdapterProblem[] {
+    const problems: AdapterProblem[] = [];
+    for (const instance of this.instances) {
+      if (!instance.enabled) continue;
+      for (const status of instance.adapter_status) {
+        if (status.known && status.connected) continue;
+        problems.push({
+          instanceId: instance.id,
+          instanceName: instance.name,
+          platform: status.platform,
+          displayName: status.display_name || status.platform,
+          reason: status.known ? 'disconnected' : 'unknown',
+        });
+      }
+    }
+    return problems;
+  }
+
+  /** Number of top-level settings the open form changed; zero when there is nothing to save. */
+  get changeCount(): number {
+    const base = this.baseline;
+    if (!base || !this.isFormOpen) return 0;
+    const now = this.payload();
+    let count = 0;
+    for (const key of Object.keys(now) as (keyof InstanceRequest)[]) {
+      if (
+        JSON.stringify(now[key] ?? null) !== JSON.stringify(base[key] ?? null)
+      ) {
+        count++;
+      }
+    }
+    return count;
+  }
+
+  /** Model the instance answers with, and whether that is the node default rather than its own. */
+  effectiveModel(instance: BotInstanceView): {
+    reference: string | null;
+    inherited: boolean;
+  } {
+    if (instance.model) return { reference: instance.model, inherited: false };
+    return { reference: this.nodeDefaultModel, inherited: true };
+  }
+
+  /** Reply policy the instance follows in groups, and whether it is the node-wide one. */
+  effectiveReplyPolicy(instance: BotInstanceView): {
+    policy: ReplyPolicy | null;
+    inherited: boolean;
+  } {
+    if (instance.reply_policy)
+      return { policy: instance.reply_policy, inherited: false };
+    return { policy: this.nodeReplyPolicy, inherited: true };
+  }
+
+  /** The instance with `id`, if the catalog has it. */
+  find(id: string | null): BotInstanceView | null {
+    if (!id) return null;
+    return this.instances.find((instance) => instance.id === id) ?? null;
+  }
+
   /** Items of one policy kind, in the order the console renders them. */
   itemsOf(kind: PolicyKind): PolicyItem[] {
     switch (kind) {
@@ -215,6 +297,25 @@ class InstancesStore {
     return null;
   }
 
+  /**
+   * Refreshes the catalog and adapter connection state only.
+   *
+   * Polled by the shell so connection problems appear and clear without a page reload; it leaves
+   * the form and the catalogs of personas, plugins, skills and MCP servers alone.
+   */
+  async refreshStatus() {
+    try {
+      const [catalog, adapters] = await Promise.all([
+        api.getInstances(),
+        api.getAdapters(),
+      ]);
+      this.catalog = catalog;
+      this.adapters = adapters.adapters;
+    } catch {
+      // The node banner already reports an unreachable node; a failed poll keeps the last state.
+    }
+  }
+
   async load() {
     this.loading = true;
     this.error = null;
@@ -282,6 +383,7 @@ class InstancesStore {
     this.notice = null;
     this.error = null;
     this.isFormOpen = true;
+    this.baseline = this.payload();
   }
 
   openEdit(instance: BotInstanceView) {
@@ -321,10 +423,23 @@ class InstancesStore {
     this.notice = null;
     this.error = null;
     this.isFormOpen = true;
+    this.baseline = this.payload();
+  }
+
+  /** Puts the form back to what it was when it was opened. */
+  discardChanges() {
+    if (this.editingId) {
+      const instance = this.find(this.editingId);
+      if (instance) this.openEdit(instance);
+    } else {
+      this.openCreate();
+    }
   }
 
   closeForm() {
     this.isFormOpen = false;
+    this.editingId = null;
+    this.baseline = null;
   }
 
   /** Editor seed for an instance that inherits: a copy of the node-wide command policy. */
@@ -341,7 +456,7 @@ class InstancesStore {
       : [...this.formAdapters, platform];
   }
 
-  private payload(): InstanceRequest {
+  payload(): InstanceRequest {
     return {
       name: this.formName.trim(),
       enabled: this.formEnabled,
@@ -378,7 +493,14 @@ class InstancesStore {
     };
   }
 
-  async save() {
+  /**
+   * Creates or updates the instance in the form.
+   *
+   * Resolves to the saved instance id, or `null` when the node rejected it (the reason is in
+   * `error` and the form keeps what was typed). After a save the form is reopened on the stored
+   * instance, so what the editor shows is what the node now runs.
+   */
+  async save(): Promise<string | null> {
     this.saving = true;
     this.error = null;
     this.notice = null;
@@ -388,26 +510,38 @@ class InstancesStore {
         ? await api.updateInstance(this.editingId, body)
         : await api.createInstance(body);
       this.notice = res.message;
-      this.isFormOpen = false;
       await this.load();
-      return true;
+      const saved = this.find(res.instance?.id ?? this.editingId);
+      if (saved) {
+        this.openEdit(saved);
+      } else {
+        this.closeForm();
+      }
+      return saved?.id ?? null;
     } catch (e) {
       this.error = e instanceof Error ? e.message : String(e);
-      return false;
+      return null;
     } finally {
       this.saving = false;
     }
   }
 
-  async toggleEnabled(instance: BotInstanceView) {
+  /**
+   * Starts or stops an instance right away, outside the form.
+   *
+   * Resolves to `true` when the node applied it. A draft open on the same instance keeps its other
+   * edits; only its on/off state (and the baseline it is compared with) follows the node.
+   */
+  async toggleEnabled(instance: BotInstanceView): Promise<boolean> {
     this.saving = true;
     this.error = null;
+    const enabled = !instance.enabled;
     try {
       // Every other field is sent back verbatim: an update replaces the whole instance, so a
       // start/stop toggle must not silently reset its overrides to their defaults.
       const res = await api.updateInstance(instance.id, {
         name: instance.name,
-        enabled: !instance.enabled,
+        enabled,
         adapters: instance.adapters,
         persona_id: instance.persona_id,
         system_prompt: instance.system_prompt,
@@ -423,23 +557,33 @@ class InstancesStore {
         mcp: instance.mcp,
       });
       this.notice = res.message;
-      await this.load();
+      if (this.isFormOpen && this.editingId === instance.id) {
+        this.formEnabled = enabled;
+        if (this.baseline) this.baseline = { ...this.baseline, enabled };
+      }
+      await this.refreshStatus();
+      return true;
     } catch (e) {
       this.error = e instanceof Error ? e.message : String(e);
+      return false;
     } finally {
       this.saving = false;
     }
   }
 
-  async remove(id: string) {
+  /** Deletes an instance; resolves to `true` when the node removed it. */
+  async remove(id: string): Promise<boolean> {
     this.saving = true;
     this.error = null;
     try {
       const res = await api.deleteInstance(id);
       this.notice = res.message;
+      if (this.editingId === id) this.closeForm();
       await this.load();
+      return true;
     } catch (e) {
       this.error = e instanceof Error ? e.message : String(e);
+      return false;
     } finally {
       this.saving = false;
     }

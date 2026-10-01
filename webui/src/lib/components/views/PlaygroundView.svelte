@@ -1,375 +1,319 @@
 <script lang="ts">
-import {
-  Bot,
-  BrainCircuit,
-  CheckCircle2,
-  Send,
-  Sliders,
-  Sparkles,
-  Square,
-  Trash2,
-  User,
-  Wrench,
-  XCircle,
-} from 'lucide-svelte';
-import { api } from '../../api/client';
-import { streamChatCompletion } from '../../api/sse';
+import { ArrowUp, MessageSquarePlus, Square } from 'lucide-svelte';
+import { tick, untrack } from 'svelte';
+import { type ChatTurn, chatStore as chat } from '../../stores/chat.svelte';
 import { t } from '../../stores/i18n.svelte';
+import { instancesStore } from '../../stores/instances.svelte';
 import { modelsStore } from '../../stores/models.svelte';
-import { providersStore } from '../../stores/providers.svelte';
-import type { ExecutedTool } from '../../types';
+import { personasStore } from '../../stores/personas.svelte';
+import { router } from '../../stores/router.svelte';
+import { toasts } from '../../stores/toast.svelte';
+import PageHead from '../ui/PageHead.svelte';
+import Select from '../ui/Select.svelte';
+import Switch from '../ui/Switch.svelte';
 
-interface ChatMessage {
-  id: string;
-  role: 'user' | 'assistant';
-  content: string;
-  reasoning?: string;
-  executedTools?: ExecutedTool[];
-  timestamp: Date;
-}
+/**
+ * Test chat: talk to the model straight from the console, as the base assistant, as one of the
+ * instances, or with a persona, to check that a model, a prompt and the tools behave.
+ *
+ * `#/chat/<instance-id>` opens it set up as that instance, which is where an instance's
+ * "Test chat" button lands.
+ */
 
-let sessionId = $state('webui:chat');
-let inputMessage = $state('');
-let isStreaming = $state(false);
-let enableTools = $state(true);
-let messages = $state<ChatMessage[]>([]);
-let abortController: AbortController | null = null;
-let chatContainer = $state<HTMLDivElement | null>(null);
+let draft = $state('');
+let scroller = $state<HTMLDivElement>();
+let composer = $state<HTMLTextAreaElement>();
+/** Whether the view follows new text; off once the reader scrolls up to read something. */
+let stick = true;
 
-// Auto-scroll chat
-$effect(() => {
-  if (messages.length > 0 && chatContainer) {
-    chatContainer.scrollTop = chatContainer.scrollHeight;
+const instance = $derived(
+  chat.target.startsWith('i:')
+    ? instancesStore.find(chat.target.slice(2))
+    : undefined,
+);
+const persona = $derived(
+  chat.target.startsWith('p:')
+    ? personasStore.all.find((p) => p.id === chat.target.slice(2))
+    : undefined,
+);
+
+/** Name shown over the replies, so it is clear who is answering. */
+const speaker = $derived(
+  instance?.name ?? persona?.name ?? t('chat.assistant'),
+);
+
+/** Model used when the picker is left on its first entry. */
+const inheritedModel = $derived(instance?.model ?? modelsStore.defaultModel);
+const model = $derived(chat.model || inheritedModel || undefined);
+
+/**
+ * Persona sent with every message. An instance's own prompt is published by the node as the
+ * persona `instance:<id>`, which wins over the persona it picked, just as in real conversations.
+ */
+const personaId = $derived.by(() => {
+  if (instance) {
+    return instance.system_prompt?.trim()
+      ? `instance:${instance.id}`
+      : (instance.persona_id ?? personasStore.baseId);
   }
+  return persona?.id ?? personasStore.baseId;
 });
 
-async function sendMessage() {
-  const text = inputMessage.trim();
-  if (!text || isStreaming) return;
-
-  const activeModelKey = providersStore.activeModel;
-  // The sandbox sends the canonical `<provider>/<model-id>` reference and lets the node resolve it
-  // against its provider directory. The browser never receives a credential, so it cannot build a
-  // provider of its own — and it no longer needs to.
-  const targetModel: string | undefined = activeModelKey || undefined;
-
-  inputMessage = '';
-  const userMsg: ChatMessage = {
-    id: `usr_${Date.now()}`,
-    role: 'user',
-    content: text,
-    timestamp: new Date(),
-  };
-  messages = [...messages, userMsg];
-
-  const assistantId = `ast_${Date.now()}`;
-  const assistantMsg: ChatMessage = {
-    id: assistantId,
-    role: 'assistant',
-    content: '',
-    reasoning: '',
-    executedTools: [],
-    timestamp: new Date(),
-  };
-  messages = [...messages, assistantMsg];
-
-  // Neither a chosen model nor a global default model: the node has nothing to answer with.
-  if (!targetModel && !modelsStore.defaultModel) {
-    messages = messages.map((m) =>
-      m.id === assistantId
-        ? {
-            ...m,
-            content:
-              '尚未设置全局默认模型。请先在「模型提供商」页面添加提供商，并选定默认模型。',
-          }
-        : m,
-    );
-    return;
-  }
-
-  isStreaming = true;
-  abortController = new AbortController();
-
-  try {
-    await streamChatCompletion(
-      {
-        session_id: sessionId,
-        message: text,
-        model: targetModel,
-        tools: enableTools,
-      },
-      {
-        onChunk: (delta, reasoning) => {
-          messages = messages.map((m) => {
-            if (m.id !== assistantId) return m;
-            return {
-              ...m,
-              content: m.content + (delta || ''),
-              reasoning: reasoning
-                ? (m.reasoning || '') + reasoning
-                : m.reasoning,
-            };
-          });
-        },
-        onFinish: () => {
-          isStreaming = false;
-        },
-        onError: (err) => {
-          messages = messages.map((m) => {
-            if (m.id !== assistantId) return m;
-            return {
-              ...m,
-              content: m.content
-                ? `${m.content}\n[错误: ${err.message}]`
-                : `[错误: ${err.message}]`,
-            };
-          });
-          isStreaming = false;
-        },
-      },
-      abortController.signal,
-    );
-  } catch (err) {
-    messages = messages.map((m) => {
-      if (m.id !== assistantId) return m;
-      return {
-        ...m,
-        content: m.content
-          ? `${m.content}\n[发送请求失败: ${err}]`
-          : `[发送请求失败: ${err}]`,
-      };
-    });
-    isStreaming = false;
-  }
-}
-
-function parseMessageContent(msg: ChatMessage) {
-  let reasoning = msg.reasoning || '';
-  let content = msg.content || '';
-
-  if (content.includes('<think>')) {
-    const startIdx = content.indexOf('<think>');
-    const endIdx = content.indexOf('</think>');
-    if (endIdx !== -1) {
-      const thinkText = content.slice(startIdx + 7, endIdx).trim();
-      if (!reasoning) reasoning = thinkText;
-      content = (content.slice(0, startIdx) + content.slice(endIdx + 8)).trim();
+// Follow the route: `#/chat/<id>` answers as that instance once the catalog has loaded.
+$effect(() => {
+  const param = router.param;
+  if (!param || instancesStore.catalog === null) return;
+  untrack(() => {
+    if (instancesStore.find(param)) {
+      chat.choose(`i:${param}`);
     } else {
-      const thinkText = content.slice(startIdx + 7).trim();
-      if (!reasoning) reasoning = thinkText;
-      content = content.slice(0, startIdx).trim();
+      toasts.error(t('chat.instance_missing', { id: param }));
+      router.replaceParam(null);
     }
-  }
+  });
+});
 
-  return { reasoning, content };
+function chooseTarget(next: string) {
+  chat.choose(next);
+  router.replaceParam(next.startsWith('i:') ? next.slice(2) : null);
 }
 
-function handleStop() {
-  if (abortController) {
-    abortController.abort();
-    abortController = null;
-  }
-  isStreaming = false;
+const groups = $derived(
+  modelsStore.providers
+    .map((provider) => ({
+      provider,
+      references: modelsStore.referencesFor(provider),
+    }))
+    .filter((group) => group.references.length > 0),
+);
+
+// Keep the newest text in view while the reader is at the bottom.
+$effect(() => {
+  void chat.turns.length;
+  const last = chat.turns.at(-1);
+  void last?.content;
+  void last?.reasoning;
+  if (stick && scroller) scroller.scrollTop = scroller.scrollHeight;
+});
+
+function onScroll() {
+  if (!scroller) return;
+  stick =
+    scroller.scrollHeight - scroller.scrollTop - scroller.clientHeight < 80;
 }
 
-function clearChat() {
-  messages = [];
+/** Grows the box with its text, up to a limit, so a long message stays readable while typed. */
+function fit() {
+  if (!composer) return;
+  composer.style.height = 'auto';
+  composer.style.height = `${Math.min(composer.scrollHeight, 220)}px`;
+}
+
+async function send() {
+  const text = draft.trim();
+  if (!text || chat.streaming || !model) return;
+  draft = '';
+  stick = true;
+  await tick();
+  fit();
+  await chat.send(text, { personaId, model });
+}
+
+function onKeydown(e: KeyboardEvent) {
+  // Enter sends; Shift+Enter adds a line. An IME composition's Enter only confirms the text.
+  if (e.key === 'Enter' && !e.shiftKey && !e.isComposing) {
+    e.preventDefault();
+    void send();
+  }
+}
+
+/**
+ * Splits a `<think>` block some models write inline from the answer itself. Reasoning streamed
+ * separately takes precedence.
+ */
+function split(turn: ChatTurn): { reasoning: string; content: string } {
+  const content = turn.content;
+  const start = content.indexOf('<think>');
+  if (start === -1) return { reasoning: turn.reasoning, content };
+  const end = content.indexOf('</think>', start);
+  const inline = content.slice(start + 7, end === -1 ? undefined : end).trim();
+  const rest =
+    end === -1
+      ? content.slice(0, start)
+      : content.slice(0, start) + content.slice(end + 8);
+  return { reasoning: turn.reasoning || inline, content: rest.trim() };
 }
 </script>
 
-<div class="h-full flex flex-col bg-zinc-50/50 dark:bg-zinc-950/50 overflow-hidden">
-  <!-- Top Control Bar -->
-  <div class="p-3 border-b border-zinc-200 dark:border-zinc-800 bg-white dark:bg-zinc-900 flex items-center justify-between shrink-0">
-    <div class="flex items-center gap-4">
-      <div class="flex items-center gap-2">
-        <Bot class="w-4.5 h-4.5 text-indigo-500" />
-        <span class="text-sm font-semibold text-zinc-900 dark:text-zinc-100">{t('nav.chat')}</span>
-      </div>
-      <div class="flex items-center gap-1.5 text-xs">
-        <label for="chat-session-input" class="text-zinc-400 font-mono text-xs">{t('sessions.session_id')}:</label>
-        <input
-          id="chat-session-input"
-          type="text"
-          bind:value={sessionId}
-          class="px-2.5 py-1 rounded-md font-mono text-xs sm:text-sm bg-zinc-100 dark:bg-zinc-800 border border-zinc-200 dark:border-zinc-700 text-zinc-800 dark:text-zinc-200 w-36"
-        />
-      </div>
+<PageHead title={t('nav.chat')}>
+  {#snippet sub()}
+    <span>{t('chat.sub')}</span>
+  {/snippet}
+  {#snippet actions()}
+    <button type="button" class="btn" disabled={chat.turns.length === 0} onclick={() => chat.clear()}>
+      <MessageSquarePlus size={16} strokeWidth={2.2} />
+      {t('chat.new')}
+    </button>
+  {/snippet}
+</PageHead>
 
-      <div class="flex items-center gap-1.5 text-xs">
-        <label for="chat-model-select" class="text-zinc-400 font-mono text-xs">模型:</label>
-        <select
-          id="chat-model-select"
-          value={providersStore.activeModel}
-          onchange={(e) => providersStore.setActiveModel(e.currentTarget.value)}
-          class="px-2.5 py-1 rounded-md font-mono text-xs sm:text-sm bg-zinc-100 dark:bg-zinc-800 border border-zinc-200 dark:border-zinc-700 text-zinc-800 dark:text-zinc-200 max-w-56 truncate cursor-pointer"
-        >
-          <option value="">
-            {modelsStore.defaultModel
-              ? `默认 · ${modelsStore.defaultModel}`
-              : '未设置默认模型'}
-          </option>
-          {#each providersStore.allModelKeys as key}
-            <option value={key}>{key}</option>
+<div class="card flex flex-wrap items-end gap-x-5 gap-y-3 px-5 py-4">
+  <div class="min-w-0 flex-1 basis-[220px]">
+    <label class="label" for="chat-target">{t('chat.target')}</label>
+    <Select id="chat-target" value={chat.target} onchange={(e) => chooseTarget(e.currentTarget.value)}>
+      <option value="">{t('chat.assistant')}</option>
+      {#if instancesStore.instances.length > 0}
+        <optgroup label={t('nav.instances')}>
+          {#each instancesStore.instances as item (item.id)}
+            <option value="i:{item.id}">{item.name}</option>
           {/each}
-        </select>
-      </div>
-    </div>
-
-    <div class="flex items-center gap-3">
-      <!-- Toggle tools -->
-      <label class="flex items-center gap-1.5 text-xs sm:text-sm text-zinc-600 dark:text-zinc-400 cursor-pointer select-none">
-        <input
-          type="checkbox"
-          bind:checked={enableTools}
-          class="rounded text-indigo-600 focus:ring-0 w-3.5 h-3.5"
-        />
-        <span>{t('playground.enable_tools')}</span>
-      </label>
-
-      <!-- Clear messages -->
-      <button
-        onclick={clearChat}
-        class="p-1.5 text-zinc-400 hover:text-zinc-600 dark:hover:text-zinc-200 transition cursor-pointer"
-        title={t('common.clear')}
-      >
-        <Trash2 class="w-4 h-4" />
-      </button>
-    </div>
+        </optgroup>
+      {/if}
+      {#if personasStore.library.length > 0}
+        <optgroup label={t('nav.personas')}>
+          {#each personasStore.library as item (item.id)}
+            <option value="p:{item.id}">{item.name}</option>
+          {/each}
+        </optgroup>
+      {/if}
+    </Select>
   </div>
+  <div class="min-w-0 flex-1 basis-[220px]">
+    <label class="label" for="chat-model">{t('chat.model')}</label>
+    <Select id="chat-model" bind:value={chat.model}>
+      <option value="">
+        {inheritedModel
+          ? instance?.model
+            ? t('chat.model_instance', { model: inheritedModel })
+            : t('chat.model_default', { model: inheritedModel })
+          : t('chat.model_none')}
+      </option>
+      {#each groups as group (group.provider)}
+        <optgroup label={group.provider}>
+          {#each group.references as reference (reference)}
+            <option value={reference}>{reference.slice(group.provider.length + 1)}</option>
+          {/each}
+        </optgroup>
+      {/each}
+    </Select>
+  </div>
+  <span class="flex h-[42px] items-center gap-2.5 text-[14px] font-bold whitespace-nowrap">
+    <Switch
+      checked={chat.tools}
+      label={t('chat.tools')}
+      onchange={(next) => (chat.tools = next)}
+    />
+    {t('chat.tools')}
+  </span>
+</div>
 
-  <!-- Messages Scroll Area -->
-  <div
-    bind:this={chatContainer}
-    class="flex-1 p-6 overflow-y-auto space-y-5 max-w-4xl w-full mx-auto"
-  >
-    {#if messages.length === 0}
-      <div class="p-16 text-center space-y-3">
-        <div class="w-14 h-14 rounded-2xl bg-indigo-50 dark:bg-indigo-950/60 border border-indigo-200 dark:border-indigo-800/60 flex items-center justify-center mx-auto text-indigo-600 dark:text-indigo-400">
-          <Bot class="w-7 h-7" />
+<section class="card flex min-h-[360px] flex-1 flex-col overflow-hidden">
+  <div bind:this={scroller} onscroll={onScroll} class="scroll-thin min-h-0 flex-1 overflow-y-auto px-5 py-6 sm:px-8">
+    <div class="mx-auto flex max-w-[760px] flex-col gap-5">
+      {#if chat.turns.length === 0}
+        <div class="flex flex-col items-center gap-1.5 py-14 text-center">
+          <p class="m-0 text-[17px] font-extrabold">{t('chat.empty_title', { name: speaker })}</p>
+          <p class="m-0 max-w-[52ch] hint">
+            {instance ? t('chat.empty_instance') : t('chat.empty_text')}
+          </p>
         </div>
-        <h4 class="text-base font-semibold text-zinc-900 dark:text-zinc-100">{t('title.playground')}</h4>
-        <p class="text-sm text-zinc-500 max-w-sm mx-auto leading-relaxed">
-          {t('playground.empty_chat')}
-        </p>
-      </div>
-    {:else}
-      {#each messages as msg (msg.id)}
-        {@const parsed = parseMessageContent(msg)}
-        {@const isLastAssistant = msg.role === 'assistant' && msg.id === messages[messages.length - 1]?.id}
-        {@const isThinkingNow = isLastAssistant && isStreaming && !parsed.content}
+      {/if}
 
-        <div class="flex items-start gap-3.5 text-sm sm:text-base leading-relaxed {msg.role === 'user' ? 'justify-end' : 'justify-start'}">
-          {#if msg.role === 'assistant'}
-            <div class="w-8 h-8 rounded-xl bg-indigo-600 text-white flex items-center justify-center shrink-0 mt-0.5 shadow-xs">
-              <Bot class="w-4.5 h-4.5" />
-            </div>
-          {/if}
-
-          <div class="space-y-2.5 max-w-[88%] sm:max-w-2xl w-full {msg.role === 'user' ? 'flex flex-col items-end' : ''}">
-            <!-- Thought / Reasoning block -->
-            {#if parsed.reasoning}
-              <details class="group rounded-xl border border-indigo-200/70 dark:border-indigo-900/70 bg-indigo-50/50 dark:bg-indigo-950/25 text-xs sm:text-sm overflow-hidden" open={isThinkingNow}>
-                <summary class="flex items-center gap-2 px-3.5 py-2 cursor-pointer text-indigo-700 dark:text-indigo-300 font-mono text-xs sm:text-sm select-none hover:bg-indigo-100/50 dark:hover:bg-indigo-900/40 transition">
-                  <BrainCircuit class="w-4 h-4 shrink-0 text-indigo-500 {isThinkingNow ? 'animate-pulse' : ''}" />
-                  <span class="font-medium">
-                    {isThinkingNow ? '思考中...' : '已深度思考'}
-                  </span>
-                  <span class="text-xs text-zinc-400">({parsed.reasoning.length} 字)</span>
+      {#each chat.turns as turn, index (turn.id)}
+        {#if turn.role === 'user'}
+          <div
+            class="max-w-[85%] self-end rounded-[20px] rounded-br-[6px] bg-accent-tint px-4 py-2.5 text-[15px] leading-relaxed break-words whitespace-pre-wrap text-fg"
+          >
+            {turn.content}
+          </div>
+        {:else}
+          {@const parts = split(turn)}
+          {@const live = chat.streaming && index === chat.turns.length - 1}
+          <div class="flex max-w-[92%] flex-col gap-2">
+            <span class="text-[12.5px] font-bold text-fg2">{speaker}</span>
+            {#if parts.reasoning}
+              <details class="rounded-[14px] bg-sunk" open={live && !parts.content}>
+                <summary class="cursor-pointer px-3.5 py-2 text-[13px] font-bold text-fg2 select-none">
+                  {live && !parts.content
+                    ? t('chat.thinking')
+                    : t('chat.thought', { n: parts.reasoning.length })}
                 </summary>
-                <div class="px-3.5 py-2.5 text-xs sm:text-[13px] text-zinc-600 dark:text-zinc-400 font-mono whitespace-pre-wrap border-t border-indigo-100 dark:border-indigo-950 bg-white/60 dark:bg-zinc-950/50 max-h-64 overflow-y-auto leading-relaxed">
-                  {parsed.reasoning}
+                <div class="scroll-thin max-h-64 overflow-y-auto border-t border-line px-3.5 py-2.5 text-[13px] leading-relaxed whitespace-pre-wrap text-fg2">
+                  {parts.reasoning}
                 </div>
               </details>
-            {:else if isThinkingNow}
-              <div class="flex items-center gap-2 px-3.5 py-2 rounded-xl border border-indigo-200/70 dark:border-indigo-900/70 bg-indigo-50/50 dark:bg-indigo-950/25 text-indigo-600 dark:text-indigo-400 font-mono text-xs sm:text-sm animate-pulse">
-                <BrainCircuit class="w-4 h-4 shrink-0" />
-                <span>思考中 (Thinking)...</span>
-              </div>
             {/if}
-
-            <!-- Main Message Bubble -->
-            {#if msg.role === 'user'}
-              <div class="p-3.5 sm:p-4 rounded-2xl shadow-2xs text-sm sm:text-base leading-relaxed bg-zinc-900 text-white dark:bg-zinc-100 dark:text-zinc-900 font-medium">
-                <div class="whitespace-pre-wrap">{msg.content}</div>
-              </div>
-            {:else if parsed.content}
-              <div class="p-3.5 sm:p-4 rounded-2xl shadow-2xs text-sm sm:text-base leading-relaxed bg-white dark:bg-zinc-900 border border-zinc-200 dark:border-zinc-800 text-zinc-800 dark:text-zinc-200">
-                <div class="whitespace-pre-wrap">{parsed.content}</div>
-              </div>
-            {:else if isLastAssistant && isStreaming && parsed.reasoning}
-              <div class="flex items-center gap-2 text-zinc-400 font-mono text-xs sm:text-sm px-2 py-1">
-                <span class="w-2 h-2 rounded-full bg-indigo-500 animate-pulse"></span>
-                <span>正在组织回复...</span>
-              </div>
-            {:else if !isStreaming && !parsed.reasoning}
-              <div class="p-3.5 sm:p-4 rounded-2xl shadow-2xs text-xs sm:text-sm bg-amber-50 dark:bg-amber-950/30 border border-amber-200 dark:border-amber-800/50 text-amber-700 dark:text-amber-300">
-                <div class="whitespace-pre-wrap">{parsed.content || '[无文本回复内容]'}</div>
-              </div>
+            {#if parts.content}
+              <div class="text-[15px] leading-relaxed break-words whitespace-pre-wrap text-fg">{parts.content}</div>
+            {:else if live}
+              <span class="flex items-center gap-2 text-[13.5px] text-fg2">
+                <i class="dot animate-pulse bg-accent!"></i>
+                {parts.reasoning ? t('chat.writing') : t('chat.thinking')}
+              </span>
+            {:else if !turn.error}
+              <span class="text-[13.5px] text-fg3">{t('chat.no_text')}</span>
             {/if}
-
-            <!-- Executed Tools inspection cards -->
-            {#if msg.executedTools && msg.executedTools.length > 0}
-              <div class="space-y-1.5">
-                {#each msg.executedTools as tool}
-                  <div class="p-2.5 rounded-lg bg-zinc-100 dark:bg-zinc-900 border border-zinc-200 dark:border-zinc-800 flex items-center justify-between text-xs font-mono">
-                    <div class="flex items-center gap-2">
-                      <Wrench class="w-3.5 h-3.5 text-indigo-500" />
-                      <span class="font-bold">{tool.tool_name}</span>
-                      <span class="text-zinc-400">({tool.plugin_id})</span>
-                    </div>
-                    <span class="flex items-center gap-1 {tool.success ? 'text-emerald-500' : 'text-rose-500'} font-semibold">
-                      {#if tool.success}
-                        <CheckCircle2 class="w-3.5 h-3.5" />
-                        <span>Success</span>
-                      {:else}
-                        <XCircle class="w-3.5 h-3.5" />
-                        <span>Failed</span>
-                      {/if}
-                    </span>
-                  </div>
-                {/each}
-              </div>
+            {#if turn.error}
+              <div class="notice notice-bad"><span class="min-w-0 break-words">{t('chat.failed', { error: turn.error })}</span></div>
             {/if}
           </div>
-
-          {#if msg.role === 'user'}
-            <div class="w-8 h-8 rounded-xl bg-zinc-200 dark:bg-zinc-800 text-zinc-600 dark:text-zinc-300 flex items-center justify-center shrink-0 mt-0.5">
-              <User class="w-4.5 h-4.5" />
-            </div>
-          {/if}
-        </div>
+        {/if}
       {/each}
-    {/if}
-  </div>
-
-  <!-- Input Bar -->
-  <div class="p-4 border-t border-zinc-200 dark:border-zinc-800 bg-white dark:bg-zinc-900 shrink-0">
-    <div class="max-w-4xl mx-auto flex items-center gap-2.5">
-      <input
-        type="text"
-        bind:value={inputMessage}
-        onkeydown={(e) => e.key === 'Enter' && sendMessage()}
-        placeholder={t('playground.placeholder')}
-        class="flex-1 px-4 py-3 rounded-xl bg-zinc-100 dark:bg-zinc-950 border border-zinc-200 dark:border-zinc-800 text-sm sm:text-base text-zinc-900 dark:text-zinc-100 placeholder-zinc-400 focus:outline-hidden focus:border-zinc-400 dark:focus:border-zinc-600"
-      />
-      {#if isStreaming}
-        <button
-          onclick={handleStop}
-          class="p-3 bg-rose-600 hover:bg-rose-500 text-white rounded-xl font-medium transition cursor-pointer flex items-center justify-center"
-          title="Stop generation"
-        >
-          <Square class="w-4.5 h-4.5 fill-current" />
-        </button>
-      {:else}
-        <button
-          onclick={sendMessage}
-          disabled={!inputMessage.trim()}
-          class="p-3 bg-zinc-900 hover:bg-zinc-800 dark:bg-zinc-100 dark:hover:bg-zinc-200 text-white dark:text-zinc-900 rounded-xl font-medium transition cursor-pointer flex items-center justify-center disabled:opacity-40"
-          title={t('playground.send')}
-        >
-          <Send class="w-4 h-4" />
-        </button>
-      {/if}
     </div>
   </div>
-</div>
+
+  <form
+    class="border-t border-line px-4 py-3 sm:px-6"
+    onsubmit={(e) => {
+      e.preventDefault();
+      void send();
+    }}
+  >
+    <div class="mx-auto flex max-w-[760px] flex-col gap-2.5">
+      {#if !model}
+        <div class="notice notice-warn items-center">
+          <span class="min-w-0 flex-1">{t('chat.no_model')}</span>
+          <button type="button" class="btn btn-sm" onclick={() => router.navigate('models')}>
+            {t('chat.open_models')}
+          </button>
+        </div>
+      {/if}
+      <div class="flex items-end gap-2.5">
+        <textarea
+          bind:this={composer}
+          bind:value={draft}
+          rows="1"
+          aria-label={t('chat.placeholder', { name: speaker })}
+          placeholder={t('chat.placeholder', { name: speaker })}
+          oninput={fit}
+          onkeydown={onKeydown}
+          class="input h-[46px] min-h-[46px] resize-none py-[11px] leading-[1.5]"
+        ></textarea>
+        {#if chat.streaming}
+          <button
+            type="button"
+            class="btn btn-icon h-[46px]! w-[46px]! shrink-0"
+            title={t('chat.stop')}
+            aria-label={t('chat.stop')}
+            onclick={() => chat.stop()}
+          >
+            <Square size={16} strokeWidth={2.4} class="fill-current" />
+          </button>
+        {:else}
+          <button
+            type="submit"
+            class="btn btn-primary btn-icon h-[46px]! w-[46px]! shrink-0"
+            title={t('chat.send')}
+            aria-label={t('chat.send')}
+            disabled={!draft.trim() || !model}
+          >
+            <ArrowUp size={19} strokeWidth={2.6} />
+          </button>
+        {/if}
+      </div>
+      <p class="m-0 text-[12.5px] text-fg3">
+        {instance ? t('chat.instance_note') : t('chat.enter_hint')}
+      </p>
+    </div>
+  </form>
+</section>

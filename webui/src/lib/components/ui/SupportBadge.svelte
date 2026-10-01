@@ -20,11 +20,11 @@ const names = $derived(capabilityStore.supporters(capabilities));
 
 {#if capabilityStore.loaded}
   {#if names.length > 0}
-    <span class="block text-[11px] text-zinc-400 mt-0.5">
-      {t('capability.supported_by')}: {names.join(' · ')}
+    <span class="mt-0.5 block text-[12.5px] text-fg3">
+      {t('capability.supported_by')}: {names.join(', ')}
     </span>
   {:else}
-    <span class="block text-[11px] text-amber-600 dark:text-amber-400 mt-0.5">
+    <span class="mt-0.5 block text-[12.5px] text-warn">
       {t('capability.none')}
     </span>
   {/if}

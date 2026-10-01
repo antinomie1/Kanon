@@ -399,9 +399,10 @@ export const api = {
       },
     ),
 
-  getSessions: (limit = 50, offset = 0) =>
+  /** Most recently active sessions first; `search` matches part of the session key. */
+  getSessions: (search = '', pageSize = 100) =>
     request<SessionsResponse>(
-      `/api/v1/sessions?limit=${limit}&offset=${offset}`,
+      `/api/v1/sessions?page_size=${pageSize}${search ? `&search=${encodeURIComponent(search)}` : ''}`,
     ),
   resetSession: (sessionId: string) =>
     request<{ success: boolean }>(
