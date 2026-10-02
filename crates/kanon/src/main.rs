@@ -41,8 +41,8 @@ use kanon_adapter_milky::MilkyAdapter;
 use kanon_adapter_onebot::OneBotAdapter;
 use kanon_adapter_qqofficial::QqOfficialAdapter;
 use kanon_api::{
-    ApiServer, ApiState, DEFAULT_SESSION_DB, NodeSettings, Observability, PersonaStore,
-    StartupConfig, SystemConfigStore, open_session_manager,
+    ApiServer, ApiState, DEFAULT_SESSION_DB, NodeSettings, Observability, StartupConfig,
+    SystemConfigStore, open_session_manager,
 };
 use kanon_core::ipc::{CoreApiService, CoreIpcServer, DEFAULT_INGEST_QUEUE_CAPACITY};
 use kanon_core::pipeline::PipelineEngine;
@@ -53,6 +53,7 @@ use kanon_core::{
     InstanceRegistry, MCP_WATCHDOG_INTERVAL, McpConfigStore, McpPool, PLUGIN_SECTION,
     ReadSkillTool, SkillCatalogHook, SkillStore, ToggleStore, sync_instance_personas,
 };
+use kanon_llm::PersonaStore;
 use tokio::sync::{mpsc, oneshot};
 use tracing_subscriber::EnvFilter;
 use tracing_subscriber::layer::SubscriberExt;
@@ -203,7 +204,7 @@ async fn main() -> StartupResult<()> {
     let state = ApiState::builder(supervisor.clone())
         .with_sessions(sessions)
         .with_personas(personas)
-        .with_persona_store(persona_store)
+        .with_persona_store(persona_store.clone())
         .with_milky_adapter(milky_adapter)
         .with_onebot_adapter(onebot_adapter)
         .with_qqofficial_adapter(qqofficial_adapter)
@@ -282,7 +283,8 @@ async fn main() -> StartupResult<()> {
         .with_supervisor(supervisor.clone())
         .with_outbound_sender(engine.outbound_sender())
         .with_agent_slot(state.llm_slot().clone())
-        .with_engine(engine.clone());
+        .with_engine(engine.clone())
+        .with_personas(state.personas().clone(), persona_store);
     let ipc_server = CoreIpcServer::new(socket_path.clone(), service);
 
     // --- Graceful shutdown channels ---------------------------------------------------

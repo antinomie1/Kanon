@@ -223,6 +223,22 @@ pub trait SessionStore: Send + Sync {
 
     /// Stores (inserts or replaces) one session record.
     fn save(&self, metadata: &SessionMetadata) -> Result<(), MemoryError>;
+
+    /// Removes one session record; removing a record that does not exist is not an error.
+    fn delete(&self, session_key: &str) -> Result<(), MemoryError>;
+}
+
+/// One stored session as a conversation listing shows it (see [`SessionManager::sessions_with_prefix`]).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SessionOverview {
+    /// The session's key.
+    pub session_key: String,
+    /// User and assistant messages in the history (summarized ones excluded).
+    pub message_count: usize,
+    /// Text of the earliest user message still in the history.
+    pub first_user_message: Option<String>,
+    /// Unix seconds of the last turn; 0 when the session never had one.
+    pub last_active_at: u64,
 }
 
 /// Comprehensive session lifecycle and state manager.
@@ -521,5 +537,72 @@ impl SessionManager {
     /// Returns a snapshot list of all tracked session metadata.
     pub fn list_sessions(&self) -> Vec<SessionMetadata> {
         self.metadata.iter().map(|entry| entry.clone()).collect()
+    }
+
+    /// Lists every session whose key starts with `prefix`, ordered by key.
+    ///
+    /// Sessions come from both halves of a conversation: the history in [`Memory`] and the
+    /// records this manager tracks. A session known to only one half (a record without messages
+    /// yet, or history written by a memory-only caller) is still listed.
+    pub async fn sessions_with_prefix(
+        &self,
+        prefix: &str,
+    ) -> Result<Vec<SessionOverview>, MemoryError> {
+        let mut sessions: HashMap<String, SessionOverview> = self
+            .memory
+            .list_sessions(prefix)
+            .await?
+            .into_iter()
+            .map(|stored| {
+                (
+                    stored.session_key.clone(),
+                    SessionOverview {
+                        session_key: stored.session_key,
+                        message_count: stored.message_count,
+                        first_user_message: stored.first_user_message,
+                        last_active_at: stored.last_message_at.unwrap_or(0),
+                    },
+                )
+            })
+            .collect();
+        for entry in self.metadata.iter() {
+            if !entry.key().starts_with(prefix) {
+                continue;
+            }
+            // A record is created before its first turn (a persona binding, for one), so its
+            // timestamps only mean "last turn" once a turn was recorded.
+            let last_turn = if entry.turn_count > 0 {
+                entry.last_active_at
+            } else {
+                0
+            };
+            let overview = sessions
+                .entry(entry.key().clone())
+                .or_insert_with(|| SessionOverview {
+                    session_key: entry.key().clone(),
+                    message_count: 0,
+                    first_user_message: None,
+                    last_active_at: 0,
+                });
+            overview.last_active_at = overview.last_active_at.max(last_turn);
+        }
+        let mut sessions: Vec<SessionOverview> = sessions.into_values().collect();
+        sessions.sort_by(|a, b| a.session_key.cmp(&b.session_key));
+        Ok(sessions)
+    }
+
+    /// Deletes a whole session: its history, its summary and its record.
+    ///
+    /// This is the only way a conversation's messages are removed besides compaction (see
+    /// [`crate::memory`]): the session disappears as a unit, so no remaining session ever has a
+    /// gap. History goes first; if removing the record then fails, the record is kept on disk
+    /// and in memory alike and the error is returned, so a retry finishes the job.
+    pub async fn delete_session(&self, session_key: &str) -> Result<(), MemoryError> {
+        self.memory.clear(session_key).await?;
+        if let Some(store) = &self.store {
+            store.delete(session_key)?;
+        }
+        self.metadata.remove(session_key);
+        Ok(())
     }
 }

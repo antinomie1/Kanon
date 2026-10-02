@@ -15,7 +15,7 @@ use kanon_llm::BuiltinAgent;
 use kanon_llm::gateway::types::{ChatRequest, ChatResponse};
 use kanon_llm::memory::{InMemory, Memory};
 use kanon_llm::tool_router::ToolRouter;
-use kanon_llm::{GatewayError, LlmProvider};
+use kanon_llm::{GatewayError, LlmProvider, SessionManager};
 use kanon_proto::v1::{PipelineEventRequest, PluginMeta};
 
 /// Provider that answers every turn and counts how often it was asked.
@@ -47,6 +47,8 @@ async fn harness(
 
     let calls = Arc::new(AtomicUsize::new(0));
     let memory: Arc<dyn Memory> = Arc::new(InMemory::new());
+    // Session records as in the node: `/new` reads them to find the chat's newest conversation.
+    let sessions = Arc::new(SessionManager::new(memory.clone()));
     let agent = Arc::new(
         BuiltinAgent::builder(
             "gating-test",
@@ -55,6 +57,7 @@ async fn harness(
             }),
         )
         .memory(memory.clone())
+        .session_manager(sessions)
         .model("test-model")
         .build(),
     );

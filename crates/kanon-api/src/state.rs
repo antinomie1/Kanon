@@ -22,13 +22,12 @@ use kanon_core::{
 };
 use kanon_llm::{
     Agent, AgentConfig, AgentFactory, AgentSlot, InMemory, LlmProvider, Memory, PersonaRegistry,
-    ProviderRuntime, SessionManager,
+    PersonaStore, ProviderRuntime, SessionManager,
 };
 
 use crate::error::ApiError;
 use crate::llm_config::{NodeSettings, SystemConfigStore};
 use crate::observability::Observability;
-use crate::persona_store::PersonaStore;
 use crate::plugin_config::PluginConfigStore;
 
 /// Shared, cloneable state injected into every management route.

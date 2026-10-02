@@ -29,7 +29,7 @@ use tokio::sync::Mutex;
 
 use crate::error::MemoryError;
 use crate::gateway::types::{ChatMessage, Role, ToolCall};
-use crate::memory::{Memory, MemorySnapshot, SessionMemory};
+use crate::memory::{Memory, MemorySnapshot, SessionMemory, StoredSession};
 use crate::session::{SessionMetadata, SessionStore};
 
 /// Backward-compatible type alias for [`SqliteMemory`].
@@ -497,6 +497,38 @@ impl Memory for SqliteMemory {
         })?;
         Ok(count as usize)
     }
+
+    async fn list_sessions(&self, prefix: &str) -> Result<Vec<StoredSession>, MemoryError> {
+        // The database is authoritative: the cache only ever mirrors committed rows, so reading
+        // here never misses a message the cache holds. `substr` compares the prefix literally,
+        // where `LIKE` would treat `%` and `_` in a chat id as wildcards.
+        let conn = self.conn.lock().await;
+        let mut stmt = conn.prepare(
+            "SELECT s.session_key,
+                    (SELECT COUNT(*) FROM messages m
+                      WHERE m.session_key = s.session_key AND m.role IN ('user', 'assistant')),
+                    (SELECT m.content FROM messages m
+                      WHERE m.session_key = s.session_key AND m.role = 'user'
+                      ORDER BY m.id ASC LIMIT 1),
+                    (SELECT MAX(m.created_at) FROM messages m WHERE m.session_key = s.session_key)
+             FROM sessions s
+             WHERE substr(s.session_key, 1, length(?1)) = ?1
+             ORDER BY s.session_key",
+        )?;
+        let mut rows = stmt.query(params![prefix])?;
+        let mut sessions = Vec::new();
+        while let Some(row) = rows.next()? {
+            let count: i64 = row.get(1)?;
+            let last: Option<i64> = row.get(3)?;
+            sessions.push(StoredSession {
+                session_key: row.get(0)?,
+                message_count: count.max(0) as usize,
+                first_user_message: row.get(2)?,
+                last_message_at: last.map(|seconds| seconds.max(0) as u64),
+            });
+        }
+        Ok(sessions)
+    }
 }
 
 /// SQLite-backed [`SessionStore`]: one JSON document per session.
@@ -581,6 +613,14 @@ impl SessionStore for SqliteSessionStore {
                  data = excluded.data,
                  updated_at = excluded.updated_at",
             params![metadata.session_key, data, current_timestamp()],
+        )?;
+        Ok(())
+    }
+
+    fn delete(&self, session_key: &str) -> Result<(), MemoryError> {
+        self.conn().execute(
+            "DELETE FROM session_meta WHERE session_key = ?1",
+            params![session_key],
         )?;
         Ok(())
     }

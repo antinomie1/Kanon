@@ -11,14 +11,15 @@
 //! - **Instance** personas are generated from a bot instance's own prompt and are owned by that
 //!   instance; they are listed for visibility but cannot be changed here.
 //!
-//! Every mutation follows *validate → persist → apply*: nothing reaches the running registry
+//! Every mutation goes through [`kanon_llm::PersonaStore`], which follows *validate → persist →
+//! apply* under one lock shared with the core's persona RPCs: nothing reaches the running registry
 //! unless the file was written, so the library and the disk can never disagree.
 
 use axum::Json;
 use axum::Router;
 use axum::extract::{Path, State};
 use axum::routing::get;
-use kanon_llm::{BASE_PERSONA_ID, Persona, PersonaError, PersonaKind};
+use kanon_llm::{BASE_PERSONA_ID, Persona, PersonaChangeError, PersonaError, PersonaKind};
 use serde::{Deserialize, Serialize};
 
 use crate::error::ApiError;
@@ -109,22 +110,13 @@ fn map_error(err: PersonaError) -> ApiError {
     }
 }
 
-/// Every operator-defined persona currently registered.
-fn custom_personas(state: &ApiState) -> Vec<Persona> {
-    state
-        .personas()
-        .list()
-        .into_iter()
-        .filter(|persona| persona.kind == PersonaKind::Custom)
-        .collect()
-}
-
-/// Persists the given custom personas, reporting a storage failure as an internal error.
-fn persist(state: &ApiState, personas: &[Persona]) -> Result<(), ApiError> {
-    state
-        .persona_store()
-        .save(personas)
-        .map_err(ApiError::Internal)
+/// Maps a refused change onto management-gateway semantics.
+fn map_change_error(err: PersonaChangeError) -> ApiError {
+    match err {
+        PersonaChangeError::Persona(err) => map_error(err),
+        PersonaChangeError::InstanceOwned(_) => ApiError::Conflict(err.to_string()),
+        PersonaChangeError::Storage(message) => ApiError::Internal(message),
+    }
 }
 
 /// Turns a display name into an identifier slug (`Code Reviewer` becomes `code-reviewer`).
@@ -159,18 +151,6 @@ fn unique_id(state: &ApiState, name: &str) -> String {
         .map(|n| format!("{base}-{n}"))
         .find(|candidate| state.personas().get(candidate).is_none())
         .expect("an unbounded range always yields an unused identifier")
-}
-
-/// Ids of the instances that select a persona.
-async fn used_by(state: &ApiState, persona_id: &str) -> Vec<String> {
-    state
-        .instances()
-        .list()
-        .await
-        .into_iter()
-        .filter(|instance| instance.persona_id.as_deref() == Some(persona_id))
-        .map(|instance| instance.id)
-        .collect()
 }
 
 /// Renders the whole library.
@@ -233,13 +213,10 @@ async fn create_persona(
     let persona = Persona::custom(id, payload.name, payload.description, payload.prompt)
         .map_err(map_error)?;
 
-    let mut all = custom_personas(&state);
-    all.push(persona.clone());
-    persist(&state, &all)?;
     state
-        .personas()
-        .register(persona.clone())
-        .map_err(map_error)?;
+        .persona_store()
+        .upsert(state.personas(), persona.clone())
+        .map_err(map_change_error)?;
 
     tracing::info!(persona_id = %persona.id, "Persona created through the control plane");
     Ok(Json(catalog(&state).await))
@@ -265,18 +242,10 @@ async fn update_persona(
     )
     .map_err(map_error)?;
 
-    let all: Vec<Persona> = custom_personas(&state)
-        .into_iter()
-        .map(|current| {
-            if current.id == id {
-                persona.clone()
-            } else {
-                current
-            }
-        })
-        .collect();
-    persist(&state, &all)?;
-    state.personas().register(persona).map_err(map_error)?;
+    state
+        .persona_store()
+        .upsert(state.personas(), persona)
+        .map_err(map_change_error)?;
 
     tracing::info!(persona_id = %id, "Persona updated through the control plane");
     Ok(Json(catalog(&state).await))
@@ -297,7 +266,7 @@ async fn delete_persona(
         .ok_or_else(|| map_error(PersonaError::NotFound(id.clone())))?;
     require_custom(&existing)?;
 
-    let users = used_by(&state, &id).await;
+    let users = state.instances().instances_using_persona(&id).await;
     if !users.is_empty() {
         return Err(ApiError::Conflict(format!(
             "persona '{id}' is used by instance(s) {}; pick another persona there first",
@@ -305,12 +274,10 @@ async fn delete_persona(
         )));
     }
 
-    let all: Vec<Persona> = custom_personas(&state)
-        .into_iter()
-        .filter(|persona| persona.id != id)
-        .collect();
-    persist(&state, &all)?;
-    state.personas().remove(&id).map_err(map_error)?;
+    state
+        .persona_store()
+        .remove(state.personas(), &id)
+        .map_err(map_change_error)?;
     let unbound = state.sessions().unbind_persona(&id);
 
     tracing::info!(persona_id = %id, unbound_sessions = unbound, "Persona removed through the control plane");

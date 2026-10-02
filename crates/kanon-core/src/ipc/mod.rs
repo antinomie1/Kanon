@@ -8,7 +8,7 @@ mod conversations;
 mod render;
 mod storage;
 
-use crate::pipeline::engine::{HistoryError, OutboundMessage, PipelineEngine};
+use crate::pipeline::engine::{OutboundMessage, PipelineEngine};
 use std::future::Future;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -57,6 +57,11 @@ pub struct CoreApiService {
     /// Only the pipeline knows how an inbound message maps to a session (instance, group scope,
     /// `/new` generation), so the lookup is delegated rather than re-derived here.
     engine: Option<Arc<PipelineEngine>>,
+    /// The persona catalog and its file, shared with the console for the persona RPCs.
+    personas: Option<(
+        Arc<kanon_llm::PersonaRegistry>,
+        Arc<kanon_llm::PersonaStore>,
+    )>,
 }
 
 impl std::fmt::Debug for CoreApiService {
@@ -69,6 +74,7 @@ impl std::fmt::Debug for CoreApiService {
             .field("outbound_sender", &self.outbound_sender.is_some())
             .field("llm", &self.llm.is_some())
             .field("engine", &self.engine.is_some())
+            .field("personas", &self.personas.is_some())
             .finish()
     }
 }
@@ -85,6 +91,7 @@ impl CoreApiService {
             outbound_sender: None,
             llm: None,
             engine: None,
+            personas: None,
         }
     }
 
@@ -108,6 +115,18 @@ impl CoreApiService {
     /// Shares the pipeline, enabling `GetConversationHistory` for plugin hosts.
     pub fn with_engine(mut self, engine: Arc<PipelineEngine>) -> Self {
         self.engine = Some(engine);
+        self
+    }
+
+    /// Shares the persona catalog and its store, enabling the persona RPCs.
+    ///
+    /// Pass the same store the console uses: it serializes every change to the catalog.
+    pub fn with_personas(
+        mut self,
+        registry: Arc<kanon_llm::PersonaRegistry>,
+        store: Arc<kanon_llm::PersonaStore>,
+    ) -> Self {
+        self.personas = Some((registry, store));
         self
     }
 
@@ -398,13 +417,7 @@ impl BotApiService for CoreApiService {
         let history = engine
             .conversation_history(&event)
             .await
-            .map_err(|err| match err {
-                HistoryError::NoInstance(_) => Status::not_found(err.to_string()),
-                HistoryError::NoModel => Status::unavailable(err.to_string()),
-                HistoryError::Ambiguous(_) | HistoryError::Memory(_) => {
-                    Status::internal(err.to_string())
-                }
-            })?;
+            .map_err(conversations::conversation_status)?;
 
         let mut messages: Vec<HistoryMessage> = history
             .messages

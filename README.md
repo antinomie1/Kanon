@@ -84,7 +84,7 @@ files under `./data/`:
 | File | Holds |
 | :--- | :--- |
 | `system.json` | provider endpoints (with credentials, mode `0600`), the model catalog, the **global default model**, reply and context policies, adapter settings |
-| `instances.json` | bot instances and their `/new` session generations |
+| `instances.json` | bot instances and the current conversation of each chat |
 | `personas.json` | the personas you add in the console (the built-in base assistant is not stored) |
 | `sessions.db` | conversation history, compaction summaries and session records |
 

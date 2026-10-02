@@ -160,6 +160,10 @@ impl SessionStore for CountingStore {
         self.saves.fetch_add(1, Ordering::SeqCst);
         Ok(())
     }
+
+    fn delete(&self, _session_key: &str) -> Result<(), MemoryError> {
+        Ok(())
+    }
 }
 
 #[test]
@@ -204,6 +208,10 @@ impl SessionStore for BrokenStore {
     fn save(&self, _metadata: &SessionMetadata) -> Result<(), MemoryError> {
         Err(MemoryError::Backend("disk full".to_string()))
     }
+
+    fn delete(&self, _session_key: &str) -> Result<(), MemoryError> {
+        Err(MemoryError::Backend("disk full".to_string()))
+    }
 }
 
 #[test]
@@ -229,6 +237,10 @@ impl SessionStore for UnreadableStore {
     }
 
     fn save(&self, _metadata: &SessionMetadata) -> Result<(), MemoryError> {
+        Ok(())
+    }
+
+    fn delete(&self, _session_key: &str) -> Result<(), MemoryError> {
         Ok(())
     }
 }

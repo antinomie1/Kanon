@@ -37,11 +37,25 @@ pub struct MemorySnapshot {
     pub messages: Vec<ChatMessage>,
 }
 
+/// What a listing of stored sessions reports about one session (see [`Memory::list_sessions`]).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct StoredSession {
+    /// The session's key.
+    pub session_key: String,
+    /// User and assistant messages in the history; messages folded into the summary are gone.
+    pub message_count: usize,
+    /// Text of the earliest user message still in the history.
+    pub first_user_message: Option<String>,
+    /// Unix seconds of the newest stored message, when the backend records message times.
+    pub last_message_at: Option<u64>,
+}
+
 /// Pluggable interface for conversational memory backends.
 ///
 /// Implementations may store history in memory, relational databases, distributed caches, or
 /// external memory microservices. The contract is *append-only* history: nothing but
-/// [`Memory::compact_history`] and [`Memory::clear`] may remove or reorder messages.
+/// [`Memory::compact_history`] and [`Memory::clear`] may remove or reorder messages. `clear` drops
+/// a session as a whole (deleting a conversation); it never trims one.
 #[async_trait]
 pub trait Memory: Send + Sync {
     /// Appends a message to the specified session history.
@@ -92,6 +106,31 @@ pub trait Memory: Send + Sync {
 
     /// Returns the count of active sessions tracked by this backend.
     async fn session_count(&self) -> Result<usize, MemoryError>;
+
+    /// Lists the stored sessions whose key starts with `prefix`, ordered by key.
+    ///
+    /// This is how a chat's conversations are found: every conversation of a chat shares the
+    /// chat's key prefix. A session without any stored message may be missing from the listing.
+    async fn list_sessions(&self, prefix: &str) -> Result<Vec<StoredSession>, MemoryError>;
+}
+
+/// Counts the user and assistant messages of a history and finds its first user text.
+///
+/// Shared by backends that hold histories in memory, so every backend reports the same numbers.
+pub fn describe_history(session_key: &str, messages: &[ChatMessage]) -> StoredSession {
+    use crate::gateway::types::Role;
+    StoredSession {
+        session_key: session_key.to_string(),
+        message_count: messages
+            .iter()
+            .filter(|message| matches!(message.role, Role::User | Role::Assistant))
+            .count(),
+        first_user_message: messages
+            .iter()
+            .find(|message| message.role == Role::User)
+            .and_then(|message| message.content.clone()),
+        last_message_at: None,
+    }
 }
 
 /// In-memory state of one session.
@@ -256,6 +295,17 @@ impl Memory for InMemory {
     async fn session_count(&self) -> Result<usize, MemoryError> {
         Ok(InMemory::session_count(self))
     }
+
+    async fn list_sessions(&self, prefix: &str) -> Result<Vec<StoredSession>, MemoryError> {
+        let mut sessions: Vec<StoredSession> = self
+            .sessions
+            .iter()
+            .filter(|entry| entry.key().starts_with(prefix))
+            .map(|entry| describe_history(entry.key(), entry.value().messages()))
+            .collect();
+        sessions.sort_by(|a, b| a.session_key.cmp(&b.session_key));
+        Ok(sessions)
+    }
 }
 
 #[async_trait]
@@ -301,5 +351,9 @@ impl Memory for Arc<dyn Memory> {
 
     async fn session_count(&self) -> Result<usize, MemoryError> {
         (**self).session_count().await
+    }
+
+    async fn list_sessions(&self, prefix: &str) -> Result<Vec<StoredSession>, MemoryError> {
+        (**self).list_sessions(prefix).await
     }
 }

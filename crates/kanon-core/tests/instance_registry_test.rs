@@ -169,7 +169,7 @@ async fn new_command_rotates_only_its_conversation_and_keeps_history() {
     assert!(initial.ends_with("#0"), "unexpected session id: {initial}");
 
     let rotated = registry
-        .rotate_session(&instance.id, conversation)
+        .select_session(&instance.id, conversation, 1)
         .await
         .expect("rotate session");
     assert!(rotated.ends_with("#1"), "unexpected session id: {rotated}");
@@ -206,7 +206,7 @@ async fn update_preserves_session_history_and_validates_input() {
         .expect("create");
 
     registry
-        .rotate_session(&instance.id, "c2c:user-1")
+        .select_session(&instance.id, "c2c:user-1", 1)
         .await
         .expect("rotate");
 

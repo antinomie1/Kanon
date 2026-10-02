@@ -11,7 +11,8 @@ use std::sync::Arc;
 
 use axum::Router;
 use axum::http::{Method, StatusCode};
-use kanon_api::{ApiState, PersonaStore};
+use kanon_api::ApiState;
+use kanon_llm::PersonaStore;
 use serde_json::{Value, json};
 
 use common::{error_code, send_json};

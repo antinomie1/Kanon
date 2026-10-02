@@ -14,7 +14,7 @@ use kanon_llm::gateway::providers::{
 use kanon_llm::gateway::types::{
     ChatMessage, ChatRequest, ChatResponse, Role, ToolCall, ToolDefinition,
 };
-use kanon_llm::memory::{Memory, MemorySnapshot};
+use kanon_llm::memory::{Memory, MemorySnapshot, StoredSession};
 use kanon_llm::tool_router::{ToolHost, json_to_prost_struct, prost_struct_to_json};
 use kanon_llm::{AgentError, GatewayError, MemoryError};
 use kanon_proto::v1::{
@@ -161,6 +161,10 @@ impl Memory for CustomPluginMemory {
 
     async fn session_count(&self) -> Result<usize, MemoryError> {
         Ok(1)
+    }
+
+    async fn list_sessions(&self, _prefix: &str) -> Result<Vec<StoredSession>, MemoryError> {
+        Ok(Vec::new())
     }
 }
 

@@ -6,11 +6,19 @@
 //!
 //! The document is small, human-readable JSON written atomically (temporary file plus rename): a
 //! crash mid-write can never leave a truncated file that would block the next startup.
+//!
+//! The console and plugins (through the core's persona RPCs) both change personas. Every change
+//! goes through [`PersonaStore::upsert`] or [`PersonaStore::remove`], which follow
+//! *validate → persist → apply* under one lock: two writers can never interleave their
+//! read-modify-write of the document, and the running registry never holds a persona the file
+//! does not.
 
 use std::path::{Path, PathBuf};
+use std::sync::Mutex;
 
-use kanon_llm::{Persona, PersonaKind, PersonaRegistry};
 use serde::{Deserialize, Serialize};
+
+use crate::prompt::{Persona, PersonaError, PersonaKind, PersonaRegistry};
 
 /// Default location of the persona document, relative to the node working directory.
 pub const DEFAULT_PERSONA_FILE: &str = "./data/personas.json";
@@ -36,10 +44,28 @@ struct PersonaDocument {
     personas: Vec<PersonaRecord>,
 }
 
+/// Why a persona change was refused.
+#[derive(Debug, thiserror::Error)]
+pub enum PersonaChangeError {
+    /// The persona is invalid, built in, or does not exist.
+    #[error(transparent)]
+    Persona(#[from] PersonaError),
+    /// The persona is generated from a bot instance's own prompt and changes with that instance.
+    #[error(
+        "persona '{0}' is generated from a bot instance's own prompt; edit it on that instance"
+    )]
+    InstanceOwned(String),
+    /// `data/personas.json` could not be written; nothing changed.
+    #[error("{0}")]
+    Storage(String),
+}
+
 /// File-backed store of the operator's personas.
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub struct PersonaStore {
     path: PathBuf,
+    /// Serializes changes: each one reads the registry, writes the file and applies the result.
+    changes: Mutex<()>,
 }
 
 impl Default for PersonaStore {
@@ -51,7 +77,10 @@ impl Default for PersonaStore {
 impl PersonaStore {
     /// Creates a store bound to an explicit path.
     pub fn new(path: impl Into<PathBuf>) -> Self {
-        Self { path: path.into() }
+        Self {
+            path: path.into(),
+            changes: Mutex::new(()),
+        }
     }
 
     /// Path of the persisted document.
@@ -118,6 +147,74 @@ impl PersonaStore {
         Ok(registry)
     }
 
+    /// Creates or replaces an operator-defined persona and returns whether one was replaced.
+    ///
+    /// The persona must be [`PersonaKind::Custom`] (build it with [`Persona::custom`]); the
+    /// built-in persona and instance personas are refused. The file is written before the
+    /// registry changes, so a failed write leaves both as they were.
+    pub fn upsert(
+        &self,
+        registry: &PersonaRegistry,
+        persona: Persona,
+    ) -> Result<bool, PersonaChangeError> {
+        let _change = self.lock();
+        match persona.kind {
+            PersonaKind::Custom => persona.validate()?,
+            PersonaKind::Builtin => return Err(PersonaError::ReadOnly(persona.id).into()),
+            PersonaKind::Instance => return Err(PersonaChangeError::InstanceOwned(persona.id)),
+        }
+        let replaced = match registry.get(&persona.id).map(|existing| existing.kind) {
+            None => false,
+            Some(PersonaKind::Custom) => true,
+            Some(PersonaKind::Builtin) => return Err(PersonaError::ReadOnly(persona.id).into()),
+            Some(PersonaKind::Instance) => {
+                return Err(PersonaChangeError::InstanceOwned(persona.id));
+            }
+        };
+        let mut all: Vec<Persona> = custom_personas(registry)
+            .into_iter()
+            .filter(|existing| existing.id != persona.id)
+            .collect();
+        all.push(persona.clone());
+        self.save(&all).map_err(PersonaChangeError::Storage)?;
+        registry.register(persona)?;
+        Ok(replaced)
+    }
+
+    /// Removes an operator-defined persona and returns it.
+    ///
+    /// Whether anything still uses the persona is the caller's question (bot instances live
+    /// outside this crate); sessions bound to it are the caller's to unbind afterwards.
+    pub fn remove(
+        &self,
+        registry: &PersonaRegistry,
+        id: &str,
+    ) -> Result<Persona, PersonaChangeError> {
+        let _change = self.lock();
+        match registry.get(id).map(|existing| existing.kind) {
+            None => return Err(PersonaError::NotFound(id.to_string()).into()),
+            Some(PersonaKind::Custom) => {}
+            Some(PersonaKind::Builtin) => return Err(PersonaError::ReadOnly(id.to_string()).into()),
+            Some(PersonaKind::Instance) => {
+                return Err(PersonaChangeError::InstanceOwned(id.to_string()));
+            }
+        }
+        let remaining: Vec<Persona> = custom_personas(registry)
+            .into_iter()
+            .filter(|persona| persona.id != id)
+            .collect();
+        self.save(&remaining).map_err(PersonaChangeError::Storage)?;
+        Ok(registry.remove(id)?)
+    }
+
+    /// Holds the change lock. A poisoned lock only means an earlier change panicked; the file
+    /// and registry are still consistent (the file is replaced atomically), so it is reused.
+    fn lock(&self) -> std::sync::MutexGuard<'_, ()> {
+        self.changes
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
     /// Persists the custom personas, replacing the previous document.
     ///
     /// Personas of any other kind are rejected: they are not this store's to keep.
@@ -168,4 +265,13 @@ impl PersonaStore {
             )
         })
     }
+}
+
+/// Every operator-defined persona currently registered.
+fn custom_personas(registry: &PersonaRegistry) -> Vec<Persona> {
+    registry
+        .list()
+        .into_iter()
+        .filter(|persona| persona.kind == PersonaKind::Custom)
+        .collect()
 }

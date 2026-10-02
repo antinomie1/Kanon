@@ -36,7 +36,7 @@ Supervisor 启动宿主时注入的**启动契约**（插件不得把其他环�
 | --- | --- | --- | --- |
 | `PluginHostService` | 宿主 | 核心 | `Ping`、`ReloadPluginConfig`、`GetPluginMeta`、`InvokeAction` |
 | `MessagePipelineService` | 宿主 | 核心 | `OnPreFilter`、`OnExecuteCommand`、`OnCallTool`、`OnEvent`、`OnDeliverMessage`、`OnDecorateReply`、`OnPrepareTurn` |
-| `BotApiService` | 核心 | 宿主 | `RegisterHost`、`Ping`、`IngestEvent`、`SendMessage`、`ReplyMessage`、`RequestLLM`、`CallPlatformApi`、`GetConversationHistory`、`SetStorage`、`GetStorage` |
+| `BotApiService` | 核心 | 宿主 | `RegisterHost`、`Ping`、`IngestEvent`、`SendMessage`、`ReplyMessage`、`RequestLLM`、`CallPlatformApi`、`GetConversationHistory`、`ListConversations`、`NewConversation`、`SwitchConversation`、`DeleteConversation`、`AppendConversation`、`ListPersonas`、`UpsertPersona`、`DeletePersona`、`SetStorage`、`GetStorage` |
 
 ---
 
@@ -169,6 +169,9 @@ Supervisor 启动宿主时注入的**启动契约**（插件不得把其他环�
 | `RequestLLM` | 独立模型调用，流式返回 `LLMChunk` | `UNAVAILABLE`：未配置模型；`INVALID_ARGUMENT`：消息不合法；`INTERNAL`：上游错误 |
 | `CallPlatformApi` | 调用内置适配器的平台原生 API | 见下 |
 | `GetConversationHistory` | 只读获取某条入站消息所属的模型会话 | 见下 |
+| `ListConversations` / `NewConversation` / `SwitchConversation` / `DeleteConversation` | 某条入站消息所属会话的多段对话：列出、新建、切换、删除，即内置 `/ls`、`/new`、`/switch`、`/del` | 见下 |
+| `AppendConversation` | 把完整的用户/助手轮次追加到当前对话 | 见下 |
+| `ListPersonas` / `UpsertPersona` / `DeletePersona` | 节点的人设目录 | 见下 |
 | `SetStorage` / `GetStorage` | 不提供中心化 KV | 恒为 `UNIMPLEMENTED`，请写本地 `data/plugins/<id>/` |
 
 ### `RequestLLM(LLMRequest) → stream LLMChunk`
@@ -202,11 +205,55 @@ Supervisor 启动宿主时注入的**启动契约**（插件不得把其他环�
 | --- | --- |
 | `context` | 入站事件，必填 |
 | `limit` | 只保留最近的若干条消息；`0` 为全部 |
-| 结果 `session_id` | 会话 ID（`/new` 之前保持不变） |
+| 结果 `session_id` | 会话 ID（`/new`、`/switch`、`/del` 之前保持不变） |
 | 结果 `summary` | 已压缩的早期轮次摘要；从未压缩为空 |
 | 结果 `messages` | `HistoryMessage { role, text }`，时间正序；只含用户与助手轮次，工具调用、工具结果与推理内容均被剔除 |
 
-历史只读，插件无法改写或删除。错误：缺 `context` 为 `INVALID_ARGUMENT`；没有实例接管该平台为 `NOT_FOUND`；未配置模型或核心未就绪为 `UNAVAILABLE`；会话存储读取失败为 `INTERNAL`。
+已有消息只读，插件无法改写其中某条，只能追加完整轮次（`AppendConversation`）或删除整段对话（`DeleteConversation`）。错误：缺 `context` 为 `INVALID_ARGUMENT`；没有实例接管该平台为 `NOT_FOUND`；未配置模型或核心未就绪为 `UNAVAILABLE`；会话存储读取失败为 `INTERNAL`。
+
+### 对话管理：`ListConversations`、`NewConversation`、`SwitchConversation`、`DeleteConversation`
+
+一个会话（私聊、群成员，或共享会话的整个群）可以有多段对话，与内置 `/ls`、`/new`、`/switch`、`/del` 是同一份实现。会话由 `context`（该会话的一条入站消息）按与 `GetConversationHistory` 相同的规则定位，插件与模型永远指向同一组对话。四个 RPC 都返回操作**之后**的 `ConversationList`。
+
+| 字段 | 说明 |
+| --- | --- |
+| `context` | 入站事件，必填 |
+| `session_id` | `SwitchConversation` / `DeleteConversation`：目标对话的 `ConversationInfo.session_id` |
+| 结果 `conversations` | 按创建先后排列（`/ls` 的序号即下标 + 1）；当前对话即使没有消息也在列 |
+| `ConversationInfo.current` | 该会话下一条消息是否续写这段对话 |
+| `ConversationInfo.title` | 第一条用户消息（去掉核心添加的 `[发送者: …]` 等前缀，截到 24 字）；没有消息时为空 |
+| `ConversationInfo.message_count` | 保存的用户与助手消息数（已被压缩进摘要的不计） |
+| `ConversationInfo.last_active_at` | 最后一轮的 Unix 秒；从未有过轮次为 0 |
+
+- `NewConversation` 开一段空对话并设为当前，代数取已有最大代数 + 1，不会落进已有的对话。
+- `DeleteConversation` 删除历史、摘要与会话记录；删除的是当前对话时，会话随即换到一段新的空对话。
+- 插件代替用户调用这些 RPC 时，应自行检查权限：内置 `/switch`、`/del` 在群里默认仅管理员可用。
+
+错误：缺 `context` 为 `INVALID_ARGUMENT`；没有实例接管该平台、`session_id` 不属于该会话为 `NOT_FOUND`；未配置模型为 `UNAVAILABLE`；对话正被运行中的轮次写入为 `FAILED_PRECONDITION`（稍后重试，或先 `/stop`）；存储或实例目录写入失败为 `INTERNAL`。
+
+### `AppendConversation(AppendConversationRequest) → AppendConversationResponse`
+
+把在别处发生的轮次（插件自己的问答、导入的记录）写入 `context` 所属会话的**当前**对话，模型下一轮把它们当作这段对话自己的历史。
+
+| 字段 | 说明 |
+| --- | --- |
+| `context` | 入站事件，必填 |
+| `messages` | `HistoryMessage { role, text }`，至少一对；必须严格按“用户、助手”交替，以用户开始、以助手结束，保证历史始终由完整轮次组成 |
+| 结果 `session_id` | 写入的会话 |
+
+只追加、不改写：已有消息保持不变，前缀缓存不受影响。每一对计为一轮。错误：消息为空、角色不是用户/助手或不交替为 `INVALID_ARGUMENT`；该对话正在运行轮次为 `FAILED_PRECONDITION`——外部写入从不排队等待运行中的轮次，所以插件工具在轮次内调用它会立即得到这个错误而不会死锁；其余同上。
+
+### 人设：`ListPersonas`、`UpsertPersona`、`DeletePersona`
+
+与控制台「人设」页共用同一份目录与 `data/personas.json`，所有修改都按“校验 → 落盘 → 生效”在一把锁下进行，控制台与插件的修改不会互相覆盖。
+
+| RPC | 说明 |
+| --- | --- |
+| `ListPersonas` | 全部人设：基础助手（`builtin = true`）、运营者的人设，以及由实例自带提示词生成的人设 |
+| `UpsertPersona(Persona)` | 新建或替换运营者人设；`name` 为空时取 `id`；替换时保留控制台填写的描述。结果 `replaced` 表示是否替换了已有人设 |
+| `DeletePersona` | 删除运营者人设；不存在时返回 `deleted = false` 而不是错误。使用它的会话退回基础助手 |
+
+错误：`id` 不合法、`name` 或 `prompt` 为空为 `INVALID_ARGUMENT`；修改基础助手或实例生成的人设、删除仍被某个实例选用的人设为 `FAILED_PRECONDITION`；`personas.json` 写入失败为 `INTERNAL`（目录保持不变）；核心未提供人设目录为 `UNAVAILABLE`。
 
 ---
 

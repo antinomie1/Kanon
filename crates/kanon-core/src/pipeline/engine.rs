@@ -252,23 +252,6 @@ pub struct ConversationHistory {
     pub messages: Vec<kanon_llm::ChatMessage>,
 }
 
-/// Why a conversation's history could not be read.
-#[derive(Debug, thiserror::Error)]
-pub enum HistoryError {
-    /// No enabled instance answers on the platform, so no conversation exists there.
-    #[error("no enabled bot instance claims platform '{0}'")]
-    NoInstance(String),
-    /// Several instances claim the platform; the owner is never guessed.
-    #[error("instance routing is ambiguous: {0}")]
-    Ambiguous(String),
-    /// No model is configured, so there is no conversation memory to read.
-    #[error("no model is configured")]
-    NoModel,
-    /// The memory backend failed.
-    #[error("conversation history could not be read: {0}")]
-    Memory(String),
-}
-
 /// What happens to a message after a plugin command, trigger or continuation handled it.
 enum CommandFlow {
     /// The handler answered; the pipeline ends with this result.
@@ -303,6 +286,23 @@ fn replace_message_text(event: &mut PipelineEventRequest, text: String) {
 /// Name of the built-in session command, handled by the core and never by the model.
 pub const NEW_SESSION_COMMAND: &str = "new";
 
+/// Name of the built-in command listing the chat's conversations (`/ls`).
+pub const LIST_SESSIONS_COMMAND: &str = "ls";
+
+/// Name of the built-in command making another conversation current (`/switch <n>`).
+pub const SWITCH_SESSION_COMMAND: &str = "switch";
+
+/// Name of the built-in command deleting a conversation (`/del [n]`, the current one by default).
+pub const DELETE_SESSION_COMMAND: &str = "del";
+
+/// Built-in commands that act on the chat's conversations; like `/new` they need an instance.
+const CONVERSATION_COMMANDS: [&str; 4] = [
+    NEW_SESSION_COMMAND,
+    LIST_SESSIONS_COMMAND,
+    SWITCH_SESSION_COMMAND,
+    DELETE_SESSION_COMMAND,
+];
+
 /// Name of the built-in model command, handled by the core and never by the model.
 ///
 /// `/model` lists the models the node knows about; `/model <index>` switches the model of the
@@ -330,7 +330,7 @@ pub const STOP_COMMAND: &str = "stop";
 ///
 /// Kept as a free function because both the instance gate and the LLM phase must derive exactly
 /// the same key — the `/new` command and the messages that follow it have to agree.
-fn conversation_key(event: &PipelineEventRequest, shared: bool) -> String {
+pub(crate) fn conversation_key(event: &PipelineEventRequest, shared: bool) -> String {
     if shared && !event.channel_id.trim().is_empty() {
         return event.channel_id.clone();
     }
@@ -348,7 +348,7 @@ fn conversation_key(event: &PipelineEventRequest, shared: bool) -> String {
 }
 
 /// Whether an event's conversation is one session shared by the whole group.
-fn shares_session(
+pub(crate) fn shares_session(
     instance: Option<&crate::instance::BotInstance>,
     event: &PipelineEventRequest,
 ) -> bool {
@@ -528,6 +528,40 @@ fn render_model_list(options: &[(String, Option<ModelSpec>)], current: Option<&s
     rendered
 }
 
+/// A conversation title for a chat reply; an empty conversation has none.
+fn display_title(title: &str) -> &str {
+    if title.is_empty() {
+        "（空会话）"
+    } else {
+        title
+    }
+}
+
+/// Renders the `/ls` listing: oldest first, numbered from 1, the current one marked.
+fn render_conversation_list(conversations: &[super::conversations::ConversationInfo]) -> String {
+    let mut rendered = String::from("会话列表：\n");
+    for (index, conversation) in conversations.iter().enumerate() {
+        rendered.push_str(&format!(
+            "{}. {}",
+            index + 1,
+            display_title(&conversation.title)
+        ));
+        let mut details = vec![format!("{} 条消息", conversation.message_count)];
+        if conversation.last_active_at > 0 {
+            // `YYYY-MM-DD HH:MM:SS` → `MM-DD HH:MM`: the year and seconds are noise in a chat.
+            let time = crate::time::format_local(conversation.last_active_at as i64);
+            details.push(time.get(5..16).unwrap_or(&time).to_string());
+        }
+        rendered.push_str(&format!("（{}）", details.join("，")));
+        if conversation.current {
+            rendered.push_str(" ✓ 当前");
+        }
+        rendered.push('\n');
+    }
+    rendered.push_str("/switch <序号> 切换，/del <序号> 删除，/new 新建。");
+    rendered
+}
+
 /// Draws the sample used by the probability reply mode.
 ///
 /// Derived from the event id so the same event always yields the same decision (a retry cannot
@@ -583,6 +617,8 @@ pub struct PipelineEngine {
     captures: CaptureRegistry,
     /// Model turns in progress, which `/stop` can end.
     turns: super::turns::RunningTurns,
+    /// One lock per conversation session, held by whoever writes it (see [`super::turns`]).
+    session_locks: super::turns::SessionLocks,
     /// MCP servers contributing tools alongside plugin hosts.
     mcp: Option<Arc<McpPool>>,
     /// Optional lifecycle observer used by the management control plane for tracing.
@@ -621,6 +657,7 @@ impl PipelineEngine {
             triggers: TriggerMatcher::default(),
             captures: CaptureRegistry::default(),
             turns: Default::default(),
+            session_locks: Default::default(),
             mcp: None,
             observer: None,
             dead_letter: Arc::new(DeadLetterWriter::default()),
@@ -661,6 +698,16 @@ impl PipelineEngine {
         self.agent = factory.slot().clone();
         self.agent_factory = Some(factory);
         self
+    }
+
+    /// The factory building per-instance agents, when one is attached.
+    pub fn agent_factory(&self) -> Option<&Arc<AgentFactory>> {
+        self.agent_factory.as_ref()
+    }
+
+    /// Locks serializing the writers of each conversation session.
+    pub(crate) fn session_locks(&self) -> &super::turns::SessionLocks {
+        &self.session_locks
     }
 
     /// Shares the bot-instance catalog that gates and partitions inbound events.
@@ -1553,9 +1600,12 @@ impl PipelineEngine {
 
             if let Some(parsed) = CommandRouter::parse_command(command_text) {
                 let name = parsed.name.clone();
-                // `/new`, `/model` and `/stop` act on an instance, so without one they are ordinary
-                // names a plugin may claim; `/help` and `/info` are always the core's.
-                let builtin = ((name.eq_ignore_ascii_case(NEW_SESSION_COMMAND)
+                // The conversation commands, `/model` and `/stop` act on an instance, so without
+                // one they are ordinary names a plugin may claim; `/help` and `/info` are always
+                // the core's.
+                let builtin = ((CONVERSATION_COMMANDS
+                    .iter()
+                    .any(|command| name.eq_ignore_ascii_case(command))
                     || name.eq_ignore_ascii_case(MODEL_COMMAND)
                     || name.eq_ignore_ascii_case(STOP_COMMAND))
                     && instance.is_some())
@@ -1576,6 +1626,14 @@ impl PipelineEngine {
                     // sender's own.
                     None if name.eq_ignore_ascii_case(STOP_COMMAND) => {
                         (STOP_COMMAND.to_string(), CommandAccess::Admins)
+                    }
+                    // In a group that shares one session, switching or deleting the conversation
+                    // does it for every member, so only administrators may by default.
+                    None if instance.is_some()
+                        && (name.eq_ignore_ascii_case(SWITCH_SESSION_COMMAND)
+                            || name.eq_ignore_ascii_case(DELETE_SESSION_COMMAND)) =>
+                    {
+                        (name.to_ascii_lowercase(), CommandAccess::AdminsInGroups)
                     }
                     None => (name.clone(), CommandAccess::Everyone),
                 };
@@ -1604,6 +1662,19 @@ impl PipelineEngine {
                     if let Some(instance) = instance.as_ref() {
                         if name.eq_ignore_ascii_case(NEW_SESSION_COMMAND) {
                             return self.handle_new_session(&filtered_event, instance).await;
+                        }
+                        if let Some(command) = CONVERSATION_COMMANDS
+                            .iter()
+                            .find(|command| name.eq_ignore_ascii_case(command))
+                        {
+                            return self
+                                .handle_conversation_command(
+                                    command,
+                                    &filtered_event,
+                                    instance,
+                                    &parsed.args,
+                                )
+                                .await;
                         }
                         if name.eq_ignore_ascii_case(STOP_COMMAND) {
                             return self.handle_stop_command(instance);
@@ -1985,6 +2056,10 @@ impl PipelineEngine {
             let turn = self
                 .turns
                 .begin(instance.as_ref().map(|instance| instance.id.clone()));
+            // The turn writes its messages as it goes; holding the session's lock keeps a plugin
+            // from deleting the conversation or appending to it in between. Plugins only ever
+            // try the lock, so a tool call of this very turn cannot deadlock on it.
+            let _writing = self.session_locks.lock(&session_id).await;
             match crate::supervisor::with_tool_event(
                 filtered_event.clone(),
                 crate::with_bash_caller(
@@ -2152,12 +2227,13 @@ impl PipelineEngine {
     pub async fn conversation_history(
         &self,
         event: &PipelineEventRequest,
-    ) -> Result<ConversationHistory, HistoryError> {
+    ) -> Result<ConversationHistory, super::conversations::ConversationError> {
+        use super::conversations::ConversationError;
         let instance = match &self.instances {
             Some(registry) => match registry.resolve_by_platform(&event.platform).await {
                 Ok(Some(instance)) => Some(instance),
-                Ok(None) => return Err(HistoryError::NoInstance(event.platform.clone())),
-                Err(err) => return Err(HistoryError::Ambiguous(err.to_string())),
+                Ok(None) => return Err(ConversationError::NoInstance(event.platform.clone())),
+                Err(err) => return Err(ConversationError::Ambiguous(err.to_string())),
             },
             None => None,
         };
@@ -2167,7 +2243,7 @@ impl PipelineEngine {
             }
             None => self.agent.current(),
         }
-        .ok_or(HistoryError::NoModel)?;
+        .ok_or(ConversationError::NoModel)?;
 
         let conversation = conversation_key(event, shares_session(instance.as_ref(), event));
         let session_id = match instance.as_ref() {
@@ -2178,7 +2254,7 @@ impl PipelineEngine {
             .memory()
             .snapshot(&session_id)
             .await
-            .map_err(|err| HistoryError::Memory(err.to_string()))?;
+            .map_err(|err| ConversationError::Storage(err.to_string()))?;
         Ok(ConversationHistory {
             session_id,
             summary: snapshot.summary,
@@ -2294,10 +2370,6 @@ impl PipelineEngine {
         }
     }
 
-    /// Handles the built-in `/new` command for one conversation.
-    ///
-    /// The previous session is never deleted: rotation only moves the conversation to a new
-    /// session key, so the old history stays inspectable in the console.
     /// Handles the built-in `/stop` command: stops every running model turn of `instance`.
     ///
     /// A stopped turn ends at its next wait on the model or a tool and sends no reply; what it
@@ -2320,50 +2392,137 @@ impl PipelineEngine {
         }
     }
 
+    /// Handles the built-in `/new` command: starts a new, empty conversation for the chat.
+    ///
+    /// The previous conversation is kept: `/ls` lists it and `/switch` returns to it.
     async fn handle_new_session(
         &self,
         event: &PipelineEventRequest,
         instance: &crate::instance::BotInstance,
     ) -> PipelineResult {
-        let Some(registry) = self.instances.as_ref() else {
-            // Unreachable in the node (the instance gate implies a registry), but a missing
-            // registry must not silently pretend the command succeeded.
-            tracing::error!(
-                instance_id = %instance.id,
-                "Built-in /new received without an instance catalog; ignoring command"
-            );
-            return PipelineResult::Passed(event.clone());
+        let chat = super::conversations::Chat {
+            instance: instance.clone(),
+            conversation: conversation_key(event, shares_session(Some(instance), event)),
         };
-
-        let conversation = conversation_key(event, shares_session(Some(instance), event));
-        match registry.rotate_session(&instance.id, &conversation).await {
+        match self.start_conversation(&chat).await {
             Ok(session_id) => {
                 tracing::info!(
                     instance_id = %instance.id,
                     session_id = %session_id,
-                    conversation = %conversation,
-                    "Built-in /new started a new session for this conversation"
+                    conversation = %chat.conversation,
+                    "Built-in /new started a new conversation for this chat"
                 );
-                let reply = MessageSegment {
-                    segment: Some(Segment::Text(kanon_proto::v1::TextSegment {
-                        content: "已开启新会话。".to_string(),
-                    })),
-                };
                 PipelineResult::SessionRotated {
                     instance_id: instance.id.clone(),
                     session_id,
-                    replies: vec![reply],
+                    replies: vec![text_reply("已开启新会话。")],
                 }
             }
             Err(err) => {
                 tracing::error!(
                     instance_id = %instance.id,
                     error = %err,
-                    "Failed to rotate session for built-in /new; conversation unchanged"
+                    "Built-in /new could not start a conversation; the chat is unchanged"
                 );
-                PipelineResult::Passed(event.clone())
+                PipelineResult::BuiltinReplied {
+                    command: NEW_SESSION_COMMAND.to_string(),
+                    replies: vec![text_reply(format!("开启新会话失败：{err}"))],
+                }
             }
         }
+    }
+
+    /// Handles `/ls`, `/switch <n>` and `/del [n]` for the chat that sent `event`.
+    ///
+    /// Conversations are numbered from 1 in `/ls` order (oldest first), and `/switch` and `/del`
+    /// take those numbers. Every outcome, failures included, is answered in the chat.
+    async fn handle_conversation_command(
+        &self,
+        command: &str,
+        event: &PipelineEventRequest,
+        instance: &crate::instance::BotInstance,
+        args: &[String],
+    ) -> PipelineResult {
+        let chat = super::conversations::Chat {
+            instance: instance.clone(),
+            conversation: conversation_key(event, shares_session(Some(instance), event)),
+        };
+        let reply = match self.conversation_command_reply(command, &chat, args).await {
+            Ok(reply) => reply,
+            Err(err) => {
+                tracing::warn!(
+                    instance_id = %instance.id,
+                    command = %command,
+                    error = %err,
+                    "Built-in conversation command failed"
+                );
+                match err {
+                    super::conversations::ConversationError::Busy(_) => {
+                        "该会话正在运行任务，请稍后再试或先发送 /stop。".to_string()
+                    }
+                    other => format!("操作失败：{other}"),
+                }
+            }
+        };
+        PipelineResult::BuiltinReplied {
+            command: command.to_string(),
+            replies: vec![text_reply(reply)],
+        }
+    }
+
+    /// The chat reply of one conversation command.
+    async fn conversation_command_reply(
+        &self,
+        command: &str,
+        chat: &super::conversations::Chat,
+        args: &[String],
+    ) -> Result<String, super::conversations::ConversationError> {
+        let conversations = self.chat_conversations(chat).await?;
+        if command == LIST_SESSIONS_COMMAND {
+            return Ok(render_conversation_list(&conversations));
+        }
+        // `/del` without a number means the current conversation; `/switch` needs one.
+        let index = match args.first() {
+            Some(arg) => match arg.trim().parse::<usize>() {
+                Ok(index) if (1..=conversations.len()).contains(&index) => Some(index),
+                _ => {
+                    return Ok(format!(
+                        "没有第 {} 个会话（共 {} 个），发送 /ls 查看序号。",
+                        arg.trim(),
+                        conversations.len()
+                    ));
+                }
+            },
+            None => None,
+        };
+        if command == SWITCH_SESSION_COMMAND {
+            let Some(index) = index else {
+                return Ok("用法：/switch <序号>，序号见 /ls。".to_string());
+            };
+            let target = &conversations[index - 1];
+            if target.current {
+                return Ok(format!("会话 {index} 已是当前会话。"));
+            }
+            self.switch_conversation(chat, &target.session_id).await?;
+            return Ok(format!(
+                "已切换到会话 {index}：{}",
+                display_title(&target.title)
+            ));
+        }
+        let index = index.unwrap_or_else(|| {
+            conversations
+                .iter()
+                .position(|conversation| conversation.current)
+                .map_or(1, |position| position + 1)
+        });
+        let target = self
+            .delete_conversation(chat, &conversations[index - 1].session_id)
+            .await?;
+        let mut reply = format!("已删除会话 {index}：{}", display_title(&target.title));
+        if target.current {
+            reply.push_str("\n已开启新会话。");
+        }
+        Ok(reply)
     }
 
     /// Handles the built-in `/model` command for one instance.
@@ -2487,6 +2646,9 @@ impl PipelineEngine {
     fn handle_help_command(&self, hosts: &[Arc<crate::supervisor::ManagedHost>]) -> PipelineResult {
         let mut rendered = String::from("内置指令：\n");
         rendered.push_str("/new — 开始新会话\n");
+        rendered.push_str("/ls — 列出本聊天的会话\n");
+        rendered.push_str("/switch <序号> — 切换到另一个会话\n");
+        rendered.push_str("/del [序号] — 删除会话（默认当前会话）\n");
         rendered.push_str("/model — 列出可用模型；/model <序号> 切换当前实例模型\n");
         rendered.push_str("/stop — 停止当前实例正在运行的任务\n");
         rendered.push_str("/help — 显示本帮助\n");

@@ -29,6 +29,7 @@ pub mod gateway;
 pub mod layout;
 pub mod memory;
 pub mod model;
+pub mod persona_store;
 pub mod prompt;
 pub mod provider;
 pub mod session;
@@ -58,16 +59,17 @@ pub use gateway::{
     build_provider, strip_reasoning_tags,
 };
 pub use layout::{canonical_json, canonical_tools, normalize_request};
-pub use memory::{InMemory, Memory, MemorySnapshot, SessionMemory};
+pub use memory::{InMemory, Memory, MemorySnapshot, SessionMemory, StoredSession};
 pub use model::{ModelCapabilities, ModelCatalog, ModelRef, ModelSettingsSource, ModelSpec};
+pub use persona_store::{DEFAULT_PERSONA_FILE, PersonaChangeError, PersonaStore};
 pub use prompt::{
     BASE_PERSONA_ID, BASE_PERSONA_PROMPT, Persona, PersonaError, PersonaHook, PersonaKind,
     PersonaRegistry, is_valid_slug,
 };
 pub use provider::{ProviderEntry, ProviderRegistry, ResolvedProvider};
 pub use session::{
-    RuntimeSessionMetadata, SessionKey, SessionManager, SessionMetadata, SessionScope,
-    SessionStatus, SessionStore,
+    RuntimeSessionMetadata, SessionKey, SessionManager, SessionMetadata, SessionOverview,
+    SessionScope, SessionStatus, SessionStore,
 };
 pub use slot::AgentSlot;
 pub use sqlite_memory::{PersistentMemory, SqliteMemory, SqliteSessionStore};

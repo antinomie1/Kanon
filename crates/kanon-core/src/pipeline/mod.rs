@@ -13,6 +13,7 @@ pub mod attachment;
 pub mod capture;
 pub mod command;
 pub mod context;
+pub mod conversations;
 pub mod dead_letter;
 pub mod engine;
 pub mod group_log;
@@ -29,12 +30,14 @@ pub use command::{
     CommandRouter, MatchedCommand, MatchedTrigger, ParsedCommand, TriggerMatcher, split_args,
 };
 pub use context::build_user_message;
+pub use conversations::{ConversationError, ConversationInfo};
 pub use dead_letter::{
     DEFAULT_DEAD_LETTER_DIR, DeadLetterDirection, DeadLetterRecord, DeadLetterWriter,
 };
 pub use engine::{
-    DEFAULT_OUTBOUND_QUEUE_CAPACITY, DeliveryOutcome, HELP_COMMAND, INFO_COMMAND, MODEL_COMMAND,
-    NEW_SESSION_COMMAND, PipelineEngine, PipelineResult, STOP_COMMAND,
+    DEFAULT_OUTBOUND_QUEUE_CAPACITY, DELETE_SESSION_COMMAND, DeliveryOutcome, HELP_COMMAND,
+    INFO_COMMAND, LIST_SESSIONS_COMMAND, MODEL_COMMAND, NEW_SESSION_COMMAND, PipelineEngine,
+    PipelineResult, STOP_COMMAND, SWITCH_SESSION_COMMAND,
 };
 pub use media::{MAX_INBOUND_IMAGE_BYTES, inline_images};
 pub use observer::{PipelineObserver, PipelineStage};

@@ -11,9 +11,9 @@
 //!   *enabled* instance, which keeps routing deterministic (no "first match wins" ambiguity);
 //! - **persona**: either a persona from the node catalog or a prompt written for this instance;
 //! - **model**: an optional override of the node's default model;
-//! - **sessions**: conversations answered by this instance are namespaced by it, and the
-//!   built-in `/new` command rotates the session of the conversation that issued it while the
-//!   previous session is retained (never deleted) for inspection in the console.
+//! - **sessions**: conversations answered by this instance are namespaced by it. A chat can hold
+//!   several conversations (`/new`, `/ls`, `/switch`, `/del`); the instance remembers which one
+//!   is current, and the others keep their history until they are deleted.
 //!
 //! Instances are persisted as one JSON document (`data/instances.json`) so the node comes back
 //! with the same bots after a restart.
@@ -184,7 +184,7 @@ pub struct BotInstance {
     /// Per-MCP-server overrides; absent identifiers inherit the node-wide switch.
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     pub mcp: HashMap<String, ItemPolicy>,
-    /// Conversation key -> session generation, rotated by the built-in `/new` command.
+    /// Conversation key -> current session generation, chosen by `/new`, `/switch` and `/del`.
     ///
     /// Kept on the instance so a restart does not silently continue the conversation an operator
     /// already reset.
@@ -247,8 +247,22 @@ impl BotInstance {
     /// The generation suffix is what makes `/new` work: the rotated session is a *different* key,
     /// so the previous session keeps its history and stays visible in the console.
     pub fn conversation_session_id(&self, conversation: &str) -> String {
-        let generation = self.session_generation(conversation);
-        format!("instance:{}:{}#{generation}", self.id, conversation)
+        self.session_id_at(conversation, self.session_generation(conversation))
+    }
+
+    /// Session identifier of one generation of a conversation.
+    pub fn session_id_at(&self, conversation: &str, generation: u64) -> String {
+        format!(
+            "{}{generation}",
+            self.conversation_session_prefix(conversation)
+        )
+    }
+
+    /// The part every session of a conversation shares: everything before the generation.
+    ///
+    /// Ends with `#`, so `instance:a:chat#` never matches the sessions of `instance:a:chat:x`.
+    pub fn conversation_session_prefix(&self, conversation: &str) -> String {
+        format!("instance:{}:{}#", self.id, conversation)
     }
 
     /// Current session generation for a conversation (0 until `/new` is used).
@@ -568,13 +582,32 @@ impl InstanceRegistry {
         }
     }
 
-    /// Rotates the session of one conversation and returns the new session identifier.
+    /// Identifiers of the instances that select `persona_id` from the catalog.
     ///
-    /// The previous session is left untouched: its history remains in the session catalog.
-    pub async fn rotate_session(
+    /// A persona in use cannot be deleted: those instances would silently start answering with
+    /// different instructions.
+    pub async fn instances_using_persona(&self, persona_id: &str) -> Vec<String> {
+        let mut users: Vec<String> = self
+            .instances
+            .read()
+            .await
+            .values()
+            .filter(|instance| instance.persona_id.as_deref() == Some(persona_id))
+            .map(|instance| instance.id.clone())
+            .collect();
+        users.sort();
+        users
+    }
+
+    /// Makes `generation` the current session of one conversation and returns its identifier.
+    ///
+    /// Used by `/new` (a generation no session has used), `/switch` (an existing one) and `/del`.
+    /// Other sessions of the conversation are left untouched: their history stays where it is.
+    pub async fn select_session(
         &self,
         id: &str,
         conversation: &str,
+        generation: u64,
     ) -> Result<String, InstanceError> {
         let mut instances = self.instances.write().await;
         let mut next = instances.clone();
@@ -582,7 +615,6 @@ impl InstanceRegistry {
             .get_mut(id)
             .ok_or_else(|| InstanceError::NotFound(id.to_string()))?;
 
-        let generation = instance.session_generation(conversation) + 1;
         instance
             .session_generations
             .insert(conversation.to_string(), generation);

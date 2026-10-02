@@ -56,7 +56,6 @@ pub mod llm_config;
 pub mod metrics;
 pub mod model_discovery;
 pub mod observability;
-pub mod persona_store;
 pub mod plugin_config;
 pub mod routes;
 pub mod server;
@@ -75,7 +74,6 @@ pub use metrics::{MetricsRegistry, RuntimeGauges};
 pub use observability::{
     LogLevel, LogRecord, Observability, TraceEvent, TraceEventBus, TraceRecord,
 };
-pub use persona_store::PersonaStore;
 pub use plugin_config::PluginConfigStore;
 pub use server::{ApiServer, app};
 pub use session_storage::{DEFAULT_SESSION_DB, open_session_manager};
