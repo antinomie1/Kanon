@@ -114,6 +114,9 @@ fn write_skill_source(root: &Path, folder: &str, description: &str) -> PathBuf {
 }
 
 /// Writes a stdio MCP server speaking just enough JSON-RPC for the client handshake.
+///
+/// It is started as `sh <script>`, never executed itself: a child forked by a parallel test while
+/// the script was still open for writing would make executing it fail with `ETXTBSY`.
 fn write_fixture_mcp_server(dir: &Path) -> PathBuf {
     let path = dir.join("fake_mcp_server.sh");
     std::fs::write(
@@ -131,11 +134,6 @@ done
 "#,
     )
     .expect("fixture server");
-
-    use std::os::unix::fs::PermissionsExt;
-    let mut permissions = std::fs::metadata(&path).expect("metadata").permissions();
-    permissions.set_mode(0o755);
-    std::fs::set_permissions(&path, permissions).expect("chmod");
     path
 }
 
@@ -375,7 +373,7 @@ async fn chat_completions_offer_mcp_tools_to_the_model() {
         "/api/v1/mcp/servers/fx",
         Some(json!({
             "name": "Fixture",
-            "transport": { "type": "stdio", "command": script.to_string_lossy(), "args": [] },
+            "transport": { "type": "stdio", "command": "sh", "args": [script.to_string_lossy()] },
         })),
     )
     .await;

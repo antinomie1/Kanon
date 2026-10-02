@@ -49,22 +49,21 @@ done
 "#,
     )
     .expect("fixture server");
-
-    let mut permissions = std::fs::metadata(&path).expect("metadata").permissions();
-    use std::os::unix::fs::PermissionsExt;
-    permissions.set_mode(0o755);
-    std::fs::set_permissions(&path, permissions).expect("chmod");
     path
 }
 
 /// Server definition pointing at the fixture script.
+///
+/// The script runs as `sh <script>` rather than being executed itself: tests run in parallel, and a
+/// child forked by another test while this one still had the script open for writing would make
+/// executing it fail with `ETXTBSY` ("Text file busy"). `sh` only reads the file.
 fn fixture_config(script: &Path, id: &str) -> McpServerConfig {
     McpServerConfig {
         id: id.to_string(),
         name: "Fake".to_string(),
         transport: McpTransport::Stdio {
-            command: script.to_string_lossy().to_string(),
-            args: Vec::new(),
+            command: "sh".to_string(),
+            args: vec![script.to_string_lossy().to_string()],
             // A 1x1 PNG, base64 encoded: the smallest real image the attachment path can carry.
             env: HashMap::from([(
                 "FAKE_IMAGE_BASE64".to_string(),
