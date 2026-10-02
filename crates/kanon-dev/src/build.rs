@@ -53,6 +53,12 @@ pub async fn build_plugin(
         .map(Some)
 }
 
+/// Builds the release binary of a Rust plugin, which is what a package ships.
+pub fn build_release(root: &Path, manifest: &PluginManifest) -> Result<PathBuf, BuildError> {
+    let name = binary_name(Path::new(&manifest.plugin.entrypoint));
+    cargo_build(root, true, &name)
+}
+
 /// The binary an entrypoint names, without extension so `target/debug/foo` also finds
 /// `foo.exe` on Windows.
 fn binary_name(entrypoint: &Path) -> String {

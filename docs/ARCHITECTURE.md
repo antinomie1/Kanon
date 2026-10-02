@@ -615,19 +615,22 @@ sequenceDiagram
 | **`kanon-dev dev <path> [--node <url>]`** | 对运行中的节点热重载插件 | 轮询插件目录变动，经管理 API `POST /api/v1/plugins/{id}/restart` 重启插件宿主。Rust 插件先执行 `cargo build`，失败则保留运行中版本；Python/TS 插件直接重启，依赖由 Supervisor 按需重装 |
 | **`kanon-dev test <path>`** | 脱机交互与测试驱动器 | 进程内最小节点（真实流水线、内置命令、钩子、内存 KV、临时会话库）+ mock 模型；支持交互 REPL、`-m` 脚本化多轮对话、`-c`/`-t` 单次执行，`!tool` 触发完整 Tool Calling 轮次，`:prompt` 查看请求 |
 | **`kanon-dev lint <path>`** | 静态清单与类型规范校验 | 静态校验 `plugin.toml` 的 JSON Schema、命令命名冲突与权限合法性 |
-| **`kanon-dev pack <path>`** | 打包可分发插件制品 | 自动校验依赖并打包为 `.kpk` (Kanon Plugin Package) 标准分发包，供发布到插件中心 |
+| **`kanon-dev pack <path>`** | 打包可分发插件制品 | 校验清单后打包为 `.kpk` (Kanon Plugin Package)：只含清单、代码（Rust 为 release 二进制，Python/TS 为脚本与依赖锁文件）及 `pages/`、`i18n/`，见 §10.2 |
 
 ### 10.2 插件分发包物理格式规范 (`.kpk` Package Specification)
 
 `.kpk` (Kanon Plugin Package) 是 Kanon 生态的标准化分发归档格式，物理上为**标准 ZIP 容器 + SHA-256 完整性校验文件**：
 
-1. **根目录强制契约**：
-   - 根目录下必须包含合法的 `plugin.toml` 清单文件；
-   - 必须包含 `README.md` 与可选的 `LICENSE`。
-2. **多语言制品打包规范**：
-   - **Rust 插件**：打包对应编译目标的预编译原生可执行文件（如 `bin/x86_64-unknown-linux-gnu/<plugin>` 或 `bin/x86_64-pc-windows-msvc/<plugin>.exe`），做到用户端零编译闪电加载；
-   - **Python 插件**：携带插件源码、`pyproject.toml` 与 `uv.lock`；首次启动时 Supervisor 在插件目录执行 `uv sync --locked` 复现 `.venv`；
-   - **TypeScript 插件**：携带转译后的 `dist/` 或源码及附带锁定文件的 `package.json`，首次启动时按锁文件执行 `bun install --frozen-lockfile` 或 `npm ci`（支持由 `bun` 或 `node/tsx` 直接加载）。
+包内只放节点运行插件所需的文件，其余（编译型插件的源码、测试、文档、编辑器与构建状态）一律不打包：
+
+1. **清单**：根目录的 `plugin.toml`。
+2. **代码**：
+   - **Rust 插件**：`kanon-dev pack` 先执行 `cargo build --release`，把产出的可执行文件放在清单 `entrypoint` 指向的路径（如 `target/debug/<plugin>`），安装后按清单原样启动，用户端零编译；包内不含源码。预编译二进制只适用于打包所在的平台；
+   - **Python 插件**：`*.py` 脚本、`pyproject.toml` 与 `uv.lock`；首次启动时 Supervisor 在插件目录执行 `uv sync --locked` 复现 `.venv`；
+   - **TypeScript 插件**：`.ts`/`.js`（含 `.mts`/`.cts`/`.mjs`/`.cjs`）脚本、`package.json` 与锁文件，首次启动时按锁文件执行 `bun install --frozen-lockfile` 或 `npm ci`（支持由 `bun` 或 `node/tsx` 直接加载）。
+3. **节点读取的资源**：`pages/`（控制台页面）与 `i18n/`（翻译）。
+
+`tests/`、`target/`、`node_modules/`、`__pycache__/`、`venv/` 与隐藏目录不会进入包。安装时节点同样跳过 `target/` 等构建产物，但始终保留清单的 `entrypoint` 文件。
 
 ---
 

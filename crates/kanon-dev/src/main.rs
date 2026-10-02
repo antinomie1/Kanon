@@ -224,7 +224,10 @@ fn handle_pack(path: Option<&std::path::Path>, output: Option<&std::path::Path>)
             println!("  Bundle:   {}", report.bundle_path.display());
             println!("  Checksum: {}", report.checksum_path.display());
             println!("  SHA-256:  {}", report.sha256_hex);
-            println!("  Files:    {}", report.file_count);
+            println!("  Files:    {}", report.files.len());
+            for file in &report.files {
+                println!("    {file}");
+            }
             println!(
                 "  Size:     {:.2} KB",
                 report.bundle_size_bytes as f64 / 1024.0

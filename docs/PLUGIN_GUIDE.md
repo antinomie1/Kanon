@@ -48,6 +48,8 @@ kanon-dev dev ./my_plugin                      # 热重载：改动后在运行�
 kanon-dev pack ./my_plugin                     # 打包为 .kpk（附 SHA-256 校验）
 ```
 
+`kanon-dev pack` 只打包节点运行插件所需的文件：`plugin.toml`、代码（Rust 插件先 `cargo build --release`，二进制放在 `entrypoint` 指向的路径，不含源码；Python/TS 插件为脚本与 `pyproject.toml`/`uv.lock`、`package.json`/锁文件）以及 `pages/`、`i18n/`。测试、文档和其他文件不会进包；打包后会逐个列出包内文件。
+
 **沙盒 `kanon-dev test`** 在进程内启动一个最小节点：真实的流水线、内置命令（`/ls`、`/new`、`/switch`、`/del` 等）、钩子、中心 KV 与会话存储（均在临时目录），模型换成本地 mock，不需要聊天平台和 API Key。Rust 插件会先 `cargo build`，Python/TS 插件会先安装依赖。
 
 - 交互模式：直接输入消息或 `/命令`；`!tool <工具名> [JSON 参数]` 让 mock 模型调用工具（走完整的工具轮次）；`:call <工具名> [JSON]` 直接调用工具；`:prompt` 打印上一次发给模型的请求（可检查系统块改写与工具列表）；`:quit` 退出。

@@ -10,7 +10,7 @@ pub mod pack;
 pub mod sandbox;
 pub mod scaffold;
 
-pub use build::{BuildError, build_plugin};
+pub use build::{BuildError, build_plugin, build_release};
 pub use dev::{DEFAULT_NODE_URL, DevError, run_dev};
 pub use lint::{LintError, LintReport, lint_plugin};
 pub use pack::{PackError, PackReport, pack_plugin};

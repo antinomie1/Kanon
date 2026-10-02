@@ -287,53 +287,94 @@ fn test_plugin_lint_warns_adapter_without_media_capabilities() {
     );
 }
 
+/// Names of the entries in a `.kpk` archive.
+fn archive_names(bundle: &std::path::Path) -> Vec<String> {
+    let mut archive = ZipArchive::new(File::open(bundle).unwrap()).unwrap();
+    (0..archive.len())
+        .map(|i| archive.by_index(i).unwrap().name().to_string())
+        .collect()
+}
+
 #[test]
 fn test_plugin_pack_bundle_and_sha256() {
     let tmp = tempdir().expect("tempdir");
     let plugin_dir = tmp.path().join("pack_test_plugin");
-
-    // Scaffold a valid Python plugin
     create_plugin_project("pack_test", "python", Some(&plugin_dir)).unwrap();
 
-    // Create a dummy file that should be excluded
-    let cache_dir = plugin_dir.join("__pycache__");
-    std::fs::create_dir_all(&cache_dir).unwrap();
-    std::fs::write(cache_dir.join("test.pyc"), b"dummy cache").unwrap();
+    // What the node needs besides the scripts: the lockfile and the console pages.
+    std::fs::write(plugin_dir.join("uv.lock"), "version = 1\n").unwrap();
+    std::fs::create_dir_all(plugin_dir.join("pages")).unwrap();
+    std::fs::write(plugin_dir.join("pages/index.html"), "<p>hi</p>").unwrap();
+    // What it does not: caches, tests, notes and documentation.
+    std::fs::create_dir_all(plugin_dir.join("__pycache__")).unwrap();
+    std::fs::write(plugin_dir.join("__pycache__/main.pyc"), b"cache").unwrap();
+    std::fs::create_dir_all(plugin_dir.join("tests")).unwrap();
+    std::fs::write(plugin_dir.join("tests/test_main.py"), "").unwrap();
+    std::fs::write(plugin_dir.join("notes.txt"), "todo").unwrap();
 
-    // Pack the plugin into out_dir
     let out_dir = tmp.path().join("dist");
     let pack_report = pack_plugin(&plugin_dir, Some(&out_dir)).expect("Packaging must succeed");
 
-    assert!(pack_report.bundle_path.exists());
-    assert!(pack_report.checksum_path.exists());
-    assert!(pack_report.bundle_size_bytes > 0);
-    assert_eq!(pack_report.sha256_hex.len(), 64); // 256-bit hex = 64 chars
-
-    // Check checksum file content: `<sha256>  <filename>`
+    assert_eq!(pack_report.sha256_hex.len(), 64);
     let checksum_content = std::fs::read_to_string(&pack_report.checksum_path).unwrap();
-    assert!(checksum_content.starts_with(&pack_report.sha256_hex));
-    assert!(checksum_content.contains("org.kanon.plugin.pack_test.kpk"));
-
-    // Verify ZIP archive contents
-    let file = File::open(&pack_report.bundle_path).unwrap();
-    let mut archive = ZipArchive::new(file).unwrap();
-
-    let mut archived_names = Vec::new();
-    for i in 0..archive.len() {
-        let entry = archive.by_index(i).unwrap();
-        archived_names.push(entry.name().to_string());
-    }
-
-    assert!(archived_names.contains(&"plugin.toml".to_string()));
-    assert!(archived_names.contains(&"pyproject.toml".to_string()));
-    assert!(archived_names.contains(&"main.py".to_string()));
-    assert!(archived_names.contains(&"README.md".to_string()));
-
-    // Excluded files must NOT be in the archive
-    assert!(
-        !archived_names.iter().any(|n| n.contains("__pycache__")),
-        "ZIP archive must exclude __pycache__ directory"
+    assert_eq!(
+        checksum_content,
+        format!(
+            "{}  org.kanon.plugin.pack_test.kpk\n",
+            pack_report.sha256_hex
+        )
     );
+
+    // Exactly the manifest, the scripts, the dependency declaration and the pages; README.md
+    // from the scaffold stays out too.
+    let expected = [
+        "main.py",
+        "pages/index.html",
+        "plugin.toml",
+        "pyproject.toml",
+        "uv.lock",
+    ];
+    let mut names = archive_names(&pack_report.bundle_path);
+    names.sort();
+    assert_eq!(names, expected);
+    assert_eq!(pack_report.files, expected);
+}
+
+#[test]
+fn test_plugin_pack_rust_ships_release_binary_at_entrypoint() {
+    let tmp = tempdir().expect("tempdir");
+    let plugin_dir = tmp.path().join("bin_plugin");
+    std::fs::create_dir_all(plugin_dir.join("src")).unwrap();
+    // A dependency-free crate keeps the build to a second; `[workspace]` keeps it standalone.
+    std::fs::write(
+        plugin_dir.join("Cargo.toml"),
+        "[package]\nname = \"bin_plugin\"\nversion = \"0.1.0\"\nedition = \"2024\"\n\n[workspace]\n",
+    )
+    .unwrap();
+    std::fs::write(plugin_dir.join("src/main.rs"), "fn main() {}\n").unwrap();
+    std::fs::write(
+        plugin_dir.join("plugin.toml"),
+        r#"[plugin]
+id = "org.kanon.test.bin_plugin"
+name = "Binary Plugin"
+version = "0.1.0"
+runtime = "rust"
+entrypoint = "target/debug/bin_plugin"
+"#,
+    )
+    .unwrap();
+
+    let report = pack_plugin(&plugin_dir, Some(&tmp.path().join("dist"))).expect("pack");
+
+    // The manifest and the binary at the path the manifest launches; no sources.
+    assert_eq!(report.files, ["plugin.toml", "target/debug/bin_plugin"]);
+    assert!(
+        plugin_dir.join("target/release/bin_plugin").is_file(),
+        "the packaged binary is the release build"
+    );
+    let mut archive = ZipArchive::new(File::open(&report.bundle_path).unwrap()).unwrap();
+    let binary = archive.by_name("target/debug/bin_plugin").unwrap();
+    assert_eq!(binary.unix_mode().unwrap() & 0o755, 0o755);
 }
 
 #[tokio::test]
