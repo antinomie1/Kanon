@@ -23,11 +23,18 @@ fn tool(bin: &Path, name: &str, body: &str) {
 }
 
 /// A `uv` that records its arguments and creates the environment where it is told to.
+///
+/// Like the real one it would resolve a relative `UV_PROJECT_ENVIRONMENT` against the project
+/// rather than the working directory, so it refuses one outright.
 fn fake_uv(bin: &Path) {
     tool(
         bin,
         "uv",
         r#"echo "uv $*" >> calls.log
+case "$UV_PROJECT_ENVIRONMENT" in
+  /*) ;;
+  *) echo "relative environment: $UV_PROJECT_ENVIRONMENT" >&2; exit 3 ;;
+esac
 mkdir -p "$UV_PROJECT_ENVIRONMENT/bin"
 ln -sf /bin/sh "$UV_PROJECT_ENVIRONMENT/bin/python""#,
     );
@@ -82,6 +89,24 @@ async fn a_python_environment_is_created_once_and_refreshed_when_the_project_cha
         .unwrap();
     installer.prepare_python(&plugin).await.expect("refreshed");
     assert_eq!(calls(&plugin).len(), 2);
+}
+
+/// The node addresses plugins through its relative `./plugins`; the environment must still be
+/// created inside the plugin folder.
+#[tokio::test]
+async fn a_relative_plugin_directory_gets_its_environment_inside_it() {
+    let _turn = SERIAL.lock().await;
+    // Relative to the test's working directory, as `./plugins/<plugin>` is to the node's.
+    let dir = tempfile::tempdir_in(".").unwrap();
+    let root = Path::new(".").join(dir.path().file_name().unwrap());
+    let bin = dir.path().join("bin");
+    fake_uv(&bin);
+    let plugin = python_plugin(&root);
+    let installer = DependencyInstaller::new().with_search_path(vec![bin]);
+
+    let python = installer.prepare_python(&plugin).await.expect("installed");
+    assert_eq!(python, plugin.join(".venv/bin/python"));
+    assert!(python.is_file());
 }
 
 #[tokio::test]

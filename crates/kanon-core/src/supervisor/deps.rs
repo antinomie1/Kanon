@@ -95,13 +95,24 @@ impl DependencyInstaller {
                     if lockfile.is_file() {
                         args.push("--locked");
                     }
+                    // uv resolves a relative UV_PROJECT_ENVIRONMENT against the project, not
+                    // the working directory: with the node's default `./plugins` the
+                    // environment would land in `<plugin>/plugins/<plugin>/.venv`. Absolute it
+                    // is, without resolving symbolic links, so a linked plugin folder keeps its
+                    // environment beside its sources.
+                    let project_env = std::path::absolute(&env).map_err(|err| {
+                        format!(
+                            "cannot resolve the environment path '{}': {err}",
+                            env.display()
+                        )
+                    })?;
                     let mut command = tokio::process::Command::new(&uv);
                     // The environment must be exactly `<plugin>/.venv`, whatever the node's own
                     // environment says: an inherited UV_PROJECT_ENVIRONMENT would install
                     // elsewhere, and an active VIRTUAL_ENV only makes uv warn.
                     command
                         .args(&args)
-                        .env("UV_PROJECT_ENVIRONMENT", &env)
+                        .env("UV_PROJECT_ENVIRONMENT", &project_env)
                         .env_remove("VIRTUAL_ENV");
                     self.run(plugin_dir, &format!("uv {}", args.join(" ")), command)
                         .await?;
