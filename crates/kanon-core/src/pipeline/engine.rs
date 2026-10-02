@@ -242,6 +242,29 @@ pub enum PipelineResult {
     Passed(PipelineEventRequest),
 }
 
+impl PipelineResult {
+    /// The segments to deliver back to the conversation; empty when the event is answered by
+    /// nothing (a passed event, a suppressed reply, an unclaimed platform).
+    pub fn replies(&self) -> &[MessageSegment] {
+        match self {
+            Self::Blocked { replies, .. }
+            | Self::CommandExecuted { replies, .. }
+            | Self::LlmReplied { replies, .. }
+            | Self::LlmFailed { replies, .. }
+            | Self::SessionRotated { replies, .. }
+            | Self::ModelSelected { replies, .. }
+            | Self::ModelListed { replies, .. }
+            | Self::BuiltinReplied { replies, .. }
+            | Self::CommandDenied { replies, .. } => replies,
+            Self::CommandNotFound { .. }
+            | Self::ReplySuppressed { .. }
+            | Self::Notice { .. }
+            | Self::NoInstance { .. }
+            | Self::Passed(_) => &[],
+        }
+    }
+}
+
 /// A model conversation as stored, read by [`PipelineEngine::conversation_history`].
 #[derive(Debug, Clone)]
 pub struct ConversationHistory {
@@ -3235,18 +3258,7 @@ impl PipelineEngine {
             }
         }
 
-        let replies = match &result {
-            PipelineResult::Blocked { replies, .. } => replies,
-            PipelineResult::CommandExecuted { replies, .. } => replies,
-            PipelineResult::LlmReplied { replies, .. } => replies,
-            PipelineResult::LlmFailed { replies, .. } => replies,
-            PipelineResult::SessionRotated { replies, .. } => replies,
-            PipelineResult::ModelSelected { replies, .. } => replies,
-            PipelineResult::ModelListed { replies, .. } => replies,
-            PipelineResult::BuiltinReplied { replies, .. } => replies,
-            PipelineResult::CommandDenied { replies, .. } => replies,
-            _ => &[][..],
-        };
+        let replies = result.replies();
 
         let split_lines = matches!(
             &result,
