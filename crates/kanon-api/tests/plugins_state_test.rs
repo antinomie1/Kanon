@@ -125,6 +125,35 @@ async fn disabling_stops_the_host_and_keeps_the_plugin_listed() {
     assert_eq!(status, StatusCode::CONFLICT);
 }
 
+/// A plugin whose host died is still installed and enabled: restarting it starts it from its
+/// manifest instead of answering that nothing runs it.
+#[tokio::test]
+async fn restarting_a_plugin_whose_host_died_starts_it_from_disk() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let (state, _store) = plugin_state_fixture(PathBuf::from(dir.path())).await;
+    let app = kanon_api::app(state.clone());
+    state
+        .supervisor()
+        .stop_host(common::FIXTURE_HOST_ID)
+        .await
+        .expect("host stops");
+
+    let (status, body) = common::send_json(
+        &app,
+        Method::POST,
+        &format!("/api/v1/plugins/{}/restart", common::FIXTURE_PLUGIN_ID),
+        None,
+    )
+    .await;
+    // The fixture's entrypoint is never built, so the launch from disk is attempted and fails.
+    assert_eq!(status, StatusCode::BAD_GATEWAY, "unexpected body: {body}");
+    let message = body["error"]["message"].as_str().unwrap_or_default();
+    assert!(
+        message.contains("is not running and its host failed to start"),
+        "{message}"
+    );
+}
+
 #[tokio::test]
 async fn disabling_twice_reports_that_nothing_changed() {
     let dir = tempfile::tempdir().expect("temp dir");

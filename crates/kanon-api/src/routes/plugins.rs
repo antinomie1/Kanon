@@ -632,7 +632,11 @@ async fn put_config(
     }))
 }
 
-/// Restarts the host process that owns a plugin.
+/// Restarts the host process that owns a plugin, or starts it when no host runs it.
+///
+/// A plugin whose host crashed or failed to start is still installed and enabled; "restart" then
+/// means starting it from its manifest on disk, exactly as enabling it would. That is what lets
+/// `kanon-dev dev` recover once a broken edit is fixed.
 async fn restart_plugin(
     State(state): State<ApiState>,
     AxumPath(plugin_id): AxumPath<String>,
@@ -649,19 +653,22 @@ async fn restart_plugin(
         )));
     }
 
-    let host = state
-        .supervisor()
-        .find_host_for_plugin(&plugin_id)
-        .await
-        .ok_or_else(|| {
-            ApiError::NotFound(format!(
-                "Plugin '{plugin_id}' is not loaded by any active host"
-            ))
-        })?;
-
-    let host_id = host.host_id.clone();
-
-    let restarted = state.supervisor().restart_host(&host_id).await?;
+    let restarted = match state.supervisor().find_host_for_plugin(&plugin_id).await {
+        Some(host) => state.supervisor().restart_host(&host.host_id).await?,
+        None => {
+            let manifest_path = find_manifest_path(&state, &plugin_id)?;
+            state
+                .supervisor()
+                .spawn_from_manifest(&manifest_path, None)
+                .await
+                .map_err(|err| {
+                    ApiError::Upstream(format!(
+                        "Plugin '{plugin_id}' is not running and its host failed to start: {err}"
+                    ))
+                })?
+        }
+    };
+    let host_id = restarted.host_id.clone();
 
     state
         .observability()
