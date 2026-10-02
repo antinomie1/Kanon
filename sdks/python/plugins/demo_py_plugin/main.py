@@ -2,15 +2,18 @@
 
 import asyncio
 import random
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Literal, Optional
 
 from kanon_sdk import (
     CommandEvent,
+    HttpRequest,
     MessageEvent,
     MessageSegment,
     Plugin,
     PluginContext,
     command,
+    http_route,
+    on_llm_request,
     tool,
     trigger,
 )
@@ -96,3 +99,66 @@ class DemoPythonPlugin(Plugin):
             "result": 42.0,
             "summary": "Calculated via Python plugin tool",
         }
+
+    # --- Command groups backed by the node's KV store -------------------------------------------
+    # "/note add <text>" and "/note list" form one group; "/note" alone lists its subcommands.
+
+    @command("note add", description="Save a note for this chat", usage="/note add <text>")
+    async def note_add(self, event: CommandEvent) -> str:
+        if not event.raw_args:
+            return "Usage: /note add <text>"
+        key = f"notes:{event.channel_id}"
+        notes = await self.kv.get(key, [])
+        notes.append(event.raw_args)
+        await self.kv.set(key, notes)
+        return f"Saved note #{len(notes)}."
+
+    @command("note list", description="Show this chat's notes")
+    async def note_list(self, event: CommandEvent) -> str:
+        notes = await self.kv.get(f"notes:{event.channel_id}", [])
+        return "\n".join(f"{i}. {note}" for i, note in enumerate(notes, 1)) or "No notes yet."
+
+    # --- A tool described by its signature -------------------------------------------------------
+
+    @tool
+    async def dice(self, sides: int = 6, count: int = 1, mode: Literal["sum", "each"] = "sum") -> Any:
+        """Rolls dice for the user.
+
+        Args:
+            sides: Faces on each die.
+            count: How many dice to roll, at most 20.
+            mode: Return the total, or every roll.
+        """
+        if not 1 <= count <= 20 or sides < 2:
+            raise ValueError("count must be 1-20 and sides at least 2")
+        rolls = [random.randint(1, sides) for _ in range(count)]
+        return sum(rolls) if mode == "sum" else rolls
+
+    # --- Rewriting the system prompt for one chat ------------------------------------------------
+
+    @on_llm_request
+    async def chat_rules(self, event: MessageEvent, system_prompt: str) -> Optional[str]:
+        rules = await self.kv.get(f"rules:{event.channel_id}")
+        if not rules:
+            return None  # keep the prompt unchanged
+        return f"{system_prompt}\n\nRules for this chat:\n{rules}"
+
+    @command(
+        "rules",
+        description="Set extra instructions for the assistant in this chat",
+        usage="/rules [text]",
+        access="admins_in_groups",
+    )
+    async def set_rules(self, event: CommandEvent) -> str:
+        if event.raw_args:
+            await self.kv.set(f"rules:{event.channel_id}", event.raw_args)
+            return "Rules saved; the assistant follows them from the next message."
+        await self.kv.delete(f"rules:{event.channel_id}")
+        return "Rules cleared."
+
+    # --- An HTTP route under /api/v1/plugins/org.kanon.plugin.demo_py/http/ -----------------------
+
+    @http_route("/notes")
+    async def notes_api(self, request: HttpRequest) -> Dict[str, Any]:
+        channel = request.arg("channel", "")
+        return {"channel": channel, "notes": await self.kv.get(f"notes:{channel}", [])}

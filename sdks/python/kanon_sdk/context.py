@@ -9,6 +9,7 @@ from typing import Any, AsyncIterator, Dict, List, Optional, Sequence, Tuple, Un
 from google.protobuf.json_format import MessageToDict, ParseDict
 from google.protobuf.struct_pb2 import Struct
 
+from kanon_sdk.kv import KV
 from kanon_sdk.proto import pb, pb_grpc
 
 
@@ -25,6 +26,83 @@ class ConversationHistory:
     session_id: str
     summary: str = ""
     messages: List[Tuple[str, str]] = field(default_factory=list)
+
+
+@dataclass
+class ConversationInfo:
+    """One conversation of a chat, as listed by :meth:`CoreHandle.list_conversations`.
+
+    Attributes:
+        session_id: Identifies the conversation for ``switch_conversation``/``delete_conversation``.
+        current: Whether the chat's next message continues this conversation.
+        title: The first user message, shortened; ``""`` while it has no messages.
+        message_count: Stored user and assistant messages (summarized ones excluded).
+        last_active_at: Unix seconds of the last turn; ``0`` if it never had one.
+    """
+
+    session_id: str
+    current: bool
+    title: str
+    message_count: int
+    last_active_at: int
+
+
+@dataclass
+class Persona:
+    """A persona of the node's catalog (see :meth:`CoreHandle.list_personas`).
+
+    Attributes:
+        id: Stable identifier instances and conversations refer to.
+        name: Display name.
+        prompt: The system text that opens every request of a conversation using it.
+        builtin: Shipped with the node; it cannot be changed or deleted.
+    """
+
+    id: str
+    name: str
+    prompt: str
+    builtin: bool = False
+
+
+@dataclass
+class AgentResult:
+    """What :meth:`CoreHandle.run_agent` produced. Nothing was sent to the chat.
+
+    Attributes:
+        content: The agent's final answer, without reasoning.
+        attachments: Media the tools produced (``mime_type`` plus ``file_path`` or ``url``),
+            for the plugin to send if it wants to.
+        tools: Names of the tools called, in order.
+        session_id: The conversation the run continued, or the discarded private session.
+    """
+
+    content: str
+    attachments: List[pb.ToolAttachment] = field(default_factory=list)
+    tools: List[str] = field(default_factory=list)
+    session_id: str = ""
+
+
+#: Roles of conversation messages, in both directions.
+_ROLES = {pb.LLM_ROLE_USER: "user", pb.LLM_ROLE_ASSISTANT: "assistant"}
+_ROLE_VALUES = {name: value for value, name in _ROLES.items()}
+
+
+def _raw_event(event: Any) -> pb.PipelineEventRequest:
+    """The protobuf message behind a :class:`~kanon_sdk.event.MessageEvent` (or the message)."""
+    return getattr(event, "raw", event)
+
+
+def _conversations(response: pb.ConversationList) -> List[ConversationInfo]:
+    return [
+        ConversationInfo(
+            session_id=item.session_id,
+            current=item.current,
+            title=item.title,
+            message_count=item.message_count,
+            last_active_at=item.last_active_at,
+        )
+        for item in response.conversations
+    ]
 
 
 class CoreHandle:
@@ -111,15 +189,43 @@ class CoreHandle:
                 ...
     """
 
-    def __init__(self, stub: pb_grpc.BotApiServiceStub) -> None:
-        """Wraps an existing ``BotApiService`` stub without touching its channel."""
+    def __init__(
+        self,
+        stub: pb_grpc.BotApiServiceStub,
+        *,
+        plugin_id: str = "",
+        host_id: str = "",
+    ) -> None:
+        """Wraps an existing ``BotApiService`` stub without touching its channel.
+
+        Args:
+            stub: The host's connected stub.
+            plugin_id: The plugin this handle acts for: the namespace of :attr:`kv` and the
+                owner of agent runs and rendered images. The host always sets it.
+            host_id: The host's id, which :meth:`refresh_meta` names.
+        """
         # The stub (and therefore the channel) belongs to the host process: the
         # handle only issues RPCs, so channel creation/closure has a single owner.
         self._stub = stub
+        self.plugin_id = plugin_id
+        self.host_id = host_id
+        self._kv: Optional[KV] = None
         # Serializes concurrent adapter tasks sharing this handle. The lock is
         # created lazily against the running loop, so constructing a CoreHandle
         # outside a loop (e.g. at import time) stays safe.
         self._lock = asyncio.Lock()
+
+    def _require_plugin_id(self, what: str) -> str:
+        if not self.plugin_id:
+            raise RuntimeError(f"{what} needs a CoreHandle created with plugin_id")
+        return self.plugin_id
+
+    @property
+    def kv(self) -> KV:
+        """The plugin's namespace in the node's central key-value store (see :class:`KV`)."""
+        if self._kv is None:
+            self._kv = KV(self._stub, self._require_plugin_id("the KV store"))
+        return self._kv
 
     async def reply_to(
         self,
@@ -269,12 +375,201 @@ class CoreHandle:
         response = await self._stub.GetConversationHistory(
             pb.ConversationHistoryRequest(context=raw, limit=limit)
         )
-        roles = {pb.LLM_ROLE_USER: "user", pb.LLM_ROLE_ASSISTANT: "assistant"}
         return ConversationHistory(
             session_id=response.session_id,
             summary=response.summary,
-            messages=[(roles.get(m.role, ""), m.text) for m in response.messages],
+            messages=[(_ROLES.get(m.role, ""), m.text) for m in response.messages],
         )
+
+    # --- Conversations of a chat ---------------------------------------------------------------
+    #
+    # A chat (a private chat, a group member, or a whole group when the group shares one session)
+    # can hold several conversations, exactly what the built-in /ls, /new, /switch and /del
+    # manage. ``event`` names the chat; every call returns the list as it is afterwards. Errors:
+    # NOT_FOUND (no instance serves the chat, unknown session_id), FAILED_PRECONDITION (a turn is
+    # writing the conversation right now; try again later).
+
+    async def list_conversations(self, event: Any) -> List[ConversationInfo]:
+        """The chat's conversations, oldest first (``/ls`` numbers them from 1)."""
+        response = await self._stub.ListConversations(
+            pb.ConversationsRequest(context=_raw_event(event))
+        )
+        return _conversations(response)
+
+    async def new_conversation(self, event: Any) -> List[ConversationInfo]:
+        """Starts an empty conversation and makes it current, like ``/new``."""
+        response = await self._stub.NewConversation(
+            pb.ConversationsRequest(context=_raw_event(event))
+        )
+        return _conversations(response)
+
+    async def switch_conversation(self, event: Any, session_id: str) -> List[ConversationInfo]:
+        """Makes ``session_id`` the chat's current conversation, like ``/switch``.
+
+        In groups the built-in ``/switch`` is for admins by default; a plugin acting for a user
+        should check the sender's role itself.
+        """
+        response = await self._stub.SwitchConversation(
+            pb.SelectConversationRequest(context=_raw_event(event), session_id=session_id)
+        )
+        return _conversations(response)
+
+    async def delete_conversation(self, event: Any, session_id: str) -> List[ConversationInfo]:
+        """Deletes a conversation with its history, like ``/del``.
+
+        Deleting the current conversation moves the chat to a new, empty one. The same
+        permission advice as for :meth:`switch_conversation` applies.
+        """
+        response = await self._stub.DeleteConversation(
+            pb.SelectConversationRequest(context=_raw_event(event), session_id=session_id)
+        )
+        return _conversations(response)
+
+    async def append_conversation(
+        self, event: Any, messages: Sequence[Tuple[str, str]]
+    ) -> str:
+        """Appends whole turns to the chat's current conversation; returns its session id.
+
+        The model reads them as the conversation's own history from its next turn on. Existing
+        messages are never changed.
+
+        Args:
+            event: The chat.
+            messages: ``(role, text)`` pairs, oldest first, role ``"user"`` or ``"assistant"``.
+        """
+        history = []
+        for role, text in messages:
+            if role not in _ROLE_VALUES:
+                raise ValueError(f"unknown role {role!r}; expected 'user' or 'assistant'")
+            history.append(pb.HistoryMessage(role=_ROLE_VALUES[role], text=text))
+        response = await self._stub.AppendConversation(
+            pb.AppendConversationRequest(context=_raw_event(event), messages=history)
+        )
+        return response.session_id
+
+    # --- Personas ------------------------------------------------------------------------------
+
+    async def list_personas(self) -> List[Persona]:
+        """The node's persona catalog: built-in, operator-made and plugin-made personas."""
+        response = await self._stub.ListPersonas(pb.ListPersonasRequest())
+        return [
+            Persona(id=item.id, name=item.name, prompt=item.prompt, builtin=item.builtin)
+            for item in response.personas
+        ]
+
+    async def upsert_persona(self, id: str, name: str, prompt: str) -> bool:  # noqa: A002
+        """Creates or replaces a persona; returns ``True`` when one was replaced.
+
+        Conversations using it pick up the new prompt from their next turn.
+        """
+        response = await self._stub.UpsertPersona(pb.Persona(id=id, name=name, prompt=prompt))
+        return response.replaced
+
+    async def delete_persona(self, id: str) -> bool:  # noqa: A002
+        """Deletes a persona; returns whether it existed."""
+        response = await self._stub.DeletePersona(pb.DeletePersonaRequest(id=id))
+        return response.deleted
+
+    # --- The agent -----------------------------------------------------------------------------
+
+    async def run_agent(
+        self,
+        prompt: str = "",
+        *,
+        event: Any = None,
+        in_conversation: bool = False,
+        images: Sequence[pb.MessageSegment] = (),
+        system_prompt: str = "",
+        model: str = "",
+        use_tools: bool = True,
+        max_steps: int = 0,
+    ) -> AgentResult:
+        """Lets the node's agent (the model plus its tool loop) answer ``prompt``.
+
+        Unlike :meth:`request_llm`, the agent can call tools — plugin, MCP and built-in ones.
+        The answer is returned, never sent: the plugin decides what reaches the chat.
+
+        Args:
+            prompt: The user message; may be empty only when ``images`` are given.
+            event: The chat the run serves. It picks the bot instance (its model, plugins and
+                tool policy) and is what tools see as their context.
+            in_conversation: Run inside the chat's current conversation, with its history and
+                persona, and append the turn to it — exactly as if the model had answered a
+                message. Needs ``event``. Otherwise the run uses a private session that is
+                discarded afterwards.
+            images: Image segments for this turn (see :meth:`MessageSegment.image_bytes`; raw
+                bytes need an ``image/*`` mime type). The model must accept images.
+            system_prompt: Instructions for a private run; ignored in a conversation.
+            model: ``"<provider>/<model-id>"``; empty uses the instance's or node's model.
+            use_tools: Offer tools to the model; ``False`` makes it a plain answer.
+            max_steps: Tool rounds allowed; ``0`` is the agent's default.
+
+        Raises:
+            grpc.aio.AioRpcError: ``INVALID_ARGUMENT`` (empty run, bad image, unknown model),
+                ``NOT_FOUND`` (no instance serves the chat), ``UNAVAILABLE`` (no model, or the
+                model or a tool failed), ``FAILED_PRECONDITION`` (the conversation is busy),
+                ``ABORTED`` (stopped with ``/stop``).
+        """
+        request = pb.RunAgentRequest(
+            plugin_id=self._require_plugin_id("run_agent"),
+            prompt=prompt,
+            images=_image_parts(images),
+            in_conversation=in_conversation,
+            system_prompt=system_prompt,
+            model=model,
+            use_tools=use_tools,
+            max_steps=max_steps,
+        )
+        if event is not None:
+            request.context.CopyFrom(_raw_event(event))
+        response = await self._stub.RunAgent(request)
+        return AgentResult(
+            content=response.content,
+            attachments=list(response.attachments),
+            tools=list(response.tools),
+            session_id=response.session_id,
+        )
+
+    # --- Rendering -----------------------------------------------------------------------------
+
+    async def render_text(self, text: str, width: int = 0) -> pb.MessageSegment:
+        """Lays ``text`` out as a PNG card and returns it as an image segment, ready to send.
+
+        Lines wrap to ``width`` pixels (default 720, 200–2000), blank lines separate paragraphs
+        and a line starting with ``"# "`` is a heading; CJK and emoji use the node's fonts.
+        The file is cleaned up after a day, so send it soon.
+        """
+        response = await self._stub.RenderImage(
+            pb.RenderImageRequest(
+                plugin_id=self._require_plugin_id("render_text"), text=text, width=width
+            )
+        )
+        return MessageSegment.image_file(response.file_path, mime_type="image/png")
+
+    async def render_svg(self, svg: str) -> pb.MessageSegment:
+        """Renders an SVG document to PNG at its own size; returns an image segment.
+
+        Embedded images must be ``data:`` URIs; references to files on the node are ignored.
+        """
+        response = await self._stub.RenderImage(
+            pb.RenderImageRequest(plugin_id=self._require_plugin_id("render_svg"), svg=svg)
+        )
+        return MessageSegment.image_file(response.file_path, mime_type="image/png")
+
+    # --- Metadata ------------------------------------------------------------------------------
+
+    async def refresh_meta(self) -> List[str]:
+        """Asks the node to read this host's metadata again; returns the plugin ids it now holds.
+
+        :meth:`kanon_sdk.Plugin.add_tool` and ``remove_tool`` call this; the change applies
+        from the next turn on.
+        """
+        if not self.host_id:
+            raise RuntimeError("refresh_meta needs a CoreHandle created with host_id")
+        response = await self._stub.RefreshPluginMeta(
+            pb.RefreshPluginMetaRequest(host_id=self.host_id)
+        )
+        return list(response.plugin_ids)
 
     async def ingest_event(
         self,
@@ -436,6 +731,16 @@ def to_segments(value: Optional[Replyable]) -> List[pb.MessageSegment]:
     return segments
 
 
+def _image_parts(images: Sequence[pb.MessageSegment]) -> List[pb.ImageSegment]:
+    """The image payloads of image segments; anything else is a caller mistake."""
+    parts = []
+    for segment in images:
+        if segment.WhichOneof("segment") != "image":
+            raise ValueError("images must be image segments (see MessageSegment.image_*)")
+        parts.append(segment.image)
+    return parts
+
+
 def llm_message(text: str, role: str = "user", images: Sequence[pb.MessageSegment] = ()) -> pb.LLMMessage:
     """Builds one turn for :meth:`CoreHandle.request_llm`.
 
@@ -444,15 +749,9 @@ def llm_message(text: str, role: str = "user", images: Sequence[pb.MessageSegmen
         role: ``"user"`` or ``"assistant"``.
         images: Image segments (see :meth:`MessageSegment.image_url`); user turns only.
     """
-    roles = {"user": pb.LLM_ROLE_USER, "assistant": pb.LLM_ROLE_ASSISTANT}
-    if role not in roles:
+    if role not in _ROLE_VALUES:
         raise ValueError(f"unknown LLM role {role!r}; expected 'user' or 'assistant'")
-    image_parts = []
-    for segment in images:
-        if segment.WhichOneof("segment") != "image":
-            raise ValueError("llm_message images must be image segments")
-        image_parts.append(segment.image)
-    return pb.LLMMessage(role=roles[role], text=text, images=image_parts)
+    return pb.LLMMessage(role=_ROLE_VALUES[role], text=text, images=_image_parts(images))
 
 
 class MessageSegment:

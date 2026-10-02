@@ -2,13 +2,20 @@
 
 A plugin is a :class:`Plugin` subclass whose methods are marked with decorators:
 
-* :func:`command` — a slash command (``/weather Paris``), with aliases and an access level;
+* :func:`command` — a slash command (``/weather Paris``), with aliases and an access level, or a
+  subcommand of a command group (``@command("todo add")``);
 * :func:`trigger` — a regular expression matched against plain messages;
-* :func:`tool` — a function the model may call;
+* :func:`tool` — a function the model may call, its schema inferred from the signature;
 * :func:`action` — an operator-only management action (never offered to the model);
-* :func:`on_event` — a lifecycle event (``message_sent``, ``notice``, ``llm_response``);
+* :func:`on_event` — a lifecycle event (messages sent, notices, model answers, agent runs and
+  tool calls);
 * :func:`decorate_reply` — a hook that rewrites the bot's replies before delivery;
-* :func:`prepare_turn` — a hook that adds context to the message the model is about to answer.
+* :func:`prepare_turn` — a hook that adds context to the message the model is about to answer;
+* :func:`on_llm_request` — a hook that rewrites a conversation's system prompt;
+* :func:`~kanon_sdk.web.http_route` — an HTTP route served through the node's gateway.
+
+Tools can also be added and removed while the plugin runs (:meth:`Plugin.add_tool`), and
+:attr:`Plugin.kv` is the plugin's corner of the node's key-value store.
 
 Command and trigger handlers receive a :class:`~kanon_sdk.event.CommandEvent` and may answer by
 returning text/segments or with ``await event.reply(...)``; ``await event.wait_next()`` asks the
@@ -17,17 +24,22 @@ user a follow-up question (see :mod:`kanon_sdk.event`).
 
 import asyncio
 import inspect
+import itertools
 import re
 import sys
+import traceback
 from dataclasses import dataclass
-from typing import Any, Callable, Dict, List, Optional, Sequence, Set
+from typing import Any, Callable, Dict, List, Optional, Sequence, Set, Union
 
 from google.protobuf.json_format import MessageToDict, ParseDict
 from google.protobuf.struct_pb2 import Struct
 
 from kanon_sdk.context import PluginContext, Replyable, to_segments
 from kanon_sdk.event import CommandEvent, Conversations, MessageEvent, _Session, _Turn, run_turn
+from kanon_sdk.kv import KV
 from kanon_sdk.proto import pb
+from kanon_sdk.schema import ToolSignature, infer_tool, restore_integers
+from kanon_sdk.web import HttpRequest, HttpResponse, to_http_response
 
 #: Access levels a command or trigger may declare. The operator's command policy overrides them.
 ACCESS_LEVELS = {
@@ -41,7 +53,15 @@ EVENT_KINDS = {
     "message_sent": pb.EVENT_KIND_MESSAGE_SENT,
     "notice": pb.EVENT_KIND_NOTICE,
     "llm_response": pb.EVENT_KIND_LLM_RESPONSE,
+    "agent_begin": pb.EVENT_KIND_AGENT_BEGIN,
+    "agent_done": pb.EVENT_KIND_AGENT_DONE,
+    "tool_call": pb.EVENT_KIND_TOOL_CALL,
+    "tool_result": pb.EVENT_KIND_TOOL_RESULT,
 }
+
+#: Declaration order of subcommands: ``dir()`` lists methods alphabetically, but a group's help
+#: should list its subcommands the way the author wrote them.
+_DECLARATION_ORDER = itertools.count()
 
 
 #: Conversation kinds a command or trigger may be limited to.
@@ -83,10 +103,17 @@ def command(
     platforms: Sequence[str] = (),
     conversation_kinds: Sequence[str] = (),
 ) -> Callable:
-    """Declares a slash command handler.
+    """Declares a slash command handler, or a subcommand of a command group.
+
+    A name with a space declares a subcommand: ``@command("todo add")`` answers ``/todo add milk``
+    with ``event.args == ["milk"]``. ``/help`` lists a group's subcommands under it, and ``/todo``
+    alone (or with an unknown subcommand) answers with that list — unless the plugin also
+    declares ``@command("todo")``, which then handles those cases and carries the group's
+    description, aliases, access level and scope. Subcommands take only ``description`` and
+    ``usage``: the node routes and checks access for the group as a whole.
 
     Args:
-        name: Command name without the slash.
+        name: Command name without the slash, or ``"<group> <subcommand>"``.
         description: One line shown by ``/help``.
         usage: Usage example shown by ``/help``.
         priority: Lower wins when several plugins declare the same name.
@@ -99,10 +126,23 @@ def command(
     """
     access_value = _access(access)
     scope = _scope(platforms, conversation_kinds)
+    words = name.lstrip("/").split()
+    if not words or len(words) > 2:
+        raise ValueError(f"command name {name!r} must be one word, or a group and a subcommand")
+    group, sub = (words[0], words[1]) if len(words) == 2 else (None, None)
+    if sub is not None and (
+        aliases or access != "everyone" or platforms or conversation_kinds or priority != 500
+    ):
+        raise ValueError(
+            f"subcommand {name!r} takes only description and usage; set aliases, access, "
+            f"priority and scope on @command({group!r})"
+        )
 
     def decorator(fn: Callable) -> Callable:
         fn._kanon_command = {
-            "name": name.lstrip("/"),
+            "name": sub or words[0],
+            "group": group,
+            "order": next(_DECLARATION_ORDER),
             "description": description,
             "usage": usage,
             "priority": priority,
@@ -160,29 +200,68 @@ def trigger(
     return decorator
 
 
+def _tool_info(
+    handler: Callable,
+    name: Optional[str],
+    description: str,
+    parameters: Optional[Dict[str, Any]],
+) -> Dict[str, Any]:
+    """A tool's name, description, schema and calling convention (see :func:`tool`)."""
+    signature: Optional[ToolSignature] = None
+    if parameters is None:
+        signature = infer_tool(handler)
+        parameters = signature.parameters
+        description = description or signature.description
+    tool_name = name or getattr(handler, "__name__", "")
+    if not tool_name:
+        raise ValueError("a tool needs a name")
+    return {
+        "name": tool_name,
+        "description": description,
+        "parameters": parameters,
+        "signature": signature,
+    }
+
+
 def tool(
-    name: str,
+    name: Union[str, Callable, None] = None,
     description: str = "",
     parameters: Optional[Dict[str, Any]] = None,
 ) -> Callable:
-    """Declares an LLM tool call handler.
+    """Declares a function the model may call.
 
-    The handler receives the model's arguments as a dict and, if it accepts a second parameter,
-    the :class:`~kanon_sdk.event.MessageEvent` the model was answering (``None`` when the call
-    did not come from a chat message) — so a tool knows who asked without trusting the model to
-    pass it along.
+    Without ``parameters`` the tool describes itself (see :mod:`kanon_sdk.schema`): its name
+    defaults to the method name, its description to the docstring's first paragraph, and its
+    parameters come from the annotated arguments, which the handler receives by keyword. An
+    argument named ``event`` receives the :class:`~kanon_sdk.event.MessageEvent` the model was
+    answering instead (``None`` when no chat message is behind the call), so a tool knows who
+    asked without trusting the model to say::
+
+        @tool
+        async def remember(self, fact: str, event: MessageEvent) -> str:
+            \"\"\"Stores a fact about the user for later conversations.\"\"\"
+
+    With an explicit JSON Schema in ``parameters`` the handler receives the arguments as one
+    dict, plus the event if it takes a second parameter.
+
+    The return value is the tool's result: a dict as is, ``bytes`` as raw bytes, anything else
+    under ``"result"``. Raising reports the failure to the model.
 
     Operations an *operator* triggers — credential binding, QR login, diagnostics — belong in
     :func:`action` instead: a tool advertised by an adapter is offered to the model, which then
     tries to invoke it mid-conversation.
+
+    Raises:
+        TypeError: When the schema cannot be inferred (see :func:`kanon_sdk.schema.infer_tool`).
     """
+    if callable(name):
+        # Used bare, as ``@tool``.
+        fn = name
+        fn._kanon_tool = _tool_info(fn, None, "", None)
+        return fn
 
     def decorator(fn: Callable) -> Callable:
-        fn._kanon_tool = {
-            "name": name,
-            "description": description,
-            "parameters": parameters or {},
-        }
+        fn._kanon_tool = _tool_info(fn, name, description, parameters)
         return fn
 
     return decorator
@@ -222,9 +301,16 @@ def on_event(kind: str) -> Callable:
     * ``"notice"`` — a :class:`~kanon_sdk.event.MessageEvent` for a platform notice (join, poke,
       recall, ...), whether or not the bot reacts to it;
     * ``"llm_response"`` — a ``pb.LlmResponseEvent`` with the model's answer and the message it
-      answered.
+      answered;
+    * ``"agent_begin"`` / ``"agent_done"`` — a ``pb.AgentBeginEvent`` / ``pb.AgentDoneEvent``
+      when the agent starts and finishes a conversation turn (``done`` carries success, the
+      answer or error, and the tools it called);
+    * ``"tool_call"`` / ``"tool_result"`` — a ``pb.ToolCallEvent`` / ``pb.ToolResultEvent`` for
+      every tool the agent calls during a turn, with its arguments and its result.
 
-    Events are notifications: the handler's return value is ignored, and Core never waits on it.
+    Each event's ``context`` is the chat message behind it (wrap it in
+    :class:`~kanon_sdk.event.MessageEvent` to use the helpers). Events are notifications: the
+    handler's return value is ignored, and Core never waits on it.
     """
     if kind not in EVENT_KINDS:
         raise ValueError(f"unknown event kind {kind!r}; expected one of {sorted(EVENT_KINDS)}")
@@ -282,6 +368,27 @@ def prepare_turn(fn: Callable) -> Callable:
     return fn
 
 
+def on_llm_request(fn: Callable) -> Callable:
+    """Marks the plugin's system prompt rewriter.
+
+    Before the model answers the first message of a turn, the handler receives the
+    :class:`~kanon_sdk.event.MessageEvent`, the conversation's current system prompt (persona,
+    skills and earlier plugins' rewrites) and the session id, and returns the new system prompt —
+    or ``None`` to leave it alone::
+
+        @on_llm_request
+        async def house_rules(self, event: MessageEvent, system_prompt: str) -> str:
+            return system_prompt + "\\n\\nAnswer in the group's language."
+
+    The system prompt opens every request, so the provider's prompt cache depends on its bytes:
+    return the same text for the same conversation — no clocks, counters or per-message details
+    (those belong in :func:`prepare_turn`). Core asks once per turn and reuses the answer for the
+    turn's tool rounds; it gives the handler three seconds and keeps the prompt on failure.
+    """
+    fn._kanon_prompt_rewriter = True
+    return fn
+
+
 async def _call(handler: Callable, *args: Any) -> Any:
     """Calls a sync or async handler with as many of ``args`` as it accepts."""
     accepted = len(inspect.signature(handler).parameters)
@@ -289,6 +396,58 @@ async def _call(handler: Callable, *args: Any) -> Any:
     if inspect.isawaitable(result):
         result = await result
     return result
+
+
+@dataclass
+class _Tool:
+    """A tool the plugin offers, however it was declared."""
+
+    name: str
+    description: str
+    parameters: Dict[str, Any]
+    handler: Callable
+    #: Inferred calling convention (keyword arguments); ``None`` for an explicit schema, whose
+    #: handler takes the arguments as one dict.
+    signature: Optional[ToolSignature]
+
+    async def call(self, args: Dict[str, Any], event: Optional[MessageEvent]) -> Any:
+        args = restore_integers(args, self.parameters)
+        if self.signature is None:
+            return await _call(self.handler, args, event)
+        unknown = sorted(set(args) - set(self.signature.arguments))
+        if unknown:
+            # Said plainly so the model can correct itself instead of seeing a Python error.
+            raise TypeError(f"unexpected arguments {unknown}; expected {self.signature.arguments}")
+        kwargs = dict(args)
+        if self.signature.wants_event:
+            kwargs["event"] = event
+        result = self.handler(**kwargs)
+        if inspect.isawaitable(result):
+            result = await result
+        return result
+
+
+def _without_subcommand(req: pb.CommandExecuteRequest) -> pb.CommandExecuteRequest:
+    """The request a subcommand handler sees: the subcommand word removed from the arguments."""
+    shifted = pb.CommandExecuteRequest()
+    shifted.CopyFrom(req)
+    sub = shifted.args[0]
+    del shifted.args[0]
+    raw = req.raw_args.lstrip()
+    shifted.raw_args = raw[len(sub):].lstrip() if raw.startswith(sub) else req.raw_args
+    return shifted
+
+
+def _group_help(group: str, subcommands: Dict[str, Callable]) -> str:
+    """One line per subcommand, as ``/help`` shows them."""
+    lines = []
+    for sub, handler in subcommands.items():
+        info = handler._kanon_command
+        line = info["usage"] or f"/{group} {sub}"
+        if info["description"]:
+            line += f" — {info['description']}"
+        lines.append(line)
+    return "\n".join(lines)
 
 
 class Plugin:
@@ -307,12 +466,17 @@ class Plugin:
     def __init__(self) -> None:
         self.context: Optional[PluginContext] = None
         self._command_handlers: Dict[str, Callable] = {}
+        # Command groups: group name -> subcommand name -> handler, in declaration order.
+        self._subcommands: Dict[str, Dict[str, Callable]] = {}
         self._trigger_handlers: Dict[str, Callable] = {}
-        self._tool_handlers: Dict[str, Callable] = {}
+        self._tools: Dict[str, _Tool] = {}
         self._action_handlers: Dict[str, Callable] = {}
         self._event_handlers: Dict[str, List[Callable]] = {}
         self._decorator: Optional[Callable] = None
         self._preparer: Optional[Callable] = None
+        self._prompt_rewriter: Optional[Callable] = None
+        # HTTP routes: path -> method -> handler.
+        self._http_routes: Dict[str, Dict[str, Callable]] = {}
         self._conversations = Conversations()
         # Handler tasks outlive the RPC that started them (see kanon_sdk.event); keeping a
         # reference stops the event loop from garbage-collecting a suspended handler.
@@ -321,6 +485,7 @@ class Plugin:
 
     def _collect_decorated_handlers(self) -> None:
         """Discovers decorated methods and checks that their names do not collide."""
+        subcommands: Dict[str, List[Callable]] = {}
         for attr_name in dir(self):
             try:
                 attr = getattr(self, attr_name)
@@ -330,11 +495,18 @@ class Plugin:
                 continue
 
             if hasattr(attr, "_kanon_command"):
-                self._command_handlers[attr._kanon_command["name"]] = attr
+                info = attr._kanon_command
+                if info["group"] is None:
+                    self._command_handlers[info["name"]] = attr
+                else:
+                    subcommands.setdefault(info["group"], []).append(attr)
             if hasattr(attr, "_kanon_trigger"):
                 self._trigger_handlers[attr._kanon_trigger["name"]] = attr
             if hasattr(attr, "_kanon_tool"):
-                self._tool_handlers[attr._kanon_tool["name"]] = attr
+                info = attr._kanon_tool
+                if info["name"] in self._tools:
+                    raise ValueError(f"{type(self).__name__} declares tool {info['name']!r} twice")
+                self._tools[info["name"]] = _Tool(handler=attr, **info)
             if hasattr(attr, "_kanon_action"):
                 self._action_handlers[attr._kanon_action["name"]] = attr
             for kind in getattr(attr, "_kanon_events", []):
@@ -347,10 +519,34 @@ class Plugin:
                 if self._preparer is not None:
                     raise ValueError(f"{type(self).__name__} declares more than one @prepare_turn")
                 self._preparer = attr
+            if getattr(attr, "_kanon_prompt_rewriter", False):
+                if self._prompt_rewriter is not None:
+                    raise ValueError(
+                        f"{type(self).__name__} declares more than one @on_llm_request"
+                    )
+                self._prompt_rewriter = attr
+            for path, methods in getattr(attr, "_kanon_http", []):
+                route = self._http_routes.setdefault(path, {})
+                for method in methods:
+                    if method in route:
+                        raise ValueError(
+                            f"{type(self).__name__} declares {method} {path} more than once"
+                        )
+                    route[method] = attr
+
+        for group, handlers in subcommands.items():
+            handlers.sort(key=lambda handler: handler._kanon_command["order"])
+            table: Dict[str, Callable] = {}
+            for handler in handlers:
+                sub = handler._kanon_command["name"]
+                if sub in table:
+                    raise ValueError(f"{type(self).__name__} declares /{group} {sub} twice")
+                table[sub] = handler
+            self._subcommands[group] = table
 
         # Core sends commands and triggers through the same RPC, naming either in `command`, so
-        # the two share one namespace.
-        clash = set(self._command_handlers) & set(self._trigger_handlers)
+        # the two share one namespace (a command group is a command).
+        clash = (set(self._command_handlers) | set(self._subcommands)) & set(self._trigger_handlers)
         if clash:
             raise ValueError(f"names used by both a command and a trigger: {sorted(clash)}")
         for kind in self.events:
@@ -362,21 +558,93 @@ class Plugin:
         """The host's :class:`~kanon_sdk.context.CoreHandle`, or ``None`` in standalone mode."""
         return self.context.core if self.context is not None else None
 
+    @property
+    def kv(self) -> KV:
+        """The plugin's namespace in the node's central key-value store (see :class:`KV`).
+
+        Raises:
+            RuntimeError: In standalone mode, where there is no node to store anything in.
+        """
+        core = self.core
+        if core is None:
+            raise RuntimeError("no Core connection: the KV store is unavailable in standalone mode")
+        return core.kv
+
+    async def add_tool(
+        self,
+        handler: Callable,
+        *,
+        name: Optional[str] = None,
+        description: str = "",
+        parameters: Optional[Dict[str, Any]] = None,
+    ) -> None:
+        """Offers a new tool to the model while the plugin runs.
+
+        ``handler`` is described exactly as :func:`tool` describes a decorated method, and the
+        node picks the tool up from the next turn on. Use it for tools that depend on
+        configuration or on something discovered at runtime.
+
+        Raises:
+            ValueError: If a tool of that name exists.
+            grpc.aio.AioRpcError: If the node could not reread the plugin's tools; the tool is
+                then not added, so the plugin and the node keep agreeing.
+        """
+        info = _tool_info(handler, name, description, parameters)
+        if info["name"] in self._tools:
+            raise ValueError(f"tool {info['name']!r} already exists")
+        self._tools[info["name"]] = _Tool(handler=handler, **info)
+        try:
+            await self._refresh_meta()
+        except BaseException:
+            del self._tools[info["name"]]
+            raise
+
+    async def remove_tool(self, name: str) -> bool:
+        """Withdraws a tool from the model; returns whether it existed.
+
+        Raises:
+            grpc.aio.AioRpcError: If the node could not reread the plugin's tools; the tool then
+                stays, so the plugin keeps serving what the node still offers.
+        """
+        removed = self._tools.pop(name, None)
+        if removed is None:
+            return False
+        try:
+            await self._refresh_meta()
+        except BaseException:
+            self._tools[name] = removed
+            raise
+        return True
+
+    async def _refresh_meta(self) -> None:
+        # Standalone (no node) there is nobody to tell; the local table is all there is.
+        if self.core is not None:
+            await self.core.refresh_meta()
+
     def meta(self) -> pb.PluginMeta:
         """Constructs and returns static metadata for this plugin."""
         commands: List[pb.CommandMeta] = []
-        for handler in self._command_handlers.values():
-            info = handler._kanon_command
+        for name in sorted(set(self._command_handlers) | set(self._subcommands)):
+            handler = self._command_handlers.get(name)
+            info = handler._kanon_command if handler is not None else {"name": name}
             commands.append(
                 pb.CommandMeta(
-                    name=info["name"],
-                    description=info["description"],
-                    usage=info["usage"],
-                    priority=info["priority"],
-                    aliases=info["aliases"],
-                    access=info["access"],
-                    platforms=info["platforms"],
-                    conversation_kinds=info["conversation_kinds"],
+                    name=name,
+                    description=info.get("description", ""),
+                    usage=info.get("usage", ""),
+                    priority=info.get("priority", 500),
+                    aliases=info.get("aliases", []),
+                    access=info.get("access", pb.COMMAND_ACCESS_EVERYONE),
+                    platforms=info.get("platforms", []),
+                    conversation_kinds=info.get("conversation_kinds", []),
+                    subcommands=[
+                        pb.CommandMeta(
+                            name=sub,
+                            description=sub_handler._kanon_command["description"],
+                            usage=sub_handler._kanon_command["usage"],
+                        )
+                        for sub, sub_handler in self._subcommands.get(name, {}).items()
+                    ],
                 )
             )
 
@@ -396,16 +664,15 @@ class Plugin:
             )
 
         tools: List[pb.ToolMeta] = []
-        for handler in self._tool_handlers.values():
-            info = handler._kanon_tool
+        for spec in self._tools.values():
             param_struct = Struct()
-            if info["parameters"]:
-                ParseDict(info["parameters"], param_struct)
+            if spec.parameters:
+                ParseDict(spec.parameters, param_struct)
             tools.append(
                 pb.ToolMeta(
-                    name=info["name"],
-                    description=info["description"],
-                    parameters=param_struct if info["parameters"] else None,
+                    name=spec.name,
+                    description=spec.description,
+                    parameters=param_struct if spec.parameters else None,
                 )
             )
 
@@ -422,6 +689,8 @@ class Plugin:
             events=sorted(EVENT_KINDS[kind] for kind in kinds),
             decorates_replies=self._decorator is not None,
             prepares_turns=self._preparer is not None,
+            rewrites_system_prompt=self._prompt_rewriter is not None,
+            serves_http=bool(self._http_routes),
         )
 
     async def on_load(self, ctx: PluginContext) -> None:
@@ -474,6 +743,17 @@ class Plugin:
         handler = self._command_handlers.get(req.command) or self._trigger_handlers.get(
             req.command
         )
+        subcommands = self._subcommands.get(req.command)
+        if subcommands is not None:
+            sub = subcommands.get(req.args[0]) if req.args else None
+            if sub is not None:
+                handler, req = sub, _without_subcommand(req)
+            elif handler is None:
+                # No group handler: `/todo` alone or with an unknown subcommand lists the group.
+                return pb.CommandExecuteResponse(
+                    success=True,
+                    replies=to_segments(_group_help(req.command, subcommands)),
+                )
         if handler is None:
             return pb.CommandExecuteResponse(
                 success=False,
@@ -553,8 +833,8 @@ class Plugin:
         req: pb.ToolCallRequest,
     ) -> pb.ToolCallResponse:
         """Executes an LLM tool call dispatched by the Core microkernel."""
-        handler = self._tool_handlers.get(req.tool_name)
-        if handler is None:
+        spec = self._tools.get(req.tool_name)
+        if spec is None:
             return pb.ToolCallResponse(
                 call_id=req.call_id,
                 success=False,
@@ -567,7 +847,7 @@ class Plugin:
         event = MessageEvent(req.context, self.core) if req.HasField("context") else None
 
         try:
-            result = await _call(handler, args_dict, event)
+            result = await spec.call(args_dict, event)
         except Exception as exc:  # noqa: BLE001 - the model is told the tool failed
             return pb.ToolCallResponse(
                 call_id=req.call_id,
@@ -580,7 +860,13 @@ class Plugin:
         if isinstance(result, bytes):
             return pb.ToolCallResponse(call_id=req.call_id, success=True, raw_bytes=result)
         result_struct = Struct()
-        ParseDict(result if isinstance(result, dict) else {"result": str(result)}, result_struct)
+        if not isinstance(result, dict):
+            # JSON values keep their shape (a list stays a list); anything else becomes text.
+            plain = isinstance(result, (str, int, float, bool, list, tuple)) or result is None
+            result = {"result": list(result) if isinstance(result, tuple) else result}
+            if not plain:
+                result = {"result": str(result["result"])}
+        ParseDict(result, result_struct)
         return pb.ToolCallResponse(
             call_id=req.call_id,
             success=True,
@@ -624,6 +910,46 @@ class Plugin:
             return pb.PrepareTurnResult()
         text = await _call(self._preparer, MessageEvent(req.context, self.core), req.session_id)
         return pb.PrepareTurnResult(text=text or "")
+
+    async def on_llm_request(self, req: pb.LlmRequestHookRequest) -> pb.LlmRequestHookResult:
+        """Runs the plugin's :func:`on_llm_request` handler; unset means "leave it alone"."""
+        if self._prompt_rewriter is None:
+            return pb.LlmRequestHookResult()
+        prompt = await _call(
+            self._prompt_rewriter,
+            MessageEvent(req.context, self.core),
+            req.system_prompt,
+            req.session_id,
+        )
+        if prompt is None:
+            return pb.LlmRequestHookResult()
+        if not isinstance(prompt, str):
+            raise TypeError(
+                f"@on_llm_request must return a str or None, not {type(prompt).__name__}"
+            )
+        return pb.LlmRequestHookResult(system_prompt=prompt)
+
+    async def on_http_request(self, req: pb.HttpRequest) -> pb.HttpResponse:
+        """Routes a forwarded HTTP request to its :func:`~kanon_sdk.web.http_route` handler."""
+        request = HttpRequest.from_proto(req)
+        route = self._http_routes.get(request.path)
+        if route is None:
+            return HttpResponse.text("Not Found", status=404).to_proto()
+        handler = route.get(request.method)
+        if handler is None:
+            response = HttpResponse.text("Method Not Allowed", status=405)
+            response.headers["allow"] = ", ".join(sorted(route))
+            return response.to_proto()
+        try:
+            result = await _call(handler, request)
+            return to_http_response(result).to_proto()
+        except Exception:  # noqa: BLE001 - the caller gets a 500, the author gets the traceback
+            print(
+                f"[kanon-sdk] HTTP {request.method} {request.path} failed:\n"
+                f"{traceback.format_exc()}",
+                file=sys.stderr,
+            )
+            return HttpResponse.text("Internal Server Error", status=500).to_proto()
 
     async def on_deliver_message(
         self,

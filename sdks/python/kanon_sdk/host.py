@@ -143,6 +143,21 @@ class PipelineServiceImpl(pb_grpc.MessagePipelineServiceServicer):
         # A failing preparer surfaces as an RPC error; Core then answers without its context.
         return await self.plugin.on_prepare_turn(request)
 
+    async def OnLlmRequest(
+        self,
+        request: pb.LlmRequestHookRequest,
+        context: grpc.aio.ServicerContext,
+    ) -> pb.LlmRequestHookResult:
+        # A failing rewriter surfaces as an RPC error; Core then keeps the system prompt.
+        return await self.plugin.on_llm_request(request)
+
+    async def OnHttpRequest(
+        self,
+        request: pb.HttpRequest,
+        context: grpc.aio.ServicerContext,
+    ) -> pb.HttpResponse:
+        return await self.plugin.on_http_request(request)
+
     async def OnDeliverMessage(
         self,
         request: pb.DeliverMessageRequest,
@@ -230,7 +245,7 @@ class KanonHost:
                         loaded_plugin_ids=[meta.id],
                     )
                     await core_stub.RegisterHost(reg_req, timeout=3.0)
-                    core_handle = CoreHandle(core_stub)
+                    core_handle = CoreHandle(core_stub, plugin_id=meta.id, host_id=self.host_id)
                 except Exception as exc:
                     if core_channel is not None:
                         try:

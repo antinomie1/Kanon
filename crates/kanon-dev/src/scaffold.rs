@@ -263,14 +263,13 @@ priority = 500
 
 [[commands]]
 name = "{snake_name}_echo"
-description = "Echoes the provided message with prefix"
+description = "Echoes the message back"
 usage = "/{snake_name}_echo <message>"
-priority = 500
 
 [[tools]]
-name = "{snake_name}_calc"
-description = "Performs mathematical calculations"
-parameters = {{ type = "object", properties = {{ expr = {{ type = "string", description = "Mathematical expression" }} }} }}
+name = "{snake_name}_add"
+description = "Adds two numbers."
+parameters = {{ type = "object", properties = {{ a = {{ type = "number", description = "First number." }}, b = {{ type = "number", description = "Second number." }} }}, required = ["a", "b"] }}
 "#
     );
 
@@ -292,11 +291,13 @@ dependencies = ["kanon-python-host"]
     );
 
     let main_py = format!(
-        r#""""{pascal_name} Plugin for Kanon Microkernel."""
+        r#""""{pascal_name} plugin for Kanon.
 
-from typing import Any, Dict, List, Optional
-from kanon_sdk import Plugin, PluginContext, MessageSegment, command, tool
-from kanon_sdk.proto import pb
+See docs/PLUGIN_GUIDE.md in the Kanon repository for commands, tools, events and core calls.
+"""
+
+from kanon_sdk import CommandEvent, Plugin, PluginContext, command, tool
+
 
 class {pascal_name}Plugin(Plugin):
     id = "org.kanon.plugin.{snake_name}"
@@ -310,34 +311,24 @@ class {pascal_name}Plugin(Plugin):
         print(f"{pascal_name} Plugin loaded with data dir: {{ctx.data_dir}}", flush=True)
 
     @command(
-        name="{snake_name}_echo",
-        description="Echoes the provided message with prefix",
+        "{snake_name}_echo",
+        description="Echoes the message back",
         usage="/{snake_name}_echo <message>",
-        priority=500,
     )
-    async def handle_echo(self, req: pb.CommandExecuteRequest, args: List[str]) -> pb.CommandExecuteResponse:
-        reply_text = f"[{pascal_name}] Echo: {{' '.join(args)}}"
-        return pb.CommandExecuteResponse(
-            success=True,
-            replies=[MessageSegment.text(reply_text)],
-            error_message="",
-        )
+    async def echo(self, event: CommandEvent) -> str:
+        # Returning a string replies with it; raw_args is the text after the command name.
+        return f"[{pascal_name}] {{event.raw_args or 'Say something!'}}"
 
-    @tool(
-        name="{snake_name}_calc",
-        description="Performs mathematical calculations",
-        parameters={{
-            "type": "object",
-            "properties": {{
-                "expr": {{"type": "string", "description": "Mathematical expression"}},
-            }},
-        }},
-    )
-    async def handle_calc(self, params: Dict[str, Any]) -> Dict[str, Any]:
-        return {{
-            "result": 42.0,
-            "summary": "Sample calculation from Python plugin tool",
-        }}
+    @tool
+    async def {snake_name}_add(self, a: float, b: float) -> float:
+        """Adds two numbers.
+
+        Args:
+            a: First number.
+            b: Second number.
+        """
+        # The schema the model sees is inferred from the signature and this docstring.
+        return a + b
 "#
     );
 

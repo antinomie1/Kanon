@@ -14,9 +14,12 @@
 | 能力 | 适用场景 | Python | TypeScript | Rust |
 | --- | --- | --- | --- | --- |
 | 斜杠命令 | `/weather 北京` | `@command` | `@Command` | `.command(CommandSpec, ..)` |
+| 命令组 | `/todo add 买牛奶`、`/todo list` | `@command("todo add")` | — | — |
 | 正则触发器 | 不带斜杠的关键词、`早安` | `@trigger` | `@Trigger` | `.trigger(TriggerSpec, ..)` |
 | 多轮对话 | 问答、确认、小游戏 | `event.wait_next()` | `event.waitNext()` | `event.wait_next(..)` |
-| LLM 工具 | 让模型调用你的函数 | `@tool` | `@Tool` | `.tool(ToolSpec, ..)` |
+| LLM 工具 | 让模型调用你的函数 | `@tool`（由签名推断 Schema） | `@Tool` | `.tool(ToolSpec, ..)` |
+| 运行时增删工具 | 按配置或登录状态开放工具 | `add_tool` / `remove_tool` | — | — |
+| 改写系统提示 | 按群定制的规则、长期设定 | `@on_llm_request` | — | — |
 | 管理动作 | 控制台按钮：扫码登录、诊断 | `@action` | `@Action` | `.action(name, ..)` |
 | 事件订阅 | 入群欢迎、发送审计、回答统计 | `@on_event` | `@OnEvent` | `.subscribe(EventKind, ..)` |
 | 回复装饰 | 统一签名、敏感词替换 | `@decorate_reply` | `@DecorateReply()` | `.decorate_reply(..)` |
@@ -24,6 +27,11 @@
 | 主动发消息 | 定时提醒、订阅推送 | `core.send_message` | `core.sendMessage` | `core.send_message` |
 | 独立调用模型 | 摘要、翻译、分类 | `core.request_llm` | `core.requestLlm` | `core.request_llm` |
 | 平台原生 API | 禁言、取群成员列表 | `core.call_platform_api` | `core.callPlatformApi` | `core.call_platform_api` |
+| 中心 KV | 计数器、开关、按用户的设置 | `self.kv` | — | — |
+| 调用智能体 | 让模型带着工具完成一件事 | `core.run_agent` | — | — |
+| 对话与人设 | 列出 / 切换 / 导入对话，维护人设 | `core.list_conversations` 等 | — | — |
+| 渲染图片 | 排行榜、卡片、图表 | `core.render_text` / `render_svg` | — | — |
+| HTTP 路由 | Webhook、给控制台页面的接口 | `@http_route` | — | — |
 | 平台适配器 | 接入新的聊天平台 | `[adapter]` + `on_deliver_message` | 同左 | 同左 |
 
 ---
@@ -183,7 +191,7 @@ Supervisor 拉起进程 → 宿主绑定专属 socket → 连接 core.sock 并 R
 
 - **配置热更新**：操作员保存配置后，核心调用 `ReloadPluginConfig`。宿主先替换 `context.config`，再调用 `on_config_reload(config)`；在其中抛出异常即拒绝本次更新，核心不会持久化被拒绝的配置。版本号单调递增，过期的更新会被宿主拒绝。
 - **核心存活看门狗**：宿主定期探测核心；核心消失后宿主自行退出，避免出现继续占用平台连接的“幽灵机器人”。关闭的每一步都有超时上限。
-- **中心 KV**：小状态（计数器、开关、令牌、按用户的设置）存核心的 KV（`data/kv.db`，见 `PLUGIN_API.md` 的 `SetStorage` 等），大数据与需要查询的数据写 `data_dir`。
+- **中心 KV**：小状态（计数器、开关、令牌、按用户的设置）存核心的 KV（`self.kv`，见 [8.5](#85-中心-kv)），大数据与需要查询的数据写 `data_dir`。
 
 ---
 
@@ -223,6 +231,22 @@ async def roll(self, event: CommandEvent, args: list) -> str: ...
 - **内置命令优先**：`/help`、`/info` 始终由核心处理；`/new`、`/ls`、`/switch`、`/del`、`/model`、`/stop` 在有实例的会话中由核心处理。插件无法覆盖。
 - **作用域**：`platforms=("onebot",)`、`conversation_kinds=("group",)` 把命令限定在指定平台或会话类型（`private`、`group`、`channel`），留空即不限。范围之外该命令视同未声明——其他插件的同名命令仍可胜出。TS 为 `{ platforms, conversationKinds }`，Rust 为 `CommandSpec::new(..).platform("onebot").conversation_kind(ConversationKind::Group)`。
 - **权限**：`access` 只是插件给出的默认值——`everyone`、`admins_in_groups`（私聊任何人可用，群内仅管理员）、`admins`。操作员可以在控制台或 `PUT /api/v1/system/command-policy` 中按命令名覆盖；管理员名单格式为 `<platform>:<user id>`，默认群主与群管理员也视为管理员。
+
+**命令组**：名称中带空格即声明子命令，一组命令共用一个命令名：
+
+```python
+@command("todo add", description="Add a todo", usage="/todo add <text>")
+async def add(self, event: CommandEvent) -> str:
+    # "/todo add buy milk": event.args == ["buy", "milk"], event.raw_args == "buy milk"
+    ...
+
+@command("todo list", description="List todos")
+async def list_todos(self) -> str: ...
+```
+
+- 核心只认识组名 `todo`：路由、同名冲突、权限与作用域都按组名计算；`/help` 在组名下逐行列出子命令。
+- 子命令处理函数收到的 `args` / `raw_args` 已去掉子命令本身。
+- 只发 `/todo`，或子命令不存在时，SDK 回复子命令列表；如果同时声明了 `@command("todo")`，则由它处理这两种情况，组的描述、别名、`access`、作用域与优先级也写在它上面。子命令只能设置 `description` 与 `usage`，写其他参数会在加载时报错。
 
 ### 5.3 正则触发器
 
@@ -312,21 +336,51 @@ async def remember(self, event: CommandEvent, args: list) -> None:
 
 ## 6. LLM 工具与管理动作
 
+最简单的写法是让 SDK 从函数签名与文档字符串推断工具：
+
 ```python
-@tool(
-    "fetch_weather",
-    description="获取城市实时天气",
-    parameters={"type": "object", "properties": {"city": {"type": "string"}}, "required": ["city"]},
-)
-async def fetch_weather(self, params: dict, event) -> dict:
+@tool
+async def fetch_weather(self, city: str, event: MessageEvent, days: int = 1) -> dict:
+    """获取城市的实时天气与预报。
+
+    Args:
+        city: 城市名，如“北京”。
+        days: 预报天数，1–7。
+    """
     # event is the message the model was answering, or None (e.g. the console chat)
+    return {"city": city, "temp": 25}
+```
+
+- **工具名**为函数名（或 `@tool("name")`），**描述**为文档字符串第一段，**参数说明**取自 `Args:` 小节或 `Annotated[str, "说明"]`。
+- 支持的类型：`str`、`int`、`float`、`bool`、`Literal[...]`（枚举）、`list[T]`、`dict[str, T]`、`Optional[T]`、`Union[...]`、`Any`。有默认值或为 `Optional` 的参数不是必填；默认值会写进 Schema。没有类型标注、`*args`、`Enum` 等无法描述的参数在**加载时**报错，而不是让模型去猜。
+- 模型的参数以关键字参数传入，多余的参数会作为失败的工具调用告诉模型；声明为 `int` 的参数收到的就是 `int`（protobuf 只有双精度数，SDK 按 Schema 还原）。
+- 名为 `event` 的参数不属于模型：它是模型正在回答的那条消息（控制台聊天中为 `None`）。工具据此知道“是谁在问”，不必让模型把用户 ID 当参数传进来——模型可以伪造参数，但伪造不了这个上下文。
+
+需要完全控制 Schema 时显式给出 `parameters`，处理函数改为接收参数字典：
+
+```python
+@tool("fetch_weather", "获取城市实时天气",
+      {"type": "object", "properties": {"city": {"type": "string"}}, "required": ["city"]})
+async def fetch_weather(self, params: dict, event) -> dict:
     return {"city": params["city"], "temp": 25}
 ```
 
-- 参数是模型给出的 JSON 对象。返回字典即为结构化结果；返回其他值会被包装为 `{"result": ...}`；返回 `bytes` 走二进制通道。
-- 第二个参数是模型正在回答的那条消息：工具可以据此知道“是谁在问”，不必让模型把用户 ID 当参数传进来（模型可以伪造参数，但伪造不了这个上下文）。
-- 抛出异常时，模型会得到一次失败的工具调用，可以自行解释或重试。
-- 工具名与参数 Schema 会进入模型请求前缀。核心对工具按名称排序、对 Schema 键排序以保证前缀缓存稳定；插件不要在运行中改变工具声明。
+- 返回字典即为结构化结果；返回其他 JSON 值（数字、字符串、列表）会被包装为 `{"result": ...}`；返回 `bytes` 走二进制通道。
+- 抛出异常时，模型会得到一次失败的工具调用（含异常信息），可以自行解释或重试。
+- 工具名与参数 Schema 会进入模型请求前缀。核心对工具按名称排序、对 Schema 键排序以保证前缀缓存稳定；不要随消息变化改变工具声明。
+
+**运行时增删工具**：工具集合需要随配置或状态变化时（例如登录后才开放的工具），用 `add_tool` / `remove_tool`：
+
+```python
+async def on_config_reload(self, config: dict) -> None:
+    if config.get("enable_search"):
+        await self.add_tool(self.search)          # schema inferred like @tool
+    else:
+        await self.remove_tool("search")
+```
+
+- 两者都会请核心重新读取插件元数据（`RefreshPluginMeta`），**下一轮**起生效，正在进行的轮次不受影响。核心拒绝时抛出异常，SDK 回滚本地改动，两边始终一致。
+- 每次增删都会改变请求前缀，使提供商的前缀缓存失效一次，只在状态真正变化时调用。
 
 **管理动作**（`@action`）是工具在控制台一侧的对应物：只能由 `POST /api/v1/plugins/{id}/actions/{action}` 调用，永远不会出现在模型的函数列表里。凭证绑定、扫码登录、诊断等操作必须用动作而不是工具，否则模型可能在对话中途尝试调用它们。动作返回 JSON 对象。
 
@@ -348,10 +402,12 @@ async def welcome(self, event: MessageEvent) -> None:
 | `message_sent` | `MessageSentEvent`（投递请求 + 平台消息 ID） | 机器人的每条消息投递成功后 |
 | `notice` | `MessageEvent`（`notice` 为类型） | 平台通知到达时，无论机器人是否对其作出反应 |
 | `llm_response` | `LlmResponseEvent`（被回答的消息 + 模型最终文本） | 模型回答之后、回复装饰之前 |
+| `agent_begin` / `agent_done` | `AgentBeginEvent` / `AgentDoneEvent`（成功与否、最终回答、错误类别、调用过的工具） | 智能体开始 / 结束回答一轮 |
+| `tool_call` / `tool_result` | `ToolCallEvent`（工具名、参数）/ `ToolResultEvent`（成功与否、模型读到的结果） | 每次工具调用之前 / 之后；只能观察，不能否决 |
 
 通知类型包括 `member_join`、`bot_join`、`friend_add`、`poke`、`recall`、`friend_request`、`group_invite`，具体取决于适配器支持哪些。
 
-事件是**通知**：核心不等待结果，每个订阅者最多 5 秒，失败只记日志。只有声明了订阅的插件才会收到对应事件。
+事件是**通知**：核心不等待结果，每个订阅者最多 5 秒，失败只记日志。只有声明了订阅的插件才会收到对应事件。智能体与工具事件覆盖聊天中的每一轮（包括 `run_agent(in_conversation=True)`），适合做统计、审计或“正在查询…”之类的提示；Python 中它们是原始 protobuf 消息，`context` 字段即对应的聊天消息。
 
 ### 7.2 回复装饰
 
@@ -389,6 +445,22 @@ TS 用 `@PrepareTurn()` 装饰方法 `(event, sessionId) => string | undefined`�
 - 所有插件的准备器**并发**执行，每个限时 3 秒；出错或超时就当没有返回。返回 `None`/`undefined`/空串表示不注入。
 - 文本只进入当前轮用户消息，绝不进入系统提示，因此不会破坏请求前缀缓存；它会随本轮消息写入会话历史，后续轮次模型仍能看到。所以只注入与本轮相关、篇幅可控的内容。
 - 每个插件只能有一个准备器。
+
+### 7.4 改写系统提示
+
+需要改变模型的**长期设定**（按群定制的规则、额外的人设约束）时，改写系统提示：
+
+```python
+@on_llm_request
+async def chat_rules(self, event: MessageEvent, system_prompt: str, session_id: str):
+    rules = await self.kv.get(f"rules:{event.channel_id}")
+    return f"{system_prompt}\n\n本群规则：\n{rules}" if rules else None
+```
+
+- 每轮一次，在该轮首个模型请求前调用；返回新的系统提示即替换，返回 `None` 表示不改。多个插件按优先级串行，后者看到前者的结果。参数可以只取前几个（`event`、`system_prompt`、`session_id`）。
+- **结果必须确定**：系统提示位于每个请求的最前面，同一会话应返回相同文本。时间、计数器、检索结果等按消息变化的内容放进 `@prepare_turn`，否则每一轮都会使前缀缓存失效。
+- 只在会话轮次中调用；控制台聊天、`request_llm` 与私有 `run_agent` 不会触发。限时 3 秒，出错或超时则跳过该插件。
+- 每个插件只能有一个改写器。
 
 ---
 
@@ -431,7 +503,7 @@ members = await self.core.call_platform_api("onebot", "get_group_member_list", g
 ```
 
 - 只对声明了 `platform_api` 能力的**内置**适配器（OneBot、Milky）可用；其他平台返回 `UNIMPLEMENTED`，未知平台返回 `NOT_FOUND`，平台拒绝时返回 `UNAVAILABLE`。
-- 动作名只允许字母、数字、`_` 和 `.`。参数与结果都是普通 JSON；数字经 protobuf 传输后都是浮点数。
+- 动作名只允许字母、数字、`_` 和 `.`。参数与结果都是普通 JSON。protobuf 只有双精度数：参数中的整数会以整数交给平台，而 Python 收到的结果里数字是 `float`（如 `42.0`），需要时自行 `int()`。
 - 这是“逃生舱”：用了它，插件就绑定在特定平台上了。能用通用能力完成的事不要走这里。
 
 ### 8.4 读取会话历史
@@ -447,6 +519,64 @@ for role, text in history.messages:      # role is "user" or "assistant"
 - **只读**：插件无法修改或删除会话历史。
 - TS：`await this.core.conversationHistory(event, 20)`，`messages` 为 `{ role, text }`；Rust：`core.conversation_history(event.raw(), 20).await?` 返回原始 `ConversationHistoryResponse`。
 - 没有实例接管该平台时返回 `NOT_FOUND`，节点未配置模型时返回 `UNAVAILABLE`。
+
+### 8.5 中心 KV
+
+```python
+count = await self.kv.get(f"visits:{event.sender_id}", 0)
+await self.kv.set(f"visits:{event.sender_id}", count + 1)
+await self.kv.set("captcha:123", {"answer": 7}, ttl=300)   # expires after 5 minutes
+keys = await self.kv.keys("visits:")
+await self.kv.delete("captcha:123")
+```
+
+- 值是任意 JSON 可序列化的对象，落盘于节点的 `data/kv.db`，重启后仍在；每个插件一个命名空间，互不可见。
+- `get` 在键不存在或已过期时返回默认值；`ttl` 为秒数，省略即永不过期。单个值至多 1 MiB，超出时在本地就报错。
+- 适合小状态。大数据或需要查询的数据请在 `data_dir` 中使用 SQLite 等本地存储。
+
+### 8.6 调用智能体
+
+`request_llm` 只是一次模型调用；`run_agent` 运行的是节点的**智能体**——模型加工具循环，可以调用插件、MCP 与内置工具：
+
+```python
+result = await self.core.run_agent("查一下明天北京的天气，适合爬山吗？", event=event)
+await event.reply(result.content)
+
+# Answer as a turn of this chat's conversation: history, persona and hooks apply,
+# and the turn is appended to the history.
+result = await self.core.run_agent(event.text, event=event, in_conversation=True)
+```
+
+- 结果为 `content`（最终回答）、`attachments`（工具产出的图片等，需要自己发送）、`tools`（按顺序调用过的工具）与 `session_id`。**不会**自动发送到聊天。
+- `event` 决定由哪个实例回答（模型、可用插件与工具策略），并作为工具调用的上下文；`in_conversation=True` 时必填。
+- 私有运行（默认）使用一次性会话，可通过 `system_prompt`、`model`、`use_tools`、`max_steps` 调整；在对话中运行时这些设定以会话为准。
+- 对话正有一轮在运行时，`in_conversation=True` 立即失败（`FAILED_PRECONDITION`），不会排队。
+- 内置智能体是节点的默认实现；将来可以替换为其他智能体框架，插件的调用方式不变。
+
+### 8.7 对话与人设
+
+```python
+conversations = await self.core.list_conversations(event)       # same as /ls
+await self.core.switch_conversation(event, conversations[0].session_id)
+await self.core.append_conversation(event, [("user", "问题"), ("assistant", "回答")])
+await self.core.upsert_persona("translator", "Translator", "你是一名专业译者。")
+```
+
+- `list_conversations` / `new_conversation` / `switch_conversation` / `delete_conversation` 与内置 `/ls`、`/new`、`/switch`、`/del` 是同一份实现，都返回操作之后的 `ConversationInfo` 列表（`session_id`、`current`、`title`、`message_count`、`last_active_at`）。代替用户调用时请自行检查权限。
+- `append_conversation` 只能追加完整的“用户、助手”轮次到当前对话；已有消息不能修改。
+- `list_personas` / `upsert_persona` / `delete_persona` 维护与控制台「人设」页相同的目录。
+
+### 8.8 渲染图片
+
+```python
+card = await self.core.render_text("# 今日排行\n1. Alice 120\n2. Bob 95", width=480)
+await event.reply(card)
+
+chart = await self.core.render_svg('<svg xmlns="http://www.w3.org/2000/svg" ...>...</svg>')
+```
+
+- 返回可直接发送的图片消息段。文本按宽度自动换行，`# ` 开头的行是标题；SVG 按自身尺寸渲染。
+- 由节点用纯 Rust 渲染，不需要浏览器；字体取自节点系统。渲染结果保留 24 小时，请渲染后尽快发送。
 
 ---
 
@@ -512,7 +642,26 @@ const stats = await fetch('../http/stats').then((r) => r.json());
 
 ### 11.3 HTTP 路由
 
-在 `PluginMeta` 中声明 `serves_http = true` 的插件会收到 `/api/v1/plugins/<id>/http/<path>` 上的全部请求（任意方法，经 `OnHttpRequest`），用于 Webhook 回调、给页面用的接口等。插件拿到方法、`path`、查询串、请求头与请求体，返回状态码、响应头与响应体。请求体至多 3 MiB、30 秒内必须应答，细节见 [PLUGIN_API.md](./PLUGIN_API.md) 的 `OnHttpRequest`。
+插件可以在 `/api/v1/plugins/<id>/http/<path>` 下提供接口，用于 Webhook 回调、给页面用的数据等：
+
+```python
+@http_route("/stats")
+async def stats(self, request: HttpRequest) -> dict:
+    return {"page": request.arg("page"), "visits": await self.kv.get("visits", 0)}
+
+@http_route("/webhook", methods=("POST",))
+async def webhook(self, request: HttpRequest) -> HttpResponse:
+    if request.headers.get("x-signature") != expected_signature(request.body):
+        return HttpResponse(status=401)
+    payload = request.json()
+    ...
+    return HttpResponse(status=204)
+```
+
+- `HttpRequest` 有 `method`、`path`、`query`（`request.arg(name)` 取第一个值）、`headers`（小写名）、`body`，以及 `text()`、`json()`。
+- 返回字典、列表等即为 JSON；返回 `str` 为纯文本，`bytes` 为二进制，`None` 为 `204`；需要状态码或响应头时返回 `HttpResponse`（`HttpResponse.json(...)`、`.text(...)`、`.html(...)`）。
+- 路径精确匹配。未知路径返回 `404`，方法不符返回 `405`（附 `Allow` 头），处理函数抛出异常返回 `500`——异常只打印到宿主的标准错误，不会发给调用方。
+- 请求体至多 3 MiB、30 秒内必须应答。协议层细节（`serves_http`、`OnHttpRequest`）见 [PLUGIN_API.md](./PLUGIN_API.md)。
 
 网关只转发、不鉴权，这些路由与管理网关一同对外暴露：接收 Webhook 时请校验平台签名，修改数据的接口要先校验调用方。
 
