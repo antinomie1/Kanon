@@ -51,7 +51,7 @@ pub use instance::{
 pub use ipc::{CoreApiService, CoreIpcServer};
 pub use manifest::{
     AdapterSection, DiscoveredPlugin, KANON_VERSION, PluginManifest, PluginScanner, PluginSection,
-    ToolDefinitionEntry, check_kanon_version,
+    ToolDefinitionEntry, check_kanon_requirement, check_kanon_version,
 };
 pub use mcp::{
     ATTACHMENT_RETENTION, DEFAULT_ATTACHMENT_DIR, DEFAULT_MCP_CONFIG, MCP_WATCHDOG_INTERVAL,

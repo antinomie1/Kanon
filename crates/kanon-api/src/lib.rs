@@ -13,6 +13,11 @@
 //! - `GET  /api/v1/adapters` — platform adapter catalog (built-in and plugin);
 //! - `POST /api/v1/adapters/:platform/ingest` — Fast-ACK inbound message ingress;
 //! - `GET  /api/v1/plugins` — supervised hosts and plugin catalog;
+//! - `GET  /api/v1/plugins/:id` — one plugin with links, pages flag and translations;
+//! - `POST /api/v1/plugins/install` — install from a folder, package upload, package URL or Git;
+//! - `GET  /api/v1/plugins/market` — plugins offered by the configured market indexes;
+//! - `GET  /api/v1/plugins/:id/pages/*path` — static console pages shipped by the plugin;
+//! - `ANY  /api/v1/plugins/:id/http/*path` — forwarded to the plugin's own HTTP routes;
 //! - `GET  /api/v1/plugins/:id/config` — current values plus declaration schema;
 //! - `PUT  /api/v1/plugins/:id/config` — validate, hot reload, persist;
 //! - `POST /api/v1/plugins/:id/restart` — restart the owning host process;
@@ -57,6 +62,10 @@ pub mod metrics;
 pub mod model_discovery;
 pub mod observability;
 pub mod plugin_config;
+pub mod plugin_files;
+pub mod plugin_install;
+pub mod plugin_market;
+pub mod plugin_sources;
 pub mod routes;
 pub mod server;
 pub mod session_storage;
@@ -67,8 +76,8 @@ pub mod ws;
 pub use error::ApiError;
 pub use kanon_core::ToggleStore;
 pub use llm_config::{
-    LlmProviderConfig, NodeSettings, StartupConfig, SystemConfigStore, derive_provider_name,
-    provider_presets,
+    LlmProviderConfig, NodeSettings, PluginMarketConfig, StartupConfig, SystemConfigStore,
+    derive_provider_name, provider_presets,
 };
 pub use metrics::{MetricsRegistry, RuntimeGauges};
 pub use observability::{

@@ -482,7 +482,119 @@ TypeScript 中方法名为驼峰（`imageUrl`、`mentionAll`）。`file_path` �
 
 ---
 
-## 11. 约束与最佳实践
+## 11. 配置表单、控制台页面与 HTTP 路由
+
+### 11.1 配置表单
+
+控制台按 `[config_schema]` 自动生成配置表单，操作员也可随时切换到 JSON 视图。常用写法与对应控件：
+
+| Schema | 控件 |
+| --- | --- |
+| `type = "boolean"` | 开关 |
+| `enum = [...]` | 下拉框；非必填字段多一个“默认”选项 |
+| `type = "string"` | 单行输入；`writeOnly = true` 或 `format = "password"` 为密码框，`format = "textarea"` 为多行 |
+| `type = "number"` / `"integer"` | 数字输入，保存前校验 |
+| `type = "array"`，`items` 为字符串或数字 | 每行一项的列表 |
+| `type = "object"` 且有 `properties` | 嵌套分组 |
+| 其他 | 该字段单独的 JSON 输入框 |
+
+`title` 作标签、`description` 作说明、`default` 作占位提示；清空字段即删除该键，让插件使用自己的默认值。
+
+### 11.2 控制台页面 `pages/`
+
+插件目录下的 `pages/`（`index.html` 加静态资源）会出现在控制台插件卡片的「打开页面」里，地址为 `/api/v1/plugins/<id>/pages/`。页面只读提供：不列目录、不提供隐藏文件（`.env`、`.git`），符号链接不能指向目录之外。
+
+页面运行在沙盒中（`Content-Security-Policy: sandbox`，内嵌框架也不授予 `allow-same-origin`）：可以运行脚本、提交表单、弹窗和下载，但拿不到控制台的源，读不到它的存储，也不能以控制台身份调用管理接口。页面需要的数据由插件自己的 HTTP 路由提供，用相对路径访问即可：
+
+```js
+const stats = await fetch('../http/stats').then((r) => r.json());
+```
+
+### 11.3 HTTP 路由
+
+在 `PluginMeta` 中声明 `serves_http = true` 的插件会收到 `/api/v1/plugins/<id>/http/<path>` 上的全部请求（任意方法，经 `OnHttpRequest`），用于 Webhook 回调、给页面用的接口等。插件拿到方法、`path`、查询串、请求头与请求体，返回状态码、响应头与响应体。请求体至多 3 MiB、30 秒内必须应答，细节见 [PLUGIN_API.md](./PLUGIN_API.md) 的 `OnHttpRequest`。
+
+网关只转发、不鉴权，这些路由与管理网关一同对外暴露：接收 Webhook 时请校验平台签名，修改数据的接口要先校验调用方。
+
+---
+
+## 12. 多语言
+
+在 `i18n/<语言标签>.json`（如 `zh-CN.json`、`en.json`）中翻译控制台展示的文字。每个文件是一个只含字符串的扁平 JSON 对象，可用的键：
+
+| 键 | 含义 |
+| --- | --- |
+| `name`、`description` | 插件名称与简介 |
+| `config.<字段路径>.title`、`config.<字段路径>.description` | 配置字段的标签与说明；路径为从根开始的属性名，以 `.` 连接，如 `config.api.key.title` |
+| `commands.<命令名>.description` | 命令说明 |
+
+```json
+{
+  "name": "天气",
+  "description": "查询天气并向模型提供天气工具",
+  "config.api_key.title": "API 密钥",
+  "commands.weather.description": "查询城市实时天气"
+}
+```
+
+控制台选用与界面语言相同（或为其地区变体，如界面为 `zh` 时的 `zh-CN`）的文件，缺失的键回退到清单与代码中的原文。无法使用的文件或键（不是 JSON、值不是字符串、未知键、超过 256 KiB）不会被静默忽略，而是显示在插件卡片的“翻译文件问题”里。翻译只影响控制台；聊天中的 `/help` 与模型看到的工具说明仍使用代码中的原文。
+
+---
+
+## 13. 发布与安装
+
+### 13.1 安装来源
+
+控制台「扩展 → 插件 → 安装插件」（即 `POST /api/v1/plugins/install`）支持四种来源，全部经过同一个安装器：
+
+| 来源 | 请求 | 说明 |
+| --- | --- | --- |
+| 节点上的目录 | `{"path": "./my_plugin"}` | 相对路径从节点工作目录算起 |
+| 上传插件包 | multipart 上传 `.kpk` / `.zip` | 包至多 64 MiB（链接下载同此限制），解压后至多 256 MiB、1 万个条目 |
+| 包链接 | `{"url": "https://…/weather-1.2.0.kpk"}` | 只允许 `https`（`http` 仅限回环地址），不跟随降级到 `http` 的跳转 |
+| Git 仓库 | `{"git": "https://…/weather.git", "ref": "v1.2.0"}` | 使用系统的 `git`；`ref` 可选（分支或标签） |
+
+安装器先校验清单与 `kanon_version`，在 `./plugins` 内暂存一份完整副本，再停止旧宿主、原子替换、拉起新宿主；暂存失败时旧版本原样保留。依赖不在安装时处理，而是由节点在启动插件前用该语言自己的工具安装（见 §2.2）。
+
+同一 `id` 已安装时返回 `409`，需在请求中加 `"replace": true` 才会替换（控制台会把按钮变成「替换」）。已安装的插件保留原来的目录：即使是手动复制进来、目录名与 `id` 不同的插件，从原目录重新安装即原地登记，替换也落在原目录，同一个 `id` 不会出现两份。
+
+### 13.2 插件市场
+
+市场就是一个 JSON 索引文件。运维在 `data/system.json` 中列出要读取的索引，控制台「扩展 → 市场」合并展示、标注已安装版本与兼容性，并一键安装或更新；未配置时节点不会访问任何第三方：
+
+```json
+"plugin_market": {
+  "indexes": ["https://example.org/kanon/index.json"]
+}
+```
+
+索引格式：
+
+```json
+{
+  "name": "Example market",
+  "plugins": [
+    {
+      "id": "org.example.weather",
+      "name": "Weather",
+      "description": "Weather commands and a weather tool",
+      "author": "Example",
+      "version": "1.2.0",
+      "download_url": "https://example.org/weather-1.2.0.kpk",
+      "repository": "https://github.com/example/kanon-weather.git",
+      "kanon_version": ">=0.1, <0.3",
+      "platforms": ["qq"],
+      "homepage": "https://example.org/weather"
+    }
+  ]
+}
+```
+
+`id`、`name`、`version` 必填，`download_url`（优先）与 `repository` 至少有一个；未知字段被忽略。格式错误的条目作为该索引的警告显示，不影响其他条目；`kanon_version` 不满足的条目会标注原因且不可安装。安装时仍以包内的 `plugin.toml` 为准，并再次校验 `kanon_version`。
+
+---
+
+## 14. 约束与最佳实践
 
 - **不要读环境变量做配置**。宿主只会注入 `KANON_HOST_ID`、`KANON_HOST_SOCK`、`KANON_CORE_SOCK`、`KANON_IPC_TOKEN`（以及操作系统变量）；插件配置一律走 `[config_schema]` + 控制台。
 - **不要硬编码绝对路径**，使用 `data_dir`。

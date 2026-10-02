@@ -435,17 +435,24 @@ sequenceDiagram
 
 > 全部端点由 `crates/kanon-api` 实现（Axum Router，路径参数采用 Axum 0.7 `:id` 语法，文档统一写作 `{id}`）。
 > 统一错误信封：`{"error": {"code": "...", "message": "..."}}`，状态码语义为
-> `400` 契约违规 / `404` 资源不存在 / `409` 当前状态下不可执行 / `503` 依赖未配置 / `502` 插件宿主机或模型网关失败。
+> `400` 契约违规 / `404` 资源不存在 / `409` 当前状态下不可执行 / `413` 载荷过大 / `503` 依赖未配置或宿主未运行 / `502` 插件宿主机或模型网关失败 / `504` 插件未在时限内应答。
 
 | Method | Endpoint | Description |
 | :--- | :--- | :--- |
 | `GET` | `/api/v1/health` | 核心健康状态与基础运行指标 (Memory, Uptime, 插件与会话计数) |
 | `GET` | `/api/v1/plugins` | 查询插件清单、运行状态与静态元数据；目录部分来自最近一次扫描（启动时或手动重新扫描），读取清单本身不扫描磁盘 |
 | `POST` | `/api/v1/plugins/rescan` | 重新扫描 `./plugins` 并返回刷新后的清单；手动放进目录的插件只有经过这一步才会被节点识别 |
+| `GET` | `/api/v1/plugins/{id}` | 查询单个插件（字段同列表项：运行状态、清单元数据、`has_pages`、`serves_http`、翻译 `i18n` 及翻译文件问题 `i18n_errors`） |
+| `POST` | `/api/v1/plugins/install` | 安装插件，来源四选一：节点上的目录 `path`、上传的 `.kpk`/`.zip`（multipart）、包链接 `url`（仅 `https`，`http` 只允许回环地址）、Git 仓库 `git`（可选 `ref`）。统一走同一安装器：校验清单与 `kanon_version` → 在 `./plugins` 内暂存 → 停止旧宿主 → 原子替换 → 拉起。已安装同一 `id` 时返回 `409`，需显式 `"replace": true` 才替换；已安装插件保留原目录（手动复制、目录名与 `id` 不同者亦然） |
+| `GET` | `/api/v1/plugins/market` | 读取 `data/system.json` 中 `plugin_market.indexes` 列出的市场索引，合并后标注已安装版本与 `kanon_version` 兼容性；未配置即返回 `configured: false`，节点不会主动访问任何第三方 |
+| `PUT` | `/api/v1/plugins/{id}/enabled` | 启用（拉起宿主）或停用（停止宿主并退出路由）插件 |
+| `GET` | `/api/v1/plugins/{id}/pages/{path}` | 只读提供插件 `pages/` 目录下的静态页面（目录只返回 `index.html`，拒绝隐藏文件、路径穿越与指出目录的符号链接） |
+| `ANY` | `/api/v1/plugins/{id}/http/{path}` | 转发给声明了 `serves_http` 的插件的 `OnHttpRequest`：请求体 ≤ 3 MiB，30 秒超时，剔除逐跳头。未知插件或未声明 → `404`，宿主未运行 → `503`，宿主出错 → `502`，超时 → `504`，过大 → `413` |
 | `GET` | `/api/v1/plugins/{id}/config` | 获取指定插件的配置项当前值、JSON Schema 及当前单调递增版本号 `version` |
 | `PUT` | `/api/v1/plugins/{id}/config` | 校验配置 → 检查 CAS 乐观锁版本向量 → 触发跨进程热重载 → 原子持久化（版本冲突返回 409，宿主拒绝则不落盘） |
 | `POST` | `/api/v1/plugins/{id}/restart` | 重启指定插件所在的宿主进程（依赖 Supervisor 记录的启动配方） |
 | `POST` | `/api/v1/plugins/{id}/actions/{action}` | 触发插件的**管理动作**（运维操作，永不进入模型的函数列表；区别于 `tools`） |
+| `POST` | `/api/v1/plugins/{id}/tools/{tool}` | 以 JSON 参数直接调用插件声明的工具（调试用） |
 | `GET` | `/api/v1/tools` | 列出模型当前可调用的**全部工具**及其提供方（内置 / 插件 / MCP），名称与分发规则和模型实际收到的完全一致 |
 | `GET` | `/api/v1/sessions` | 分页查询会话记录（Turn 计数、Token 消耗、活跃时间、Persona、作用域）；记录持久化，节点重启后仍可见 |
 | `POST` | `/api/v1/sessions/{id}/reset` | 安全重置会话历史，保留配置变量与人设 |
@@ -472,6 +479,8 @@ sequenceDiagram
 | `PUT` | `/api/v1/mcp/servers/{id}` | 新增或替换 MCP 服务器定义（`stdio` 子进程或 `http` 端点），保存后立即同步连接池 |
 | `DELETE` | `/api/v1/mcp/servers/{id}` | 删除 MCP 服务器定义并断开连接 |
 | `PUT` | `/api/v1/mcp/servers/{id}/enabled` | 全局启用/停用 MCP 服务器（停用即刻断开，释放子进程或连接） |
+
+**插件内容隔离**：`pages/` 与 `http/` 都由管理网关自身的源提供，因此两者的每个响应都带 `Content-Security-Policy: sandbox allow-scripts allow-forms allow-popups allow-modals allow-downloads` 与 `X-Content-Type-Options: nosniff`。即使用户在新标签页直接打开，插件内容也运行在不透明源中，无法读取控制台的存储或调用控制台的接口；控制台内嵌页面的 `<iframe>` 同样不授予 `allow-same-origin`。插件页面以相对路径（`../http/...`）访问自己的 HTTP 路由。
 
 ### 9.3 实时数据流 (WebSocket)
 

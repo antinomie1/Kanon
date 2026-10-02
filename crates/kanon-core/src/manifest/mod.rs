@@ -168,26 +168,30 @@ pub const KANON_VERSION: &str = env!("CARGO_PKG_VERSION");
 /// A plugin without a requirement runs on any node. A requirement that is not valid semver is an
 /// error rather than "no requirement": the author meant to restrict something.
 pub fn check_kanon_version(section: &PluginSection) -> Result<(), ManifestError> {
-    let Some(requirement) = section.kanon_version.as_deref() else {
-        return Ok(());
-    };
-    let parsed = semver::VersionReq::parse(requirement).map_err(|err| {
-        ManifestError::Invalid(format!(
-            "kanon_version '{requirement}' is not a semver requirement: {err}"
-        ))
-    })?;
+    match section.kanon_version.as_deref() {
+        None => Ok(()),
+        Some(requirement) => check_kanon_requirement(requirement)
+            .map_err(|reason| ManifestError::Invalid(format!("plugin '{}' {reason}", section.id))),
+    }
+}
+
+/// Checks one `kanon_version` requirement (such as `>=0.1, <0.3`) against this node.
+///
+/// The error is a sentence fragment naming the problem (`requires Kanon >=0.3, but this node is
+/// 0.1.0`); callers prefix the plugin it is about. Shared by the supervisor, the installer and the
+/// plugin market, so all three judge compatibility identically.
+pub fn check_kanon_requirement(requirement: &str) -> Result<(), String> {
+    let parsed = semver::VersionReq::parse(requirement)
+        .map_err(|err| format!("has an invalid kanon_version '{requirement}': {err}"))?;
     let node = semver::Version::parse(KANON_VERSION).map_err(|err| {
-        ManifestError::Invalid(format!(
-            "node version '{KANON_VERSION}' is not semver: {err}"
-        ))
+        format!("cannot be checked: node version '{KANON_VERSION}' is not semver: {err}")
     })?;
     if parsed.matches(&node) {
         Ok(())
     } else {
-        Err(ManifestError::Invalid(format!(
-            "plugin '{}' requires Kanon {requirement}, but this node is {KANON_VERSION}",
-            section.id
-        )))
+        Err(format!(
+            "requires Kanon {requirement}, but this node is {KANON_VERSION}"
+        ))
     }
 }
 

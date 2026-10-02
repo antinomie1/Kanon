@@ -39,6 +39,12 @@ pub enum ApiError {
     /// Unexpected internal failure (filesystem, serialization, task join).
     #[error("{0}")]
     Internal(String),
+    /// The request body exceeded the limit the endpoint accepts.
+    #[error("{0}")]
+    PayloadTooLarge(String),
+    /// A plugin host did not answer within the time the gateway waits for it.
+    #[error("{0}")]
+    Timeout(String),
 }
 
 impl ApiError {
@@ -52,6 +58,8 @@ impl ApiError {
             ApiError::Unavailable(_) => StatusCode::SERVICE_UNAVAILABLE,
             ApiError::Upstream(_) => StatusCode::BAD_GATEWAY,
             ApiError::Internal(_) => StatusCode::INTERNAL_SERVER_ERROR,
+            ApiError::PayloadTooLarge(_) => StatusCode::PAYLOAD_TOO_LARGE,
+            ApiError::Timeout(_) => StatusCode::GATEWAY_TIMEOUT,
         }
     }
 
@@ -65,6 +73,8 @@ impl ApiError {
             ApiError::Unavailable(_) => "unavailable",
             ApiError::Upstream(_) => "upstream_error",
             ApiError::Internal(_) => "internal_error",
+            ApiError::PayloadTooLarge(_) => "payload_too_large",
+            ApiError::Timeout(_) => "timeout",
         }
     }
 }

@@ -173,6 +173,26 @@ Supervisor 启动宿主时注入的**启动契约**（插件不得把其他环�
 - **只在会话轮次中调用。** 控制台聊天、插件的 `RequestLLM` 与私有 `RunAgent` 不会触发，因此插件在钩子里调用模型不会递归回到自己。
 - 每个插件限时 **3 秒**；出错或超时的插件不生效，下一个插件从未被改写的提示继续。会话历史中的摘要始终排在改写后的系统提示之后。
 
+### `OnHttpRequest(HttpRequest) → HttpResponse`
+
+只调用 `PluginMeta.serves_http = true` 的插件。管理网关把 `/api/v1/plugins/<plugin_id>/http/<path>` 上的任意方法请求原样转给插件，插件自行按 `path` 路由，适合 Webhook 回调、给插件页面（`pages/`）用的数据接口等。
+
+| 字段 | 说明 |
+| --- | --- |
+| `plugin_id` | 目标插件 |
+| `method` | 大写方法名，如 `GET`、`POST` |
+| `path` | `http/` 之后的路径，以 `/` 开头；请求根本身为 `/` |
+| `query` | 原始查询串，不含 `?`；没有则为空 |
+| `headers` | 请求头（已剔除 `Connection`、`Transfer-Encoding` 等逐跳头） |
+| `body` | 完整请求体 |
+| 结果 `status` | HTTP 状态码；`0` 视为 `200` |
+| 结果 `headers` / `body` | 响应头与响应体；逐跳头与 `Content-Length` 由网关处理 |
+
+- 请求体至多 **3 MiB**（超出返回 `413`），网关最多等待 **30 秒**（超时返回 `504`）。宿主出错或返回非法状态码、响应头时网关返回 `502`；插件已安装但宿主未运行时返回 `503`；插件未声明 `serves_http` 时返回 `404`，不会调用本 RPC。
+- `OPTIONS` 预检请求由网关的 CORS 层应答，不会到达插件。
+- 网关只转发，不做鉴权：路由、参数校验与鉴权（如校验 Webhook 签名）都由插件负责。这些路由与管理网关一同对外暴露，敏感操作必须先校验调用方。
+- 每个响应都带 `Content-Security-Policy: sandbox …`：返回的 HTML 运行在不透明源中，不能读写控制台的存储；需要同源能力的功能不要做在插件页面里。
+
 ### `OnDeliverMessage(DeliverMessageRequest) → DeliverMessageResponse`
 
 仅发给在清单中声明了 `[adapter] platform` 的插件，`platform` 与之匹配。实现必须如实报告：未发送就返回 `success = false`，绝不“假成功”。核心对每个平台维护熔断器与死信队列。
@@ -404,6 +424,7 @@ Supervisor 启动宿主时注入的**启动契约**（插件不得把其他环�
 | `decorates_replies` | 是否参与回复装饰 |
 | `prepares_turns` | 是否参与轮次准备（`OnPrepareTurn`） |
 | `rewrites_system_prompt` | 是否参与系统提示改写（`OnLlmRequest`） |
+| `serves_http` | 是否处理转发来的 HTTP 请求（`OnHttpRequest`） |
 
 命令与触发器共享名称空间；同名命令按 `CommandMeta.priority`、再按宿主优先级决出唯一胜者。内置命令 `help`、`info`、`new`、`model` 不可被覆盖。
 
@@ -429,6 +450,7 @@ Supervisor 启动宿主时注入的**启动契约**（插件不得把其他环�
 | `OnDecorateReply` 单装饰器 | 3 秒 |
 | `OnPrepareTurn` 单准备器 | 3 秒（并发执行） |
 | `OnLlmRequest` 单插件 | 3 秒（串行，每轮一次） |
+| `OnHttpRequest` 请求体 / 等待 | 3 MiB / 30 秒 |
 | `RequestLLM` / `RunAgent` 图片 `raw_bytes` | 每张至多 10 MiB |
 | `ReplyMessage` 等待投递结果 | 30 秒（SDK 客户端截止时间 35 秒） |
 | 宿主启动就绪等待 | 5 秒 |

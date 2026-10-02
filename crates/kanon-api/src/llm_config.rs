@@ -239,6 +239,18 @@ impl Default for StartupConfig {
     }
 }
 
+/// Plugin market sources, stored under `plugin_market`.
+///
+/// Like `startup`, the console never writes this section: an operator lists the index URLs by
+/// hand. It is read on every market request, so an edit applies on the next visit without a
+/// restart. Unknown keys are rejected so a misspelt setting fails loudly.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct PluginMarketConfig {
+    /// Index documents to read, in priority order (an id listed twice is taken from the first).
+    pub indexes: Vec<String>,
+}
+
 /// Root document persisted in `data/system.json`.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 struct SystemConfigDocument {
@@ -285,6 +297,9 @@ struct SystemConfigDocument {
     /// Startup settings; carried through every write, never changed by the console.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     startup: Option<StartupConfig>,
+    /// Plugin market indexes; carried through every write, never changed by the console.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    plugin_market: Option<PluginMarketConfig>,
     /// Every unrecognized key is carried through verbatim.
     ///
     /// The document is shared, forward-compatible node state: writing the provider must never
@@ -409,6 +424,14 @@ impl SystemConfigStore {
         Ok(self
             .read_document()?
             .and_then(|document| document.startup)
+            .unwrap_or_default())
+    }
+
+    /// Loads the plugin market sources, empty when the section is absent.
+    pub fn load_plugin_market(&self) -> Result<PluginMarketConfig, String> {
+        Ok(self
+            .read_document()?
+            .and_then(|document| document.plugin_market)
             .unwrap_or_default())
     }
 

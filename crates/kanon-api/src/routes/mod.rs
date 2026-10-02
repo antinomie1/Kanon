@@ -26,6 +26,11 @@
 //! | `PUT` | `/api/v1/instances/{id}` | Update a bot instance (adapters, persona, model) |
 //! | `DELETE` | `/api/v1/instances/{id}` | Delete a bot instance |
 //! | `GET` | `/api/v1/plugins` | Plugin and host catalog |
+//! | `GET` | `/api/v1/plugins/:id` | One plugin with links, pages flag and translations |
+//! | `POST` | `/api/v1/plugins/install` | Install from a folder, package upload, package URL or Git |
+//! | `GET` | `/api/v1/plugins/market` | Plugins offered by the configured market indexes |
+//! | `GET` | `/api/v1/plugins/:id/pages/*path` | Static console pages shipped in the plugin's `pages/` |
+//! | `ANY` | `/api/v1/plugins/:id/http/*path` | Forward to the plugin's own HTTP routes (`OnHttpRequest`) |
 //! | `GET` | `/api/v1/plugins/:id/config` | Current values plus declaration schema |
 //! | `PUT` | `/api/v1/plugins/:id/config` | Validate, hot reload, then persist |
 //! | `POST` | `/api/v1/plugins/:id/restart` | Restart the owning host process |
@@ -72,6 +77,8 @@ pub mod milky;
 pub mod models;
 pub mod onebot;
 pub mod personas;
+pub mod plugin_market;
+pub mod plugin_web;
 pub mod plugins;
 pub mod providers;
 pub mod qqofficial;
@@ -96,6 +103,8 @@ pub fn api_router() -> Router<ApiState> {
         .merge(qqofficial::routes())
         .merge(instances::routes())
         .merge(plugins::routes())
+        .merge(plugin_market::routes())
+        .merge(plugin_web::routes())
         .merge(sessions::routes())
         .merge(skills::routes())
         .merge(mcp::routes())

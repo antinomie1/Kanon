@@ -10,22 +10,24 @@
 //!   disk. A rejected reload therefore leaves both the running plugin and the persisted file
 //!   untouched.
 
-use std::path::Path;
+use std::collections::BTreeMap;
+use std::path::PathBuf;
 
 use axum::Json;
 use axum::Router;
-use axum::extract::{FromRequest, Path as AxumPath, State};
+use axum::extract::{DefaultBodyLimit, FromRequest, Path as AxumPath, State};
 use axum::routing::{get, post};
-use kanon_core::{DiscoveredPlugin, ManagedHost, PluginManifest, PluginScanner, SupervisorError};
+use kanon_core::{DiscoveredPlugin, LaunchSpec, ManagedHost, PluginManifest, UnavailablePlugin};
 use kanon_llm::tool_router::{json_to_prost_struct, prost_struct_to_json};
 use kanon_proto::v1::PluginMeta;
-use kanon_storage::PluginId;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
 use crate::error::ApiError;
 use crate::observability::TraceEvent;
 use crate::plugin_config::PluginConfigStore;
+use crate::plugin_files::{has_pages, load_translations};
+use crate::plugin_install::{self, InstallSource, MAX_PACKAGE_BYTES};
 use crate::state::ApiState;
 
 /// Registers all plugin management routes.
@@ -35,7 +37,14 @@ pub fn routes() -> Router<ApiState> {
         // The plugin directory is read only on request: listing serves the last scan, and this
         // route is what makes a folder copied in by hand show up.
         .route("/api/v1/plugins/rescan", post(rescan_plugins))
-        .route("/api/v1/plugins/install", post(install_plugin))
+        // Uploaded packages exceed axum's 2 MB default body limit, so this route carries its own.
+        .route(
+            "/api/v1/plugins/install",
+            post(install_plugin).layer(DefaultBodyLimit::max(install_body_limit())),
+        )
+        // Static segments (`rescan`, `install`, `market`) win over the parameter in the router,
+        // so these never shadow each other.
+        .route("/api/v1/plugins/:id", get(get_plugin))
         .route(
             "/api/v1/plugins/:id/config",
             get(get_config).put(put_config),
@@ -59,13 +68,6 @@ pub fn routes() -> Router<ApiState> {
         )
 }
 
-/// Request body for installing a plugin from a local directory path.
-#[derive(Debug, Deserialize)]
-pub struct InstallPathRequest {
-    /// Filesystem path to the local plugin directory.
-    pub path: String,
-}
-
 /// Standard response payload returned after a plugin installation.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct InstallPluginResponse {
@@ -81,7 +83,8 @@ pub struct InstallPluginResponse {
     pub commands: Vec<CommandView>,
     /// List of statically declared tools.
     pub tools: Vec<ToolView>,
-    /// Lifecycle status after installation (`running` or `RuntimeUnavailable`).
+    /// Lifecycle status after installation: `running`, `RuntimeUnavailable`, or `disabled` when
+    /// the operator had switched the plugin off (a reinstall does not switch it back on).
     pub status: String,
     /// Informational or status message.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -124,7 +127,7 @@ pub struct HostView {
 }
 
 /// A plugin instance with its declared capabilities.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct PluginView {
     /// Plugin identifier (e.g. `org.kanon.plugin.weather`).
     pub id: String,
@@ -155,6 +158,118 @@ pub struct PluginView {
     pub commands: Vec<CommandView>,
     /// Statically declared tools and their parameter schemas.
     pub tools: Vec<ToolView>,
+    /// Project homepage declared by the manifest.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub homepage: Option<String>,
+    /// Source repository declared by the manifest.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub repository: Option<String>,
+    /// Platforms the plugin was written for; empty means every platform.
+    #[serde(default)]
+    pub platforms: Vec<String>,
+    /// Node versions the plugin supports, as the manifest's semver requirement.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub kanon_version: Option<String>,
+    /// Whether the plugin ships console pages (`pages/index.html`), served under
+    /// `/api/v1/plugins/<id>/pages/`.
+    #[serde(default)]
+    pub has_pages: bool,
+    /// Whether the running plugin serves HTTP routes under `/api/v1/plugins/<id>/http/`.
+    /// Only a live host reports this, so it is `false` while the plugin is not running.
+    #[serde(default)]
+    pub serves_http: bool,
+    /// Display-text translations from `i18n/<locale>.json`, keyed by locale tag; the console
+    /// picks the one matching its language and falls back to the manifest text.
+    #[serde(default)]
+    pub i18n: BTreeMap<String, BTreeMap<String, String>>,
+    /// Problems found in the translation files, one sentence each.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub i18n_errors: Vec<String>,
+}
+
+/// Where a plugin's files live on this node.
+#[derive(Debug, Clone)]
+pub(crate) struct PluginLocation {
+    /// Plugin folder (the directory holding `plugin.toml`).
+    pub dir: PathBuf,
+    /// Manifest read from that folder, when known.
+    pub manifest: Option<PluginManifest>,
+}
+
+/// Finds the folder of an installed plugin.
+///
+/// The running host's launch recipe is checked first, since that is the copy actually serving
+/// the plugin; then the last directory scan (ignoring entries whose folder was deleted since);
+/// then plugins recorded as unavailable because their runtime is missing.
+fn locate_plugin(
+    plugin_id: &str,
+    hosts: &[std::sync::Arc<ManagedHost>],
+    on_disk: &[DiscoveredPlugin],
+    unavailable: &[UnavailablePlugin],
+) -> Option<PluginLocation> {
+    let from_host = hosts
+        .iter()
+        .filter(|host| host.metas().iter().any(|meta| meta.id == plugin_id))
+        .chain(hosts.iter().filter(|host| {
+            host.manifest()
+                .is_some_and(|manifest| manifest.plugin.id == plugin_id)
+        }))
+        .find_map(|host| match host.launch_spec() {
+            Some(LaunchSpec::Manifest { manifest_path, .. }) => {
+                manifest_path.parent().map(|dir| PluginLocation {
+                    dir: dir.to_path_buf(),
+                    manifest: host.manifest().cloned(),
+                })
+            }
+            _ => None,
+        });
+    if from_host.is_some() {
+        return from_host;
+    }
+
+    if let Some(plugin) = on_disk
+        .iter()
+        .find(|plugin| plugin.manifest.plugin.id == plugin_id && plugin.manifest_path.is_file())
+    {
+        return Some(PluginLocation {
+            dir: plugin.plugin_dir.clone(),
+            manifest: Some(plugin.manifest.clone()),
+        });
+    }
+
+    unavailable
+        .iter()
+        .find(|plugin| plugin.manifest.plugin.id == plugin_id)
+        .and_then(|plugin| {
+            plugin.manifest_path.parent().map(|dir| PluginLocation {
+                dir: dir.to_path_buf(),
+                manifest: Some(plugin.manifest.clone()),
+            })
+        })
+}
+
+/// Finds the folder of an installed plugin (see [`locate_plugin`]).
+pub(crate) async fn plugin_location(state: &ApiState, plugin_id: &str) -> Option<PluginLocation> {
+    let hosts = state.supervisor().get_all_hosts().await;
+    let unavailable = state.supervisor().get_unavailable_plugins().await;
+    locate_plugin(plugin_id, &hosts, &state.plugins_on_disk(), &unavailable)
+}
+
+/// Fills the facts that come from the plugin folder: manifest links, pages and translations.
+fn apply_location(view: &mut PluginView, location: Option<&PluginLocation>) {
+    let Some(location) = location else {
+        return;
+    };
+    if let Some(manifest) = &location.manifest {
+        view.homepage = manifest.plugin.homepage.clone();
+        view.repository = manifest.plugin.repository.clone();
+        view.platforms = manifest.plugin.platforms.clone();
+        view.kanon_version = manifest.plugin.kanon_version.clone();
+    }
+    view.has_pages = has_pages(&location.dir);
+    let translations = load_translations(&location.dir);
+    view.i18n = translations.locales;
+    view.i18n_errors = translations.errors;
 }
 
 /// Request body for enabling or disabling a plugin.
@@ -255,6 +370,27 @@ pub struct RestartResponse {
 
 /// Lists every supervised host and plugin with static metadata.
 async fn list_plugins(State(state): State<ApiState>) -> Json<PluginCatalog> {
+    Json(catalog(&state).await)
+}
+
+/// Returns one plugin as the catalog presents it, including its translations.
+async fn get_plugin(
+    State(state): State<ApiState>,
+    AxumPath(plugin_id): AxumPath<String>,
+) -> Result<Json<PluginView>, ApiError> {
+    catalog(&state)
+        .await
+        .plugins
+        .into_iter()
+        .find(|view| view.id == plugin_id)
+        .map(Json)
+        .ok_or_else(|| {
+            ApiError::NotFound(format!("Plugin '{plugin_id}' is not known to this node"))
+        })
+}
+
+/// Assembles the catalog of hosts and plugins.
+async fn catalog(state: &ApiState) -> PluginCatalog {
     let hosts = state.supervisor().get_all_hosts().await;
 
     let mut host_views = Vec::with_capacity(hosts.len());
@@ -269,7 +405,8 @@ async fn list_plugins(State(state): State<ApiState>) -> Json<PluginCatalog> {
 
     // Include any plugins recorded as unavailable due to missing runtime environments
     let unavailable = state.supervisor().get_unavailable_plugins().await;
-    for unavail in unavailable {
+    let on_disk = state.plugins_on_disk();
+    for unavail in unavailable.iter().cloned() {
         let plugin_view = plugin_view_from_manifest_with_status(&unavail.manifest, &unavail.status);
         let host_id = format!("host_{}", unavail.manifest.plugin.id.replace('.', "_"));
         host_views.push(HostView {
@@ -289,8 +426,14 @@ async fn list_plugins(State(state): State<ApiState>) -> Json<PluginCatalog> {
     // Disabled plugins have no host at all, so the catalog would otherwise hide them and the
     // console could never re-enable one. Present the rest of the last directory scan (with a
     // placeholder status: the overlay below decides the final one).
-    for on_disk in on_disk_plugin_views(state.plugins_on_disk(), &plugin_views) {
+    for on_disk in on_disk_plugin_views(on_disk.clone(), &plugin_views) {
         plugin_views.push(on_disk);
+    }
+
+    // Facts read from the plugin folder: manifest links, pages and translations.
+    for view in &mut plugin_views {
+        let location = locate_plugin(&view.id, &hosts, &on_disk, &unavailable);
+        apply_location(view, location.as_ref());
     }
 
     // Overlay the operator's enable/disable state and the watchdog's health, after every entry
@@ -322,9 +465,7 @@ async fn list_plugins(State(state): State<ApiState>) -> Json<PluginCatalog> {
     for host_view in &mut host_views {
         for plugin in &mut host_view.plugins {
             if let Some(resolved) = plugin_views.iter().find(|view| view.id == plugin.id) {
-                plugin.enabled = resolved.enabled;
-                plugin.health = resolved.health.clone();
-                plugin.status = resolved.status.clone();
+                *plugin = resolved.clone();
             }
         }
     }
@@ -333,11 +474,11 @@ async fn list_plugins(State(state): State<ApiState>) -> Json<PluginCatalog> {
     host_views.sort_by(|a, b| a.host_id.cmp(&b.host_id));
     plugin_views.sort_by(|a, b| a.id.cmp(&b.id));
 
-    Json(PluginCatalog {
+    PluginCatalog {
         total: plugin_views.len(),
         hosts: host_views,
         plugins: plugin_views,
-    })
+    }
 }
 
 /// Rescans the plugin directory on the operator's request and answers with the fresh catalog.
@@ -356,7 +497,7 @@ async fn rescan_plugins(State(state): State<ApiState>) -> Result<Json<PluginCata
         dir = %state.plugins_dir().display(),
         "Plugin directory rescanned on request"
     );
-    Ok(list_plugins(State(state)).await)
+    Ok(Json(catalog(&state).await))
 }
 
 /// Builds catalog entries for plugins on disk that have no running host.
@@ -792,7 +933,81 @@ fn find_manifest_path(state: &ApiState, plugin_id: &str) -> Result<std::path::Pa
         })
 }
 
-/// Handles plugin installation from a local directory path or uploaded distribution archive.
+/// Request body for `POST /api/v1/plugins/install` as JSON.
+///
+/// Exactly one source must be given. Unknown fields are refused so a misspelled `replace` cannot
+/// silently turn an intended upgrade into a `409`, or a misspelled source into "no source".
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct InstallRequest {
+    /// Folder (or `plugin.toml`) on this node.
+    #[serde(default)]
+    pub path: Option<String>,
+    /// `https` URL of a `.kpk` / `.zip` package.
+    #[serde(default)]
+    pub url: Option<String>,
+    /// Git repository URL.
+    #[serde(default)]
+    pub git: Option<String>,
+    /// Branch or tag to clone; only valid together with `git`.
+    #[serde(default, rename = "ref")]
+    pub git_ref: Option<String>,
+    /// Overwrite a plugin already installed under the same id.
+    #[serde(default)]
+    pub replace: bool,
+}
+
+impl InstallRequest {
+    /// Turns the request into an install source, enforcing "exactly one source".
+    fn into_source(self) -> Result<(InstallSource, bool), ApiError> {
+        let non_empty = |value: Option<String>| {
+            value
+                .map(|value| value.trim().to_string())
+                .filter(|value| !value.is_empty())
+        };
+        let (path, url, git, git_ref) = (
+            non_empty(self.path),
+            non_empty(self.url),
+            non_empty(self.git),
+            non_empty(self.git_ref),
+        );
+        if git_ref.is_some() && git.is_none() {
+            return Err(ApiError::BadRequest(
+                "Field 'ref' is only valid together with 'git'".to_string(),
+            ));
+        }
+        let source = match (path, url, git) {
+            (Some(path), None, None) => InstallSource::Path(PathBuf::from(path)),
+            (None, Some(url), None) => InstallSource::Url(url),
+            (None, None, Some(url)) => InstallSource::Git { url, git_ref },
+            (None, None, None) => {
+                return Err(ApiError::BadRequest(
+                    "Give the plugin to install as one of 'path', 'url' or 'git'".to_string(),
+                ));
+            }
+            _ => {
+                return Err(ApiError::BadRequest(
+                    "Give exactly one of 'path', 'url' or 'git'".to_string(),
+                ));
+            }
+        };
+        Ok((source, self.replace))
+    }
+}
+
+/// Largest JSON install request; it only carries a path or a URL.
+const MAX_INSTALL_JSON_BYTES: usize = 64 * 1024;
+
+/// Body limit of the install route: a full package plus the multipart framing around it.
+fn install_body_limit() -> usize {
+    MAX_PACKAGE_BYTES as usize + 1024 * 1024
+}
+
+/// Installs a plugin from a local folder, an uploaded package, a package URL or a Git repository.
+///
+/// - `application/json`: [`InstallRequest`] (`path`, `url` or `git` + optional `ref`, `replace`).
+/// - `multipart/form-data`: a `file` part holding the package (or a `path` part), plus an
+///   optional `replace` part (`true` / `false`).
 async fn install_plugin(
     State(state): State<ApiState>,
     req: axum::extract::Request,
@@ -804,334 +1019,87 @@ async fn install_plugin(
         .unwrap_or("")
         .to_string();
 
-    if content_type.starts_with("multipart/form-data") {
-        let mut multipart = axum::extract::Multipart::from_request(req, &state)
-            .await
-            .map_err(|err| ApiError::BadRequest(format!("Invalid multipart payload: {err}")))?;
-
-        let mut archive_bytes: Option<Vec<u8>> = None;
-        let mut path_str: Option<String> = None;
-
-        while let Some(field) = multipart
-            .next_field()
-            .await
-            .map_err(|e| ApiError::BadRequest(e.to_string()))?
-        {
-            let name = field.name().unwrap_or("").to_string();
-            let file_name = field.file_name().map(ToString::to_string);
-
-            if name == "path" {
-                let text = field
-                    .text()
-                    .await
-                    .map_err(|e| ApiError::BadRequest(e.to_string()))?;
-                if !text.trim().is_empty() {
-                    path_str = Some(text.trim().to_string());
-                }
-            } else if name == "file"
-                || file_name
-                    .as_ref()
-                    .is_some_and(|f| f.ends_with(".kpk") || f.ends_with(".zip"))
-            {
-                let bytes = field
-                    .bytes()
-                    .await
-                    .map_err(|e| ApiError::BadRequest(e.to_string()))?;
-                archive_bytes = Some(bytes.to_vec());
-            }
-        }
-
-        if let Some(bytes) = archive_bytes {
-            let response = install_from_archive(&state, &bytes).await?;
-            Ok(Json(response))
-        } else if let Some(path) = path_str {
-            let response = install_from_path(&state, Path::new(&path)).await?;
-            Ok(Json(response))
-        } else {
-            Err(ApiError::BadRequest(
-                "Multipart form must contain either 'file' (.kpk/.zip) or 'path'".to_string(),
-            ))
-        }
+    let (source, replace) = if content_type.starts_with("multipart/form-data") {
+        read_install_multipart(&state, req).await?
     } else if content_type.is_empty() || content_type.contains("application/json") {
-        let bytes = axum::body::to_bytes(req.into_body(), 10 * 1024 * 1024)
+        let bytes = axum::body::to_bytes(req.into_body(), MAX_INSTALL_JSON_BYTES)
             .await
             .map_err(|e| ApiError::BadRequest(format!("Failed to read request body: {e}")))?;
-        let payload: InstallPathRequest = serde_json::from_slice(&bytes)
+        let payload: InstallRequest = serde_json::from_slice(&bytes)
             .map_err(|e| ApiError::BadRequest(format!("Invalid JSON request body: {e}")))?;
-        let response = install_from_path(&state, Path::new(&payload.path)).await?;
-        Ok(Json(response))
+        payload.into_source()?
     } else {
-        Err(ApiError::BadRequest(format!(
-            "Unsupported Content-Type: '{content_type}'. Expected application/json or multipart/form-data"
-        )))
-    }
-}
-
-/// Installs a plugin from a local filesystem path.
-async fn install_from_path(
-    state: &ApiState,
-    source_path: &Path,
-) -> Result<InstallPluginResponse, ApiError> {
-    if !source_path.exists() {
         return Err(ApiError::BadRequest(format!(
-            "Source path does not exist: {}",
-            source_path.display()
+            "Unsupported Content-Type: '{content_type}'. Expected application/json or multipart/form-data"
         )));
-    }
-
-    let manifest_file =
-        if source_path.is_file() && source_path.file_name().is_some_and(|n| n == "plugin.toml") {
-            source_path.to_path_buf()
-        } else if source_path.is_dir() {
-            let candidate = source_path.join("plugin.toml");
-            if candidate.is_file() {
-                candidate
-            } else if let Some(found) = PluginScanner::find_manifest_in_dir(source_path) {
-                found
-            } else {
-                return Err(ApiError::BadRequest(format!(
-                    "No plugin.toml found in directory: {}",
-                    source_path.display()
-                )));
-            }
-        } else {
-            return Err(ApiError::BadRequest(format!(
-                "Source path is neither a directory nor a plugin.toml file: {}",
-                source_path.display()
-            )));
-        };
-
-    let manifest = PluginManifest::load_from_file(&manifest_file)
-        .map_err(|e| ApiError::BadRequest(format!("Invalid plugin manifest: {e}")))?;
-
-    PluginId::validate(&manifest.plugin.id)
-        .map_err(|e| ApiError::BadRequest(format!("Invalid plugin identifier: {e}")))?;
-
-    let plugin_source_dir = manifest_file.parent().unwrap_or(source_path);
-
-    // Target installation directory: <plugins_root>/<plugin_id>
-    let plugins_root = state.plugins_dir().to_path_buf();
-    std::fs::create_dir_all(&plugins_root).map_err(|e| ApiError::Internal(e.to_string()))?;
-    let dest_dir = plugins_root.join(&manifest.plugin.id);
-
-    let is_same =
-        if let (Ok(c1), Ok(c2)) = (plugin_source_dir.canonicalize(), dest_dir.canonicalize()) {
-            c1 == c2
-        } else {
-            false
-        };
-
-    let host_id = manifest.plugin.id.replace('.', "_");
-    // Terminate existing host if running
-    let _ = state.supervisor().stop_host(&host_id).await;
-
-    if !is_same {
-        if dest_dir.exists() {
-            let _ = std::fs::remove_dir_all(&dest_dir);
-        }
-        copy_dir_recursive(plugin_source_dir, &dest_dir).map_err(|e| {
-            ApiError::Internal(format!("Failed to copy plugin to target directory: {e}"))
-        })?;
-    }
-
-    ensure_entrypoint_executable(&dest_dir, &manifest.plugin.entrypoint);
-
-    let target_manifest_path = dest_dir.join("plugin.toml");
-    // The files are in place, so the node knows the plugin from here on, even if its host fails
-    // to start below: the operator can then fix the cause and enable it from the console.
-    state.record_installed_plugin(DiscoveredPlugin {
-        manifest: manifest.clone(),
-        manifest_path: target_manifest_path.clone(),
-        plugin_dir: dest_dir.clone(),
-    });
-    let spawn_result = state
-        .supervisor()
-        .spawn_from_manifest(&target_manifest_path, None)
-        .await;
-
-    match spawn_result {
-        Ok(host) => {
-            state
-                .observability()
-                .events
-                .publish(TraceEvent::PluginInstalled {
-                    plugin_id: manifest.plugin.id.clone(),
-                    host_id: host.host_id.clone(),
-                });
-
-            let p_views = plugin_views_for(&host);
-            let (commands, tools) = p_views
-                .into_iter()
-                .find(|p| p.id == manifest.plugin.id)
-                .map(|p| (p.commands, p.tools))
-                .unwrap_or_else(|| {
-                    let declared = plugin_view_from_manifest_with_status(&manifest, "running");
-                    (declared.commands, declared.tools)
-                });
-
-            tracing::info!(
-                plugin_id = %manifest.plugin.id,
-                host_id = %host.host_id,
-                "Plugin installed and host spawned successfully"
-            );
-
-            Ok(InstallPluginResponse {
-                plugin_id: manifest.plugin.id.clone(),
-                name: manifest.plugin.name.clone(),
-                version: manifest.plugin.version.clone(),
-                runtime: manifest.plugin.runtime.clone(),
-                commands,
-                tools,
-                status: "running".to_string(),
-                message: Some("Plugin installed and launched successfully".to_string()),
-            })
-        }
-        Err(SupervisorError::RuntimeUnavailable { runtime, reason }) => {
-            tracing::warn!(
-                plugin_id = %manifest.plugin.id,
-                runtime = %runtime,
-                reason = %reason,
-                "Plugin installed but runtime is unavailable"
-            );
-
-            let declared = plugin_view_from_manifest_with_status(&manifest, "RuntimeUnavailable");
-            Ok(InstallPluginResponse {
-                plugin_id: manifest.plugin.id.clone(),
-                name: manifest.plugin.name.clone(),
-                version: manifest.plugin.version.clone(),
-                runtime,
-                commands: declared.commands,
-                tools: declared.tools,
-                status: "RuntimeUnavailable".to_string(),
-                message: Some(format!(
-                    "Plugin installed but runtime is unavailable: {reason}"
-                )),
-            })
-        }
-        Err(err) => Err(ApiError::BadRequest(format!(
-            "Failed to launch plugin host: {err}"
-        ))),
-    }
-}
-
-/// Installs a plugin from raw archive bytes (.kpk or .zip).
-async fn install_from_archive(
-    state: &ApiState,
-    archive_bytes: &[u8],
-) -> Result<InstallPluginResponse, ApiError> {
-    if archive_bytes.len() < 22 {
-        return Err(ApiError::BadRequest(
-            "Uploaded archive file is too small or corrupt".to_string(),
-        ));
-    }
-
-    let temp_dir = tempfile::tempdir().map_err(|e| ApiError::Internal(e.to_string()))?;
-    let cursor = std::io::Cursor::new(archive_bytes);
-    let mut zip = zip::ZipArchive::new(cursor)
-        .map_err(|e| ApiError::BadRequest(format!("Failed to parse ZIP archive: {e}")))?;
-
-    for i in 0..zip.len() {
-        let mut file = zip
-            .by_index(i)
-            .map_err(|e| ApiError::BadRequest(e.to_string()))?;
-
-        let enclosed = match file.enclosed_name() {
-            Some(p) => p.to_owned(),
-            None => {
-                return Err(ApiError::BadRequest(
-                    "Archive contains forbidden or malicious relative path".to_string(),
-                ));
-            }
-        };
-
-        let out_path = temp_dir.path().join(&enclosed);
-        if file.is_dir() {
-            std::fs::create_dir_all(&out_path).map_err(|e| ApiError::Internal(e.to_string()))?;
-        } else {
-            if let Some(parent) = out_path.parent() {
-                std::fs::create_dir_all(parent).map_err(|e| ApiError::Internal(e.to_string()))?;
-            }
-            let mut outfile =
-                std::fs::File::create(&out_path).map_err(|e| ApiError::Internal(e.to_string()))?;
-            std::io::copy(&mut file, &mut outfile)
-                .map_err(|e| ApiError::Internal(e.to_string()))?;
-
-            #[cfg(unix)]
-            {
-                use std::os::unix::fs::PermissionsExt;
-                if let Some(mode) = file.unix_mode() {
-                    let _ =
-                        std::fs::set_permissions(&out_path, std::fs::Permissions::from_mode(mode));
-                }
-            }
-        }
-    }
-
-    let source_dir = if temp_dir.path().join("plugin.toml").is_file() {
-        temp_dir.path().to_path_buf()
-    } else if let Some(manifest_path) = PluginScanner::find_manifest_in_dir(temp_dir.path()) {
-        manifest_path
-            .parent()
-            .unwrap_or(temp_dir.path())
-            .to_path_buf()
-    } else {
-        return Err(ApiError::BadRequest(
-            "Uploaded archive does not contain a valid plugin.toml file".to_string(),
-        ));
     };
 
-    install_from_path(state, &source_dir).await
+    Ok(Json(
+        plugin_install::install(&state, source, replace).await?,
+    ))
 }
 
-/// Recursively copies directory contents, skipping transient development and cache directories.
-fn copy_dir_recursive(src: &Path, dst: &Path) -> Result<(), std::io::Error> {
-    std::fs::create_dir_all(dst)?;
-    for entry in std::fs::read_dir(src)? {
-        let entry = entry?;
-        let file_type = entry.file_type()?;
-        let file_name = entry.file_name();
-        let name_str = file_name.to_string_lossy();
-
-        if name_str.starts_with('.')
-            || name_str == "node_modules"
-            || name_str == "target"
-            || name_str == ".venv"
-            || name_str == "venv"
-            || name_str == "__pycache__"
-        {
-            continue;
+/// Reads a multipart install request (`file` or `path`, optional `replace`).
+async fn read_install_multipart(
+    state: &ApiState,
+    req: axum::extract::Request,
+) -> Result<(InstallSource, bool), ApiError> {
+    // The route's `DefaultBodyLimit` bounds the whole body; going past it surfaces as a field
+    // error with status 413, which is reported as such instead of as a malformed upload.
+    let multipart_error = |err: axum::extract::multipart::MultipartError| {
+        if err.status() == axum::http::StatusCode::PAYLOAD_TOO_LARGE {
+            ApiError::PayloadTooLarge(format!(
+                "Plugin packages are limited to {MAX_PACKAGE_BYTES} bytes"
+            ))
+        } else {
+            ApiError::BadRequest(format!("Invalid multipart payload: {}", err.body_text()))
         }
+    };
 
-        let src_child = entry.path();
-        let dst_child = dst.join(file_name);
+    let mut multipart = axum::extract::Multipart::from_request(req, state)
+        .await
+        .map_err(|err| ApiError::BadRequest(format!("Invalid multipart payload: {err}")))?;
 
-        if file_type.is_dir() {
-            copy_dir_recursive(&src_child, &dst_child)?;
-        } else if file_type.is_file() {
-            std::fs::copy(&src_child, &dst_child)?;
+    let mut archive: Option<Vec<u8>> = None;
+    let mut path: Option<String> = None;
+    let mut replace = false;
+    while let Some(field) = multipart.next_field().await.map_err(multipart_error)? {
+        let name = field.name().unwrap_or("").to_string();
+        let is_package = field
+            .file_name()
+            .is_some_and(|file| file.ends_with(".kpk") || file.ends_with(".zip"));
+        if name == "file" || is_package {
+            archive = Some(field.bytes().await.map_err(multipart_error)?.to_vec());
+        } else if name == "path" {
+            let text = field.text().await.map_err(multipart_error)?;
+            path = Some(text.trim().to_string()).filter(|text| !text.is_empty());
+        } else if name == "replace" {
+            let text = field.text().await.map_err(multipart_error)?;
+            replace = match text.trim() {
+                "true" | "1" => true,
+                "false" | "0" | "" => false,
+                other => {
+                    return Err(ApiError::BadRequest(format!(
+                        "Field 'replace' must be 'true' or 'false', not '{other}'"
+                    )));
+                }
+            };
+        } else {
+            return Err(ApiError::BadRequest(format!(
+                "Unknown multipart field '{name}'; expected 'file', 'path' or 'replace'"
+            )));
         }
     }
-    Ok(())
-}
 
-/// Sets Unix executable permission bits (0o755) on the declared entrypoint binary if present.
-fn ensure_entrypoint_executable(plugin_dir: &Path, entrypoint: &str) {
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        let exec_path = plugin_dir.join(entrypoint);
-        if exec_path.is_file() {
-            if let Ok(metadata) = std::fs::metadata(&exec_path) {
-                let mut permissions = metadata.permissions();
-                let mode = permissions.mode();
-                permissions.set_mode(mode | 0o755);
-                let _ = std::fs::set_permissions(&exec_path, permissions);
-            }
-        }
-    }
-    #[cfg(not(unix))]
-    {
-        let _ = (plugin_dir, entrypoint);
+    match (archive, path) {
+        (Some(bytes), None) => Ok((InstallSource::Archive(bytes), replace)),
+        (None, Some(path)) => Ok((InstallSource::Path(PathBuf::from(path)), replace)),
+        (Some(_), Some(_)) => Err(ApiError::BadRequest(
+            "Send either 'file' or 'path', not both".to_string(),
+        )),
+        (None, None) => Err(ApiError::BadRequest(
+            "Multipart form must contain either 'file' (.kpk/.zip) or 'path'".to_string(),
+        )),
     }
 }
 
@@ -1153,7 +1121,7 @@ fn host_view(host: &ManagedHost, pid: Option<u32>, plugins: Vec<PluginView>) -> 
 }
 
 /// Builds plugin views for a host, merging live metadata with the static manifest.
-fn plugin_views_for(host: &ManagedHost) -> Vec<PluginView> {
+pub(crate) fn plugin_views_for(host: &ManagedHost) -> Vec<PluginView> {
     let manifest = host.manifest();
 
     let mut views: Vec<PluginView> = host
@@ -1230,6 +1198,8 @@ fn plugin_view_from_meta(
                     .unwrap_or_else(|| json!({ "type": "object" })),
             })
             .collect(),
+        serves_http: meta.serves_http,
+        ..PluginView::default()
     }
 }
 
@@ -1272,11 +1242,12 @@ fn plugin_view_from_manifest(
                     .unwrap_or_else(|| json!({ "type": "object" })),
             })
             .collect(),
+        ..PluginView::default()
     }
 }
 
 /// Builds a plugin view from a manifest with an explicit lifecycle status.
-fn plugin_view_from_manifest_with_status(
+pub(crate) fn plugin_view_from_manifest_with_status(
     manifest: &kanon_core::PluginManifest,
     status: &str,
 ) -> PluginView {
@@ -1315,6 +1286,7 @@ fn plugin_view_from_manifest_with_status(
                     .unwrap_or_else(|| json!({ "type": "object" })),
             })
             .collect(),
+        ..PluginView::default()
     }
 }
 

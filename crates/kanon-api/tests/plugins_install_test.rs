@@ -252,7 +252,7 @@ async fn install_demo_weather_plugin_end_to_end() {
     )
     .await;
 
-    assert_eq!(status, 200);
+    assert_eq!(status, 200, "{body}");
     assert_eq!(body["plugin_id"], "org.kanon.plugin.weather");
     assert_eq!(body["name"], "Demo Weather Plugin");
     assert_eq!(body["version"], "0.1.0");
