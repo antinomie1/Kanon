@@ -19,6 +19,7 @@ pub mod manifest;
 pub mod mcp;
 pub mod notice;
 pub mod pipeline;
+pub mod render;
 pub mod shutdown;
 pub mod skill;
 pub mod supervisor;

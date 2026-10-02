@@ -36,7 +36,7 @@ Supervisor 启动宿主时注入的**启动契约**（插件不得把其他环�
 | --- | --- | --- | --- |
 | `PluginHostService` | 宿主 | 核心 | `Ping`、`ReloadPluginConfig`、`GetPluginMeta`、`InvokeAction` |
 | `MessagePipelineService` | 宿主 | 核心 | `OnPreFilter`、`OnExecuteCommand`、`OnCallTool`、`OnEvent`、`OnDeliverMessage`、`OnDecorateReply`、`OnPrepareTurn` |
-| `BotApiService` | 核心 | 宿主 | `RegisterHost`、`Ping`、`IngestEvent`、`SendMessage`、`ReplyMessage`、`RequestLLM`、`CallPlatformApi`、`GetConversationHistory`、`ListConversations`、`NewConversation`、`SwitchConversation`、`DeleteConversation`、`AppendConversation`、`ListPersonas`、`UpsertPersona`、`DeletePersona`、`SetStorage`、`GetStorage`、`DeleteStorage`、`ListStorage` |
+| `BotApiService` | 核心 | 宿主 | `RegisterHost`、`Ping`、`IngestEvent`、`SendMessage`、`ReplyMessage`、`RequestLLM`、`CallPlatformApi`、`GetConversationHistory`、`ListConversations`、`NewConversation`、`SwitchConversation`、`DeleteConversation`、`AppendConversation`、`ListPersonas`、`UpsertPersona`、`DeletePersona`、`SetStorage`、`GetStorage`、`DeleteStorage`、`ListStorage`、`RenderImage` |
 
 ---
 
@@ -173,6 +173,7 @@ Supervisor 启动宿主时注入的**启动契约**（插件不得把其他环�
 | `AppendConversation` | 把完整的用户/助手轮次追加到当前对话 | 见下 |
 | `ListPersonas` / `UpsertPersona` / `DeletePersona` | 节点的人设目录 | 见下 |
 | `SetStorage` / `GetStorage` / `DeleteStorage` / `ListStorage` | 核心的中心 KV 存储，每个插件一个命名空间 | 见下 |
+| `RenderImage` | 把文本或 SVG 渲染成 PNG，供图片段发送 | 见下 |
 
 ### 中心 KV：`SetStorage`、`GetStorage`、`DeleteStorage`、`ListStorage`
 
@@ -188,6 +189,19 @@ Supervisor 启动宿主时注入的**启动契约**（插件不得把其他环�
 | 结果 `found` / `deleted` | 键不存在或已过期时为 `false`，不是错误 |
 
 错误：插件 ID 或键不合法为 `INVALID_ARGUMENT`；值超过 1 MiB 为 `RESOURCE_EXHAUSTED`；核心未提供 KV 为 `UNAVAILABLE`；数据库故障为 `INTERNAL`。
+
+### `RenderImage(RenderImageRequest) → RenderImageResponse`
+
+把文本排成卡片，或把 SVG 原样渲染为 PNG（resvg，纯 Rust，节点不需要浏览器），写入插件自己的目录 `data/plugins/<plugin_id>/render/`，返回绝对路径，可直接作为 `ImageSegment.file_path` 发送。
+
+| 字段 | 说明 |
+| --- | --- |
+| `text` | 纯文本卡片：按 `width` 自动换行（英文按词、中文按字），空行分段，以 `# ` 开头的行是标题；最多 20,000 字 |
+| `svg` | 完整的 SVG 文档，按其自身尺寸渲染，未绘制处透明；`<image>` 只接受内嵌的 `data:` URI，指向节点文件的引用被忽略 |
+| `width` | 仅文本：卡片宽度，默认 720，范围 200–2000 |
+| 结果 | `file_path`、`width`、`height` |
+
+字体取自节点系统：`sans-serif` 优先选用已安装的中文无衬线字体（如 Noto Sans CJK），缺字的字符（中文、emoji）自动从其他已安装字体中补齐。相同内容渲染为同一个文件；超过 24 小时的渲染结果在下次渲染时清理，所以应在渲染后尽快发送。错误：参数不合法、SVG 无法解析、图片超过 1600 万像素为 `INVALID_ARGUMENT`；节点未安装任何字体时渲染文本为 `FAILED_PRECONDITION`。
 
 ### `RequestLLM(LLMRequest) → stream LLMChunk`
 

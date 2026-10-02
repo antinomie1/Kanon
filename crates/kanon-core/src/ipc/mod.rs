@@ -64,6 +64,8 @@ pub struct CoreApiService {
     )>,
     /// The central key-value store behind the storage RPCs.
     kv: Option<Arc<kanon_storage::KvStore>>,
+    /// Plugins' data directories; `RenderImage` writes its PNGs under `<id>/render/`.
+    plugin_data: kanon_storage::PluginDataDir,
 }
 
 impl std::fmt::Debug for CoreApiService {
@@ -78,6 +80,7 @@ impl std::fmt::Debug for CoreApiService {
             .field("engine", &self.engine.is_some())
             .field("personas", &self.personas.is_some())
             .field("kv", &self.kv.is_some())
+            .field("plugin_data", &self.plugin_data.base_dir())
             .finish()
     }
 }
@@ -96,6 +99,7 @@ impl CoreApiService {
             engine: None,
             personas: None,
             kv: None,
+            plugin_data: kanon_storage::PluginDataDir::default(),
         }
     }
 
@@ -137,6 +141,12 @@ impl CoreApiService {
     /// Shares the central key-value store, enabling the storage RPCs.
     pub fn with_kv(mut self, kv: Arc<kanon_storage::KvStore>) -> Self {
         self.kv = Some(kv);
+        self
+    }
+
+    /// Uses `dir` as the root of plugins' data directories instead of `./data/plugins`.
+    pub fn with_plugin_data_dir(mut self, dir: kanon_storage::PluginDataDir) -> Self {
+        self.plugin_data = dir;
         self
     }
 
