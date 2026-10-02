@@ -363,14 +363,13 @@ priority = 500
 
 [[commands]]
 name = "{snake_name}_echo"
-description = "Echoes the provided message with prefix"
+description = "Echoes the message back"
 usage = "/{snake_name}_echo <message>"
-priority = 500
 
 [[tools]]
-name = "{snake_name}_calc"
-description = "Performs mathematical calculations"
-parameters = {{ type = "object", properties = {{ expr = {{ type = "string", description = "Mathematical expression" }} }} }}
+name = "{snake_name}_add"
+description = "Adds two numbers."
+parameters = {{ type = "object", properties = {{ a = {{ type = "number", description = "First number." }}, b = {{ type = "number", description = "Second number." }} }}, required = ["a", "b"] }}
 "#
     );
 
@@ -414,13 +413,13 @@ parameters = {{ type = "object", properties = {{ expr = {{ type = "string", desc
 "#;
 
     let index_ts = format!(
-        r#"import {{
-  Plugin,
-  PluginContext,
-  Command,
-  Tool,
-  MessageSegment,
-}} from "@kanon/sdk-and-host";
+        r#"/**
+ * {pascal_name} plugin for Kanon.
+ *
+ * See docs/PLUGIN_GUIDE.md in the Kanon repository for commands, tools, events and core calls.
+ */
+
+import {{ Command, CommandEvent, Plugin, PluginContext, Tool, s }} from "@kanon/sdk-and-host";
 
 export default class {pascal_name}Plugin extends Plugin {{
   id = "org.kanon.plugin.{snake_name}";
@@ -435,36 +434,22 @@ export default class {pascal_name}Plugin extends Plugin {{
   }}
 
   @Command("{snake_name}_echo", {{
-    description: "Echoes the provided message with prefix",
+    description: "Echoes the message back",
     usage: "/{snake_name}_echo <message>",
-    priority: 500,
   }})
-  async handleEcho(req: any, args: string[]): Promise<any> {{
-    const message = args && args.length > 0 ? args.join(" ") : "(empty)";
-    return {{
-      success: true,
-      replies: [
-        MessageSegment.text(`[{pascal_name}] Echo: ${{message}}`),
-      ],
-      error_message: "",
-    }};
+  async echo(event: CommandEvent): Promise<string> {{
+    // Returning a string replies with it; rawArgs is the text after the command name.
+    return `[{pascal_name}] ${{event.rawArgs || "Say something!"}}`;
   }}
 
-  @Tool({{
-    name: "{snake_name}_calc",
-    description: "Performs mathematical calculations",
-    parameters: {{
-      type: "object",
-      properties: {{
-        expr: {{ type: "string", description: "Mathematical expression" }},
-      }},
-    }},
+  @Tool("{snake_name}_add", {{
+    description: "Adds two numbers.",
+    args: {{ a: s.number("First number."), b: s.number("Second number.") }},
   }})
-  async handleCalc(params: any): Promise<any> {{
-    return {{
-      result: 42,
-      summary: "Sample calculation from TypeScript plugin tool",
-    }};
+  async add({{ a, b }}: {{ a: number; b: number }}): Promise<number> {{
+    // The schema the model sees is built from `args`; missing or unknown arguments are reported
+    // to the model before this runs.
+    return a + b;
   }}
 }}
 "#

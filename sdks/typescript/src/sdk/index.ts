@@ -20,8 +20,17 @@ import {
   WaitTimeoutError,
   runTurn,
 } from "./event.js";
-import { LlmMessage, MessageSegmentItem, Replyable, toSegments } from "./segments.js";
+import { KV } from "./kv.js";
+import { ArgsSpec, JsonSchema, bindArgs, objectSchema } from "./schema.js";
+import {
+  LlmMessage,
+  MessageSegment,
+  MessageSegmentItem,
+  Replyable,
+  toSegments,
+} from "./segments.js";
 import { fromProtoStruct, fromProtoValue, toProtoStruct } from "./struct.js";
+import { HTTP_METHODS, HttpMethod, HttpRequest, toHttpResponse } from "./web.js";
 
 export interface PluginContext {
   /** Dedicated filesystem directory for this plugin's local persistent storage. */
@@ -150,6 +159,104 @@ export interface LlmRequestOptions {
   maxTokens?: number;
 }
 
+/** Who is calling: the host process and the plugin it serves. Set by the host. */
+export interface CoreIdentity {
+  /** `KANON_HOST_ID`; needed by {@link CoreHandle.refreshMeta}. */
+  hostId?: string;
+  /** The plugin's id; the namespace of {@link CoreHandle.kv}, and the caller of agent runs and renders. */
+  pluginId?: string;
+}
+
+/** One conversation of a chat, as `/ls` lists it. */
+export interface ConversationInfo {
+  /** Pass it to {@link CoreHandle.switchConversation} or {@link CoreHandle.deleteConversation}. */
+  sessionId: string;
+  /** Whether the chat's next message continues this conversation. */
+  current: boolean;
+  /** The first user message, shortened; `""` while the conversation is empty. */
+  title: string;
+  /** Saved user and assistant messages (those compacted into the summary are not counted). */
+  messageCount: number;
+  /** Unix seconds of the last turn; 0 if there was none. */
+  lastActiveAt: number;
+}
+
+/** A persona of the node's catalog. */
+export interface Persona {
+  id: string;
+  name: string;
+  /** The system prompt it gives the model. */
+  prompt: string;
+  /** The base assistant or an instance's own prompt, which plugins cannot change. */
+  builtin: boolean;
+}
+
+/** Options of {@link CoreHandle.runAgent}. */
+export interface RunAgentOptions {
+  /**
+   * The chat the run serves. It picks the bot instance (its model, plugins and tool policy) and is
+   * what tools see as their context.
+   */
+  event?: MessageEvent | any;
+  /**
+   * Run inside the chat's current conversation, with its history and persona, and append the turn
+   * to it — exactly as if the model had answered a message. Needs `event`. Otherwise the run uses
+   * a private session that is discarded afterwards.
+   */
+  inConversation?: boolean;
+  /** Images for this turn (`MessageSegment.imageUrl(...)`, `event.images`, ...). */
+  images?: Array<MessageSegmentItem | NonNullable<MessageSegmentItem["image"]>>;
+  /** Instructions for a private run; ignored in a conversation. */
+  systemPrompt?: string;
+  /** `<provider>/<model-id>`; empty uses the instance's or node's model. */
+  model?: string;
+  /** Offer tools to the model (default); `false` makes it a plain answer. */
+  useTools?: boolean;
+  /** Tool rounds allowed; 0 is the agent's default. */
+  maxSteps?: number;
+}
+
+/** What an agent run produced. Nothing has been sent to the chat. */
+export interface AgentResult {
+  /** The final answer, without the model's reasoning. */
+  content: string;
+  /** Media the tools produced (`mime_type`, `file_path` or `url`); send them yourself. */
+  attachments: Array<{ mime_type: string; file_path?: string; url?: string }>;
+  /** Tools called, in order. */
+  tools: string[];
+  /** The conversation's session, or the discarded private one. */
+  sessionId: string;
+}
+
+/** The raw `PipelineEventRequest` behind a {@link MessageEvent} or a raw request. */
+function rawEvent(event: any): any {
+  return event instanceof MessageEvent ? event.raw : event;
+}
+
+/** Image parts for a request: segments are unwrapped to their image. */
+function imageParts(
+  images: Array<MessageSegmentItem | NonNullable<MessageSegmentItem["image"]>>,
+): Array<NonNullable<MessageSegmentItem["image"]>> {
+  return images.map((image: any) => {
+    const part = image?.image ?? image;
+    if (!part || typeof part !== "object") {
+      throw new TypeError("images must be image segments");
+    }
+    return part;
+  });
+}
+
+function conversationList(response: any): ConversationInfo[] {
+  return (response?.conversations ?? []).map((c: any) => ({
+    sessionId: c.session_id ?? "",
+    current: c.current === true,
+    title: c.title ?? "",
+    messageCount: Number(c.message_count ?? 0),
+    // int64 arrives as a string (`longs: String`); seconds fit a double exactly.
+    lastActiveAt: Number(c.last_active_at ?? 0),
+  }));
+}
+
 /**
  * Shared client handle for the Core microkernel's `BotApiService`.
  *
@@ -168,6 +275,12 @@ export class CoreHandle {
   private readonly client: BotApiServiceClient;
   /** Filesystem path of the target when it is a Unix domain socket, else undefined. */
   private readonly unixSocketPath?: string;
+  /** This host process; empty when the handle was created without an identity. */
+  readonly hostId: string;
+  /** The plugin this handle calls for; empty when created without an identity. */
+  readonly pluginId: string;
+  /** Created on first use of {@link kv}. */
+  private kvStore?: KV;
 
   /**
    * Creates a handle for one Core IPC endpoint.
@@ -182,11 +295,16 @@ export class CoreHandle {
    *   IPC server: local IPC sockets are protected by filesystem permissions (0700 on
    *   the run directory) rather than by TLS. Callers that connect over a transport
    *   requiring authentication pass the matching `grpc.ChannelCredentials` here.
+   * @param identity The host and plugin this handle calls for; the host sets it, and the calls
+   *   that need it say so.
    */
   constructor(
     endpoint: string,
     credentials: grpc.ChannelCredentials = grpc.credentials.createInsecure(),
+    identity: CoreIdentity = {},
   ) {
+    this.hostId = identity.hostId ?? "";
+    this.pluginId = identity.pluginId ?? "";
     const descriptor = loadKanonProto();
     const botApiService = (descriptor as any).kanon?.plugin?.v1?.BotApiService;
     if (!botApiService) {
@@ -412,8 +530,10 @@ export class CoreHandle {
    *   model is configured.
    */
   async conversationHistory(event: any, limit = 0): Promise<ConversationHistory> {
-    const raw = event instanceof MessageEvent ? event.raw : event;
-    const response = await this.unary("GetConversationHistory", { context: raw, limit });
+    const response = await this.unary("GetConversationHistory", {
+      context: rawEvent(event),
+      limit,
+    });
     return {
       sessionId: response?.session_id ?? "",
       summary: response?.summary ?? "",
@@ -422,6 +542,185 @@ export class CoreHandle {
         text: message.text ?? "",
       })),
     };
+  }
+
+  // --- Conversations ----------------------------------------------------------------------------
+  //
+  // The same implementation as the built-in /ls, /new, /switch and /del: `event` names the chat,
+  // and every call returns the chat's conversations after the change. A plugin acting for a user
+  // should check permissions itself (the built-in /switch and /del are admin-only in groups).
+
+  /** The chat's conversations, oldest first (`/ls`). */
+  async listConversations(event: MessageEvent | any): Promise<ConversationInfo[]> {
+    return conversationList(await this.unary("ListConversations", { context: rawEvent(event) }));
+  }
+
+  /** Starts an empty conversation and makes it current (`/new`). */
+  async newConversation(event: MessageEvent | any): Promise<ConversationInfo[]> {
+    return conversationList(await this.unary("NewConversation", { context: rawEvent(event) }));
+  }
+
+  /**
+   * Makes `sessionId` the chat's current conversation (`/switch`).
+   *
+   * @throws `NOT_FOUND` when the session is not one of the chat's, `FAILED_PRECONDITION` while a
+   *   turn is running in the chat.
+   */
+  async switchConversation(event: MessageEvent | any, sessionId: string): Promise<ConversationInfo[]> {
+    return conversationList(
+      await this.unary("SwitchConversation", { context: rawEvent(event), session_id: sessionId }),
+    );
+  }
+
+  /** Deletes a conversation; deleting the current one moves the chat to a new empty one (`/del`). */
+  async deleteConversation(event: MessageEvent | any, sessionId: string): Promise<ConversationInfo[]> {
+    return conversationList(
+      await this.unary("DeleteConversation", { context: rawEvent(event), session_id: sessionId }),
+    );
+  }
+
+  /**
+   * Appends whole turns to the chat's current conversation; resolves the session written to.
+   *
+   * `messages` must alternate user and assistant, starting with the user and ending with the
+   * assistant, so the history keeps consisting of complete turns. Existing messages never change.
+   *
+   * @throws `FAILED_PRECONDITION` while a turn is running in the conversation (never queued, so a
+   *   tool calling this during its own turn fails instead of deadlocking).
+   */
+  async appendConversation(
+    event: MessageEvent | any,
+    messages: Array<{ role: "user" | "assistant"; text: string }>,
+  ): Promise<string> {
+    const wire = messages.map(({ role, text }) => {
+      if (role !== "user" && role !== "assistant") {
+        throw new Error(`role must be "user" or "assistant", got ${JSON.stringify(role)}`);
+      }
+      return { role: role === "user" ? "LLM_ROLE_USER" : "LLM_ROLE_ASSISTANT", text };
+    });
+    const response = await this.unary("AppendConversation", {
+      context: rawEvent(event),
+      messages: wire,
+    });
+    return response?.session_id ?? "";
+  }
+
+  // --- Personas ---------------------------------------------------------------------------------
+
+  /** Every persona: the base assistant, the operator's, and those made from instance prompts. */
+  async listPersonas(): Promise<Persona[]> {
+    const response = await this.unary("ListPersonas", {});
+    return (response?.personas ?? []).map((p: any) => ({
+      id: p.id ?? "",
+      name: p.name ?? "",
+      prompt: p.prompt ?? "",
+      builtin: p.builtin === true,
+    }));
+  }
+
+  /** Creates or replaces an operator persona; resolves whether one was replaced. */
+  async upsertPersona(id: string, name: string, prompt: string): Promise<boolean> {
+    const response = await this.unary("UpsertPersona", { id, name, prompt, builtin: false });
+    return response?.replaced === true;
+  }
+
+  /** Deletes an operator persona; resolves whether it existed. */
+  async deletePersona(id: string): Promise<boolean> {
+    const response = await this.unary("DeletePersona", { id });
+    return response?.deleted === true;
+  }
+
+  // --- The agent --------------------------------------------------------------------------------
+
+  /**
+   * Lets the node's agent (the model plus its tool loop) answer `prompt`.
+   *
+   * Unlike {@link requestLlm}, the agent can call tools — plugin, MCP and built-in ones. The answer
+   * is returned, never sent: the plugin decides what reaches the chat.
+   *
+   * @throws `INVALID_ARGUMENT` (empty run, bad image, unknown model), `NOT_FOUND` (no instance
+   *   serves the chat), `UNAVAILABLE` (no model, or the model or a tool failed),
+   *   `FAILED_PRECONDITION` (the conversation is busy), `ABORTED` (stopped with `/stop`).
+   */
+  async runAgent(prompt: string, options: RunAgentOptions = {}): Promise<AgentResult> {
+    const request: Record<string, any> = {
+      plugin_id: this.requirePluginId("runAgent"),
+      prompt,
+      images: imageParts(options.images ?? []),
+      in_conversation: options.inConversation === true,
+      system_prompt: options.systemPrompt ?? "",
+      model: options.model ?? "",
+      use_tools: options.useTools ?? true,
+      max_steps: options.maxSteps ?? 0,
+    };
+    if (options.event !== undefined) {
+      request.context = rawEvent(options.event);
+    }
+    const response = await this.unary("RunAgent", request);
+    return {
+      content: response?.content ?? "",
+      attachments: response?.attachments ?? [],
+      tools: [...(response?.tools ?? [])],
+      sessionId: response?.session_id ?? "",
+    };
+  }
+
+  // --- Rendering --------------------------------------------------------------------------------
+
+  /**
+   * Lays `text` out as a PNG card and resolves an image segment, ready to send.
+   *
+   * Lines wrap to `width` pixels (default 720, 200–2000), blank lines separate paragraphs and a
+   * line starting with `"# "` is a heading; CJK and emoji use the node's fonts. The file is
+   * cleaned up after a day, so send it soon.
+   */
+  async renderText(text: string, width = 0): Promise<MessageSegmentItem> {
+    const response = await this.unary("RenderImage", {
+      plugin_id: this.requirePluginId("renderText"),
+      text,
+      width,
+    });
+    return MessageSegment.imageFile(response.file_path, "image/png");
+  }
+
+  /** Renders an SVG document to PNG at its own size. Embedded images must be `data:` URIs. */
+  async renderSvg(svg: string): Promise<MessageSegmentItem> {
+    const response = await this.unary("RenderImage", {
+      plugin_id: this.requirePluginId("renderSvg"),
+      svg,
+    });
+    return MessageSegment.imageFile(response.file_path, "image/png");
+  }
+
+  // --- Storage and metadata ---------------------------------------------------------------------
+
+  /** The plugin's namespace in the node's KV store (see {@link KV}); `this.kv` in a plugin. */
+  get kv(): KV {
+    this.kvStore ??= new KV(
+      (method, request) => this.unary(method, request),
+      this.requirePluginId("kv"),
+    );
+    return this.kvStore;
+  }
+
+  /**
+   * Asks the node to read this host's metadata again; resolves the plugin ids it now holds.
+   *
+   * `Plugin.addTool` and `removeTool` call this; the change applies from the next turn on.
+   */
+  async refreshMeta(): Promise<string[]> {
+    if (!this.hostId) {
+      throw new Error("refreshMeta needs a CoreHandle created with a hostId");
+    }
+    const response = await this.unary("RefreshPluginMeta", { host_id: this.hostId });
+    return [...(response?.plugin_ids ?? [])];
+  }
+
+  private requirePluginId(what: string): string {
+    if (!this.pluginId) {
+      throw new Error(`${what} needs a CoreHandle created with a pluginId`);
+    }
+    return this.pluginId;
   }
 
   /** Issues one unary RPC on the shared channel. */
@@ -616,12 +915,23 @@ const ACCESS_LEVELS: Record<CommandAccess, string> = {
 };
 
 /** Lifecycle events a plugin may subscribe to with {@link OnEvent}. */
-export type EventKind = "message_sent" | "notice" | "llm_response";
+export type EventKind =
+  | "message_sent"
+  | "notice"
+  | "llm_response"
+  | "agent_begin"
+  | "agent_done"
+  | "tool_call"
+  | "tool_result";
 
 const EVENT_KINDS: Record<EventKind, string> = {
   message_sent: "EVENT_KIND_MESSAGE_SENT",
   notice: "EVENT_KIND_NOTICE",
   llm_response: "EVENT_KIND_LLM_RESPONSE",
+  agent_begin: "EVENT_KIND_AGENT_BEGIN",
+  agent_done: "EVENT_KIND_AGENT_DONE",
+  tool_call: "EVENT_KIND_TOOL_CALL",
+  tool_result: "EVENT_KIND_TOOL_RESULT",
 };
 
 /** Conversation kinds a command or trigger may be limited to. */
@@ -668,6 +978,8 @@ export interface CommandMeta {
   access?: string;
   platforms?: string[];
   conversation_kinds?: string[];
+  /** A command group's subcommands (name, description and usage only), listed by `/help`. */
+  subcommands?: CommandMeta[];
 }
 
 /** Wire shape of `TriggerMeta`. */
@@ -701,6 +1013,8 @@ export interface PluginMeta {
   events?: string[];
   decorates_replies?: boolean;
   prepares_turns?: boolean;
+  rewrites_system_prompt?: boolean;
+  serves_http?: boolean;
 }
 
 /** A model conversation as returned by {@link CoreHandle.conversationHistory}. */
@@ -725,15 +1039,62 @@ export interface Reply {
   command: string;
 }
 
+/** A tool's declaration; `args` is set when the arguments were described with `s`. */
+interface ToolEntry {
+  name: string;
+  description: string;
+  parameters?: JsonSchema;
+  args?: ArgsSpec;
+}
+
+/** Options of {@link Tool} and {@link Plugin.addTool}; give `args` or `parameters`, not both. */
+export interface ToolOptions {
+  /** What the tool does, for the model. */
+  description?: string;
+  /**
+   * The arguments, built with `s` (see `schema.ts`). The SDK fills in defaults and rejects unknown
+   * or missing arguments before the handler runs.
+   */
+  args?: ArgsSpec;
+  /** A hand-written JSON Schema of the argument object, passed through unchecked. */
+  parameters?: JsonSchema;
+}
+
+/** Validates tool options and resolves them into a declaration. */
+function toolEntry(name: string, options: ToolOptions = {}): ToolEntry {
+  if (!name) {
+    throw new Error("a tool needs a name");
+  }
+  if (options.args !== undefined && options.parameters !== undefined) {
+    throw new Error(`tool '${name}': give args or parameters, not both`);
+  }
+  return {
+    name,
+    description: options.description ?? "",
+    parameters: options.args !== undefined ? objectSchema(options.args) : options.parameters,
+    args: options.args,
+  };
+}
+
 /** Declarations collected by the decorators, kept per class. */
 interface Declarations {
   commands: Array<CommandMeta & { methodName: string | symbol }>;
+  /** Subcommands of command groups, in declaration order. */
+  subcommands: Array<{
+    group: string;
+    name: string;
+    description: string;
+    usage: string;
+    methodName: string | symbol;
+  }>;
   triggers: Array<TriggerMeta & { methodName: string | symbol }>;
-  tools: Array<ToolMeta & { methodName: string | symbol }>;
+  tools: Array<ToolEntry & { methodName: string | symbol }>;
   actions: Array<{ name: string; methodName: string | symbol }>;
   events: Array<{ kind: EventKind; methodName: string | symbol }>;
+  routes: Array<{ path: string; methods: HttpMethod[]; methodName: string | symbol }>;
   decorator?: string | symbol;
   preparer?: string | symbol;
+  rewriter?: string | symbol;
 }
 
 const DECLARATIONS = Symbol("kanon.declarations");
@@ -749,12 +1110,15 @@ function declarations(prototype: any): Declarations {
     const inherited: Declarations | undefined = prototype[DECLARATIONS];
     prototype[DECLARATIONS] = {
       commands: [...(inherited?.commands ?? [])],
+      subcommands: [...(inherited?.subcommands ?? [])],
       triggers: [...(inherited?.triggers ?? [])],
       tools: [...(inherited?.tools ?? [])],
       actions: [...(inherited?.actions ?? [])],
       events: [...(inherited?.events ?? [])],
+      routes: [...(inherited?.routes ?? [])],
       decorator: inherited?.decorator,
       preparer: inherited?.preparer,
+      rewriter: inherited?.rewriter,
     };
   }
   return prototype[DECLARATIONS];
@@ -769,12 +1133,19 @@ function accessValue(level: CommandAccess | undefined): string {
 }
 
 /**
- * Declares a slash command handler.
+ * Declares a slash command handler, or a subcommand of a command group.
  *
  * The handler receives a {@link CommandEvent} and its arguments, and answers by returning text
  * or segments, or with `await event.reply(...)`.
  *
- * @param name Command name without the slash.
+ * A name with a space declares a subcommand: `@Command("todo add")` answers `/todo add milk`
+ * with `event.args` = `["milk"]`. `/help` lists a group's subcommands under it, and `/todo` alone
+ * (or with an unknown subcommand) answers with that list — unless the plugin also declares
+ * `@Command("todo")`, which then handles those cases and carries the group's description,
+ * aliases, access level, scope and priority. Subcommands take only `description` and `usage`:
+ * the node routes and checks access for the group as a whole.
+ *
+ * @param name Command name without the slash, or `"<group> <subcommand>"`.
  * @param options.aliases Other names that invoke the command; the handler always sees `name`.
  * @param options.access Default access level, which the operator can override.
  * @param options.priority Lower wins when several plugins declare the same name.
@@ -792,10 +1163,33 @@ export function Command(
     access?: CommandAccess;
   } & ScopeOptions,
 ): MethodDecorator {
+  const words = name.replace(/^\//, "").trim().split(/\s+/);
+  if (words.length > 2 || !words[0]) {
+    throw new Error(`command name '${name}' must be "<name>" or "<group> <subcommand>"`);
+  }
+  if (words.length === 2) {
+    const [group, sub] = words;
+    const extra = Object.keys(options ?? {}).filter((k) => k !== "description" && k !== "usage");
+    if (extra.length > 0) {
+      throw new Error(
+        `subcommand '${group} ${sub}' takes only description and usage; set ${extra.join(", ")} ` +
+          `on @Command("${group}")`,
+      );
+    }
+    return (target: any, propertyKey: string | symbol) => {
+      declarations(target).subcommands.push({
+        group,
+        name: sub,
+        description: options?.description ?? "",
+        usage: options?.usage ?? `/${group} ${sub}`,
+        methodName: propertyKey,
+      });
+    };
+  }
   const access = accessValue(options?.access);
   const scope = scopeValue(options);
   return (target: any, propertyKey: string | symbol) => {
-    const canonical = name.replace(/^\//, "");
+    const canonical = words[0];
     declarations(target).commands.push({
       methodName: propertyKey,
       name: canonical,
@@ -852,31 +1246,32 @@ export function Trigger(
 /**
  * Declares an LLM tool call handler.
  *
- * The handler receives the model's arguments and the {@link MessageEvent} the model was
- * answering (`undefined` when the call did not come from a chat message), so a tool knows who
- * asked without trusting the model to pass it along. Operator-only operations belong in
+ * ```ts
+ * @Tool("weather", {
+ *   description: "Current weather for a city.",
+ *   args: { city: s.string("City name"), days: s.integer("Days of forecast").default(1) },
+ * })
+ * async weather({ city, days }: { city: string; days: number }, event?: MessageEvent) { ... }
+ * ```
+ *
+ * The handler receives the model's arguments as one object and the {@link MessageEvent} the
+ * model was answering (`undefined` when the call did not come from a chat message), so a tool
+ * knows who asked without trusting the model to pass it along. It returns the result: an object
+ * as is, any other JSON value as `{ result: value }`, a `Buffer` as raw bytes. A thrown error
+ * becomes a failed call the model can explain or retry. Operator-only operations belong in
  * {@link Action} instead.
+ *
+ * @param name The tool's name for the model (or the older `{ name, description, parameters }`).
+ * @param options See {@link ToolOptions}.
  */
 export function Tool(
-  nameOrOptions:
-    | string
-    | {
-        name: string;
-        description?: string;
-        parameters?: Record<string, any>;
-      },
+  name: string | ({ name: string } & ToolOptions),
+  options?: ToolOptions,
 ): MethodDecorator {
+  const entry =
+    typeof name === "string" ? toolEntry(name, options) : toolEntry(name.name, name);
   return (target: any, propertyKey: string | symbol) => {
-    const info =
-      typeof nameOrOptions === "string"
-        ? { name: nameOrOptions, description: "", parameters: undefined }
-        : nameOrOptions;
-    declarations(target).tools.push({
-      methodName: propertyKey,
-      name: info.name,
-      description: info.description ?? "",
-      parameters: info.parameters,
-    });
+    declarations(target).tools.push({ ...entry, methodName: propertyKey });
   };
 }
 
@@ -899,9 +1294,15 @@ export function Action(name: string): MethodDecorator {
  *
  * - `"message_sent"`: the `MessageSentEvent` for every message the bot delivered;
  * - `"notice"`: a {@link MessageEvent} for a platform notice (join, poke, recall, ...);
- * - `"llm_response"`: the `LlmResponseEvent` with the model's answer and the message it answered.
+ * - `"llm_response"`: the `LlmResponseEvent` with the model's answer and the message it answered;
+ * - `"agent_begin"` / `"agent_done"`: the `AgentBeginEvent` / `AgentDoneEvent` when the agent
+ *   starts and finishes a conversation turn (`done` carries `success`, the answer or `error`, and
+ *   the `tools` it called);
+ * - `"tool_call"` / `"tool_result"`: the `ToolCallEvent` / `ToolResultEvent` for every tool the
+ *   agent calls during a turn, with its `arguments` (a `Struct`) and its `result`.
  *
- * Events are notifications: Core never waits on them and ignores the return value.
+ * Each event's `context` is the chat message behind it (wrap it in {@link MessageEvent} to use
+ * the helpers). Events are notifications: Core never waits on them and ignores the return value.
  */
 export function OnEvent(kind: EventKind): MethodDecorator {
   if (!EVENT_KINDS[kind]) {
@@ -950,6 +1351,96 @@ export function PrepareTurn(): MethodDecorator {
   };
 }
 
+/**
+ * Marks the plugin's system prompt rewriter.
+ *
+ * Before the model answers the first message of a turn, the handler receives the
+ * {@link MessageEvent}, the current system prompt and the session id, and returns the new
+ * system prompt, or `undefined` to keep it:
+ *
+ * ```ts
+ * @OnLlmRequest()
+ * async rules(event: MessageEvent, systemPrompt: string) {
+ *   const rules = await this.kv.get(`rules:${event.channelId}`);
+ *   return rules ? `${systemPrompt}\n\nRules for this chat:\n${rules}` : undefined;
+ * }
+ * ```
+ *
+ * The result must be deterministic for a session: the system prompt leads every request and
+ * decides the provider's prefix cache, so per-message content (time, counters, retrieved
+ * snippets) belongs in {@link PrepareTurn}. Core asks plugins one after another, each seeing the
+ * previous result, and gives each three seconds; a failing plugin is skipped. Only conversation
+ * turns are rewritten — never the console chat, `requestLlm` or a private `runAgent`.
+ */
+export function OnLlmRequest(): MethodDecorator {
+  return (target: any, propertyKey: string | symbol) => {
+    const declared = declarations(target);
+    if (declared.rewriter !== undefined && declared.rewriter !== propertyKey) {
+      throw new Error("a plugin may declare only one @OnLlmRequest handler");
+    }
+    declared.rewriter = propertyKey;
+  };
+}
+
+/**
+ * Declares a handler for HTTP requests to `path` below the plugin's `http/` root
+ * (`/api/v1/plugins/<id>/http/...`); see `web.ts`.
+ *
+ * The handler receives an {@link HttpRequest} and returns an `HttpResponse` or a plain value (see
+ * `toHttpResponse`). Paths match exactly; a known path with another method answers `405`, an
+ * unknown path `404`, and a handler that throws `500` (the error is logged to the host's stderr,
+ * never sent to the caller).
+ *
+ * @param path Path starting with `/`, e.g. `"/stats"`; `"/"` is the root itself.
+ * @param options.methods Methods the handler accepts; `["GET"]` by default.
+ */
+export function HttpRoute(path: string, options?: { methods?: HttpMethod[] }): MethodDecorator {
+  if (!path.startsWith("/")) {
+    throw new Error(`HttpRoute path must start with '/', got '${path}'`);
+  }
+  const methods = (options?.methods ?? ["GET"]).map((m) => m.toUpperCase() as HttpMethod);
+  const unknown = methods.filter((m) => !HTTP_METHODS.includes(m));
+  if (methods.length === 0 || unknown.length > 0) {
+    throw new Error(`unknown HTTP methods ${JSON.stringify(unknown)}; expected some of ${HTTP_METHODS}`);
+  }
+  return (target: any, propertyKey: string | symbol) => {
+    declarations(target).routes.push({ path, methods, methodName: propertyKey });
+  };
+}
+
+/** Lines listing a group's subcommands, as `/help` shows them. */
+function groupHelp(subcommands: Declarations["subcommands"]): string {
+  return subcommands
+    .map((sub) => (sub.description ? `${sub.usage} — ${sub.description}` : sub.usage))
+    .join("\n");
+}
+
+/** The request a subcommand handler sees: the subcommand word removed from the arguments. */
+function withoutSubcommand(req: any): any {
+  const sub: string = req.args[0];
+  const raw: string = (req.raw_args ?? "").trimStart();
+  return {
+    ...req,
+    args: req.args.slice(1),
+    raw_args: raw.startsWith(sub) ? raw.slice(sub.length).trimStart() : req.raw_args,
+  };
+}
+
+/** A tool result as the wire `ToolCallResponse` carries it. */
+function toolResult(callId: string, value: any): any {
+  if (Buffer.isBuffer(value) || value instanceof Uint8Array) {
+    return { call_id: callId, success: true, error_message: "", raw_bytes: value };
+  }
+  const plain = value && typeof value === "object" && !Array.isArray(value);
+  return {
+    call_id: callId,
+    success: true,
+    error_message: "",
+    // JSON values keep their shape (a list stays a list); an object is the result itself.
+    structured_result: toProtoStruct(plain ? value : { result: value ?? null }),
+  };
+}
+
 /** Whether a handler's return value is a command response rather than reply content. */
 function isCommandResponse(value: any): boolean {
   return (
@@ -975,23 +1466,111 @@ export abstract class Plugin {
   context?: PluginContext;
 
   private readonly conversations = new Conversations();
+  /** Tools added with {@link addTool}, beside the declared ones. */
+  private readonly runtimeTools = new Map<string, ToolEntry & { handler: Function }>();
 
   /** The host's Core handle, or `undefined` in standalone mode. */
   get core(): CoreHandle | undefined {
     return this.context?.core;
   }
 
+  /**
+   * The plugin's namespace in the node's central key-value store (see `KV`).
+   *
+   * @throws In standalone mode, where there is no node to store anything in.
+   */
+  get kv(): KV {
+    if (!this.core) {
+      throw new Error("no Core connection: the KV store is unavailable in standalone mode");
+    }
+    return this.core.kv;
+  }
+
   /** The declarations of this plugin's class, validated. */
   private declared(): Declarations {
     const declared = declarations(Object.getPrototypeOf(this));
     // Core sends commands and triggers through the same RPC, naming either in `command`, so
-    // the two share one namespace.
-    const commandNames = new Set(declared.commands.map((c) => c.name));
+    // the two share one namespace (a command group is a command).
+    const commandNames = new Set([
+      ...declared.commands.map((c) => c.name),
+      ...declared.subcommands.map((c) => c.group),
+    ]);
     const clash = declared.triggers.filter((t) => commandNames.has(t.name)).map((t) => t.name);
     if (clash.length > 0) {
       throw new Error(`names used by both a command and a trigger: ${clash.join(", ")}`);
     }
+    const repeated = (keys: string[]) => keys.filter((key, i) => keys.indexOf(key) !== i);
+    const twice = [
+      ...repeated(declared.subcommands.map((c) => `/${c.group} ${c.name}`)),
+      ...repeated(declared.tools.map((t) => `tool ${t.name}`)),
+      ...repeated(declared.routes.flatMap((r) => r.methods.map((m) => `${m} ${r.path}`))),
+    ];
+    if (twice.length > 0) {
+      throw new Error(`declared more than once: ${[...new Set(twice)].join(", ")}`);
+    }
     return declared;
+  }
+
+  /** Every tool the plugin offers right now: the declared ones, then those added at runtime. */
+  private tools(): Array<ToolEntry & { handler: Function }> {
+    const declared = this.declared().tools.map((t) => ({
+      ...t,
+      handler: (this as any)[t.methodName] as Function,
+    }));
+    return [...declared, ...this.runtimeTools.values()];
+  }
+
+  /**
+   * Offers a new tool to the model while the plugin runs.
+   *
+   * Use it for tools that depend on configuration or on something discovered at runtime. The
+   * node picks the tool up from the next turn on; every change invalidates the provider's prefix
+   * cache once, so only call it when something really changed.
+   *
+   * @param handler Called like a {@link Tool} method, with `this` bound to the plugin.
+   * @throws If a tool of that name exists, or if the node could not reread the plugin's tools —
+   *   the tool is then not added, so the plugin and the node keep agreeing.
+   */
+  async addTool(
+    name: string,
+    options: ToolOptions,
+    handler: (args: any, event?: MessageEvent) => any,
+  ): Promise<void> {
+    const entry = toolEntry(name, options);
+    if (this.tools().some((t) => t.name === name)) {
+      throw new Error(`tool '${name}' already exists`);
+    }
+    this.runtimeTools.set(name, { ...entry, handler });
+    try {
+      await this.core?.refreshMeta();
+    } catch (err) {
+      this.runtimeTools.delete(name);
+      throw err;
+    }
+  }
+
+  /**
+   * Withdraws a tool added with {@link addTool}; resolves whether it existed.
+   *
+   * @throws If the node could not reread the plugin's tools; the tool then stays, so the plugin
+   *   keeps serving what the node still offers. Declared tools cannot be removed.
+   */
+  async removeTool(name: string): Promise<boolean> {
+    const removed = this.runtimeTools.get(name);
+    if (removed === undefined) {
+      if (this.declared().tools.some((t) => t.name === name)) {
+        throw new Error(`tool '${name}' is declared with @Tool and cannot be removed`);
+      }
+      return false;
+    }
+    this.runtimeTools.delete(name);
+    try {
+      await this.core?.refreshMeta();
+    } catch (err) {
+      this.runtimeTools.set(name, removed);
+      throw err;
+    }
+    return true;
   }
 
   /** Returns static metadata describing this plugin's identity, commands, and tools. */
@@ -999,15 +1578,38 @@ export abstract class Plugin {
     const declared = this.declared();
     const strip = <T extends { methodName: unknown }>({ methodName, ...rest }: T) => rest;
     const kinds = new Set<EventKind>([...declared.events.map((e) => e.kind), ...this.events]);
+    // A group is listed once, where it first appears; declaring @Command("<group>") gives it its
+    // description, access and scope, otherwise it gets the defaults.
+    const commands: CommandMeta[] = declared.commands.map(strip);
+    for (const sub of declared.subcommands) {
+      let group = commands.find((c) => c.name === sub.group);
+      if (!group) {
+        group = {
+          name: sub.group,
+          description: "",
+          usage: "",
+          priority: 500,
+          aliases: [],
+          access: accessValue("everyone"),
+          platforms: [],
+          conversation_kinds: [],
+        };
+        commands.push(group);
+      }
+      group.subcommands = [
+        ...(group.subcommands ?? []),
+        { name: sub.name, description: sub.description, usage: sub.usage },
+      ];
+    }
     return {
       id: this.id,
       name: this.name,
       version: this.version,
       author: this.author,
       description: this.description,
-      commands: declared.commands.map(strip),
+      commands,
       triggers: declared.triggers.map(strip),
-      tools: declared.tools.map((t) => ({
+      tools: this.tools().map((t) => ({
         name: t.name,
         description: t.description,
         parameters: t.parameters ? toProtoStruct(t.parameters) : undefined,
@@ -1020,6 +1622,8 @@ export abstract class Plugin {
       }),
       decorates_replies: declared.decorator !== undefined,
       prepares_turns: declared.preparer !== undefined,
+      rewrites_system_prompt: declared.rewriter !== undefined,
+      serves_http: declared.routes.length > 0,
     };
   }
 
@@ -1068,9 +1672,25 @@ export abstract class Plugin {
     }
 
     const declared = this.declared();
+    const subcommands = declared.subcommands.filter((c) => c.group === req.command);
+    const sub = subcommands.find((c) => c.name === req.args?.[0]);
+    if (sub) {
+      // Core routes `/todo add x` to the group `todo`; the subcommand handler sees only `x`.
+      req = withoutSubcommand(req);
+    }
     const entry =
+      sub ??
       declared.commands.find((c) => c.name === req.command) ??
       declared.triggers.find((t) => t.name === req.command);
+    if (!entry && subcommands.length > 0) {
+      // A bare `/todo`, or an unknown subcommand, with no `@Command("todo")` to take it.
+      return {
+        success: true,
+        replies: [MessageSegment.text(groupHelp(subcommands))],
+        error_message: "",
+        capture_seconds: 0,
+      };
+    }
     const handler = entry && (this as any)[entry.methodName];
     if (typeof handler !== "function") {
       return {
@@ -1130,9 +1750,8 @@ export abstract class Plugin {
 
   /** Executes an LLM tool call dispatched by the Core microkernel. */
   async onCallTool(req: any): Promise<any> {
-    const entry = this.declared().tools.find((t) => t.name === req.tool_name);
-    const handler = entry && (this as any)[entry.methodName];
-    if (typeof handler !== "function") {
+    const tool = this.tools().find((t) => t.name === req.tool_name);
+    if (!tool || typeof tool.handler !== "function") {
       return {
         call_id: req.call_id,
         success: false,
@@ -1140,26 +1759,17 @@ export abstract class Plugin {
       };
     }
 
-    const args = req.structured_args ? fromProtoStruct(req.structured_args) : {};
     const event = req.context ? new MessageEvent(req.context, this.core) : undefined;
-    let res: any;
     try {
-      res = await handler.call(this, args, event);
+      let args = req.structured_args ? fromProtoStruct(req.structured_args) : {};
+      if (tool.args !== undefined) {
+        args = bindArgs(tool.args, args);
+      }
+      return toolResult(req.call_id, await tool.handler.call(this, args, event));
     } catch (err: any) {
       // The model is told the tool failed and can explain or retry.
       return { call_id: req.call_id, success: false, error_message: err?.message ?? String(err) };
     }
-
-    if (Buffer.isBuffer(res) || res instanceof Uint8Array) {
-      return { call_id: req.call_id, success: true, error_message: "", raw_bytes: res };
-    }
-    const result = res && typeof res === "object" && !Array.isArray(res) ? res : { result: String(res) };
-    return {
-      call_id: req.call_id,
-      success: true,
-      error_message: "",
-      structured_result: toProtoStruct(result),
-    };
   }
 
   /**
@@ -1246,6 +1856,47 @@ export abstract class Plugin {
     return { text: text ?? "" };
   }
 
+  /** Runs the plugin's `@OnLlmRequest` handler; an unset `system_prompt` keeps the prompt. */
+  async onLlmRequest(req: any): Promise<any> {
+    const method = this.declared().rewriter;
+    if (method === undefined) {
+      return {};
+    }
+    const result = await (this as any)[method](
+      new MessageEvent(req.context ?? {}, this.core),
+      req.system_prompt ?? "",
+      req.session_id ?? "",
+    );
+    if (result === undefined || result === null) {
+      return {};
+    }
+    if (typeof result !== "string") {
+      throw new TypeError(`@OnLlmRequest must return a string or undefined, got ${typeof result}`);
+    }
+    return { system_prompt: result };
+  }
+
+  /** Routes a gateway request to the plugin's `@HttpRoute` handler for its path and method. */
+  async onHttpRequest(req: any): Promise<any> {
+    const request = HttpRequest.fromProto(req);
+    const routes = this.declared().routes.filter((r) => r.path === request.path);
+    if (routes.length === 0) {
+      return { status: 404, headers: [], body: Buffer.alloc(0) };
+    }
+    const route = routes.find((r) => r.methods.includes(request.method as HttpMethod));
+    if (!route) {
+      const allow = [...new Set(routes.flatMap((r) => r.methods))].sort().join(", ");
+      return { status: 405, headers: [{ name: "allow", value: allow }], body: Buffer.alloc(0) };
+    }
+    try {
+      return toHttpResponse(await (this as any)[route.methodName](request)).toProto();
+    } catch (err) {
+      // The caller learns only that it failed; details may be private and go to the host's log.
+      console.error(`[kanon-sdk] HTTP ${request.method} ${request.path} failed:`, err);
+      return { status: 500, headers: [], body: Buffer.alloc(0) };
+    }
+  }
+
   /**
    * Delivers an outbound message to a target platform.
    *
@@ -1280,6 +1931,11 @@ export {
 } from "./segments.js";
 export type { LlmMessage, MessageSegmentItem, Replyable } from "./segments.js";
 export { fromProtoStruct, fromProtoValue, toProtoStruct, toProtoValue } from "./struct.js";
+export { KV, MAX_VALUE_BYTES } from "./kv.js";
+export { Param, s } from "./schema.js";
+export type { ArgsOf, ArgsSpec, JsonSchema } from "./schema.js";
+export { HttpRequest, HttpResponse } from "./web.js";
+export type { HttpMethod } from "./web.js";
 
 export {
   startCoreWatchdog,

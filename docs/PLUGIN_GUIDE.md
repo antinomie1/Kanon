@@ -14,12 +14,12 @@
 | 能力 | 适用场景 | Python | TypeScript | Rust |
 | --- | --- | --- | --- | --- |
 | 斜杠命令 | `/weather 北京` | `@command` | `@Command` | `.command(CommandSpec, ..)` |
-| 命令组 | `/todo add 买牛奶`、`/todo list` | `@command("todo add")` | — | — |
+| 命令组 | `/todo add 买牛奶`、`/todo list` | `@command("todo add")` | `@Command("todo add")` | — |
 | 正则触发器 | 不带斜杠的关键词、`早安` | `@trigger` | `@Trigger` | `.trigger(TriggerSpec, ..)` |
 | 多轮对话 | 问答、确认、小游戏 | `event.wait_next()` | `event.waitNext()` | `event.wait_next(..)` |
-| LLM 工具 | 让模型调用你的函数 | `@tool`（由签名推断 Schema） | `@Tool` | `.tool(ToolSpec, ..)` |
-| 运行时增删工具 | 按配置或登录状态开放工具 | `add_tool` / `remove_tool` | — | — |
-| 改写系统提示 | 按群定制的规则、长期设定 | `@on_llm_request` | — | — |
+| LLM 工具 | 让模型调用你的函数 | `@tool`（由签名推断 Schema） | `@Tool(name, { args })`（`s` 构造 Schema） | `.tool(ToolSpec, ..)` |
+| 运行时增删工具 | 按配置或登录状态开放工具 | `add_tool` / `remove_tool` | `addTool` / `removeTool` | — |
+| 改写系统提示 | 按群定制的规则、长期设定 | `@on_llm_request` | `@OnLlmRequest()` | — |
 | 管理动作 | 控制台按钮：扫码登录、诊断 | `@action` | `@Action` | `.action(name, ..)` |
 | 事件订阅 | 入群欢迎、发送审计、回答统计 | `@on_event` | `@OnEvent` | `.subscribe(EventKind, ..)` |
 | 回复装饰 | 统一签名、敏感词替换 | `@decorate_reply` | `@DecorateReply()` | `.decorate_reply(..)` |
@@ -27,11 +27,11 @@
 | 主动发消息 | 定时提醒、订阅推送 | `core.send_message` | `core.sendMessage` | `core.send_message` |
 | 独立调用模型 | 摘要、翻译、分类 | `core.request_llm` | `core.requestLlm` | `core.request_llm` |
 | 平台原生 API | 禁言、取群成员列表 | `core.call_platform_api` | `core.callPlatformApi` | `core.call_platform_api` |
-| 中心 KV | 计数器、开关、按用户的设置 | `self.kv` | — | — |
-| 调用智能体 | 让模型带着工具完成一件事 | `core.run_agent` | — | — |
-| 对话与人设 | 列出 / 切换 / 导入对话，维护人设 | `core.list_conversations` 等 | — | — |
-| 渲染图片 | 排行榜、卡片、图表 | `core.render_text` / `render_svg` | — | — |
-| HTTP 路由 | Webhook、给控制台页面的接口 | `@http_route` | — | — |
+| 中心 KV | 计数器、开关、按用户的设置 | `self.kv` | `this.kv` | — |
+| 调用智能体 | 让模型带着工具完成一件事 | `core.run_agent` | `core.runAgent` | — |
+| 对话与人设 | 列出 / 切换 / 导入对话，维护人设 | `core.list_conversations` 等 | `core.listConversations` 等 | — |
+| 渲染图片 | 排行榜、卡片、图表 | `core.render_text` / `render_svg` | `core.renderText` / `renderSvg` | — |
+| HTTP 路由 | Webhook、给控制台页面的接口 | `@http_route` | `@HttpRoute` | — |
 | 平台适配器 | 接入新的聊天平台 | `[adapter]` + `on_deliver_message` | 同左 | 同左 |
 
 ---
@@ -247,6 +247,7 @@ async def list_todos(self) -> str: ...
 - 核心只认识组名 `todo`：路由、同名冲突、权限与作用域都按组名计算；`/help` 在组名下逐行列出子命令。
 - 子命令处理函数收到的 `args` / `raw_args` 已去掉子命令本身。
 - 只发 `/todo`，或子命令不存在时，SDK 回复子命令列表；如果同时声明了 `@command("todo")`，则由它处理这两种情况，组的描述、别名、`access`、作用域与优先级也写在它上面。子命令只能设置 `description` 与 `usage`，写其他参数会在加载时报错。
+- TS 写法相同：`@Command("todo add", { description, usage })`，处理函数收到的 `event.args` / `event.rawArgs` 同样已去掉子命令。
 
 ### 5.3 正则触发器
 
@@ -369,6 +370,26 @@ async def fetch_weather(self, params: dict, event) -> dict:
 - 抛出异常时，模型会得到一次失败的工具调用（含异常信息），可以自行解释或重试。
 - 工具名与参数 Schema 会进入模型请求前缀。核心对工具按名称排序、对 Schema 键排序以保证前缀缓存稳定；不要随消息变化改变工具声明。
 
+**TypeScript**：类型在运行时不存在，参数用 `s` 描述，处理函数收到参数对象与消息：
+
+```typescript
+@Tool("fetch_weather", {
+  description: "获取城市的实时天气与预报。",
+  args: {
+    city: s.string("城市名，如“北京”"),
+    days: s.integer("预报天数，1–7").default(1),
+    unit: s.enum(["c", "f"]).optional(),
+  },
+})
+async fetchWeather({ city, days }: { city: string; days: number }, event?: MessageEvent) {
+  return { city, temp: 25 };
+}
+```
+
+- 构造器：`s.string`、`s.number`、`s.integer`、`s.boolean`、`s.enum([...])`、`s.array(item)`、`s.object({...})`、`s.any()`；每个都可接说明文字，并可链式调用 `.optional()`、`.default(value)`、`.describe(text)`。
+- 参数默认必填。SDK 在调用前补上默认值，并把未知参数、缺少的必填参数作为失败的工具调用告诉模型；不重复校验类型。
+- 仍可用 `parameters` 传入手写的 JSON Schema（与 `args` 二选一），此时参数原样传入。
+
 **运行时增删工具**：工具集合需要随配置或状态变化时（例如登录后才开放的工具），用 `add_tool` / `remove_tool`：
 
 ```python
@@ -379,6 +400,7 @@ async def on_config_reload(self, config: dict) -> None:
         await self.remove_tool("search")
 ```
 
+- TS：`await this.addTool("search", { description, args }, async ({ query }) => ...)`、`await this.removeTool("search")`；用 `@Tool` 声明的工具不能移除。
 - 两者都会请核心重新读取插件元数据（`RefreshPluginMeta`），**下一轮**起生效，正在进行的轮次不受影响。核心拒绝时抛出异常，SDK 回滚本地改动，两边始终一致。
 - 每次增删都会改变请求前缀，使提供商的前缀缓存失效一次，只在状态真正变化时调用。
 
@@ -407,7 +429,7 @@ async def welcome(self, event: MessageEvent) -> None:
 
 通知类型包括 `member_join`、`bot_join`、`friend_add`、`poke`、`recall`、`friend_request`、`group_invite`，具体取决于适配器支持哪些。
 
-事件是**通知**：核心不等待结果，每个订阅者最多 5 秒，失败只记日志。只有声明了订阅的插件才会收到对应事件。智能体与工具事件覆盖聊天中的每一轮（包括 `run_agent(in_conversation=True)`），适合做统计、审计或“正在查询…”之类的提示；Python 中它们是原始 protobuf 消息，`context` 字段即对应的聊天消息。
+事件是**通知**：核心不等待结果，每个订阅者最多 5 秒，失败只记日志。只有声明了订阅的插件才会收到对应事件。智能体与工具事件覆盖聊天中的每一轮（包括 `run_agent(in_conversation=True)`），适合做统计、审计或“正在查询…”之类的提示；Python 与 TypeScript 中它们是原始 protobuf 消息（TS 为 snake_case 字段的普通对象），`context` 字段即对应的聊天消息。
 
 ### 7.2 回复装饰
 
@@ -457,6 +479,7 @@ async def chat_rules(self, event: MessageEvent, system_prompt: str, session_id: 
     return f"{system_prompt}\n\n本群规则：\n{rules}" if rules else None
 ```
 
+- TS 用 `@OnLlmRequest()` 装饰方法 `(event, systemPrompt, sessionId) => string | undefined`。
 - 每轮一次，在该轮首个模型请求前调用；返回新的系统提示即替换，返回 `None` 表示不改。多个插件按优先级串行，后者看到前者的结果。参数可以只取前几个（`event`、`system_prompt`、`session_id`）。
 - **结果必须确定**：系统提示位于每个请求的最前面，同一会话应返回相同文本。时间、计数器、检索结果等按消息变化的内容放进 `@prepare_turn`，否则每一轮都会使前缀缓存失效。
 - 只在会话轮次中调用；控制台聊天、`request_llm` 与私有 `run_agent` 不会触发。限时 3 秒，出错或超时则跳过该插件。
@@ -530,7 +553,8 @@ keys = await self.kv.keys("visits:")
 await self.kv.delete("captcha:123")
 ```
 
-- 值是任意 JSON 可序列化的对象，落盘于节点的 `data/kv.db`，重启后仍在；每个插件一个命名空间，互不可见。
+- TS：`await this.kv.get(key, fallback)`、`await this.kv.set(key, value, { ttl: 300 })`、`delete`、`keys`。
+- 值是任意 JSON 可序列化的对象，落盘于节点的 `data/kv.db`，重启后仍在；每个插件一个命名空间，互不可见。各语言 SDK 都以 UTF-8 JSON 存储，彼此可读。
 - `get` 在键不存在或已过期时返回默认值；`ttl` 为秒数，省略即永不过期。单个值至多 1 MiB，超出时在本地就报错。
 - 适合小状态。大数据或需要查询的数据请在 `data_dir` 中使用 SQLite 等本地存储。
 
@@ -547,6 +571,7 @@ await event.reply(result.content)
 result = await self.core.run_agent(event.text, event=event, in_conversation=True)
 ```
 
+- TS：`await this.core.runAgent(prompt, { event, inConversation, images, systemPrompt, model, useTools, maxSteps })`。
 - 结果为 `content`（最终回答）、`attachments`（工具产出的图片等，需要自己发送）、`tools`（按顺序调用过的工具）与 `session_id`。**不会**自动发送到聊天。
 - `event` 决定由哪个实例回答（模型、可用插件与工具策略），并作为工具调用的上下文；`in_conversation=True` 时必填。
 - 私有运行（默认）使用一次性会话，可通过 `system_prompt`、`model`、`use_tools`、`max_steps` 调整；在对话中运行时这些设定以会话为准。
@@ -565,6 +590,7 @@ await self.core.upsert_persona("translator", "Translator", "你是一名专业�
 - `list_conversations` / `new_conversation` / `switch_conversation` / `delete_conversation` 与内置 `/ls`、`/new`、`/switch`、`/del` 是同一份实现，都返回操作之后的 `ConversationInfo` 列表（`session_id`、`current`、`title`、`message_count`、`last_active_at`）。代替用户调用时请自行检查权限。
 - `append_conversation` 只能追加完整的“用户、助手”轮次到当前对话；已有消息不能修改。
 - `list_personas` / `upsert_persona` / `delete_persona` 维护与控制台「人设」页相同的目录。
+- TS 为驼峰命名（`listConversations`、`switchConversation(event, sessionId)`、`appendConversation(event, [{ role: "user", text }, ...])`、`upsertPersona` 等），返回字段同样为驼峰（`sessionId`、`messageCount`）。
 
 ### 8.8 渲染图片
 
@@ -575,7 +601,7 @@ await event.reply(card)
 chart = await self.core.render_svg('<svg xmlns="http://www.w3.org/2000/svg" ...>...</svg>')
 ```
 
-- 返回可直接发送的图片消息段。文本按宽度自动换行，`# ` 开头的行是标题；SVG 按自身尺寸渲染。
+- 返回可直接发送的图片消息段（TS：`await this.core.renderText(text, 480)`、`renderSvg(svg)`）。文本按宽度自动换行，`# ` 开头的行是标题；SVG 按自身尺寸渲染。
 - 由节点用纯 Rust 渲染，不需要浏览器；字体取自节点系统。渲染结果保留 24 小时，请渲染后尽快发送。
 
 ---
@@ -658,6 +684,7 @@ async def webhook(self, request: HttpRequest) -> HttpResponse:
     return HttpResponse(status=204)
 ```
 
+- TS：`@HttpRoute("/stats")`、`@HttpRoute("/webhook", { methods: ["POST"] })`，处理函数收到同样的 `HttpRequest`，返回值规则相同（`new HttpResponse(401)`、`HttpResponse.json(value, 201)`）。
 - `HttpRequest` 有 `method`、`path`、`query`（`request.arg(name)` 取第一个值）、`headers`（小写名）、`body`，以及 `text()`、`json()`。
 - 返回字典、列表等即为 JSON；返回 `str` 为纯文本，`bytes` 为二进制，`None` 为 `204`；需要状态码或响应头时返回 `HttpResponse`（`HttpResponse.json(...)`、`.text(...)`、`.html(...)`）。
 - 路径精确匹配。未知路径返回 `404`，方法不符返回 `405`（附 `Allow` 头），处理函数抛出异常返回 `500`——异常只打印到宿主的标准错误，不会发给调用方。

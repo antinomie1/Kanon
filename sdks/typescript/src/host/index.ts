@@ -31,6 +31,7 @@ const CORE_READY_TIMEOUT_MS = 2000;
  */
 async function connectCore(
   coreSockPath: string | undefined,
+  identity: { hostId: string; pluginId: string },
 ): Promise<CoreHandle | undefined> {
   if (!coreSockPath) {
     console.warn(
@@ -39,7 +40,9 @@ async function connectCore(
     return undefined;
   }
 
-  const handle = new CoreHandle(coreSockPath);
+  // The identity lets the plugin's KV namespace, agent runs, renders and metadata refreshes name
+  // their caller without the plugin passing its own id around.
+  const handle = new CoreHandle(coreSockPath, undefined, identity);
   if (!(await handle.waitForReady(CORE_READY_TIMEOUT_MS))) {
     console.warn(
       `Core endpoint '${coreSockPath}' is unreachable: starting in standalone mode, ctx.core will be undefined`,
@@ -207,7 +210,7 @@ async function main(): Promise<void> {
   const dataDir = path.resolve(`./data/plugins/${meta.id}`);
   fs.mkdirSync(dataDir, { recursive: true });
 
-  const coreHandle = await connectCore(coreSockPath);
+  const coreHandle = await connectCore(coreSockPath, { hostId, pluginId: meta.id });
   const ctx: PluginContext = {
     dataDir,
     // The Core pushes configuration only when the operator changes it, so the last saved
@@ -365,6 +368,29 @@ async function main(): Promise<void> {
       } catch (err: any) {
         // Surfaced as an RPC error: Core then answers without this plugin's context.
         callback({ code: grpc.status.INTERNAL, message: err?.message || "Prepare error" });
+      }
+    },
+    OnLlmRequest: async (call: any, callback: any) => {
+      if (typeof (plugin as any).onLlmRequest !== "function") {
+        callback(null, {});
+        return;
+      }
+      try {
+        callback(null, await plugin.onLlmRequest(call.request));
+      } catch (err: any) {
+        // Surfaced as an RPC error: Core then continues from the prompt it had.
+        callback({ code: grpc.status.INTERNAL, message: err?.message || "LlmRequest error" });
+      }
+    },
+    OnHttpRequest: async (call: any, callback: any) => {
+      if (typeof (plugin as any).onHttpRequest !== "function") {
+        callback(null, { status: 404, headers: [], body: Buffer.alloc(0) });
+        return;
+      }
+      try {
+        callback(null, await plugin.onHttpRequest(call.request));
+      } catch (err: any) {
+        callback({ code: grpc.status.INTERNAL, message: err?.message || "HttpRequest error" });
       }
     },
     OnDeliverMessage: async (call: any, callback: any) => {

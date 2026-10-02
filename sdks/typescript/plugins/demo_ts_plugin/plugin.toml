@@ -15,7 +15,20 @@ description = "TypeScript-based greeting command"
 usage = "/tsgreet <name>"
 priority = 100
 
+[[commands]]
+name = "note"
+usage = "/note add <text> | /note list"
+
+[[commands]]
+name = "rules"
+description = "Set extra instructions for the assistant in this chat"
+usage = "/rules [text]"
+
 [[tools]]
 name = "ts_calc"
 description = "TypeScript mathematical calculation tool"
 parameters = { type = "object", properties = { expr = { type = "string", description = "Expression to evaluate" } } }
+
+[[tools]]
+name = "dice"
+description = "Rolls dice for the user."

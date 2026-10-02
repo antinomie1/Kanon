@@ -253,17 +253,6 @@ export class CommandEvent extends MessageEvent {
   }
 
   /**
-   * Ends this turn and waits for the same sender's next message in this conversation.
-   *
-   * Replies made so far are sent first. The next message skips commands and the model and
-   * comes back here as a new {@link CommandEvent} with `continuation` set.
-   *
-   * @param timeoutSeconds Seconds to wait, at most {@link MAX_WAIT_SECONDS}.
-   * @throws WaitTimeoutError If the sender did not answer in time (or a newer `waitNext` in
-   *   the same conversation replaced this one). The handler may still `reply` afterwards;
-   *   those replies are delivered on their own.
-   */
-  /**
    * Hands this message on to the model once the handler returns.
    *
    * Core then continues as if no command or trigger had matched: replies made in this turn are
@@ -283,6 +272,17 @@ export class CommandEvent extends MessageEvent {
     turn.modelText = text;
   }
 
+  /**
+   * Ends this turn and waits for the same sender's next message in this conversation.
+   *
+   * Replies made so far are sent first. The next message skips commands and the model and
+   * comes back here as a new {@link CommandEvent} with `continuation` set.
+   *
+   * @param timeoutSeconds Seconds to wait, at most {@link MAX_WAIT_SECONDS}.
+   * @throws WaitTimeoutError If the sender did not answer in time (or a newer `waitNext` in
+   *   the same conversation replaced this one). The handler may still `reply` afterwards;
+   *   those replies are delivered on their own.
+   */
   async waitNext(timeoutSeconds = 60): Promise<CommandEvent> {
     const session = this.session;
     if (!session) {

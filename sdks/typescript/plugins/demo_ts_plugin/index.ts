@@ -5,12 +5,17 @@
 import {
   Command,
   CommandEvent,
+  HttpRequest,
+  HttpRoute,
+  MessageEvent,
   MessageSegment,
+  OnLlmRequest,
   Plugin,
   PluginContext,
   Tool,
   Trigger,
   WaitTimeoutError,
+  s,
 } from "../../src/sdk/index.js";
 
 export default class DemoTsPlugin extends Plugin {
@@ -84,5 +89,75 @@ export default class DemoTsPlugin extends Plugin {
       result: 42,
       summary: "Calculated via TypeScript plugin tool",
     };
+  }
+
+  // --- Command groups backed by the node's KV store --------------------------------------------
+  // "/note add <text>" and "/note list" form one group; "/note" alone lists its subcommands.
+
+  @Command("note add", { description: "Save a note for this chat", usage: "/note add <text>" })
+  async noteAdd(event: CommandEvent): Promise<string> {
+    if (!event.rawArgs) {
+      return "Usage: /note add <text>";
+    }
+    const key = `notes:${event.channelId}`;
+    const notes: string[] = await this.kv.get(key, []);
+    notes.push(event.rawArgs);
+    await this.kv.set(key, notes);
+    return `Saved note #${notes.length}.`;
+  }
+
+  @Command("note list", { description: "Show this chat's notes" })
+  async noteList(event: CommandEvent): Promise<string> {
+    const notes: string[] = await this.kv.get(`notes:${event.channelId}`, []);
+    return notes.map((note, i) => `${i + 1}. ${note}`).join("\n") || "No notes yet.";
+  }
+
+  // --- A tool with described arguments ---------------------------------------------------------
+
+  @Tool("dice", {
+    description: "Rolls dice for the user.",
+    args: {
+      sides: s.integer("Faces on each die.").default(6),
+      count: s.integer("How many dice to roll, at most 20.").default(1),
+      mode: s.enum(["sum", "each"], "Return the total, or every roll.").default("sum"),
+    },
+  })
+  async dice({ sides, count, mode }: { sides: number; count: number; mode: "sum" | "each" }) {
+    if (count < 1 || count > 20 || sides < 2) {
+      throw new Error("count must be 1-20 and sides at least 2");
+    }
+    const rolls = Array.from({ length: count }, () => 1 + Math.floor(Math.random() * sides));
+    return mode === "sum" ? rolls.reduce((a, b) => a + b, 0) : rolls;
+  }
+
+  // --- Rewriting the system prompt for one chat ------------------------------------------------
+
+  @OnLlmRequest()
+  async chatRules(event: MessageEvent, systemPrompt: string): Promise<string | undefined> {
+    const rules = await this.kv.get(`rules:${event.channelId}`);
+    // Undefined keeps the prompt unchanged.
+    return rules ? `${systemPrompt}\n\nRules for this chat:\n${rules}` : undefined;
+  }
+
+  @Command("rules", {
+    description: "Set extra instructions for the assistant in this chat",
+    usage: "/rules [text]",
+    access: "admins_in_groups",
+  })
+  async setRules(event: CommandEvent): Promise<string> {
+    if (event.rawArgs) {
+      await this.kv.set(`rules:${event.channelId}`, event.rawArgs);
+      return "Rules saved; the assistant follows them from the next message.";
+    }
+    await this.kv.delete(`rules:${event.channelId}`);
+    return "Rules cleared.";
+  }
+
+  // --- An HTTP route under /api/v1/plugins/org.kanon.plugin.demo_ts/http/ -----------------------
+
+  @HttpRoute("/notes")
+  async notesApi(request: HttpRequest) {
+    const channel = request.arg("channel", "");
+    return { channel, notes: await this.kv.get(`notes:${channel}`, []) };
   }
 }
