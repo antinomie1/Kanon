@@ -458,6 +458,24 @@ export interface PluginMeta {
   health?: HostHealth | null;
   commands: CommandDescriptor[];
   tools: ToolDescriptor[];
+  author?: string;
+  runtime?: string | null;
+  /** Project homepage declared by the manifest. */
+  homepage?: string;
+  /** Source repository declared by the manifest. */
+  repository?: string;
+  /** Platforms the plugin was written for; empty means every platform. */
+  platforms?: string[];
+  /** Node versions the plugin supports, as a semver requirement. */
+  kanon_version?: string;
+  /** Whether the plugin ships console pages under `/api/v1/plugins/<id>/pages/`. */
+  has_pages?: boolean;
+  /** Whether the running plugin serves HTTP routes under `/api/v1/plugins/<id>/http/`. */
+  serves_http?: boolean;
+  /** Display-text translations keyed by locale tag (`zh-CN`), then by text key. */
+  i18n?: Record<string, Record<string, string>>;
+  /** Problems found in the plugin's translation files. */
+  i18n_errors?: string[];
 }
 
 /** Where one callable tool comes from. */
@@ -570,6 +588,62 @@ export interface PluginsResponse {
   total: number;
   hosts: PluginHost[];
   plugins: PluginMeta[];
+}
+
+/**
+ * JSON body of `POST /api/v1/plugins/install`: exactly one of `path`, `url` or `git`.
+ *
+ * `replace` must be set to overwrite a plugin already installed under the same id; without it the
+ * node answers `409`, so an upgrade is always a deliberate act.
+ */
+export interface InstallPluginRequest {
+  path?: string;
+  url?: string;
+  git?: string;
+  /** Branch or tag to clone; only with `git`. */
+  ref?: string;
+  replace?: boolean;
+}
+
+/** One plugin offered by a market index, annotated for this node. */
+export interface MarketPlugin {
+  id: string;
+  name: string;
+  description: string;
+  author: string;
+  version: string;
+  repository?: string;
+  download_url?: string;
+  kanon_version?: string;
+  platforms: string[];
+  homepage?: string;
+  /** URL of the index that listed it. */
+  source: string;
+  /** Version installed on this node, when installed. */
+  installed_version?: string;
+  /** Whether the entry's `kanon_version` admits this node. */
+  compatible: boolean;
+  incompatible_reason?: string;
+}
+
+/** Result of reading one configured market index. */
+export interface MarketSource {
+  url: string;
+  name?: string;
+  plugins: number;
+  /** Why the index could not be read at all. */
+  error?: string;
+  /** Entries of this index that were skipped, one sentence each. */
+  warnings: string[];
+}
+
+/** Response of `GET /api/v1/plugins/market`. */
+export interface MarketResponse {
+  /** Whether any index is configured in `data/system.json`. */
+  configured: boolean;
+  hint?: string;
+  sources: MarketSource[];
+  plugins: MarketPlugin[];
 }
 
 export interface InstallPluginResponse {

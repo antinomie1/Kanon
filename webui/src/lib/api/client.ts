@@ -17,10 +17,12 @@ import type {
   EventPolicyResponse,
   FetchModelsRequest,
   FetchModelsResponse,
+  InstallPluginRequest,
   InstallPluginResponse,
   InstanceMutationResponse,
   InstanceRequest,
   InstancesResponse,
+  MarketResponse,
   McpCatalog,
   McpServerView,
   McpStateResponse,
@@ -36,6 +38,7 @@ import type {
   PersonasResponse,
   PluginConfigResponse,
   PluginConfigUpdateResponse,
+  PluginMeta,
   PluginStateResponse,
   PluginsResponse,
   ProvidersCatalog,
@@ -245,19 +248,26 @@ export const api = {
       { method: 'PUT', body: JSON.stringify({ enabled }) },
     ),
 
-  installPluginPath: (path: string) =>
+  // One plugin as the catalog presents it, including its translations.
+  getPlugin: (pluginId: string) =>
+    request<PluginMeta>(`/api/v1/plugins/${encodeURIComponent(pluginId)}`),
+  // Installs from a folder on the node, a package URL or a Git repository.
+  installPlugin: (body: InstallPluginRequest) =>
     request<InstallPluginResponse>('/api/v1/plugins/install', {
       method: 'POST',
-      body: JSON.stringify({ path }),
+      body: JSON.stringify(body),
     }),
-  installPluginArchive: (file: File) => {
+  installPluginArchive: (file: File, replace = false) => {
     const formData = new FormData();
     formData.append('file', file);
+    if (replace) formData.append('replace', 'true');
     return sendMultipart<InstallPluginResponse>(
       '/api/v1/plugins/install',
       formData,
     );
   },
+  // Plugins offered by the market indexes configured in data/system.json.
+  getPluginMarket: () => request<MarketResponse>('/api/v1/plugins/market'),
   getPluginConfig: (pluginId: string) =>
     request<PluginConfigResponse>(
       `/api/v1/plugins/${encodeURIComponent(pluginId)}/config`,

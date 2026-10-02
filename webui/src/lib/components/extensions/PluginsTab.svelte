@@ -1,8 +1,15 @@
 <script lang="ts">
-import { Plus, Puzzle, RefreshCw } from 'lucide-svelte';
+import {
+  AppWindow,
+  ExternalLink,
+  Plus,
+  Puzzle,
+  RefreshCw,
+} from 'lucide-svelte';
 import { untrack } from 'svelte';
 import { api } from '../../api/client';
 import { errorText } from '../../format';
+import { pluginText, pluginTexts } from '../../pluginText';
 import { confirmDialog } from '../../stores/confirm.svelte';
 import { i18n, t } from '../../stores/i18n.svelte';
 import { toasts } from '../../stores/toast.svelte';
@@ -12,13 +19,15 @@ import EmptyState from '../ui/EmptyState.svelte';
 import Switch from '../ui/Switch.svelte';
 import InstallPluginModal from './InstallPluginModal.svelte';
 import PluginConfigDrawer from './PluginConfigDrawer.svelte';
+import PluginPageModal from './PluginPageModal.svelte';
 
 /**
  * Installed plugins, one card each, whether or not a host process runs them.
  *
  * A plugin without a host is listed too: a disabled plugin is exactly the one an operator needs
  * to find again to turn it back on. Process details (runtime, PID, host) stay on one quiet line
- * for whoever needs them.
+ * for whoever needs them. Names, descriptions and command help come from the plugin's
+ * translations when it ships one for the console's language.
  */
 
 interface Row {
@@ -36,6 +45,16 @@ let busy = $state<Record<string, boolean>>({});
 
 let installOpen = $state(false);
 let configFor = $state<string | null>(null);
+let pageFor = $state<string | null>(null);
+
+/** A plugin's display name in the console's language. */
+const nameOf = (plugin: PluginMeta) => pluginText(plugin, 'name', plugin.name);
+const configPlugin = $derived(
+  rows.find((row) => row.plugin.id === configFor)?.plugin,
+);
+const pagePlugin = $derived(
+  rows.find((row) => row.plugin.id === pageFor)?.plugin,
+);
 
 /**
  * Loads the catalog. Only the refresh button passes `rescan`: the node reads its plugin directory
@@ -104,7 +123,7 @@ function listJoin(items: string[]): string {
 async function setEnabled(plugin: PluginMeta, next: boolean) {
   if (!next) {
     const yes = await confirmDialog({
-      title: t('extensions.plugin_off_title', { name: plugin.name }),
+      title: t('extensions.plugin_off_title', { name: nameOf(plugin) }),
       message: t('extensions.plugin_off_text'),
       confirm: t('extensions.plugin_off_confirm'),
     });
@@ -115,13 +134,16 @@ async function setEnabled(plugin: PluginMeta, next: boolean) {
     await api.setPluginEnabled(plugin.id, next);
     toasts.ok(
       t(next ? 'extensions.on_toast' : 'extensions.off_toast', {
-        name: plugin.name,
+        name: nameOf(plugin),
       }),
     );
     await load();
   } catch (e) {
     toasts.error(
-      t('extensions.toggle_failed', { name: plugin.name, error: errorText(e) }),
+      t('extensions.toggle_failed', {
+        name: nameOf(plugin),
+        error: errorText(e),
+      }),
     );
   } finally {
     busy = { ...busy, [plugin.id]: false };
@@ -134,9 +156,9 @@ async function setEnabled(plugin: PluginMeta, next: boolean) {
  */
 async function restart(row: Row) {
   if (!row.host) return;
-  const names = row.host.plugins.map((plugin) => plugin.name);
+  const names = row.host.plugins.map(nameOf);
   const yes = await confirmDialog({
-    title: t('extensions.restart_title', { name: row.plugin.name }),
+    title: t('extensions.restart_title', { name: nameOf(row.plugin) }),
     message:
       names.length > 1
         ? t('extensions.restart_text_shared', { names: listJoin(names) })
@@ -147,7 +169,7 @@ async function restart(row: Row) {
   busy = { ...busy, [row.plugin.id]: true };
   try {
     await api.restartPlugin(row.plugin.id);
-    toasts.ok(t('extensions.restarted_toast', { name: row.plugin.name }));
+    toasts.ok(t('extensions.restarted_toast', { name: nameOf(row.plugin) }));
     await load();
   } catch (e) {
     toasts.error(errorText(e));
@@ -195,7 +217,7 @@ async function restart(row: Row) {
       <article class="flex flex-wrap items-start gap-x-6 gap-y-3 py-5">
         <div class="flex min-w-0 flex-1 basis-[340px] flex-col gap-1.5">
           <div class="flex flex-wrap items-center gap-x-2.5 gap-y-1">
-            <h2 class="m-0 text-[17px] font-semibold">{plugin.name}</h2>
+            <h2 class="m-0 text-[17px] font-semibold">{nameOf(plugin)}</h2>
             <span class="text-[13px] text-fg3">v{plugin.version}</span>
             <span class="chip chip-sm {CHIP[status.tone]}">
               {#if status.tone !== 'idle'}<i class="dot dot-{status.tone}"></i>{/if}
@@ -203,7 +225,9 @@ async function restart(row: Row) {
             </span>
           </div>
           {#if plugin.description}
-            <p class="m-0 max-w-[72ch] text-[14px] text-fg2">{plugin.description}</p>
+            <p class="m-0 max-w-[72ch] text-[14px] text-fg2">
+              {pluginText(plugin, 'description', plugin.description)}
+            </p>
           {/if}
           {#if plugin.commands.length > 0 || plugin.tools.length > 0}
             <div class="flex flex-wrap items-center gap-x-4 gap-y-1.5 text-[13.5px]">
@@ -211,7 +235,7 @@ async function restart(row: Row) {
                 <span class="flex flex-wrap items-center gap-1.5">
                   <span class="text-fg2">{t('extensions.commands')}</span>
                   {#each plugin.commands as command (command.name)}
-                    <code class="rounded-lg bg-sunk px-1.5 py-0.5 text-[12.5px]" title={command.description}>/{command.name}</code>
+                    <code class="rounded-lg bg-sunk px-1.5 py-0.5 text-[12.5px]" title={pluginText(plugin, `commands.${command.name}.description`, command.description)}>/{command.name}</code>
                   {/each}
                 </span>
               {/if}
@@ -225,8 +249,28 @@ async function restart(row: Row) {
               {/if}
             </div>
           {/if}
+          {#if plugin.platforms && plugin.platforms.length > 0}
+            <div class="flex flex-wrap items-center gap-1.5 text-[13px]">
+              <span class="text-fg2">{t('extensions.platforms')}</span>
+              {#each plugin.platforms as platform (platform)}
+                <span class="chip chip-sm chip-muted">{platform}</span>
+              {/each}
+            </div>
+          {/if}
           <p class="m-0 flex flex-wrap gap-x-4 text-[12.5px] text-fg3">
             <span>{plugin.id}</span>
+            {#if plugin.kanon_version}<span>Kanon {plugin.kanon_version}</span>{/if}
+            {#if plugin.homepage || plugin.repository}
+              <a
+                class="inline-flex items-center gap-1 text-fg3 hover:text-fg"
+                href={plugin.homepage ?? plugin.repository}
+                target="_blank"
+                rel="noopener noreferrer"
+              >
+                <ExternalLink size={12} strokeWidth={2} />
+                {t('extensions.homepage')}
+              </a>
+            {/if}
             {#if row.host}
               {#if row.host.runtime}<span>{row.host.runtime}</span>{/if}
               {#if row.host.pid}<span>{t('extensions.pid', { pid: row.host.pid })}</span>{/if}
@@ -245,6 +289,16 @@ async function restart(row: Row) {
               <span class="min-w-0">{t('extensions.no_runtime_hint')}</span>
             </div>
           {/if}
+          {#if plugin.i18n_errors && plugin.i18n_errors.length > 0}
+            <details class="text-[12.5px] text-fg3">
+              <summary class="cursor-pointer">
+                {t('extensions.i18n_problems', { n: plugin.i18n_errors.length })}
+              </summary>
+              <ul class="m-0 mt-1 pl-5">
+                {#each plugin.i18n_errors as problem, index (index)}<li>{problem}</li>{/each}
+              </ul>
+            </details>
+          {/if}
         </div>
 
         <div class="ml-auto flex items-center gap-2.5">
@@ -258,6 +312,12 @@ async function restart(row: Row) {
               {t('extensions.restart')}
             </Button>
           {/if}
+          {#if plugin.has_pages}
+            <Button type="button" variant="text" size="sm" onclick={() => (pageFor = plugin.id)}>
+              <AppWindow size={15} strokeWidth={2} />
+              {t('extensions.page_open')}
+            </Button>
+          {/if}
           <Button type="button" size="sm" onclick={() => (configFor = plugin.id)}>
             {t('platforms.settings')}
           </Button>
@@ -265,8 +325,8 @@ async function restart(row: Row) {
             checked={plugin.enabled}
             disabled={busy[plugin.id]}
             label={plugin.enabled
-              ? t('platforms.turn_off', { name: plugin.name })
-              : t('platforms.turn_on', { name: plugin.name })}
+              ? t('platforms.turn_off', { name: nameOf(plugin) })
+              : t('platforms.turn_on', { name: nameOf(plugin) })}
             onchange={(next) => void setEnabled(plugin, next)}
           />
         </div>
@@ -285,6 +345,13 @@ async function restart(row: Row) {
 
 <PluginConfigDrawer
   pluginId={configFor}
-  name={rows.find((row) => row.plugin.id === configFor)?.plugin.name ?? configFor ?? ''}
+  name={configPlugin ? nameOf(configPlugin) : (configFor ?? '')}
+  texts={configPlugin ? pluginTexts(configPlugin) : {}}
   onclose={() => (configFor = null)}
+/>
+
+<PluginPageModal
+  pluginId={pageFor}
+  name={pagePlugin ? nameOf(pagePlugin) : (pageFor ?? '')}
+  onclose={() => (pageFor = null)}
 />

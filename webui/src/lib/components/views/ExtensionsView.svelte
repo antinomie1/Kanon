@@ -1,6 +1,7 @@
 <script lang="ts">
 import { t } from '../../stores/i18n.svelte';
 import { router } from '../../stores/router.svelte';
+import MarketTab from '../extensions/MarketTab.svelte';
 import McpTab from '../extensions/McpTab.svelte';
 import PluginsTab from '../extensions/PluginsTab.svelte';
 import SkillsTab from '../extensions/SkillsTab.svelte';
@@ -11,10 +12,11 @@ import Seg from '../ui/Seg.svelte';
 /**
  * Extensions: everything that adds abilities to the model. Plugins, MCP servers and skills are
  * three providers, and the tool list shows what they add up to, so they share one page with a tab
- * each. The tab is part of the address (`#/extensions/mcp`) so a reload keeps it.
+ * each; the market offers more plugins to install. The tab is part of the address
+ * (`#/extensions/mcp`) so a reload keeps it.
  */
 
-const TABS = ['plugins', 'tools', 'mcp', 'skills'] as const;
+const TABS = ['plugins', 'market', 'tools', 'mcp', 'skills'] as const;
 type Tab = (typeof TABS)[number];
 
 const tab = $derived<Tab>(
@@ -30,13 +32,14 @@ const tab = $derived<Tab>(
   {/snippet}
 </PageHead>
 
-<div class="scroll-thin -mt-1 overflow-x-auto px-1">
+<div class="scroll-thin -mt-1 overflow-x-auto overflow-y-hidden px-1">
   <Seg
     label={t('nav.extensions')}
     value={tab}
     onchange={(next: Tab) => router.replaceParam(next === 'plugins' ? null : next)}
     options={[
       { value: 'plugins', label: t('extensions.tab_plugins') },
+      { value: 'market', label: t('extensions.tab_market') },
       { value: 'tools', label: t('extensions.tab_tools') },
       { value: 'mcp', label: t('extensions.tab_mcp') },
       { value: 'skills', label: t('extensions.tab_skills') },
@@ -44,7 +47,9 @@ const tab = $derived<Tab>(
   />
 </div>
 
-{#if tab === 'tools'}
+{#if tab === 'market'}
+  <MarketTab />
+{:else if tab === 'tools'}
   <ToolsTab />
 {:else if tab === 'mcp'}
   <McpTab />
