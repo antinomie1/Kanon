@@ -221,10 +221,31 @@ async fn register_hook_host(
             channel.expect("fixture host reachable"),
             vec![PluginMeta {
                 id: "org.kanon.plugin.hooks".to_string(),
-                commands: vec![CommandMeta {
-                    name: "hi".to_string(),
-                    ..Default::default()
-                }],
+                commands: vec![
+                    CommandMeta {
+                        name: "hi".to_string(),
+                        ..Default::default()
+                    },
+                    // A command group: `/help` lists its subcommands under it.
+                    CommandMeta {
+                        name: "todo".to_string(),
+                        description: "Manage todos".to_string(),
+                        subcommands: vec![
+                            CommandMeta {
+                                name: "add".to_string(),
+                                description: "Add a todo".to_string(),
+                                usage: "/todo add <text>".to_string(),
+                                ..Default::default()
+                            },
+                            CommandMeta {
+                                name: "list".to_string(),
+                                description: "List todos".to_string(),
+                                ..Default::default()
+                            },
+                        ],
+                        ..Default::default()
+                    },
+                ],
                 events: events.into_iter().map(|kind| kind as i32).collect(),
                 decorates_replies: true,
                 ..Default::default()
@@ -386,4 +407,21 @@ async fn a_delivered_message_is_reported_to_subscribers() {
     };
     assert_eq!(sent.message_id, "m-1");
     assert_eq!(texts(&sent.message.as_ref().unwrap().segments), ["hi"]);
+}
+
+#[tokio::test]
+async fn help_lists_the_subcommands_of_a_command_group() {
+    let (engine, _, _dir) = engine_with_host(Vec::new()).await;
+
+    let PipelineResult::BuiltinReplied { replies, .. } =
+        engine.process_event(event("help", "/help", None)).await
+    else {
+        panic!("/help must be answered by the core");
+    };
+    let help = texts(&replies).join("");
+    assert!(help.contains("/todo — Manage todos\n"), "{help}");
+    assert!(
+        help.contains("  /todo add <text> — Add a todo\n  /todo list — List todos\n"),
+        "{help}"
+    );
 }

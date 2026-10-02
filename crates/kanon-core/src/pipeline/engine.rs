@@ -21,9 +21,9 @@ use kanon_llm::{AgentFactory, AgentSlot, ModelCapabilities, ModelRef, ModelSpec,
 use kanon_proto::v1::event_notification::Detail;
 use kanon_proto::v1::message_segment::Segment;
 use kanon_proto::v1::{
-    AgentBeginEvent, AgentDoneEvent, DeliverMessageRequest, DeliverMessageResponse, EventKind,
-    IngestEventRequest, LlmResponseEvent, MessageSegment, MessageSentEvent, PipelineEventRequest,
-    ReplySource,
+    AgentBeginEvent, AgentDoneEvent, CommandMeta, DeliverMessageRequest, DeliverMessageResponse,
+    EventKind, IngestEventRequest, LlmResponseEvent, MessageSegment, MessageSentEvent,
+    PipelineEventRequest, ReplySource,
 };
 
 use crate::access::{CommandAccess, CommandPolicyStore, META_SENDER_NAME};
@@ -2806,7 +2806,8 @@ impl PipelineEngine {
 
         // Command names are deduplicated: two plugins claiming the same name would otherwise show
         // up twice, while routing already resolves that collision deterministically.
-        let mut plugin_commands: Vec<(String, String, String, Vec<String>)> = Vec::new();
+        let mut plugin_commands: Vec<(String, String, String, Vec<String>, Vec<CommandMeta>)> =
+            Vec::new();
         let mut triggers: Vec<(String, String)> = Vec::new();
         for host in hosts {
             for plugin in host.metas() {
@@ -2826,6 +2827,7 @@ impl PipelineEngine {
                         command.description.trim().to_string(),
                         command.usage.trim().to_string(),
                         aliases,
+                        command.subcommands.clone(),
                     ));
                 }
                 // A trigger without a description is an implementation detail of its plugin, not
@@ -2844,7 +2846,7 @@ impl PipelineEngine {
         if !plugin_commands.is_empty() {
             plugin_commands.sort_by(|left, right| left.0.cmp(&right.0));
             rendered.push_str("\n插件指令：\n");
-            for (name, description, usage, aliases) in plugin_commands {
+            for (name, description, usage, aliases, subcommands) in plugin_commands {
                 rendered.push('/');
                 rendered.push_str(&name);
                 if !aliases.is_empty() {
@@ -2862,6 +2864,31 @@ impl PipelineEngine {
                     rendered.push('）');
                 }
                 rendered.push('\n');
+                // A command group lists its subcommands under it, indented, in declaration order:
+                // routing still goes to the group (`/name sub args`) and the plugin dispatches.
+                // Like a command's, a subcommand's usage is the full line (`/todo add <text>`).
+                for sub in &subcommands {
+                    let sub_name = sub.name.trim();
+                    if sub_name.is_empty() {
+                        continue;
+                    }
+                    rendered.push_str("  ");
+                    let sub_usage = sub.usage.trim();
+                    if sub_usage.is_empty() {
+                        rendered.push('/');
+                        rendered.push_str(&name);
+                        rendered.push(' ');
+                        rendered.push_str(sub_name);
+                    } else {
+                        rendered.push_str(sub_usage);
+                    }
+                    let sub_description = sub.description.trim();
+                    if !sub_description.is_empty() {
+                        rendered.push_str(" — ");
+                        rendered.push_str(sub_description);
+                    }
+                    rendered.push('\n');
+                }
             }
         }
 
