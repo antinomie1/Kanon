@@ -20,8 +20,9 @@ an explicit development mode).
   pipeline never makes an IM platform wait on a model response.
 - **Headless core, decoupled console** — the node exposes a REST + WebSocket control plane and the
   WebUI is an independent frontend that talks to it over HTTP.
-- **Plugin-owned persistence** — plugins read and write their own `./data/plugins/<id>/`, so the core
-  never becomes a data proxy.
+- **Plugin persistence** — small state (counters, flags, tokens) goes into the core's key-value
+  store `./data/kv.db`, one namespace per plugin; larger or relational data stays in the plugin's
+  own `./data/plugins/<id>/`.
 - **Conversations survive restarts** — history, summaries and session records live in
   `./data/sessions.db`, so after a restart (or after a bot instance is edited) the next message
   continues the same conversation. A database that cannot be opened stops startup instead of
@@ -87,6 +88,7 @@ files under `./data/`:
 | `instances.json` | bot instances and the current conversation of each chat |
 | `personas.json` | the personas you add in the console (the built-in base assistant is not stored) |
 | `sessions.db` | conversation history, compaction summaries and session records |
+| `kv.db` | the plugins' key-value store |
 
 To deploy a preconfigured node (a container image, CI), ship a prepared `data/system.json`.
 

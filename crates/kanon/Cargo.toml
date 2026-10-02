@@ -16,6 +16,7 @@ kanon-adapter-qqofficial = { path = "../kanon-adapter-qqofficial" }
 kanon-api = { path = "../kanon-api" }
 kanon-core = { path = "../kanon-core" }
 kanon-llm = { path = "../kanon-llm" }
+kanon-storage = { path = "../kanon-storage" }
 tokio = { version = "1.40", features = ["full"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt", "registry"] }

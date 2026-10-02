@@ -22,12 +22,12 @@ use kanon_proto::v1::message_pipeline_service_server::{
 use kanon_proto::v1::message_segment::Segment;
 use kanon_proto::v1::plugin_host_service_server::{PluginHostService, PluginHostServiceServer};
 use kanon_proto::v1::{
-    CommandExecuteRequest, CommandExecuteResponse, DeliverMessageRequest, DeliverMessageResponse,
-    EventAck, EventNotification, GetPluginMetaRequest, GetPluginMetaResponse, GetStorageRequest,
-    MessageSegment, PingRequest, PingResponse, PipelineEventRequest, PluginActionRequest,
-    PluginActionResponse, PluginMeta, PreFilterResult, RegisterHostRequest,
-    ReloadPluginConfigRequest, ReloadPluginConfigResponse, SendMessageRequest, SetStorageRequest,
-    TextSegment, ToolCallRequest, ToolCallResponse,
+    CommandExecuteRequest, CommandExecuteResponse, DeleteStorageRequest, DeliverMessageRequest,
+    DeliverMessageResponse, EventAck, EventNotification, GetPluginMetaRequest,
+    GetPluginMetaResponse, GetStorageRequest, ListStorageRequest, MessageSegment, PingRequest,
+    PingResponse, PipelineEventRequest, PluginActionRequest, PluginActionResponse, PluginMeta,
+    PreFilterResult, RegisterHostRequest, ReloadPluginConfigRequest, ReloadPluginConfigResponse,
+    SendMessageRequest, SetStorageRequest, TextSegment, ToolCallRequest, ToolCallResponse,
 };
 use kanon_transport::{IpcListener, connect_ipc, host_socket_path};
 
@@ -475,12 +475,13 @@ async fn test_send_message_dispatches_to_platform_adapter() {
 }
 
 #[tokio::test]
-async fn test_storage_endpoints_return_unimplemented() {
+async fn plugins_keep_state_in_the_central_kv_store_over_ipc() {
     let tmp = tempdir().expect("tempdir");
     let core_sock = tmp.path().join("core.sock");
 
     let (event_tx, _event_rx) = mpsc::channel(DEFAULT_INGEST_QUEUE_CAPACITY);
-    let core_api = CoreApiService::new(event_tx);
+    let kv = Arc::new(kanon_storage::KvStore::open(tmp.path().join("kv.db")).expect("kv"));
+    let core_api = CoreApiService::new(event_tx).with_kv(kv);
     let core_server = CoreIpcServer::new(&core_sock, core_api);
 
     let (core_shutdown_tx, core_shutdown_rx) = oneshot::channel();
@@ -496,32 +497,63 @@ async fn test_storage_endpoints_return_unimplemented() {
 
     let channel = connect_ipc(&core_sock).await.expect("connect to core");
     let mut client = BotApiServiceClient::new(channel);
+    let set = |key: &str, ttl_seconds: i64| SetStorageRequest {
+        plugin_id: "weather".to_string(),
+        key: key.to_string(),
+        value: vec![1, 2, 3],
+        ttl_seconds,
+    };
 
-    // Test SetStorage
-    let set_err = client
-        .set_storage(SetStorageRequest {
-            plugin_id: "test".to_string(),
-            key: "foo".to_string(),
-            value: vec![1, 2, 3],
-            ttl_seconds: 0,
-        })
+    client.set_storage(set("city:paris", 0)).await.expect("set");
+    client
+        .set_storage(set("city:tokyo", 60))
         .await
-        .expect_err("SetStorage must fail");
+        .expect("set with ttl");
+    let err = client.set_storage(set("bad", -1)).await.unwrap_err();
+    assert_eq!(err.code(), Code::InvalidArgument);
 
-    assert_eq!(set_err.code(), Code::Unimplemented);
-    assert!(set_err.message().contains("unsupported"));
-
-    // Test GetStorage
-    let get_err = client
+    let got = client
         .get_storage(GetStorageRequest {
-            plugin_id: "test".to_string(),
-            key: "foo".to_string(),
+            plugin_id: "weather".to_string(),
+            key: "city:paris".to_string(),
         })
         .await
-        .expect_err("GetStorage must fail");
+        .expect("get")
+        .into_inner();
+    assert!(got.found);
+    assert_eq!(got.value, [1, 2, 3]);
 
-    assert_eq!(get_err.code(), Code::Unimplemented);
-    assert!(get_err.message().contains("unsupported"));
+    // Another plugin's namespace is separate.
+    let other = client
+        .get_storage(GetStorageRequest {
+            plugin_id: "other".to_string(),
+            key: "city:paris".to_string(),
+        })
+        .await
+        .expect("get")
+        .into_inner();
+    assert!(!other.found);
+
+    let keys = client
+        .list_storage(ListStorageRequest {
+            plugin_id: "weather".to_string(),
+            prefix: "city:".to_string(),
+        })
+        .await
+        .expect("list")
+        .into_inner()
+        .keys;
+    assert_eq!(keys, ["city:paris", "city:tokyo"]);
+
+    let deleted = client
+        .delete_storage(DeleteStorageRequest {
+            plugin_id: "weather".to_string(),
+            key: "city:paris".to_string(),
+        })
+        .await
+        .expect("delete")
+        .into_inner();
+    assert!(deleted.deleted);
 
     // Clean up
     let _ = core_shutdown_tx.send(());

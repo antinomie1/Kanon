@@ -62,6 +62,8 @@ pub struct CoreApiService {
         Arc<kanon_llm::PersonaRegistry>,
         Arc<kanon_llm::PersonaStore>,
     )>,
+    /// The central key-value store behind the storage RPCs.
+    kv: Option<Arc<kanon_storage::KvStore>>,
 }
 
 impl std::fmt::Debug for CoreApiService {
@@ -75,6 +77,7 @@ impl std::fmt::Debug for CoreApiService {
             .field("llm", &self.llm.is_some())
             .field("engine", &self.engine.is_some())
             .field("personas", &self.personas.is_some())
+            .field("kv", &self.kv.is_some())
             .finish()
     }
 }
@@ -92,6 +95,7 @@ impl CoreApiService {
             llm: None,
             engine: None,
             personas: None,
+            kv: None,
         }
     }
 
@@ -127,6 +131,12 @@ impl CoreApiService {
         store: Arc<kanon_llm::PersonaStore>,
     ) -> Self {
         self.personas = Some((registry, store));
+        self
+    }
+
+    /// Shares the central key-value store, enabling the storage RPCs.
+    pub fn with_kv(mut self, kv: Arc<kanon_storage::KvStore>) -> Self {
+        self.kv = Some(kv);
         self
     }
 

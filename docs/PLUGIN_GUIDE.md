@@ -176,7 +176,7 @@ Supervisor 拉起进程 → 宿主绑定专属 socket → 连接 core.sock 并 R
 
 - **配置热更新**：操作员保存配置后，核心调用 `ReloadPluginConfig`。宿主先替换 `context.config`，再调用 `on_config_reload(config)`；在其中抛出异常即拒绝本次更新，核心不会持久化被拒绝的配置。版本号单调递增，过期的更新会被宿主拒绝。
 - **核心存活看门狗**：宿主定期探测核心；核心消失后宿主自行退出，避免出现继续占用平台连接的“幽灵机器人”。关闭的每一步都有超时上限。
-- **没有中心化 KV**：`SetStorage` / `GetStorage` 固定返回 `UNIMPLEMENTED`，请直接读写 `data_dir`。
+- **中心 KV**：小状态（计数器、开关、令牌、按用户的设置）存核心的 KV（`data/kv.db`，见 `PLUGIN_API.md` 的 `SetStorage` 等），大数据与需要查询的数据写 `data_dir`。
 
 ---
 

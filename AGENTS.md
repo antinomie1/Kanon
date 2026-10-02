@@ -68,7 +68,7 @@ Kanon 是基于 Rust 2024 构建的高性能多平台聊天机器人微内核，
 - **IPC 拓扑**：目录隔离模式。Core 监听 `./run/core.sock`；各 Host 监听专属 `./run/host_<id>.sock`。
 - **异步入站防锁步**：`BotApiService.IngestEvent` 必须非阻塞推入带高水位线的 Tokio MPSC 通道并立即 Fast-ACK（< 50µs），绝不同步等待 LLM，彻底切断反压链，保障 IM 心跳永不掉线。
 - **Windows 本地安全**：TCP Loopback 握手必须在首包 HTTP/2 HEADERS 中携带 32-Byte CSPRNG 随机 Token（`x-kanon-auth-token`），核心恒定时间校验。
-- **数据访问防放大**：只读配置 Host 内存缓存；复杂业务持久化直接在专属目录 `./data/plugins/<id>/` 本地读写 SQLite/DuckDB。
+- **数据访问防放大**：只读配置 Host 内存缓存；小状态走核心中心 KV（`data/kv.db`，按插件分命名空间，单值 ≤ 1 MiB）；复杂业务持久化直接在专属目录 `./data/plugins/<id>/` 本地读写 SQLite/DuckDB。
 - **程序入口唯一**：全工程仅 `crates/kanon` 提供节点可执行文件 `kanon`；其余 crate 一律为库，禁止新增 `src/main.rs` 或 `[[bin]]`（`crates/kanon-dev` 的 `kanon-dev` 开发者 CLI 为唯一例外）。
 - **构建产物收敛**：根 `default-members` 仅含 `crates/kanon` 与 `crates/kanon-dev`，一次默认构建（`cargo build` / `cargo test`）只产出 `kanon` 与 `kanon-dev` 两个可执行文件；全仓校验必须显式 `--workspace`（示例插件宿主属测试夹具，需先 `cargo build -p demo-weather -p demo-rust-plugin` 才能运行插件宿主用例；Python 宿主用例需先在 `sdks/python/plugins/demo_py_plugin` 下执行 `uv sync`）。
 - **Rust 标准**：统一 **Rust 2024 Edition**，异步基于 Tokio/Tonic/Axum。错误用 `thiserror`/`anyhow` 显式追踪。`cargo check --workspace` 必须保持 **0 错误、0 警告**。

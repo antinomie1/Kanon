@@ -36,7 +36,7 @@ Supervisor 启动宿主时注入的**启动契约**（插件不得把其他环�
 | --- | --- | --- | --- |
 | `PluginHostService` | 宿主 | 核心 | `Ping`、`ReloadPluginConfig`、`GetPluginMeta`、`InvokeAction` |
 | `MessagePipelineService` | 宿主 | 核心 | `OnPreFilter`、`OnExecuteCommand`、`OnCallTool`、`OnEvent`、`OnDeliverMessage`、`OnDecorateReply`、`OnPrepareTurn` |
-| `BotApiService` | 核心 | 宿主 | `RegisterHost`、`Ping`、`IngestEvent`、`SendMessage`、`ReplyMessage`、`RequestLLM`、`CallPlatformApi`、`GetConversationHistory`、`ListConversations`、`NewConversation`、`SwitchConversation`、`DeleteConversation`、`AppendConversation`、`ListPersonas`、`UpsertPersona`、`DeletePersona`、`SetStorage`、`GetStorage` |
+| `BotApiService` | 核心 | 宿主 | `RegisterHost`、`Ping`、`IngestEvent`、`SendMessage`、`ReplyMessage`、`RequestLLM`、`CallPlatformApi`、`GetConversationHistory`、`ListConversations`、`NewConversation`、`SwitchConversation`、`DeleteConversation`、`AppendConversation`、`ListPersonas`、`UpsertPersona`、`DeletePersona`、`SetStorage`、`GetStorage`、`DeleteStorage`、`ListStorage` |
 
 ---
 
@@ -172,7 +172,22 @@ Supervisor 启动宿主时注入的**启动契约**（插件不得把其他环�
 | `ListConversations` / `NewConversation` / `SwitchConversation` / `DeleteConversation` | 某条入站消息所属会话的多段对话：列出、新建、切换、删除，即内置 `/ls`、`/new`、`/switch`、`/del` | 见下 |
 | `AppendConversation` | 把完整的用户/助手轮次追加到当前对话 | 见下 |
 | `ListPersonas` / `UpsertPersona` / `DeletePersona` | 节点的人设目录 | 见下 |
-| `SetStorage` / `GetStorage` | 不提供中心化 KV | 恒为 `UNIMPLEMENTED`，请写本地 `data/plugins/<id>/` |
+| `SetStorage` / `GetStorage` / `DeleteStorage` / `ListStorage` | 核心的中心 KV 存储，每个插件一个命名空间 | 见下 |
+
+### 中心 KV：`SetStorage`、`GetStorage`、`DeleteStorage`、`ListStorage`
+
+存放小状态（计数器、开关、令牌、按用户的设置），落盘于 `data/kv.db`，节点重启后仍在。大数据与需要查询的数据请写插件目录 `data/plugins/<id>/`。
+
+| 字段 | 说明 |
+| --- | --- |
+| `plugin_id` | 命名空间，即插件 ID（SDK 自动填写）；只用于区分插件，不是访问控制 |
+| `key` | 1–256 字节 |
+| `value` | 不透明字节，至多 1 MiB（SDK 存 JSON） |
+| `ttl_seconds` | `SetStorage`：`0` 为永不过期；正数为秒数，过期后读取、列举、删除都视为不存在；负数为 `INVALID_ARGUMENT`。再次 `SetStorage` 会同时替换值与过期时间 |
+| `prefix` | `ListStorage`：按字面前缀筛选（`_`、`%` 不是通配符），空为全部；结果按键排序，只含未过期的键 |
+| 结果 `found` / `deleted` | 键不存在或已过期时为 `false`，不是错误 |
+
+错误：插件 ID 或键不合法为 `INVALID_ARGUMENT`；值超过 1 MiB 为 `RESOURCE_EXHAUSTED`；核心未提供 KV 为 `UNAVAILABLE`；数据库故障为 `INTERNAL`。
 
 ### `RequestLLM(LLMRequest) → stream LLMChunk`
 

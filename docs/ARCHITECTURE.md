@@ -281,13 +281,15 @@ SDK 只是协议的封装：三语言提供同一套能力（命令、正则触�
 1. **配置与元数据本地化缓存 (Read-Cache in Host Memory)**：
    - 只读配置项、白名单、动态参数在插件加载及核心推送 `ReloadPluginConfig` 时，直接常驻于 Host 进程内存字典中。
    - 过滤链与指令处理一律内存命中，严禁每条消息往返一次 gRPC 远程读取配置。
-2. **专属物理数据目录与本地持久化 (Local Storage First - 唯一权威方案)**：
+2. **中心 KV 存储（小状态）**：
+   - 计数器、开关、缓存的令牌、按用户的设置这类小状态，插件直接用核心的 KV 存储（`SetStorage` / `GetStorage` / `DeleteStorage` / `ListStorage`，SDK 封装为 `kv`），无需自己建库。
+   - 实现为 `kanon_storage::KvStore`：单个 SQLite 文件 `data/kv.db`（WAL），主键 `(plugin_id, key)`，每个插件一个命名空间；值是不透明字节（SDK 在其上做 JSON）。键 1–256 字节，值至多 1 MiB，超限显式报错。
+   - 可设 TTL：读取、列举时按当前时间过滤，过期即不可见；过期行在被读取、被覆盖时及启动时清理，不需要后台任务。
+   - 每次操作在阻塞线程池执行，慢磁盘不会阻塞 gRPC 运行时。文件无法打开时节点启动失败，而不是让插件静默丢失状态。
+   - 命名空间用于避免插件之间的键冲突，不是访问控制：插件以节点权限运行，本就能读取 `data/`。
+3. **专属物理数据目录（大数据与关系数据）**：
    - 核心在加载插件时，确保 `./data/plugins/<plugin_id>/` 物理隔离目录就绪，并将路径注入 `ctx.data_dir`。
-   - **架构约束**：插件的所有持久化状态（如用户积分、业务会话、缓存、离线数据等）必须在插件内部直接使用嵌入式数据库（如 Python/TS/Rust 内置的 SQLite / DuckDB）或本地扁平文件存储在专属目录下。
-   - 彻底避免在微内核中设计低效的集中式代理存储，保障数据隔离边界清晰且无跨进程序列化 I/O 开销。
-3. **gRPC 集中式 KV 存储边界说明 (Centralized KV Deprecation Notice)**：
-   - Protobuf 契约中虽保留历史 `SetStorage` / `GetStorage` 端点定义，但微内核当前明确将其标记为不支持，调用时显式返回 `Status::unimplemented`（指引插件使用专属数据目录本地持久化）。
-   - 核心不内置全局集中式 KV 数据库，防止核心沦为单点数据库代理并规避多插件数据污染风险。
+   - 大量数据、需要查询或事务的数据（业务表、离线数据、文件）在插件内部直接使用嵌入式数据库（SQLite / DuckDB）或文件存储在专属目录下，不经核心代理，没有跨进程序列化开销。
 
 ---
 
@@ -637,8 +639,8 @@ sequenceDiagram
 为贯彻“简单优先、显式优先、失败优先、验证优先”的工程准则，本节坦诚列出当前架构版本的明确系统边界与已知局限性：
 
 ### 12.1 存储模型边界 (Storage Model Boundaries)
-- **无内置全局集中式 KV 存储**：微内核已彻底移除原存根性质的内存 KV 模块（`crates/kanon-storage/src/kv.rs` 已删除）。`BotApiService.SetStorage` 与 `GetStorage` 端点当前显式返回 `Status::unimplemented`。
-- **本地专属存储第一原则**：所有业务持久化（用户状态、业务缓存等）必须在插件所属的 `./data/plugins/<plugin_id>/` 独立目录中本地持久化（推荐 SQLite、DuckDB 或文件系统）。核心不代理业务读写，亦不提供跨插件共享的分布式数据库抽象。
+- **中心 KV 只存小状态**：`data/kv.db` 按插件分命名空间，单值至多 1 MiB，没有跨键事务、没有跨插件共享，也不是分布式存储（见第 7 节）。
+- **大数据留在插件目录**：业务表、需要查询或事务的数据在插件所属的 `./data/plugins/<plugin_id>/` 中本地持久化（推荐 SQLite、DuckDB 或文件系统），核心不代理这类读写。
 - **会话历史与会话记录的持久化边界 (Session History vs Record)**：
   - **对话历史与摘要**：`SqliteMemory`（`crates/kanon-llm/src/sqlite_memory.rs`）以 SQLite WAL 模式持久化仅追加的对话历史与压缩摘要，压缩在单个事务内完成，单会话内具备串行写入一致性与跨进程重启持久性。
   - **会话记录 (`SessionMetadata`)**：人设绑定、变量、轮次与 Token 计数、状态由 `SessionManager` 在内存（DashMap）中维护，并经 `SqliteSessionStore` **写穿**到同一个 `data/sessions.db`；节点启动时一次性加载。写入失败记录 `error` 日志但不使回复失败，库无法打开/读取则启动失败（见 8.8）。

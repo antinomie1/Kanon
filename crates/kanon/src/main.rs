@@ -31,9 +31,9 @@
 //! node-wide reply and context policies and the OneBot, Milky and QQ Official adapter sections.
 //!
 //! Conversations are durable: history, compaction summaries and session records live in
-//! `data/sessions.db`, and the operator's personas in `data/personas.json`. Both are opened before
-//! anything is served, and a file that cannot be read stops startup instead of being replaced by an
-//! empty one.
+//! `data/sessions.db`, and the operator's personas in `data/personas.json`. Plugins keep small
+//! state in the central key-value store `data/kv.db`. All are opened before anything is served,
+//! and a file that cannot be read stops startup instead of being replaced by an empty one.
 
 use std::sync::Arc;
 
@@ -201,6 +201,17 @@ async fn main() -> StartupResult<()> {
     // starting from an empty session list.
     let sessions = open_session_manager(DEFAULT_SESSION_DB)?;
 
+    // The plugins' central key-value store. Like the session database, a file that cannot be
+    // opened stops startup: plugins would otherwise run on, silently losing what they stored.
+    let kv = Arc::new(
+        kanon_storage::KvStore::open(kanon_storage::DEFAULT_KV_FILE).map_err(|err| {
+            format!(
+                "Failed to open the key-value store {}: {err}",
+                kanon_storage::DEFAULT_KV_FILE
+            )
+        })?,
+    );
+
     let state = ApiState::builder(supervisor.clone())
         .with_sessions(sessions)
         .with_personas(personas)
@@ -284,7 +295,8 @@ async fn main() -> StartupResult<()> {
         .with_outbound_sender(engine.outbound_sender())
         .with_agent_slot(state.llm_slot().clone())
         .with_engine(engine.clone())
-        .with_personas(state.personas().clone(), persona_store);
+        .with_personas(state.personas().clone(), persona_store)
+        .with_kv(kv);
     let ipc_server = CoreIpcServer::new(socket_path.clone(), service);
 
     // --- Graceful shutdown channels ---------------------------------------------------
