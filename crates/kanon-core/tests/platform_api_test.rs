@@ -91,6 +91,8 @@ fn call(platform: &str, action: &str) -> Request<PlatformApiRequest> {
     })
 }
 
+/// Whole numbers reach the adapter as JSON integers (`42`, not `42.0`), as platform APIs expect
+/// for IDs, although `Struct` carries every number as a double.
 #[tokio::test]
 async fn a_call_reaches_the_adapter_and_returns_its_result() {
     let response = service()
@@ -101,7 +103,7 @@ async fn a_call_reaches_the_adapter_and_returns_its_result() {
         .into_inner();
     assert_eq!(
         prost_value_to_json(response.result.expect("result")),
-        json!({ "action": "get_group_info", "params": { "group_id": 42.0 } })
+        json!({ "action": "get_group_info", "params": { "group_id": 42 } })
     );
 }
 

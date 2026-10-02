@@ -355,7 +355,9 @@ async fn test_tool_router_max_recursion_limit() {
 fn test_prost_json_roundtrip() {
     let json_input = serde_json::json!({
         "name": "calc",
-        "count": 42.0,
+        "count": 42,
+        "negative": -7,
+        "ratio": 1.5,
         "active": true,
         "nested": {
             "tags": ["rust", "plugin"]
@@ -366,6 +368,22 @@ fn test_prost_json_roundtrip() {
     let json_output = prost_struct_to_json(prost_struct);
 
     assert_eq!(json_input, json_output);
+}
+
+#[test]
+fn test_whole_struct_numbers_become_json_integers() {
+    // Every SDK sends numbers as doubles; the model must still see `6`, not `6.0`, for an integer.
+    let from_plugin = json_to_prost_struct(&serde_json::json!({
+        "default": 6.0,
+        "huge": 1e300,
+    }))
+    .expect("Valid JSON object");
+
+    let json = prost_struct_to_json(from_plugin);
+
+    assert_eq!(serde_json::to_string(&json["default"]).unwrap(), "6");
+    // Beyond 2^53 a double no longer names one integer, so it stays a float.
+    assert_eq!(json["huge"], serde_json::json!(1e300));
 }
 
 #[tokio::test]

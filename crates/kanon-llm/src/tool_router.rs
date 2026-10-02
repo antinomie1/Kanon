@@ -352,10 +352,24 @@ pub fn prost_struct_to_json(s: prost_types::Struct) -> serde_json::Value {
     serde_json::Value::Object(map)
 }
 
+/// Largest magnitude below which every integer is exactly representable as an `f64`.
+const MAX_SAFE_INTEGER: f64 = (1_u64 << 53) as f64;
+
 /// Converts a [`prost_types::Value`] into its corresponding [`serde_json::Value`].
+///
+/// `Struct` has a single double-precision number type, so a plugin's `{"default": 6}` or a tool
+/// result `{"count": 42}` arrives as `6.0` / `42.0`. Whole numbers within the exactly
+/// representable range are turned back into JSON integers: the model then sees the same JSON the
+/// plugin author wrote (an `integer` schema with an integer default), and the request prefix does
+/// not depend on which SDK produced the value.
 pub fn prost_value_to_json(v: prost_types::Value) -> serde_json::Value {
     match v.kind {
         Some(prost_types::value::Kind::NullValue(_)) | None => serde_json::Value::Null,
+        Some(prost_types::value::Kind::NumberValue(n))
+            if n.fract() == 0.0 && n.abs() <= MAX_SAFE_INTEGER =>
+        {
+            serde_json::Value::from(n as i64)
+        }
         Some(prost_types::value::Kind::NumberValue(n)) => serde_json::Number::from_f64(n)
             .map(serde_json::Value::Number)
             .unwrap_or(serde_json::Value::Null),
