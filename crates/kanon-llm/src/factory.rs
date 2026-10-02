@@ -19,9 +19,9 @@ use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
 
 use crate::agent::{Agent, AgentConfig, AgentHook, AgentTool};
-use crate::builtin::BuiltinAgent;
+use crate::builtin::{AgentBuilder, BuiltinAgent};
 use crate::gateway::LlmProvider;
-use crate::memory::Memory;
+use crate::memory::{InMemory, Memory};
 use crate::model::{ModelCatalog, ModelRef, ModelSpec};
 use crate::prompt::PersonaRegistry;
 use crate::provider::{ProviderEntry, ProviderRegistry};
@@ -400,6 +400,41 @@ impl AgentFactory {
         Arc::new(self.build_agent(provider, config))
     }
 
+    /// Builds an agent for one private run: same model, hooks and tools as the agent serving
+    /// `model` (see [`AgentFactory::agent_for_model`]), but its own empty memory.
+    ///
+    /// A plugin that runs the agent outside any conversation gets a session nobody else can see,
+    /// and the whole session goes away with the returned agent: nothing reaches the node's
+    /// conversation store, so there is nothing to delete and no background compaction that could
+    /// outlive the run. `instructions` replace the persona at the top of the system block; without
+    /// them the run gets the base assistant persona, as a new conversation would.
+    ///
+    /// `None` when no agent serves `model` (no provider configured, or a reference that does not
+    /// resolve).
+    pub fn private_agent(
+        &self,
+        model: Option<&str>,
+        instructions: Option<String>,
+    ) -> Option<Arc<dyn Agent>> {
+        let base = self.agent_for_model(model)?;
+        let config = AgentConfig {
+            // One turn is all a private session ever holds; there is nothing to fold.
+            compaction: None,
+            ..base.config().clone()
+        };
+        let instructions = instructions.unwrap_or_else(|| self.personas.base().prompt);
+        let agent = self
+            .configured_builder(
+                format!("{}-private", self.name),
+                base.provider().clone(),
+                &config,
+            )
+            .memory(Arc::new(InMemory::new()))
+            .system_prompt(instructions)
+            .build();
+        Some(Arc::new(agent))
+    }
+
     /// Derives the agent configuration for one resolved model.
     ///
     /// Model-specific settings win over endpoint-level defaults, which in turn win over the
@@ -442,12 +477,23 @@ impl AgentFactory {
         provider: Arc<dyn LlmProvider>,
         config: AgentConfig,
     ) -> BuiltinAgent {
-        // The builder exposes fluent setters rather than a whole-config setter, so optional
-        // sampling knobs are applied only when configured.
-        let mut builder = BuiltinAgent::builder(name, provider)
+        self.configured_builder(name, provider, &config)
             .memory(self.memory.clone())
             .session_manager(self.sessions.clone())
             .persona_registry(self.personas.clone())
+            .build()
+    }
+
+    /// A builder carrying `config` and this factory's hooks and native tools, but no memory.
+    fn configured_builder(
+        &self,
+        name: String,
+        provider: Arc<dyn LlmProvider>,
+        config: &AgentConfig,
+    ) -> AgentBuilder {
+        // The builder exposes fluent setters rather than a whole-config setter, so optional
+        // sampling knobs are applied only when configured.
+        let mut builder = BuiltinAgent::builder(name, provider)
             .model(config.default_model.clone())
             .provider(config.provider.clone())
             .context_length(config.context_length)
@@ -467,7 +513,6 @@ impl AgentFactory {
         if let Some(max_tokens) = config.max_tokens {
             builder = builder.max_tokens(max_tokens);
         }
-
-        builder.build()
+        builder
     }
 }

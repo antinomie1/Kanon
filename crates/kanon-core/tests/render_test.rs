@@ -44,10 +44,19 @@ fn text_cards_wrap_to_the_width_and_grow_with_the_text() {
     };
     assert_eq!(short.width, 720);
 
-    let long_line = "The quick brown fox jumps over the lazy dog. 敏捷的棕色狐狸跳过了懒狗。".repeat(8);
+    let long_line =
+        "The quick brown fox jumps over the lazy dog. 敏捷的棕色狐狸跳过了懒狗。".repeat(8);
     let long = render_text(&long_line, 720).expect("render");
-    assert_eq!(long.width, 720, "long lines wrap instead of widening the card");
-    assert!(long.height > short.height * 2, "{} vs {}", long.height, short.height);
+    assert_eq!(
+        long.width, 720,
+        "long lines wrap instead of widening the card"
+    );
+    assert!(
+        long.height > short.height * 2,
+        "{} vs {}",
+        long.height,
+        short.height
+    );
 
     // Something was actually drawn on the white card.
     let pixmap = Pixmap::decode_png(&long.png).unwrap();
@@ -56,8 +65,14 @@ fn text_cards_wrap_to_the_width_and_grow_with_the_text() {
         "text is visible"
     );
 
-    assert!(matches!(render_text("hi", 100), Err(RenderError::Invalid(_))));
-    assert!(matches!(render_text("  \n", 720), Err(RenderError::Invalid(_))));
+    assert!(matches!(
+        render_text("hi", 100),
+        Err(RenderError::Invalid(_))
+    ));
+    assert!(matches!(
+        render_text("  \n", 720),
+        Err(RenderError::Invalid(_))
+    ));
 }
 
 #[tokio::test]
@@ -88,7 +103,10 @@ async fn plugins_get_a_png_in_their_own_directory() {
         .await
         .expect("render")
         .into_inner();
-    assert_eq!(again.file_path, first.file_path, "the same image is one file");
+    assert_eq!(
+        again.file_path, first.file_path,
+        "the same image is one file"
+    );
 
     let err = service
         .render_image(Request::new(RenderImageRequest {

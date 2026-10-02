@@ -57,13 +57,28 @@ pub trait Agent: Send + Sync {
         None
     }
 
+    /// Answers one turn whose message the caller built, with per-turn settings.
+    ///
+    /// The settings change only this turn; an agent that cannot honour one must fail the turn
+    /// rather than quietly answer without it.
+    async fn run_message_with(
+        &self,
+        session_id: &str,
+        message: ChatMessage,
+        hosts: &[Arc<dyn ToolHost>],
+        options: TurnOptions,
+    ) -> Result<AgentOutput, AgentError>;
+
     /// Answers one turn whose message the caller built (text, or text with images).
     async fn run_message(
         &self,
         session_id: &str,
         message: ChatMessage,
         hosts: &[Arc<dyn ToolHost>],
-    ) -> Result<AgentOutput, AgentError>;
+    ) -> Result<AgentOutput, AgentError> {
+        self.run_message_with(session_id, message, hosts, TurnOptions::default())
+            .await
+    }
 
     /// Answers one text turn, streaming the final reply.
     async fn run_stream(
@@ -113,6 +128,20 @@ pub trait Agent: Send + Sync {
     ) -> Result<ChatChunkStream, AgentError> {
         self.run_stream(session_id, user_input, &[]).await
     }
+}
+
+/// Settings that apply to one turn only, on top of the agent's [`AgentConfig`].
+///
+/// The default changes nothing, which is how the pipeline answers chat messages.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct TurnOptions {
+    /// Tool rounds allowed in this turn; `None` uses [`AgentConfig::max_iterations`].
+    pub max_iterations: Option<usize>,
+    /// Offers the model no tools at all in this turn, the agent's native tools included.
+    ///
+    /// The tool list heads every request, so a turn without it does not share the conversation's
+    /// cached prefix; callers use it for a deliberate one-off (a plugin's tool-less agent run).
+    pub without_tools: bool,
 }
 
 /// Configuration parameters for agent reasoning and execution.

@@ -378,6 +378,77 @@ async fn the_static_block_is_one_trimmed_message_however_many_hooks_contribute()
     );
 }
 
+/// Replaces the whole system block, the way a plugin's `OnLlmRequest` rewrite is applied.
+struct Rewriter;
+
+#[async_trait]
+impl AgentHook for Rewriter {
+    async fn on_llm_request(
+        &self,
+        _session_id: &str,
+        request: &mut ChatRequest,
+    ) -> Result<(), kanon_llm::AgentError> {
+        let text = kanon_llm::layout::system_text(&request.messages);
+        let leading = request
+            .messages
+            .iter()
+            .take_while(|message| message.role == Role::System)
+            .count();
+        request.messages.drain(..leading);
+        request
+            .messages
+            .insert(0, ChatMessage::system(format!("{text}\n\nrewritten")));
+        Ok(())
+    }
+}
+
+#[tokio::test]
+async fn a_rewritten_system_prompt_is_one_stable_block_with_the_summary_after_it() {
+    let recorder = Arc::new(Recorder::default());
+    let memory = Arc::new(InMemory::new());
+    let sessions = Arc::new(SessionManager::new(memory.clone()));
+    let agent = BuiltinAgent::builder("rewrite", recorder.clone())
+        .memory(memory.clone())
+        .session_manager(sessions)
+        .persona_registry(Arc::new(PersonaRegistry::default()))
+        .hook(SloppyHooks)
+        .hook(Rewriter)
+        .build();
+
+    agent.run("s", "first", &[]).await.expect("turn 1");
+    agent.run("s", "second", &[]).await.expect("turn 2");
+    memory
+        .compact_history("s", 4, "they said hi twice".to_string())
+        .await
+        .expect("compacted");
+    agent.run("s", "third", &[]).await.expect("turn 3");
+
+    let requests = recorder.requests.lock().unwrap();
+    let rewritten = format!("{BASE_PERSONA_PROMPT}\n\ncatalog line\n\nrewritten");
+    assert_eq!(
+        requests[0].messages[0].content.as_deref(),
+        Some(rewritten.as_str()),
+        "the rewrite sees the block exactly as it would be sent"
+    );
+    assert_eq!(requests[1].messages[0], requests[0].messages[0]);
+    // The summary is not part of what is rewritten: it follows the rewritten prompt, so a
+    // compaction never changes what a plugin is shown.
+    let after_compaction = requests[2].messages[0].content.clone().unwrap_or_default();
+    assert!(
+        after_compaction.starts_with(&format!("{rewritten}\n\n")),
+        "{after_compaction}"
+    );
+    assert!(after_compaction.contains("they said hi twice"));
+    assert_eq!(
+        requests[2]
+            .messages
+            .iter()
+            .filter(|message| message.role == Role::System)
+            .count(),
+        1
+    );
+}
+
 #[test]
 fn normalizing_leaves_a_request_without_system_messages_alone() {
     let mut request = ChatRequest {

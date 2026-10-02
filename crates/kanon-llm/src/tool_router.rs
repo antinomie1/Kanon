@@ -290,7 +290,28 @@ impl ToolRouter {
         message: crate::gateway::types::ChatMessage,
         hosts: &[Arc<dyn ToolHost>],
     ) -> Result<ToolRouterOutput, ToolRouterError> {
-        self.map_result(self.agent.run_message(session_id, message, hosts).await)
+        self.execute_message_with(
+            session_id,
+            message,
+            hosts,
+            crate::agent::TurnOptions::default(),
+        )
+        .await
+    }
+
+    /// Executes one turn like [`ToolRouter::execute_message`], with per-turn settings.
+    pub async fn execute_message_with(
+        &self,
+        session_id: &str,
+        message: crate::gateway::types::ChatMessage,
+        hosts: &[Arc<dyn ToolHost>],
+        options: crate::agent::TurnOptions,
+    ) -> Result<ToolRouterOutput, ToolRouterError> {
+        self.map_result(
+            self.agent
+                .run_message_with(session_id, message, hosts, options)
+                .await,
+        )
     }
 
     /// Projects an agent run result into the router's output type.

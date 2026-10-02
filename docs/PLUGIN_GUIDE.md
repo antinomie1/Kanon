@@ -421,7 +421,7 @@ async for delta in self.core.stream_llm("讲个笑话"):
 
 - 与任何会话完全独立：不读取也不写入会话记忆，不经过人设与技能目录。
 - `model` 留空即使用节点的唯一默认模型；指定时必须写成 `<provider>/<model-id>`。
-- `prompt` 与 `messages` 二选一。多轮消息按时间从早到晚排列；图片只能放在用户消息中，且必须用 URL 或文件路径（不接受 `raw_bytes`，请先写入 `data_dir`）。
+- `prompt` 与 `messages` 二选一。多轮消息按时间从早到晚排列；图片只能放在用户消息中，可用 URL、文件路径或原始字节（`MessageSegment.image_bytes(data, "image/png")`，必须注明 `image/*` 的 MIME 类型，单张至多 10 MiB）。
 - 节点未配置模型时返回 `UNAVAILABLE`，消息不合法时返回 `INVALID_ARGUMENT`。
 
 ### 8.3 平台原生 API

@@ -12,7 +12,7 @@ use std::sync::Arc;
 
 use kanon_proto::v1::{ToolCallRequest, tool_call_request, tool_call_response};
 
-use crate::agent::{Agent, AgentConfig, AgentHook, AgentOutput, AgentTool};
+use crate::agent::{Agent, AgentConfig, AgentHook, AgentOutput, AgentTool, TurnOptions};
 use crate::compaction::{COMPACTION_INSTRUCTION, CompactionPolicy, ends_cleanly, summary_block};
 use crate::error::{AgentError, GatewayError, MemoryError};
 use crate::gateway::types::{
@@ -308,6 +308,7 @@ impl BuiltinAgent {
         session_id: &str,
         mut message: ChatMessage,
         hosts: &[Arc<dyn ToolHost>],
+        options: TurnOptions,
     ) -> Result<AgentOutput, AgentError> {
         for hook in &self.hooks {
             hook.on_user_message(session_id, &mut message).await?;
@@ -325,7 +326,10 @@ impl BuiltinAgent {
         // From here on the turn is part of history. However it ends, the next turn has to find a
         // conversation the provider accepts, and one that does not ask the model to redo the work
         // that just failed.
-        match self.answer(session_id, &user_input, media, hosts).await {
+        match self
+            .answer(session_id, &user_input, media, hosts, options)
+            .await
+        {
             Ok(output) => Ok(output),
             Err(err) => Err(self.close_failed_turn(session_id, err).await),
         }
@@ -338,9 +342,15 @@ impl BuiltinAgent {
         user_input: &str,
         media: Option<Vec<ContentPart>>,
         hosts: &[Arc<dyn ToolHost>],
+        options: TurnOptions,
     ) -> Result<AgentOutput, AgentError> {
         // 2. Dynamically aggregate tools from both native tools and active plugin hosts
-        let tools = self.collect_tools(hosts);
+        let tools = if options.without_tools {
+            Vec::new()
+        } else {
+            self.collect_tools(hosts)
+        };
+        let max_iterations = options.max_iterations.unwrap_or(self.config.max_iterations);
 
         let mut executed_tools = Vec::new();
         let mut attachments: Vec<ToolAttachment> = Vec::new();
@@ -419,7 +429,7 @@ impl BuiltinAgent {
             }
 
             // Guard against runaway loop recursion
-            if iterations >= self.config.max_iterations {
+            if iterations >= max_iterations {
                 tracing::warn!(
                     agent = %self.name,
                     session_id = %session_id,
@@ -556,6 +566,13 @@ impl BuiltinAgent {
                     None => {
                         tracing::warn!(tool = %call.name, "Requested tool not declared by any native tool or active host");
                         let err_msg = format!("Tool '{}' not registered", call.name);
+                        // A call that was attempted is reported finished, failed, so observers
+                        // can pair it with its start; the RPC-failure path below does the same.
+                        // (A vetoed call never started, so it reports nothing.)
+                        for hook in &self.hooks {
+                            hook.on_after_tool_call(session_id, &call, &err_msg, false)
+                                .await?;
+                        }
                         self.memory
                             .push_message(
                                 session_id,
@@ -677,14 +694,13 @@ impl BuiltinAgent {
                             success: false,
                         });
 
+                        let err_msg = format!("RPC Error: {}", status.message());
+                        for hook in &self.hooks {
+                            hook.on_after_tool_call(session_id, &call, &err_msg, false)
+                                .await?;
+                        }
                         self.memory
-                            .push_message(
-                                session_id,
-                                ChatMessage::tool_response(
-                                    &call.id,
-                                    format!("RPC Error: {}", status.message()),
-                                ),
-                            )
+                            .push_message(session_id, ChatMessage::tool_response(&call.id, err_msg))
                             .await?;
 
                         if self.config.stop_on_tool_failure {
@@ -1039,13 +1055,14 @@ impl Agent for BuiltinAgent {
         self.session_manager.as_ref()
     }
 
-    async fn run_message(
+    async fn run_message_with(
         &self,
         session_id: &str,
         message: ChatMessage,
         hosts: &[Arc<dyn ToolHost>],
+        options: TurnOptions,
     ) -> Result<AgentOutput, AgentError> {
-        self.run_turn(session_id, message, hosts).await
+        self.run_turn(session_id, message, hosts, options).await
     }
 
     async fn run_stream(

@@ -43,7 +43,7 @@ pub mod visible_reply;
 
 pub use agent::{
     Agent, AgentConfig, AgentHook, AgentOutput, AgentTool, NativeTool, NativeToolFn, NoopHost,
-    ToolOutput,
+    ToolOutput, TurnOptions,
 };
 pub use builtin::{AgentBuilder, BuiltinAgent, FAILED_TOOL_RESULT, STOPPED_TOOL_RESULT};
 pub use compaction::{COMPACTION_INSTRUCTION, CompactionPolicy};
@@ -80,6 +80,7 @@ pub use token::{
 };
 pub use tool_call_text::extract_textual_tool_calls;
 pub use tool_router::{
-    ToolAttachment, ToolHost, ToolRouter, ToolRouterOutput, aggregate_tools, resolve_tools,
+    ExecutedToolCall, ToolAttachment, ToolHost, ToolRouter, ToolRouterOutput, aggregate_tools,
+    resolve_tools,
 };
 pub use visible_reply::visible_reply;

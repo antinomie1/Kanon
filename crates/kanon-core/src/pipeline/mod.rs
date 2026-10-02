@@ -8,7 +8,11 @@
 //! - [`build_user_message`]: Translation of inbound segments into the model-visible user message.
 //! - [`inline_images`]: Inbound images downloaded by the node, so the provider never fetches them.
 //! - [`attachment_segments`]: Outbound segments for tool media, limited to what the adapter can send.
+//! - [`PluginAgentHook`]: Plugins inside the agent's turn (system prompt rewrites, tool events).
+//! - [`AgentRun`]: The node's agent run on a plugin's behalf (`RunAgent`).
 
+pub mod agent_hook;
+mod agent_run;
 pub mod attachment;
 pub mod capture;
 pub mod command;
@@ -24,6 +28,8 @@ pub mod pre_filter;
 mod reply;
 mod turns;
 
+pub use agent_hook::{PluginAgentHook, with_turn};
+pub use agent_run::{AgentRun, AgentRunError, AgentRunOutput};
 pub use attachment::{AttachmentSegments, MediaKind, attachment_segments};
 pub use capture::{Capture, CaptureRegistry, MAX_CAPTURE};
 pub use command::{

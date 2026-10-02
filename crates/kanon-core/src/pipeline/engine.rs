@@ -21,8 +21,9 @@ use kanon_llm::{AgentFactory, AgentSlot, ModelCapabilities, ModelRef, ModelSpec,
 use kanon_proto::v1::event_notification::Detail;
 use kanon_proto::v1::message_segment::Segment;
 use kanon_proto::v1::{
-    DeliverMessageRequest, DeliverMessageResponse, EventKind, IngestEventRequest, LlmResponseEvent,
-    MessageSegment, MessageSentEvent, PipelineEventRequest, ReplySource,
+    AgentBeginEvent, AgentDoneEvent, DeliverMessageRequest, DeliverMessageResponse, EventKind,
+    IngestEventRequest, LlmResponseEvent, MessageSegment, MessageSentEvent, PipelineEventRequest,
+    ReplySource,
 };
 
 use crate::access::{CommandAccess, CommandPolicyStore, META_SENDER_NAME};
@@ -486,6 +487,25 @@ fn text_reply(content: impl Into<String>) -> MessageSegment {
 ///
 /// It says outright that nothing retries: the sender should know that sending again is theirs to
 /// decide, and the node never repeats a failing request on its own.
+/// Names of the tools a turn called, in call order.
+fn tool_names(executed: &[kanon_llm::ExecutedToolCall]) -> Vec<String> {
+    executed.iter().map(|call| call.tool_name.clone()).collect()
+}
+
+/// The failure category `AGENT_DONE` reports for a turn that ended without an answer.
+///
+/// Categories, not messages: an error's text can carry a provider's response body, which a
+/// subscriber has no use for and should not receive.
+fn failure_category(error: &kanon_llm::ToolRouterError) -> &'static str {
+    match error {
+        kanon_llm::ToolRouterError::Stopped => "stopped",
+        kanon_llm::ToolRouterError::Gateway(_) => "model_error",
+        kanon_llm::ToolRouterError::Rpc(_) | kanon_llm::ToolRouterError::ToolNotFound(_) => {
+            "tool_error"
+        }
+    }
+}
+
 fn failure_notice(error: &kanon_llm::ToolRouterError) -> String {
     use kanon_llm::{GatewayError, ToolRouterError};
     let reason = match error {
@@ -573,6 +593,26 @@ fn reply_sample(event_id: &str) -> f32 {
     let mut hasher = std::collections::hash_map::RandomState::new().build_hasher();
     event_id.hash(&mut hasher);
     (hasher.finish() % 10_000) as f32 / 10_000.0
+}
+
+/// One agent turn in a conversation, ready to run (see [`PipelineEngine::run_conversation_turn`]).
+pub(crate) struct ConversationTurn<'a> {
+    /// The agent answering the turn.
+    pub(crate) agent: Arc<dyn kanon_llm::Agent>,
+    /// The instance answering, when the pipeline has instances.
+    pub(crate) instance: Option<&'a crate::instance::BotInstance>,
+    /// The conversation's session.
+    pub(crate) session_id: &'a str,
+    /// The inbound message the turn answers.
+    pub(crate) event: &'a PipelineEventRequest,
+    /// Hosts of the plugins the instance runs: they hear the turn's events and hooks.
+    pub(crate) hosts: &'a [Arc<crate::supervisor::ManagedHost>],
+    /// Tool sources offered to the model.
+    pub(crate) tool_hosts: Vec<Arc<dyn kanon_llm::tool_router::ToolHost>>,
+    /// Who may be running Bash through this turn; `None` refuses it.
+    pub(crate) bash_caller: Option<crate::BashCaller>,
+    /// Per-turn agent settings.
+    pub(crate) options: kanon_llm::TurnOptions,
 }
 
 /// Central event processing engine driving the message pipeline.
@@ -708,6 +748,11 @@ impl PipelineEngine {
     /// Locks serializing the writers of each conversation session.
     pub(crate) fn session_locks(&self) -> &super::turns::SessionLocks {
         &self.session_locks
+    }
+
+    /// The model turns running now, which `/stop` reaches.
+    pub(crate) fn running_turns(&self) -> &super::turns::RunningTurns {
+        &self.turns
     }
 
     /// Shares the bot-instance catalog that gates and partitions inbound events.
@@ -882,6 +927,143 @@ impl PipelineEngine {
             }
         }
         allowed
+    }
+
+    /// The tool sources a turn of `instance` may use: the hosts of its plugins whose circuit
+    /// breaker is closed, and the MCP servers it allows.
+    ///
+    /// `hosts` are the instance's plugin hosts (see [`Self::instance_hosts`]); a host with an open
+    /// breaker is skipped, and the skip observed, so a failing plugin does not stall the model.
+    pub(crate) async fn tool_hosts(
+        &self,
+        hosts: &[Arc<crate::supervisor::ManagedHost>],
+        instance: Option<&crate::instance::BotInstance>,
+        event_id: &str,
+    ) -> Vec<Arc<dyn kanon_llm::tool_router::ToolHost>> {
+        // Plugin hosts and MCP servers are both tool sources; the router sees one slice.
+        let mut active: Vec<Arc<dyn kanon_llm::tool_router::ToolHost>> = Vec::new();
+        for host in hosts {
+            if host.circuit_breaker.allow_request() {
+                active.push(Arc::clone(host) as Arc<dyn kanon_llm::tool_router::ToolHost>);
+            } else {
+                tracing::warn!(
+                    host_id = %host.host_id,
+                    event_id = %event_id,
+                    "Circuit breaker is OPEN; fast-skipping host from ToolRouter candidates"
+                );
+                self.observe(PipelineStage::CircuitBreakerTripped {
+                    event_id: event_id.to_string(),
+                    host_id: host.host_id.clone(),
+                    phase: "tool_router".to_string(),
+                    reason: format!(
+                        "Circuit breaker OPEN (state: {:?}, consecutive failures: {})",
+                        host.circuit_breaker.state(),
+                        host.circuit_breaker.consecutive_failures()
+                    ),
+                });
+            }
+        }
+
+        // MCP servers contribute their tools under the same policy rules as plugins.
+        if let (Some(mcp), Some(toggles)) = (&self.mcp, &self.toggles) {
+            active.extend(mcp.hosts_for_instance(toggles, instance).await);
+        }
+        active
+    }
+
+    /// Plugin hosts for a turn outside any instance: those the node-wide toggles enable.
+    pub(crate) async fn enabled_hosts(&self) -> Vec<Arc<crate::supervisor::ManagedHost>> {
+        let hosts = self.supervisor.get_all_hosts().await;
+        let Some(toggles) = &self.toggles else {
+            return hosts;
+        };
+        let mut enabled = Vec::with_capacity(hosts.len());
+        for host in hosts {
+            let plugin_id = host.primary_plugin_id().unwrap_or_default();
+            if toggles.is_enabled(PLUGIN_SECTION, &plugin_id).await {
+                enabled.push(host);
+            }
+        }
+        enabled
+    }
+
+    /// The plugin hosts `instance` runs, resolved now (see [`Self::instance_hosts`]).
+    pub(crate) async fn hosts_of(
+        &self,
+        instance: &crate::instance::BotInstance,
+    ) -> Vec<Arc<crate::supervisor::ManagedHost>> {
+        let hosts = self.supervisor.get_all_hosts().await;
+        self.instance_hosts(Some(instance), hosts).await
+    }
+
+    /// Runs one agent turn that answers `turn.event` in a conversation.
+    ///
+    /// The turn is announced to subscribers (`AGENT_BEGIN`, then `AGENT_DONE` however it ends),
+    /// registered so `/stop` reaches it, and run inside [`super::agent_hook::with_turn`] so its
+    /// tool calls carry the message as context and the instance's plugins take part in it. The
+    /// caller owns the session: it builds the message and holds the session's write lock.
+    pub(crate) async fn run_conversation_turn(
+        &self,
+        turn: ConversationTurn<'_>,
+        message: kanon_llm::ChatMessage,
+    ) -> Result<kanon_llm::ToolRouterOutput, kanon_llm::ToolRouterError> {
+        let ConversationTurn {
+            agent,
+            instance,
+            session_id,
+            event,
+            hosts,
+            tool_hosts,
+            bash_caller,
+            options,
+        } = turn;
+        hooks::emit_event(
+            hosts,
+            EventKind::AgentBegin,
+            Detail::AgentBegin(AgentBeginEvent {
+                context: Some(event.clone()),
+                session_id: session_id.to_string(),
+            }),
+        );
+        // Registered for exactly as long as the turn runs, so `/stop` reaches it and only it.
+        let running = self
+            .turns
+            .begin(instance.map(|instance| instance.id.clone()));
+        let router = ToolRouter::from_arc(agent);
+        let result = super::agent_hook::with_turn(
+            event.clone(),
+            hosts.to_vec(),
+            crate::with_bash_caller(
+                bash_caller,
+                kanon_llm::with_stop_signal(
+                    running.signal(),
+                    router.execute_message_with(session_id, message, &tool_hosts, options),
+                ),
+            ),
+        )
+        .await;
+        drop(running);
+
+        let done = match &result {
+            Ok(output) => AgentDoneEvent {
+                context: Some(event.clone()),
+                session_id: session_id.to_string(),
+                success: true,
+                content: visible_reply(&output.content),
+                error: String::new(),
+                tools: tool_names(&output.executed_tools),
+            },
+            Err(err) => AgentDoneEvent {
+                context: Some(event.clone()),
+                session_id: session_id.to_string(),
+                success: false,
+                content: String::new(),
+                error: failure_category(err).to_string(),
+                tools: Vec::new(),
+            },
+        };
+        hooks::emit_event(hosts, EventKind::AgentDone, Detail::AgentDone(done));
+        result
     }
 
     /// Tells subscribed plugins that the bot sent a message on `request.platform`.
@@ -1969,8 +2151,6 @@ impl PipelineEngine {
             || user_message.has_parts())
             && let Some(agent) = resolved_agent
         {
-            let router = ToolRouter::from_arc(agent.clone());
-
             // Remember what the model is shown, so a later recall of it can be noted.
             if notice.is_none() {
                 self.recalls.record_turn(
@@ -2001,41 +2181,11 @@ impl PipelineEngine {
             {
                 sessions.set_persona(&session_id, persona_id);
             }
-            // Filter hosts whose circuit breaker is Open to fast-skip them and protect LLM throughput
-            // Plugin hosts and MCP servers are both tool sources; the router sees one slice.
-            let mut active_hosts: Vec<Arc<dyn kanon_llm::tool_router::ToolHost>> = Vec::new();
-            for host in &hosts {
-                if host.circuit_breaker.allow_request() {
-                    active_hosts
-                        .push(Arc::clone(host) as Arc<dyn kanon_llm::tool_router::ToolHost>);
-                } else {
-                    tracing::warn!(
-                        host_id = %host.host_id,
-                        event_id = %filtered_event.event_id,
-                        "Circuit breaker is OPEN; fast-skipping host from ToolRouter candidates"
-                    );
-                    self.observe(PipelineStage::CircuitBreakerTripped {
-                        event_id: filtered_event.event_id.clone(),
-                        host_id: host.host_id.clone(),
-                        phase: "tool_router".to_string(),
-                        reason: format!(
-                            "Circuit breaker OPEN (state: {:?}, consecutive failures: {})",
-                            host.circuit_breaker.state(),
-                            host.circuit_breaker.consecutive_failures()
-                        ),
-                    });
-                }
-            }
-
-            // MCP servers contribute their tools under the same policy rules as plugins.
-            if let (Some(mcp), Some(toggles)) = (&self.mcp, &self.toggles) {
-                active_hosts.extend(mcp.hosts_for_instance(toggles, instance.as_ref()).await);
-            }
-
             // A model the catalog marks as not tool-capable is offered no external tools. Native
             // in-process tools stay available: they never leave the node and cost nothing to offer.
             let tool_hosts = if capabilities.tool_calling {
-                active_hosts
+                self.tool_hosts(&hosts, instance.as_ref(), &filtered_event.event_id)
+                    .await
             } else {
                 tracing::debug!(
                     session_id = %session_id,
@@ -2052,25 +2202,25 @@ impl PipelineEngine {
                 instance: instance.as_ref().map(|instance| instance.id.clone()),
                 shared_context: shared || observing,
             });
-            // Registered for exactly as long as the turn runs, so `/stop` reaches it and only it.
-            let turn = self
-                .turns
-                .begin(instance.as_ref().map(|instance| instance.id.clone()));
             // The turn writes its messages as it goes; holding the session's lock keeps a plugin
             // from deleting the conversation or appending to it in between. Plugins only ever
             // try the lock, so a tool call of this very turn cannot deadlock on it.
             let _writing = self.session_locks.lock(&session_id).await;
-            match crate::supervisor::with_tool_event(
-                filtered_event.clone(),
-                crate::with_bash_caller(
-                    bash_caller,
-                    kanon_llm::with_stop_signal(
-                        turn.signal(),
-                        router.execute_message(&session_id, user_message, &tool_hosts),
-                    ),
-                ),
-            )
-            .await
+            match self
+                .run_conversation_turn(
+                    ConversationTurn {
+                        agent,
+                        instance: instance.as_ref(),
+                        session_id: &session_id,
+                        event: &filtered_event,
+                        hosts: &hosts,
+                        tool_hosts,
+                        bash_caller,
+                        options: kanon_llm::TurnOptions::default(),
+                    },
+                    user_message,
+                )
+                .await
             {
                 Ok(output) => {
                     // Reasoning already has its own channel and parsed tool calls were removed by

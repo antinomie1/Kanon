@@ -35,8 +35,8 @@ Supervisor 启动宿主时注入的**启动契约**（插件不得把其他环�
 | 服务 | 运行在 | 调用方 | RPC |
 | --- | --- | --- | --- |
 | `PluginHostService` | 宿主 | 核心 | `Ping`、`ReloadPluginConfig`、`GetPluginMeta`、`InvokeAction` |
-| `MessagePipelineService` | 宿主 | 核心 | `OnPreFilter`、`OnExecuteCommand`、`OnCallTool`、`OnEvent`、`OnDeliverMessage`、`OnDecorateReply`、`OnPrepareTurn` |
-| `BotApiService` | 核心 | 宿主 | `RegisterHost`、`Ping`、`IngestEvent`、`SendMessage`、`ReplyMessage`、`RequestLLM`、`CallPlatformApi`、`GetConversationHistory`、`ListConversations`、`NewConversation`、`SwitchConversation`、`DeleteConversation`、`AppendConversation`、`ListPersonas`、`UpsertPersona`、`DeletePersona`、`SetStorage`、`GetStorage`、`DeleteStorage`、`ListStorage`、`RenderImage` |
+| `MessagePipelineService` | 宿主 | 核心 | `OnPreFilter`、`OnExecuteCommand`、`OnCallTool`、`OnEvent`、`OnDeliverMessage`、`OnDecorateReply`、`OnPrepareTurn`、`OnLlmRequest` |
+| `BotApiService` | 核心 | 宿主 | `RegisterHost`、`Ping`、`IngestEvent`、`SendMessage`、`ReplyMessage`、`RequestLLM`、`CallPlatformApi`、`GetConversationHistory`、`ListConversations`、`NewConversation`、`SwitchConversation`、`DeleteConversation`、`AppendConversation`、`ListPersonas`、`UpsertPersona`、`DeletePersona`、`SetStorage`、`GetStorage`、`DeleteStorage`、`ListStorage`、`RenderImage`、`RunAgent`、`RefreshPluginMeta` |
 
 ---
 
@@ -62,7 +62,7 @@ Supervisor 启动宿主时注入的**启动契约**（插件不得把其他环�
 
 ```
 实例闸门 → 通知事件（OnEvent: notice）→ OnPreFilter 链 → 内置命令
-  → 会话接管（continuation）→ 斜杠命令 → 正则触发器 → 回复策略 → OnPrepareTurn → 模型
+  → 会话接管（continuation）→ 斜杠命令 → 正则触发器 → 回复策略 → OnPrepareTurn → 模型（首个请求前 OnLlmRequest）
                                      ↘ 回复经 OnDecorateReply 后投递，成功后 OnEvent: message_sent
 
 命令或触发器返回 pass_to_model 时，其回复照常投递，消息继续进入“回复策略 → 模型”。
@@ -122,6 +122,12 @@ Supervisor 启动宿主时注入的**启动契约**（插件不得把其他环�
 | `message_sent` | `EVENT_KIND_MESSAGE_SENT` | 投递成功的 `DeliverMessageRequest` 与平台消息 ID |
 | `notice` | `EVENT_KIND_NOTICE` | 平台通知原样的 `PipelineEventRequest`（类型见 `kanon.notice`） |
 | `llm_response` | `EVENT_KIND_LLM_RESPONSE` | 被回答的消息与模型最终文本（装饰前） |
+| `agent_begin` | `EVENT_KIND_AGENT_BEGIN` | 智能体开始回答某条消息：`context`、`session_id` |
+| `agent_done` | `EVENT_KIND_AGENT_DONE` | 该轮结束：`success`、`content`（装饰前的最终回答）、`error`、`tools`（按调用顺序） |
+| `tool_call` | `EVENT_KIND_TOOL_CALL` | 模型请求调用工具（工具执行前发出，仅供观察，不能否决）：`tool_name`、`arguments` |
+| `tool_result` | `EVENT_KIND_TOOL_RESULT` | 工具调用结束：`tool_name`、`success`、`result`（模型读到的文本） |
+
+智能体事件覆盖流水线回答的每一轮，以及 `RunAgent` 在会话内的运行；控制台聊天与插件的私有运行不发送。`agent_done.error` 是失败类别：`stopped`（被 `/stop` 中止）、`model_error`（模型服务出错）、`tool_error`（工具调用失败）。工具事件的 `tool_name` 是模型看到的名字（重名时为 `<plugin>__<tool>`）。同一轮的事件按发生顺序派发，但各订阅者独立接收，插件不应依赖跨事件的到达顺序。
 
 字段号 1、2 已保留（旧版扁平字段），不得复用。
 
@@ -151,6 +157,22 @@ Supervisor 启动宿主时注入的**启动契约**（插件不得把其他环�
 
 所有准备器**并发**执行，每个限时 **3 秒**；出错、超时或返回空串的不贡献内容。结果按宿主优先级、`host_id`、插件顺序拼接，插在召回提示之后、群聊记录与发送者标签之前。文本只进入当前轮用户消息，从不进入系统提示，因此不破坏请求前缀缓存；它随本轮消息一起写入会话历史。
 
+### `OnLlmRequest(LlmRequestHookRequest) → LlmRequestHookResult`
+
+只调用 `PluginMeta.rewrites_system_prompt = true` 的插件，用于改写会话的系统提示（人设之外的长期规则、按群定制的语气等）。
+
+| 字段 | 说明 |
+| --- | --- |
+| `context` | 即将被回答的入站消息 |
+| `session_id` | 模型将续写的会话 |
+| `system_prompt` | 目前的系统提示：实例提示词或人设、技能目录，以及排在前面的插件的改写 |
+| 结果 `system_prompt` | 设置时替换系统提示；不设置表示不改；空字符串被拒绝（保留原提示并记录日志） |
+
+- **每轮一次。** 核心在一轮的首个模型请求前按宿主优先级、`host_id`、插件顺序**串行**询问，后者看到前者的结果；同一轮后续的工具轮次以及随后的历史压缩复用这次的结果，不再询问。
+- **必须确定。** 系统提示位于每个请求的最前面，决定提供商的前缀缓存：对同一会话应返回相同文本，不要放入时间、计数器或按消息变化的内容（这些属于 `OnPrepareTurn`）。当运维修改人设或技能使原提示变化时，旧的改写自动作废并重新询问。
+- **只在会话轮次中调用。** 控制台聊天、插件的 `RequestLLM` 与私有 `RunAgent` 不会触发，因此插件在钩子里调用模型不会递归回到自己。
+- 每个插件限时 **3 秒**；出错或超时的插件不生效，下一个插件从未被改写的提示继续。会话历史中的摘要始终排在改写后的系统提示之后。
+
 ### `OnDeliverMessage(DeliverMessageRequest) → DeliverMessageResponse`
 
 仅发给在清单中声明了 `[adapter] platform` 的插件，`platform` 与之匹配。实现必须如实报告：未发送就返回 `success = false`，绝不“假成功”。核心对每个平台维护熔断器与死信队列。
@@ -174,6 +196,8 @@ Supervisor 启动宿主时注入的**启动契约**（插件不得把其他环�
 | `ListPersonas` / `UpsertPersona` / `DeletePersona` | 节点的人设目录 | 见下 |
 | `SetStorage` / `GetStorage` / `DeleteStorage` / `ListStorage` | 核心的中心 KV 存储，每个插件一个命名空间 | 见下 |
 | `RenderImage` | 把文本或 SVG 渲染成 PNG，供图片段发送 | 见下 |
+| `RunAgent` | 让节点的智能体（模型 + 工具循环）回答一个提示，可在私有会话或某个聊天的当前对话中运行 | 见下 |
+| `RefreshPluginMeta` | 插件在运行时增删工具、命令或触发器后，请核心重新读取本宿主的 `GetPluginMeta` | 见下 |
 
 ### 中心 KV：`SetStorage`、`GetStorage`、`DeleteStorage`、`ListStorage`
 
@@ -203,13 +227,50 @@ Supervisor 启动宿主时注入的**启动契约**（插件不得把其他环�
 
 字体取自节点系统：`sans-serif` 优先选用已安装的中文无衬线字体（如 Noto Sans CJK），缺字的字符（中文、emoji）自动从其他已安装字体中补齐。相同内容渲染为同一个文件；超过 24 小时的渲染结果在下次渲染时清理，所以应在渲染后尽快发送。错误：参数不合法、SVG 无法解析、图片超过 1600 万像素为 `INVALID_ARGUMENT`；节点未安装任何字体时渲染文本为 `FAILED_PRECONDITION`。
 
+### `RunAgent(RunAgentRequest) → RunAgentResponse`
+
+与 `RequestLLM` 不同，`RunAgent` 运行的是节点的智能体：它可以调用工具（插件、MCP 与内置工具），也可以在某个聊天的对话里作为一轮回答。
+
+| 字段 | 说明 |
+| --- | --- |
+| `prompt` | 给智能体的用户消息；仅当提供了 `images` 时可以为空 |
+| `images` | 本轮的图片：`url`、`file_path` 或 `raw_bytes`（须带 `image/*` 的 `mime_type`，至多 10 MiB）；所用模型必须声明视觉能力 |
+| `context` | 本次运行服务的聊天（一条入站消息）：决定实例，从而决定默认模型、可用插件与工具策略，并作为工具调用的 `context` |
+| `in_conversation` | `true`：在该聊天的当前对话中运行，带着对话历史与人设回答，并追加到历史中，与模型回答该消息完全一样（订阅者收到智能体与工具事件，`OnLlmRequest` 参与，`/stop` 可中止）。`false`（默认）：使用一次性的私有会话，结束即丢弃，不调用任何插件钩子 |
+| `system_prompt` | 私有运行的指令，空则沿用节点的基础人设；在对话中运行时忽略 |
+| `model` | `<provider>/<model-id>`；空为实例的模型，否则为节点默认模型 |
+| `use_tools` | 是否向模型提供工具；为 `false` 时只做纯文本回答 |
+| `max_steps` | 允许的工具轮次，`0` 为智能体默认值 |
+| 结果 | `content`（去掉推理内容的最终回答）、`attachments`（工具产出的富媒体，由插件自行发送）、`tools`（按顺序调用过的工具）、`session_id`（对话的会话，或已丢弃的私有会话 `plugin:<plugin_id>:<n>`） |
+
+运行**不会**把回答发送到聊天，发送由插件决定。运行从不执行 Bash：聊天由插件持有的消息指定，插件可以伪造的发送者身份不能用于解锁 shell。
+
+| 条件 | 状态码 |
+| --- | --- |
+| 提示与图片都为空；`in_conversation` 缺 `context`；图片不合法或模型不支持图片；模型引用不合法 | `INVALID_ARGUMENT` |
+| `context` 所在的聊天没有启用的实例认领 | `NOT_FOUND` |
+| 未配置模型 | `UNAVAILABLE` |
+| 对话正有一轮在运行（`in_conversation`，不排队） | `FAILED_PRECONDITION` |
+| 运行被 `/stop` 中止 | `ABORTED` |
+| 模型或工具失败 | `UNAVAILABLE` |
+
+### `RefreshPluginMeta(RefreshPluginMetaRequest) → RefreshPluginMetaResponse`
+
+插件在运行时增删了工具（`add_tool` / `remove_tool`）、命令或触发器后调用，核心立即重新调用该宿主的 `GetPluginMeta`，下一轮起生效（正在进行的轮次不受影响）。结果 `plugin_ids` 为核心现在持有其元数据的插件。
+
+| 条件 | 状态码 |
+| --- | --- |
+| 未知的 `host_id` | `NOT_FOUND` |
+| 新的元数据缺少宿主此前声明过的插件（核心保留旧元数据） | `FAILED_PRECONDITION` |
+| `GetPluginMeta` 本身失败 | 原样返回其状态码 |
+
 ### `RequestLLM(LLMRequest) → stream LLMChunk`
 
 | 字段 | 说明 |
 | --- | --- |
 | `model` | 空为节点默认模型；否则必须为 `<provider>/<model-id>` |
 | `system_prompt` | 可选系统提示 |
-| `messages` | 至少一条，时间正序。`role` 不能为 `LLM_ROLE_UNSPECIFIED`；`images` 只允许出现在用户消息中，且只接受 `url` / `file_path`（`raw_bytes` 返回 `INVALID_ARGUMENT`） |
+| `messages` | 至少一条，时间正序。`role` 不能为 `LLM_ROLE_UNSPECIFIED`；`images` 只允许出现在用户消息中，可以是 `url`、`file_path` 或 `raw_bytes`（须带 `image/*` 的 `mime_type`，至多 10 MiB） |
 | `temperature` / `max_tokens` | `optional`：不设置即沿用提供商默认值 |
 
 调用与任何会话无关：不读写会话记忆，也不经过人设与工具。字段号 1、3（旧 `prompt`、`parameters`）已保留。
@@ -342,6 +403,7 @@ Supervisor 启动宿主时注入的**启动契约**（插件不得把其他环�
 | `events` | 订阅的 `EventKind` |
 | `decorates_replies` | 是否参与回复装饰 |
 | `prepares_turns` | 是否参与轮次准备（`OnPrepareTurn`） |
+| `rewrites_system_prompt` | 是否参与系统提示改写（`OnLlmRequest`） |
 
 命令与触发器共享名称空间；同名命令按 `CommandMeta.priority`、再按宿主优先级决出唯一胜者。内置命令 `help`、`info`、`new`、`model` 不可被覆盖。
 
@@ -350,7 +412,7 @@ Supervisor 启动宿主时注入的**启动契约**（插件不得把其他环�
 | 枚举 | 取值 |
 | --- | --- |
 | `CommandAccess` | `COMMAND_ACCESS_EVERYONE`、`COMMAND_ACCESS_ADMINS_IN_GROUPS`、`COMMAND_ACCESS_ADMINS` |
-| `EventKind` | `EVENT_KIND_UNSPECIFIED`、`EVENT_KIND_MESSAGE_SENT`、`EVENT_KIND_NOTICE`、`EVENT_KIND_LLM_RESPONSE` |
+| `EventKind` | `EVENT_KIND_UNSPECIFIED`、`EVENT_KIND_MESSAGE_SENT`、`EVENT_KIND_NOTICE`、`EVENT_KIND_LLM_RESPONSE`、`EVENT_KIND_AGENT_BEGIN`、`EVENT_KIND_AGENT_DONE`、`EVENT_KIND_TOOL_CALL`、`EVENT_KIND_TOOL_RESULT` |
 | `ReplySource` | `REPLY_SOURCE_UNSPECIFIED`、`REPLY_SOURCE_LLM`、`REPLY_SOURCE_COMMAND` |
 | `LLMRole` | `LLM_ROLE_UNSPECIFIED`、`LLM_ROLE_USER`、`LLM_ROLE_ASSISTANT` |
 | `ConversationKind` | `CONVERSATION_KIND_UNSPECIFIED`、`CONVERSATION_KIND_PRIVATE`、`CONVERSATION_KIND_GROUP`、`CONVERSATION_KIND_CHANNEL` |
@@ -366,6 +428,8 @@ Supervisor 启动宿主时注入的**启动契约**（插件不得把其他环�
 | `OnEvent` 单订阅者等待 | 5 秒 |
 | `OnDecorateReply` 单装饰器 | 3 秒 |
 | `OnPrepareTurn` 单准备器 | 3 秒（并发执行） |
+| `OnLlmRequest` 单插件 | 3 秒（串行，每轮一次） |
+| `RequestLLM` / `RunAgent` 图片 `raw_bytes` | 每张至多 10 MiB |
 | `ReplyMessage` 等待投递结果 | 30 秒（SDK 客户端截止时间 35 秒） |
 | 宿主启动就绪等待 | 5 秒 |
 | 宿主停止宽限 | 3 秒 |

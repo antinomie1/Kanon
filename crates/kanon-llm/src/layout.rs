@@ -62,6 +62,22 @@ pub fn canonical_tools(mut tools: Vec<ToolDefinition>) -> Vec<ToolDefinition> {
     tools
 }
 
+/// The static block the leading system messages of `messages` merge into: parts trimmed,
+/// empties dropped, joined with the fixed separator. Empty when there is none.
+///
+/// This is the system prompt exactly as [`normalize_request`] sends it, for code that must see
+/// (or replace) the prompt the provider will receive.
+pub fn system_text(messages: &[ChatMessage]) -> String {
+    messages
+        .iter()
+        .take_while(|message| message.role == Role::System)
+        .filter_map(|message| message.content.as_deref())
+        .map(str::trim)
+        .filter(|text| !text.is_empty())
+        .collect::<Vec<_>>()
+        .join(SYSTEM_SEPARATOR)
+}
+
 /// Normalizes a request after every hook has run.
 ///
 /// The leading run of system messages (persona, skill catalog, summary, ...) becomes exactly one
@@ -80,13 +96,7 @@ pub fn normalize_request(request: &mut ChatRequest) {
         .count();
 
     if leading > 0 {
-        let merged = request.messages[..leading]
-            .iter()
-            .filter_map(|message| message.content.as_deref())
-            .map(str::trim)
-            .filter(|text| !text.is_empty())
-            .collect::<Vec<_>>()
-            .join(SYSTEM_SEPARATOR);
+        let merged = system_text(&request.messages);
         request.messages.drain(..leading);
         if !merged.is_empty() {
             request.messages.insert(0, ChatMessage::system(merged));

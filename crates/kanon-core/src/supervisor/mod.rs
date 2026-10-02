@@ -1489,6 +1489,34 @@ impl Supervisor {
         Ok(applied)
     }
 
+    /// Fetches a host's plugin metadata again, for a plugin that changed its tools, commands or
+    /// triggers at runtime; returns the plugin ids the host now declares.
+    ///
+    /// The new metadata applies from the next turn on. A host that stops declaring a plugin it
+    /// declared before is refused and keeps its previous metadata: a plugin vanishing from
+    /// routing and the console is a restart's business, not a refresh's.
+    ///
+    /// The host is asked while its own `RefreshPluginMeta` call is still waiting, so a host must
+    /// serve `GetPluginMeta` concurrently with its outgoing calls (every SDK does).
+    pub async fn refresh_plugin_meta(&self, host_id: &str) -> Result<Vec<String>, SupervisorError> {
+        let host = self
+            .get_host(host_id)
+            .await
+            .ok_or_else(|| SupervisorError::HostNotFound(host_id.to_string()))?;
+        let metas = host.get_plugin_meta().await?;
+        if let Some(missing) = host
+            .metas()
+            .into_iter()
+            .find(|previous| !metas.iter().any(|meta| meta.id == previous.id))
+        {
+            return Err(SupervisorError::PluginNotFound(missing.id));
+        }
+        let plugin_ids = metas.iter().map(|meta| meta.id.clone()).collect();
+        host.set_metas(metas);
+        tracing::info!(host_id = %host_id, "Plugin metadata refreshed at the plugin's request");
+        Ok(plugin_ids)
+    }
+
     /// Directly registers an externally created or mocked `ManagedHost` (useful for unit tests).
     pub async fn register_managed_host(&self, host: Arc<ManagedHost>) {
         self.hosts.write().await.insert(host.host_id.clone(), host);

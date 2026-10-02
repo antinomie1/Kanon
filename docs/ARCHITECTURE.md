@@ -299,7 +299,9 @@ SDK 只是协议的封装：三语言提供同一套能力（命令、正则触�
 
 ### 8.1 核心职责与架构定位
 Rust 核心全权主导 LLM 的生命周期与推理编排，确保高并发下的 Token 预算控制与流式吞吐：
-- **Agent 抽象**：流水线、控制台聊天与插件网关从不直接驱动模型，而是把一轮对话交给 `kanon_llm::Agent`（trait：`run_message` / `run_stream` / `compact_session`，以及 `config`、`provider`、`memory`），并只依据其 `AgentOutput` 行事。节点目前只有一个实现——内置的 `BuiltinAgent`（`kanon-llm/src/builtin.rs`，基于 `LlmProvider` 的工具循环）；将来换用外部 Agent SDK 时只需新增实现并在 `AgentFactory` 中构建，流水线不变。实现必须遵守同一会话契约：历史仅追加、失败轮次留下可续接的历史、停止信号触发时及时结束。
+- **Agent 抽象**：流水线、控制台聊天与插件网关从不直接驱动模型，而是把一轮对话交给 `kanon_llm::Agent`（trait：`run_message_with` / `run_stream` / `compact_session`，以及 `config`、`provider`、`memory`；`run_message` 是不带 `TurnOptions` 的便捷形式，`TurnOptions` 可限制工具轮次或不提供工具），并只依据其 `AgentOutput` 行事。节点目前只有一个实现——内置的 `BuiltinAgent`（`kanon-llm/src/builtin.rs`，基于 `LlmProvider` 的工具循环）；将来换用外部 Agent SDK 时只需新增实现并在 `AgentFactory` 中构建，流水线不变。实现必须遵守同一会话契约：历史仅追加、失败轮次留下可续接的历史、停止信号触发时及时结束、在每次模型请求前与每次工具调用前后调用 `AgentHook`。
+- **插件进入智能体的轮次**：流水线回答一条消息的每一轮都由 `PipelineEngine::run_conversation_turn` 驱动——发出 `AGENT_BEGIN` / `AGENT_DONE` 事件、登记 `/stop`，并在 `with_turn` 任务作用域内运行，作用域记录入站消息与该实例启用的插件宿主。节点为每个 Agent 注册 `PluginAgentHook`（`kanon-core/src/pipeline/agent_hook.rs`），它从作用域中找到插件：模型请求前调用 `OnLlmRequest` 改写系统提示（见 8.6），工具调用前后发出 `TOOL_CALL` / `TOOL_RESULT`。作用域是任务本地的而不是 Agent 的字段，因为同一个 Agent 同时服务多个聊天的轮次；作用域之外（控制台聊天、插件的私有运行、后台压缩）从不调用插件，插件在钩子里调用模型因此不会递归。
+- **插件调用智能体 (`RunAgent`)**：插件可以让节点的智能体回答一个提示（`kanon-core/src/pipeline/agent_run.rs`）。在某个聊天的对话中运行时，它就是该对话的一轮，同样经 `run_conversation_turn`，且像其他外部写入者一样只在能立即拿到会话写锁时进行；默认则用 `AgentFactory::private_agent` 构建一次性 Agent（独立的内存记忆、不压缩、无插件钩子作用域），会话名为 `plugin:<plugin_id>:<n>`，结束即丢弃。两种运行都不执行 Bash。
 - **统一模型网关**：内置支持 OpenAI-compatible、DeepSeek、Claude、Ollama 等多端点协议，支持动态权重与故障自动重试。
 - **全局会话上下文管理 (Session Memory)**：
   - 基于 `channel_id:sender_id` 分配会话上下文，实例会话键为 `instance:<id>:<会话>#<代数>`：一个会话（私聊、群成员或共享的群）可以有多段对话，每段是一个代数，实例记录当前代数；`/new` 开新对话，`/ls`、`/switch`、`/del` 列出、切换、删除（见 9.5 的“多段对话”）。
@@ -336,6 +338,8 @@ Rust 核心全权主导 LLM 的生命周期与推理编排，确保高并发下�
 
 控制台的"工具列表"页签通过 `GET /api/v1/tools` 展示三类来源的合并结果：内置工具（`read_skill` 等，直接来自 Agent 的原生工具表）、运行中插件宿主声明的工具，以及已启用 MCP 服务器通告的工具；插件与 MCP 工具经由同一个 `resolve_tools` 解析，因此控制台显示的名称与模型收到的名称由构造保证一致（含重名时的 `plugin__tool` 命名空间）。被全局关闭的 MCP 服务器不会出现在其中——该接口列出的是"此刻真的可调用"的工具。
 
+插件可以在运行时增删自己的工具（以及命令、触发器）：变更后调用 `RefreshPluginMeta`，核心重新读取该宿主的 `GetPluginMeta`，从下一轮起生效；工具列表因此变化一次，前缀随之重新稳定。刷新后的元数据若缺少宿主此前声明过的插件，核心拒绝并保留旧元数据。
+
 流水线在实例门禁之后立即按该策略过滤插件宿主（`PreFilter`、内置/插件命令、工具聚合因此同时生效），MCP 与技能策略则在聚合工具与构建技能目录时求值。策略通过会话键中的实例标识解析，因此共享同一 Agent 的不同实例不会串用彼此的工具与技能。
 
 ### 8.5 Tool Calling 跨语言执行状态机闭环
@@ -368,7 +372,7 @@ sequenceDiagram
 | 层 | 内容 | 何时变化 |
 | :--- | :--- | :--- |
 | 1. 工具 | 全部可调用工具，按名称排序，Schema 键名排序 | 插件 / MCP / 技能开关变化时 |
-| 2. 系统块 | 人设提示词 + 技能目录（+ 会话摘要，见 8.7），合并为**单条** system 消息 | 运营者编辑配置时 |
+| 2. 系统块 | 人设提示词 + 技能目录（插件可经 `OnLlmRequest` 改写，见下；+ 会话摘要，见 8.7），合并为**单条** system 消息 | 运营者编辑配置或插件改写结果变化时 |
 | 3. 历史 | 此前各轮对话，**仅追加** | 每轮追加，不修改已有内容 |
 | 4. 当前轮 | 用户输入（含运营者启用的 `[时间]`/`[发送者]` 前缀） | 每次请求 |
 
@@ -377,6 +381,11 @@ sequenceDiagram
 - 字段结构不随轮次增减：某个配置下，字段要么始终存在、要么始终缺省，不会一轮传 `null`、一轮省略键；
 - 人设提示词是**纯静态文本**（保存时统一换行并去除首尾空白），不再支持 `{{变量}}` 模板；时间、发送者等运行时才知道的信息只出现在当前轮用户消息里；
 - system 文本逐段 trim 后以固定分隔符 `\n\n` 合并，钩子数量变化不会改变提示词形状；若有钩子在对话开始后再插入 system 消息（会切断缓存前缀），系统记录告警。
+
+**插件改写系统提示**：声明 `rewrites_system_prompt` 的插件可通过 `OnLlmRequest` 改写第 2 层。为保持前缀稳定：
+- 每轮只在首个模型请求前按宿主优先级串行询问一次，结果按会话记住（`PluginAgentHook`，最多记住最近 256 个会话）；同一轮的工具轮次与随后的后台压缩复用这次结果，因此一轮的全部请求与其摘要请求共享同一前缀。被遗忘的结果只会让一次压缩少命中缓存，绝不会用错提示。
+- 记住的结果绑定插件看到的原提示（哈希）：运维修改人设或技能后，旧改写作废并重新询问，不会掩盖修改；不再有插件改写时立即遗忘，压缩不会重新带出旧改写。
+- 改写结果替换开头的全部 system 消息成为一条，摘要始终插在其后（`prompt_layout_test.rs` 验证）；插件出错、超时（3 秒）或返回空串时保留原提示。插件必须对同一会话给出确定的结果，按消息变化的上下文应走 `OnPrepareTurn` 进入当前轮。
 
 **服务商适配**：OpenAI Chat / Responses 与 DeepSeek 等按前缀自动缓存，稳定前缀即可命中；Anthropic 需要显式断点，`AnthropicMessagesProvider` 在工具列表末尾、system 块、对话最后一个内容块各打一个 `cache_control: ephemeral` 断点（流式与非流式共用同一请求构造器，保证两者布局一致）。
 

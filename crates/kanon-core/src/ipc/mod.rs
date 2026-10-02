@@ -763,9 +763,7 @@ impl CoreIpcServer {
 /// not represent instead of silently dropping it.
 #[allow(clippy::result_large_err)]
 fn llm_messages(turns: Vec<kanon_proto::v1::LlmMessage>) -> Result<Vec<ChatMessage>, Status> {
-    use kanon_llm::gateway::types::ContentPart;
     use kanon_proto::v1::LlmRole;
-    use kanon_proto::v1::image_segment::Source;
 
     if turns.is_empty() {
         return Err(Status::invalid_argument(
@@ -777,19 +775,7 @@ fn llm_messages(turns: Vec<kanon_proto::v1::LlmMessage>) -> Result<Vec<ChatMessa
         .enumerate()
         .map(|(index, turn)| match turn.role() {
             LlmRole::User => {
-                let mut parts = Vec::with_capacity(turn.images.len());
-                for image in turn.images {
-                    let mime_type = image.mime_type.clone();
-                    parts.push(match image.source {
-                        Some(Source::Url(url)) => ContentPart::image_url(url, mime_type),
-                        Some(Source::FilePath(path)) => ContentPart::image_file(path, mime_type),
-                        Some(Source::RawBytes(_)) | None => {
-                            return Err(Status::invalid_argument(format!(
-                                "message {index}: images must be a URL or a file path"
-                            )));
-                        }
-                    });
-                }
+                let parts = agent::image_parts(turn.images, &format!("message {index}"))?;
                 Ok(ChatMessage::user_multimodal(turn.text, parts))
             }
             LlmRole::Assistant if turn.images.is_empty() => Ok(ChatMessage::assistant(turn.text)),

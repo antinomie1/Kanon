@@ -52,7 +52,8 @@ use kanon_core::{
     BashPolicyStore, BashTool, CommandPolicyStore, DEFAULT_INSTANCE_CATALOG, DEFAULT_MCP_CONFIG,
     DEFAULT_SKILLS_DIR, DEFAULT_TOGGLE_STATE, EventIngress, HOST_WATCHDOG_INTERVAL,
     InstanceRegistry, MCP_WATCHDOG_INTERVAL, McpConfigStore, McpPool, PLUGIN_SECTION,
-    ReadSkillTool, SkillCatalogHook, SkillStore, ToggleStore, sync_instance_personas,
+    PluginAgentHook, ReadSkillTool, SkillCatalogHook, SkillStore, ToggleStore,
+    sync_instance_personas,
 };
 use kanon_llm::PersonaStore;
 use tokio::sync::{mpsc, oneshot};
@@ -238,11 +239,16 @@ async fn main() -> StartupResult<()> {
             plugin_state.clone(),
             instances.clone(),
         ))])
-        .with_hooks(vec![Arc::new(SkillCatalogHook::new(
-            skills.clone(),
-            plugin_state.clone(),
-            instances.clone(),
-        ))])
+        // The plugin hook comes after the skill catalog: plugins rewrite the system prompt as the
+        // operator's persona and skills built it.
+        .with_hooks(vec![
+            Arc::new(SkillCatalogHook::new(
+                skills.clone(),
+                plugin_state.clone(),
+                instances.clone(),
+            )),
+            Arc::new(PluginAgentHook::new()),
+        ])
         .with_bash_tool(bash_tool)
         .build();
 

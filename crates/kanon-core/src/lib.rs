@@ -65,7 +65,7 @@ pub use notice::{
 pub use pipeline::{
     CommandRouter, DEFAULT_OUTBOUND_QUEUE_CAPACITY, DeliveryOutcome, HELP_COMMAND, INFO_COMMAND,
     MODEL_COMMAND, MatchedCommand, NEW_SESSION_COMMAND, PipelineEngine, PipelineObserver,
-    PipelineResult, PipelineStage, PreFilterChain, PreFilterOutcome, STOP_COMMAND,
+    PipelineResult, PipelineStage, PluginAgentHook, PreFilterChain, PreFilterOutcome, STOP_COMMAND,
     build_user_message,
 };
 pub use shutdown::shutdown_signal;
