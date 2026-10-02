@@ -287,10 +287,14 @@ async fn install_from_dir(
             .prefix(".kanon-install-")
             .tempdir_in(&plugins_root)?;
         let (from, to) = (source_dir.clone(), staging.path().to_path_buf());
-        tokio::task::spawn_blocking(move || copy_dir_recursive(&from, &to))
-            .await
-            .map_err(|err| ApiError::Internal(format!("Copy task failed: {err}")))?
-            .map_err(|err| ApiError::Internal(format!("Failed to copy the plugin files: {err}")))?;
+        let entrypoint = manifest.plugin.entrypoint.trim().to_string();
+        tokio::task::spawn_blocking(move || {
+            copy_dir_recursive(&from, &to)?;
+            copy_entrypoint(&from, &to, &entrypoint)
+        })
+        .await
+        .map_err(|err| ApiError::Internal(format!("Copy task failed: {err}")))?
+        .map_err(|err| ApiError::Internal(format!("Failed to copy the plugin files: {err}")))?;
         Some(staging)
     };
 
@@ -634,6 +638,24 @@ fn copy_dir_recursive(src: &Path, dst: &Path) -> Result<(), std::io::Error> {
                 "Skipping a symlink or special file while installing a plugin"
             );
         }
+    }
+    Ok(())
+}
+
+/// Copies the entrypoint when [`copy_dir_recursive`] left it out.
+///
+/// A Rust plugin's binary lives under `target/`, which the copy skips as build output; the binary
+/// is the plugin itself, though, so it is copied on its own. Like the folder copy, it never
+/// follows a symlink. The path was checked to stay inside the plugin folder by
+/// [`validate_manifest`].
+fn copy_entrypoint(src: &Path, dst: &Path, entrypoint: &str) -> Result<(), std::io::Error> {
+    let (from, to) = (src.join(entrypoint), dst.join(entrypoint));
+    let is_file = std::fs::symlink_metadata(&from).is_ok_and(|metadata| metadata.is_file());
+    if is_file && !to.exists() {
+        if let Some(parent) = to.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        std::fs::copy(&from, &to)?;
     }
     Ok(())
 }

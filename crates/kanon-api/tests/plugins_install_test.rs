@@ -226,6 +226,72 @@ description = "Greet from ts"
     assert!(status_str == "running" || status_str == "RuntimeUnavailable");
 }
 
+/// Sends a `.kpk` to the install endpoint as a multipart upload.
+async fn upload_package(app: Router, package: Vec<u8>) -> axum::http::StatusCode {
+    let boundary = "------------------------boundary123456789";
+    let mut body_bytes = Vec::new();
+    body_bytes.extend_from_slice(format!("--{boundary}\r\n").as_bytes());
+    body_bytes.extend_from_slice(
+        b"Content-Disposition: form-data; name=\"file\"; filename=\"plugin.kpk\"\r\n",
+    );
+    body_bytes.extend_from_slice(b"Content-Type: application/zip\r\n\r\n");
+    body_bytes.extend_from_slice(&package);
+    body_bytes.extend_from_slice(format!("\r\n--{boundary}--\r\n").as_bytes());
+    let req = axum::http::Request::builder()
+        .method(Method::POST)
+        .uri("/api/v1/plugins/install")
+        .header(
+            "Content-Type",
+            format!("multipart/form-data; boundary={boundary}"),
+        )
+        .body(axum::body::Body::from(body_bytes))
+        .expect("build request");
+    tower::ServiceExt::oneshot(app, req)
+        .await
+        .expect("execute request")
+        .status()
+}
+
+#[tokio::test]
+async fn install_keeps_a_packaged_binary_under_target() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let app: Router = app(fixture_state(PathBuf::from(dir.path()), false).await);
+
+    // What `kanon-dev pack` makes of a Rust plugin: the manifest and the binary at its entrypoint.
+    let mut package = Vec::new();
+    {
+        let mut zip = zip::ZipWriter::new(std::io::Cursor::new(&mut package));
+        let options = zip::write::SimpleFileOptions::default();
+        zip.start_file("plugin.toml", options).unwrap();
+        zip.write_all(
+            br#"[plugin]
+id = "org.kanon.test.packaged_bin"
+name = "Packaged Binary"
+version = "1.0.0"
+runtime = "rust"
+entrypoint = "target/debug/packaged_bin"
+"#,
+        )
+        .unwrap();
+        zip.start_file("target/debug/packaged_bin", options.unix_permissions(0o755))
+            .unwrap();
+        zip.write_all(b"#!/bin/sh\nexit 0\n").unwrap();
+        zip.finish().unwrap();
+    }
+
+    // The fake binary exits at once, so the host may fail to start; the files must be in place
+    // either way.
+    upload_package(app, package).await;
+
+    let installed = dir
+        .path()
+        .join("plugins/org.kanon.test.packaged_bin/target/debug/packaged_bin");
+    assert!(
+        installed.is_file(),
+        "the entrypoint under target/ was dropped"
+    );
+}
+
 #[tokio::test]
 async fn install_demo_weather_plugin_end_to_end() {
     let dir = tempfile::tempdir().expect("temp dir");
