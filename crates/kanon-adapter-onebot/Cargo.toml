@@ -21,3 +21,4 @@ url = "2"
 
 [dev-dependencies]
 tokio = { version = "1.40", features = ["test-util"] }
+libc = "0.2"

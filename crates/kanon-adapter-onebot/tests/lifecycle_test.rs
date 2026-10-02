@@ -262,13 +262,10 @@ async fn connection_switch_during_attachment_read_does_not_retarget_delivery() {
     wait_state(&adapter, ConnectionState::Connected).await;
     let file = Attachment::new();
     std::fs::remove_file(&file.0).unwrap();
-    assert!(
-        std::process::Command::new("mkfifo")
-            .arg(&file.0)
-            .status()
-            .unwrap()
-            .success()
-    );
+    // Created in-process: spawning `mkfifo` would fork this multi-threaded test binary, and the
+    // child would briefly hold every open socket, including listeners other tests just closed.
+    let fifo = std::ffi::CString::new(file.0.as_os_str().as_encoded_bytes()).unwrap();
+    assert_eq!(unsafe { libc::mkfifo(fifo.as_ptr(), 0o600) }, 0);
     let mut request = media_request(file.0.to_str().unwrap());
     request.segments.truncate(1);
     let mut delivery = Box::pin(adapter.deliver(request));
