@@ -5,6 +5,7 @@
 //! 2. Static manifest and schema validation (`kanon-dev lint`)
 //! 3. `.kpk` bundle distribution packager and SHA-256 integrity verification (`kanon-dev pack`)
 //! 4. Offline sandbox host execution for slash commands and tool calling (`kanon-dev test`)
+//! 5. The sandbox as a node: scripted messages through the pipeline, KV and the mock model
 
 use std::fs::File;
 use std::path::PathBuf;
@@ -342,10 +343,8 @@ async fn test_sandbox_offline_non_interactive_and_command() {
 
     // 1. Non-interactive probe test
     let probe_opts = SandboxOptions {
-        command: None,
-        tool: None,
-        args: vec![],
         non_interactive: true,
+        ..SandboxOptions::default()
     };
     let probe_res = run_sandbox(&manifest_path, probe_opts).await;
     assert!(
@@ -357,9 +356,8 @@ async fn test_sandbox_offline_non_interactive_and_command() {
     // 2. Direct command execution test
     let cmd_opts = SandboxOptions {
         command: Some("pycalc".to_string()),
-        tool: None,
         args: vec!["100 + 200".to_string()],
-        non_interactive: false,
+        ..SandboxOptions::default()
     };
     let cmd_res = run_sandbox(&manifest_path, cmd_opts).await;
     assert!(
@@ -370,15 +368,64 @@ async fn test_sandbox_offline_non_interactive_and_command() {
 
     // 3. Direct tool call execution test
     let tool_opts = SandboxOptions {
-        command: None,
         tool: Some("py_calc".to_string()),
         args: vec![r#"{"expr": "40 + 2"}"#.to_string()],
-        non_interactive: false,
+        ..SandboxOptions::default()
     };
     let tool_res = run_sandbox(&manifest_path, tool_opts).await;
     assert!(
         tool_res.is_ok(),
         "Sandbox tool call execution failed: {:?}",
         tool_res.err()
+    );
+}
+
+/// Scripted messages run through the sandbox's real pipeline in order: commands reach the KV
+/// store, the mock model calls a plugin tool on request and reports its result, and a command no
+/// plugin declares makes `-c` fail.
+#[test]
+fn test_sandbox_scripted_conversation() {
+    let root = find_workspace_root();
+    let plugin = root.join("sdks/python/plugins/demo_py_plugin");
+    let output = std::process::Command::new(env!("CARGO_BIN_EXE_kanon-dev"))
+        .arg("test")
+        .arg(&plugin)
+        .args(["-m", "/note add milk"])
+        .args(["-m", "/note list"])
+        .args(["-m", r#"!tool py_calc {"expr": "6*7"}"#])
+        .args(["-m", "hello"])
+        .output()
+        .expect("kanon-dev runs");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(output.status.success(), "{stdout}");
+
+    // Each reply is printed before the next message is sent.
+    let mut rest = stdout.as_ref();
+    for expected in [
+        "you> /note add milk",
+        "bot> Saved note #1.",
+        "you> /note list",
+        "bot> 1. milk",
+        "bot> (mock model) the tool returned: {\"result\":42",
+        "you> hello",
+        "bot> (mock model) received:",
+    ] {
+        let at = rest
+            .find(expected)
+            .unwrap_or_else(|| panic!("'{expected}' missing or out of order in:\n{stdout}"));
+        rest = &rest[at + expected.len()..];
+    }
+
+    let unknown = std::process::Command::new(env!("CARGO_BIN_EXE_kanon-dev"))
+        .arg("test")
+        .arg(&plugin)
+        .args(["-c", "nope"])
+        .output()
+        .expect("kanon-dev runs");
+    assert!(!unknown.status.success());
+    assert!(
+        String::from_utf8_lossy(&unknown.stderr).contains("'/nope' is not declared"),
+        "{}",
+        String::from_utf8_lossy(&unknown.stderr)
     );
 }

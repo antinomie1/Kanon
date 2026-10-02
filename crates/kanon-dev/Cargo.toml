@@ -15,10 +15,12 @@ thiserror = "1.0"
 kanon-core = { path = "../kanon-core" }
 kanon-llm = { path = "../kanon-llm" }
 kanon-proto = { path = "../kanon-proto" }
+kanon-storage = { path = "../kanon-storage" }
 kanon-transport = { path = "../kanon-transport" }
 ring = "0.17"
 zip = { version = "2.2", default-features = false, features = ["deflate"] }
 tonic = "0.12"
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
 async-trait = "0.1"
 tracing = "0.1"
 tempfile = "3.12"

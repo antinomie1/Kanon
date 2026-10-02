@@ -43,9 +43,17 @@
 ```bash
 kanon-dev create my_plugin --lang python      # 或 rust / typescript
 kanon-dev lint ./my_plugin                     # 静态校验 plugin.toml
-kanon-dev test ./my_plugin --command /hello   # 离线沙盒：执行命令或工具
+kanon-dev test ./my_plugin                     # 离线沙盒：在终端里和插件对话
+kanon-dev dev ./my_plugin                      # 热重载：改动后在运行中的节点上重启插件
 kanon-dev pack ./my_plugin                     # 打包为 .kpk（附 SHA-256 校验）
 ```
+
+**沙盒 `kanon-dev test`** 在进程内启动一个最小节点：真实的流水线、内置命令（`/ls`、`/new`、`/switch`、`/del` 等）、钩子、中心 KV 与会话存储（均在临时目录），模型换成本地 mock，不需要聊天平台和 API Key。Rust 插件会先 `cargo build`，Python/TS 插件会先安装依赖。
+
+- 交互模式：直接输入消息或 `/命令`；`!tool <工具名> [JSON 参数]` 让 mock 模型调用工具（走完整的工具轮次）；`:call <工具名> [JSON]` 直接调用工具；`:prompt` 打印上一次发给模型的请求（可检查系统块改写与工具列表）；`:quit` 退出。
+- 脚本模式：`-m/--message` 可重复，按顺序发送后退出，适合写进 CI；`-c /hello`、`-t <工具> -a '<JSON>'` 只执行一个命令或工具，失败时退出码非零。
+
+**热重载 `kanon-dev dev`** 连接已在运行的节点（默认 `http://127.0.0.1:8080`，用 `--node` 指定），插件目录有改动时先构建（Rust），再通过 `POST /api/v1/plugins/{id}/restart` 重启插件宿主；宿主会重新读取 `plugin.toml`、按需重装依赖并重新注册命令、工具与钩子。构建失败时保留正在运行的版本；插件崩溃后，修好代码保存即可重新启动。节点必须已经加载该插件：把插件目录（或指向它的符号链接）放进节点的 `./plugins/`。Rust 插件若位于其他 Cargo 工作区内，构建产物不在 `entrypoint` 指向的位置，`dev` 会报错而不是用旧二进制重启——给插件加独立的 `[workspace]` 即可。
 
 把插件目录放进节点的 `./plugins/` 下（最多嵌套两层子目录），节点启动时扫描 `plugin.toml` 并按 `priority` 排序加载。节点运行期间不会自动扫描该目录：新放进去的插件要在控制台「扩展 → 插件」点「刷新」（即 `POST /api/v1/plugins/rescan`）后才会出现，再从那里启用；通过控制台安装的插件则会立即出现。
 
@@ -815,4 +823,4 @@ async def webhook(self, request: HttpRequest) -> HttpResponse:
 - **不要阻塞事件循环**。Python 中的 CPU 密集或阻塞 I/O 请放进 `asyncio.to_thread`；Rust 请用 `spawn_blocking`。
 - **前置过滤要快**（总预算 30ms），**回复装饰要快**（3 秒），**事件处理不要依赖顺序**（并发、即发即忘）。
 - **共享状态**：Rust `Router` 的处理函数是 `'static` 闭包，请用 `Arc` 捕获共享状态；Python/TS 直接用实例属性即可，但要注意多个会话的处理函数会并发执行。
-- **调试**：宿主进程继承节点的标准输出与标准错误，`print` / `console.log` 会直接出现在节点终端；`kanon-dev test` 可以在没有聊天平台的情况下执行命令和工具。
+- **调试**：宿主进程继承节点的标准输出与标准错误，`print` / `console.log` 会直接出现在节点终端；`kanon-dev test` 可以在没有聊天平台和模型的情况下跑通命令、工具与钩子，`kanon-dev dev` 在改动后自动重启插件。

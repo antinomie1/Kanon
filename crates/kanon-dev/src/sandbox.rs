@@ -1,27 +1,69 @@
-//! Offline sandbox environment for isolated plugin execution and testing.
+//! Offline sandbox: a small Kanon node, in this process, serving one plugin.
 //!
-//! Spawns a dedicated sub-process plugin host on an isolated temporary endpoint,
-//! runs a mock core `BotApiService`, and enables direct interactive or non-interactive
-//! testing of commands, pre-filters, and LLM Tool Calling.
+//! The plugin runs exactly as it would on a real node: in its own host process, with its
+//! dependencies installed by its own tool, behind the real message pipeline, with the central KV
+//! store, conversations (`/ls`, `/switch`, `/del`, `/new`), the agent and its plugin hooks. Only
+//! the two things a developer machine lacks are replaced:
+//!
+//! - **the chat platform** — a built-in `sandbox` adapter whose messages come from the terminal
+//!   (or `-m`) and whose deliveries are printed as `bot>` lines;
+//! - **the model** — a deterministic mock that echoes what it received, calls a tool when a
+//!   message says `!tool <name> [json]`, and reports the tool's result.
+//!
+//! Everything lives in a temporary directory, so each run starts from an empty store.
 
 use std::path::Path;
-use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
-use tempfile::tempdir;
+
+use async_trait::async_trait;
+use tempfile::{TempDir, tempdir};
 use thiserror::Error;
 use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::sync::{mpsc, oneshot};
+use tokio::task::JoinHandle;
 
-use kanon_core::ipc::{CoreApiService, CoreIpcServer, DEFAULT_INGEST_QUEUE_CAPACITY};
+use kanon_core::instance::{InstanceDraft, InstanceRegistry};
+use kanon_core::ipc::DEFAULT_INGEST_QUEUE_CAPACITY;
+use kanon_core::pipeline::DeadLetterWriter;
+use kanon_core::pipeline::engine::OutboundMessage;
 use kanon_core::supervisor::{ManagedHost, Supervisor, SupervisorError};
-use kanon_proto::prost_types;
+use kanon_core::{
+    AdapterError, Capability, CommandPolicy, CommandPolicyStore, CoreApiService, CoreIpcServer,
+    PipelineEngine, PipelineResult, PlatformAdapter, PluginAgentHook,
+};
+use kanon_llm::{
+    AgentConfig, AgentFactory, AgentSlot, ChatRequest, ChatResponse, GatewayError, LlmProvider,
+    PersonaStore, Role, SessionManager, SqliteMemory, SqliteSessionStore, ToolCall,
+};
 use kanon_proto::v1::message_segment::Segment;
 use kanon_proto::v1::{
-    CommandExecuteRequest, CommandExecuteResponse, ToolCallRequest, ToolCallResponse,
-    audio_segment, image_segment, tool_call_request, tool_call_response, video_segment,
+    DeliverMessageRequest, DeliverMessageResponse, MessageSegment, PipelineEventRequest,
+    TextSegment, ToolCallRequest, ToolCallResponse, audio_segment, image_segment,
+    tool_call_request, tool_call_response, video_segment,
 };
 
+use crate::build::{BuildError, build_plugin};
 use crate::lint::{LintError, find_manifest_path};
+
+/// Platform name of the sandbox's built-in adapter.
+const PLATFORM: &str = "sandbox";
+
+/// The one chat the sandbox simulates: a private conversation with the developer.
+const CHANNEL: &str = "sandbox-chat";
+
+/// Sender of every simulated message. Listed as a bot administrator, so commands restricted to
+/// administrators can be tried too.
+const SENDER: &str = "developer";
+
+/// Model reference the mock answers under (`<provider>/<model-id>`).
+const MOCK_PROVIDER: &str = "sandbox";
+const MOCK_MODEL: &str = "mock";
+
+/// Session id given to tools called directly (`-t`, `:call`): such a call belongs to no
+/// conversation turn.
+const DIRECT_CALL_SESSION: &str = "sandbox-direct";
 
 /// Errors occurring during sandbox execution.
 #[derive(Debug, Error)]
@@ -35,15 +77,27 @@ pub enum SandboxError {
     /// File I/O failure.
     #[error("I/O error in sandbox: {0}")]
     Io(#[from] std::io::Error),
+    /// A part of the sandbox node could not be assembled.
+    #[error("Sandbox setup failed: {0}")]
+    Setup(String),
     /// gRPC status error.
     #[error("gRPC RPC error from host: {0}")]
     Rpc(Box<tonic::Status>),
     /// Specified command was not found on the plugin.
-    #[error("Command '/{0}' is not declared by the plugin")]
+    #[error("Command '/{0}' is not declared by any loaded plugin")]
     CommandNotFound(String),
+    /// The command ran and reported a failure, or was refused.
+    #[error("Command '/{0}' failed")]
+    CommandFailed(String),
     /// Specified tool was not found on the plugin.
     #[error("Tool '{0}' is not declared by the plugin")]
     ToolNotFound(String),
+    /// The tool ran and reported a failure.
+    #[error("Tool '{0}' failed")]
+    ToolFailed(String),
+    /// The plugin could not be built.
+    #[error("Build failed: {0}")]
+    Build(#[from] BuildError),
     /// JSON parsing error when processing tool arguments.
     #[error("Invalid JSON tool arguments: {0}")]
     Json(#[from] serde_json::Error),
@@ -58,18 +112,22 @@ impl From<tonic::Status> for SandboxError {
 /// Execution options configuring sandbox behavior.
 #[derive(Debug, Clone, Default)]
 pub struct SandboxOptions {
-    /// Specific command to execute (e.g. `pycalc` or `/pycalc`).
+    /// Command to run through the pipeline (e.g. `pycalc` or `/pycalc`); fails the run when no
+    /// plugin answers it or the plugin reports a failure.
     pub command: Option<String>,
-    /// Specific tool to invoke.
+    /// Tool to call directly, bypassing the model.
     pub tool: Option<String>,
-    /// Arguments passed alongside the command or tool.
+    /// Arguments of the command, or the tool's JSON arguments.
     pub args: Vec<String>,
+    /// Messages to send in order, as the developer would type them (`/note add milk`,
+    /// `count to 3`, `!tool dice {}`), each answered before the next is sent.
+    pub messages: Vec<String>,
     /// Whether to run without opening an interactive terminal REPL.
     pub non_interactive: bool,
 }
 
 /// Renders a list of MessageSegments into a readable string.
-fn format_segments(segments: &[kanon_proto::v1::MessageSegment]) -> String {
+fn format_segments(segments: &[MessageSegment]) -> String {
     let mut out = Vec::new();
     for seg in segments {
         if let Some(ref inner) = seg.segment {
@@ -118,85 +176,461 @@ fn format_segments(segments: &[kanon_proto::v1::MessageSegment]) -> String {
     out.join("")
 }
 
-/// Converts a `serde_json::Value` into `prost_types::Struct`.
-fn json_to_prost_struct(val: &serde_json::Value) -> Option<prost_types::Struct> {
-    let map = val.as_object()?;
-    let mut fields = std::collections::BTreeMap::new();
-    for (k, v) in map {
-        fields.insert(k.clone(), json_to_prost_value(v));
+/// Prints `text` after `label`, indenting continuation lines under the first.
+fn print_labeled(label: &str, text: &str) {
+    let indent = " ".repeat(label.len() + 1);
+    let mut lines = text.lines();
+    println!("{label} {}", lines.next().unwrap_or_default());
+    for line in lines {
+        println!("{indent}{line}");
     }
-    Some(prost_types::Struct { fields })
 }
 
-/// Converts a single `serde_json::Value` into `prost_types::Value`.
-fn json_to_prost_value(val: &serde_json::Value) -> prost_types::Value {
-    let kind = match val {
-        serde_json::Value::Null => Some(prost_types::value::Kind::NullValue(0)),
-        serde_json::Value::Bool(b) => Some(prost_types::value::Kind::BoolValue(*b)),
-        serde_json::Value::Number(n) => Some(prost_types::value::Kind::NumberValue(
-            n.as_f64().unwrap_or(0.0),
-        )),
-        serde_json::Value::String(s) => Some(prost_types::value::Kind::StringValue(s.clone())),
-        serde_json::Value::Array(arr) => {
-            let values = arr.iter().map(json_to_prost_value).collect();
-            Some(prost_types::value::Kind::ListValue(
-                prost_types::ListValue { values },
-            ))
+/// The sandbox's chat platform: every message the node delivers is printed to the terminal.
+///
+/// It declares the media capabilities so plugins' images, voice, video and files are shown as
+/// what they are instead of being reduced to text fallbacks.
+#[derive(Default)]
+struct SandboxAdapter {
+    delivered: AtomicU64,
+}
+
+#[async_trait]
+impl PlatformAdapter for SandboxAdapter {
+    fn platform(&self) -> &str {
+        PLATFORM
+    }
+
+    fn display_name(&self) -> &str {
+        "Sandbox terminal"
+    }
+
+    fn capabilities(&self) -> &[Capability] {
+        &[
+            Capability::SendImage,
+            Capability::SendVoice,
+            Capability::SendVideo,
+            Capability::SendFile,
+        ]
+    }
+
+    async fn deliver(
+        &self,
+        request: DeliverMessageRequest,
+    ) -> Result<DeliverMessageResponse, AdapterError> {
+        // An empty delivery is the sandbox's own flush marker (see `Sandbox::send`): it only
+        // proves that everything queued before it has been printed.
+        if request.segments.is_empty() {
+            return Ok(DeliverMessageResponse {
+                success: true,
+                ..DeliverMessageResponse::default()
+            });
         }
-        serde_json::Value::Object(map) => {
-            let mut fields = std::collections::BTreeMap::new();
-            for (k, v) in map {
-                fields.insert(k.clone(), json_to_prost_value(v));
+        let number = self.delivered.fetch_add(1, Ordering::Relaxed) + 1;
+        print_labeled("bot>", &format_segments(&request.segments));
+        Ok(DeliverMessageResponse {
+            success: true,
+            message_id: format!("sandbox-{number}"),
+            error_message: String::new(),
+        })
+    }
+}
+
+/// A model that needs no network and answers predictably.
+///
+/// - A user message containing `!tool <name> [json]` makes it call that tool (by its plugin
+///   name or the namespaced name the model sees) with the JSON arguments, `{}` when omitted.
+/// - After a tool ran, it answers with the tool's result.
+/// - Anything else is echoed back, exactly as the model received it.
+///
+/// It keeps the last request so the developer can inspect the system prompt and tools plugins
+/// produced (`:prompt`).
+#[derive(Default)]
+struct MockModel {
+    last_request: Mutex<Option<ChatRequest>>,
+    calls: AtomicU64,
+}
+
+impl MockModel {
+    /// The last request the agent sent, if the model was asked anything yet.
+    fn last_request(&self) -> Option<ChatRequest> {
+        self.last_request
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone()
+    }
+
+    /// A plain text answer that ends the turn.
+    fn answer(text: String) -> ChatResponse {
+        ChatResponse {
+            content: Some(text),
+            finish_reason: Some("stop".to_string()),
+            ..ChatResponse::default()
+        }
+    }
+
+    /// Answers a user message: a tool call when it asks for one, otherwise an echo.
+    fn answer_user(&self, text: &str, request: &ChatRequest) -> ChatResponse {
+        let Some(directive) = text
+            .lines()
+            .find_map(|line| line.split_once("!tool").map(|(_, rest)| rest.trim()))
+        else {
+            return Self::answer(format!("(mock model) received:\n{text}"));
+        };
+        let (name, arguments) = directive
+            .split_once(char::is_whitespace)
+            .map(|(name, rest)| (name, rest.trim()))
+            .unwrap_or((directive, ""));
+        let arguments = if arguments.is_empty() {
+            serde_json::json!({})
+        } else {
+            match serde_json::from_str(arguments) {
+                Ok(arguments) => arguments,
+                Err(err) => {
+                    return Self::answer(format!(
+                        "(mock model) the arguments of `!tool {name}` are not JSON: {err}"
+                    ));
+                }
             }
-            Some(prost_types::value::Kind::StructValue(prost_types::Struct {
-                fields,
-            }))
+        };
+        // The model sees plugin tools as `<plugin>__<tool>`; the developer may type either.
+        let suffix = format!("__{name}");
+        let offered: Vec<&str> = request
+            .tools
+            .iter()
+            .map(|tool| tool.name.as_str())
+            .collect();
+        let matches: Vec<&str> = match offered.iter().find(|tool| **tool == name) {
+            Some(exact) => vec![*exact],
+            None => offered
+                .iter()
+                .copied()
+                .filter(|tool| tool.ends_with(&suffix))
+                .collect(),
+        };
+        let [tool] = matches.as_slice() else {
+            let problem = if matches.is_empty() {
+                format!("no tool named '{name}' is offered")
+            } else {
+                format!("'{name}' is ambiguous")
+            };
+            return Self::answer(format!(
+                "(mock model) {problem}; offered tools: {}",
+                if offered.is_empty() {
+                    "none".to_string()
+                } else {
+                    offered.join(", ")
+                }
+            ));
+        };
+        let call = self.calls.fetch_add(1, Ordering::Relaxed) + 1;
+        ChatResponse {
+            tool_calls: vec![ToolCall {
+                id: format!("mock-call-{call}"),
+                name: tool.to_string(),
+                arguments,
+            }],
+            finish_reason: Some("tool_calls".to_string()),
+            ..ChatResponse::default()
         }
-    };
-    prost_types::Value { kind }
+    }
 }
 
-/// Runs the offline sandbox test driver for a target plugin.
-pub async fn run_sandbox(path: &Path, opts: SandboxOptions) -> Result<(), SandboxError> {
-    let (manifest_path, _root) = find_manifest_path(path)?;
+#[async_trait]
+impl LlmProvider for MockModel {
+    async fn chat(&self, request: &ChatRequest) -> Result<ChatResponse, GatewayError> {
+        *self
+            .last_request
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(request.clone());
+        let Some(last) = request.messages.last() else {
+            return Ok(Self::answer(
+                "(mock model) the request had no messages".to_string(),
+            ));
+        };
+        let text = last.content.as_deref().unwrap_or_default();
+        Ok(match last.role {
+            Role::Tool => Self::answer(format!("(mock model) the tool returned: {text}")),
+            Role::User => self.answer_user(text, request),
+            _ => Self::answer(format!("(mock model) received:\n{text}")),
+        })
+    }
+}
 
-    println!("============================================================");
-    println!(" Kanon Offline Sandbox Runner");
-    println!(" Manifest: {}", manifest_path.display());
-    println!("============================================================");
+/// The running sandbox node and the plugin it serves.
+struct Sandbox {
+    supervisor: Arc<Supervisor>,
+    engine: Arc<PipelineEngine>,
+    model: Arc<MockModel>,
+    host: Arc<ManagedHost>,
+    worker: JoinHandle<()>,
+    dispatcher: Option<JoinHandle<()>>,
+    server: JoinHandle<()>,
+    server_shutdown: oneshot::Sender<()>,
+    next_event: u64,
+    /// Holds sockets, databases and plugin data; removed when the sandbox is dropped.
+    _dir: TempDir,
+}
 
-    // 1. Create isolated temporary directory for runtime IPC sockets
-    let temp_dir = tempdir()?;
-    let run_dir = temp_dir.path().to_path_buf();
-    let core_sock = run_dir.join("core.sock");
+impl Sandbox {
+    /// Assembles the node as `kanon` does and starts the plugin from `manifest_path`.
+    async fn start(manifest_path: &Path) -> Result<Self, SandboxError> {
+        let dir = tempdir()?;
+        let root = dir.path().to_path_buf();
+        let core_sock = root.join("core.sock");
+        let setup =
+            |what: &str, err: &dyn std::fmt::Display| SandboxError::Setup(format!("{what}: {err}"));
 
-    // 2. Initialize Supervisor with the isolated runtime directory
-    // Dependencies are installed with the plugin's own tool, exactly as the node does, so a
-    // plugin that runs here runs there.
-    let supervisor = Arc::new(
-        Supervisor::new(Some(run_dir.clone()), Some(core_sock.clone()))
-            .with_dependency_installer(Some(kanon_core::DependencyInstaller::new())),
-    );
+        // Dependencies are installed with the plugin's own tool, exactly as the node does, so a
+        // plugin that runs here runs there.
+        let supervisor = Arc::new(
+            Supervisor::new(Some(root.join("run")), Some(core_sock.clone()))
+                .with_dependency_installer(Some(kanon_core::DependencyInstaller::new())),
+        );
+        let adapter: Arc<dyn PlatformAdapter> = Arc::new(SandboxAdapter::default());
+        supervisor
+            .adapters()
+            .register(adapter)
+            .await
+            .map_err(|err| setup("sandbox adapter", &err))?;
 
-    // 3. Start Core IPC Server wired with Supervisor
-    let (event_tx, _event_rx) = mpsc::channel(DEFAULT_INGEST_QUEUE_CAPACITY);
-    let core_api = CoreApiService::new(event_tx).with_supervisor(supervisor.clone());
-    let core_server = CoreIpcServer::new(&core_sock, core_api);
+        // Conversations are stored as on a node, so `/ls`, `/switch`, `/del` and the plugin
+        // conversation APIs behave the same.
+        let db = root.join("sessions.db");
+        let memory = SqliteMemory::open(&db).map_err(|err| setup("session memory", &err))?;
+        let store = SqliteSessionStore::open(&db).map_err(|err| setup("session store", &err))?;
+        let sessions = Arc::new(
+            SessionManager::new(Arc::new(memory))
+                .with_store(Arc::new(store))
+                .map_err(|err| setup("sessions", &err))?,
+        );
+        let persona_store = Arc::new(PersonaStore::new(root.join("personas.json")));
+        let personas = Arc::new(
+            persona_store
+                .load_registry()
+                .map_err(|err| setup("personas", &err))?,
+        );
 
-    let (shutdown_tx, shutdown_rx) = oneshot::channel();
-    let server_task = tokio::spawn(async move {
-        let _ = core_server
-            .run(async move {
-                let _ = shutdown_rx.await;
+        // One instance answers every sandbox message, with the mock as its model.
+        let instances = Arc::new(
+            InstanceRegistry::open(root.join("instances.json"))
+                .await
+                .map_err(|err| setup("instance catalog", &err))?,
+        );
+        instances
+            .create(InstanceDraft {
+                name: "Sandbox".to_string(),
+                enabled: true,
+                adapters: vec![PLATFORM.to_string()],
+                ..InstanceDraft::default()
             })
-            .await;
-    });
+            .await
+            .map_err(|err| setup("sandbox instance", &err))?;
+        let model = Arc::new(MockModel::default());
+        let factory = Arc::new(AgentFactory::new(
+            "sandbox",
+            Arc::new(AgentSlot::new()),
+            sessions.memory().clone(),
+            sessions,
+            personas.clone(),
+            vec![Arc::new(PluginAgentHook::new())],
+            Vec::new(),
+        ));
+        factory.install(
+            "sandbox",
+            model.clone(),
+            AgentConfig {
+                default_model: MOCK_MODEL.to_string(),
+                provider: Some(MOCK_PROVIDER.to_string()),
+                ..AgentConfig::default()
+            },
+        );
 
-    tokio::time::sleep(Duration::from_millis(50)).await;
+        let policy = CommandPolicy {
+            admins: vec![format!("{PLATFORM}:{SENDER}")],
+            ..CommandPolicy::default()
+        };
+        let engine = Arc::new(
+            PipelineEngine::new(supervisor.clone())
+                .with_agent_factory(factory.clone())
+                .with_instances(instances)
+                .with_command_policy(Arc::new(CommandPolicyStore::new(policy)))
+                .with_dead_letter(Arc::new(DeadLetterWriter::new(root.join("dead_letter")))),
+        );
+        // The worker only serves events plugins ingest themselves (adapter plugins); the
+        // developer's messages are processed directly so each is answered before the next.
+        let (event_tx, event_rx) = mpsc::channel(DEFAULT_INGEST_QUEUE_CAPACITY);
+        let worker = engine.clone().start_worker(event_rx);
+        let dispatcher = engine.clone().start_outbound_dispatcher();
 
-    println!("Spawning plugin host process and completing handshake...");
-    let host = supervisor.spawn_from_manifest(&manifest_path, None).await?;
+        let kv = kanon_storage::KvStore::open_in_memory().map_err(|err| setup("KV store", &err))?;
+        let service = CoreApiService::new(event_tx)
+            .with_supervisor(supervisor.clone())
+            .with_outbound_sender(engine.outbound_sender())
+            .with_engine(engine.clone())
+            .with_agent_slot(factory.slot().clone())
+            .with_personas(personas, persona_store)
+            .with_kv(Arc::new(kv))
+            .with_plugin_data_dir(kanon_storage::PluginDataDir::new(root.join("plugins")));
+        let core_server = CoreIpcServer::new(&core_sock, service);
+        let (server_shutdown, shutdown_rx) = oneshot::channel();
+        let server = tokio::spawn(async move {
+            let _ = core_server
+                .run(async move {
+                    let _ = shutdown_rx.await;
+                })
+                .await;
+        });
+        // The host connects back to the core socket during its handshake.
+        for _ in 0..50 {
+            if core_sock.exists() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
 
+        // What runs is always the code as it is now: a Rust plugin is rebuilt first.
+        let manifest = kanon_core::PluginManifest::load_from_file(manifest_path)
+            .map_err(|err| setup("plugin.toml", &err))?;
+        let plugin_root = manifest_path.parent().unwrap_or(Path::new("."));
+        if manifest.plugin.runtime == "rust" {
+            println!("Building with cargo...");
+        }
+        let executable = build_plugin(plugin_root, &manifest).await?;
+
+        println!("Spawning plugin host process and completing handshake...");
+        let host = supervisor
+            .spawn_from_manifest(manifest_path, executable.as_deref())
+            .await?;
+        Ok(Self {
+            supervisor,
+            engine,
+            model,
+            host,
+            worker,
+            dispatcher,
+            server,
+            server_shutdown,
+            next_event: 0,
+            _dir: dir,
+        })
+    }
+
+    /// Sends one message as the developer and waits until every reply it caused is printed.
+    async fn send(&mut self, text: &str) -> PipelineResult {
+        self.next_event += 1;
+        let event = PipelineEventRequest {
+            event_id: format!("sandbox-event-{}", self.next_event),
+            platform: PLATFORM.to_string(),
+            channel_id: CHANNEL.to_string(),
+            sender_id: SENDER.to_string(),
+            raw_text: text.to_string(),
+            segments: vec![MessageSegment {
+                segment: Some(Segment::Text(TextSegment {
+                    content: text.to_string(),
+                })),
+            }],
+            metadata: None,
+        };
+        let event_id = event.event_id.clone();
+        let result = self.engine.process_event(event).await;
+        match &result {
+            PipelineResult::CommandNotFound { command } => {
+                println!("[sandbox] no plugin declares /{command}")
+            }
+            PipelineResult::CommandExecuted { success: false, .. } => {
+                println!("[sandbox] the command reported a failure")
+            }
+            PipelineResult::LlmFailed { error, .. } => {
+                println!("[sandbox] model turn failed: {error}")
+            }
+            PipelineResult::ReplySuppressed { reason, .. } => {
+                println!("[sandbox] reply suppressed: {reason}")
+            }
+            PipelineResult::Passed(_) => println!("[sandbox] passed without a reply"),
+            _ => {}
+        }
+
+        // Replies go through the outbound queue like the node's, behind anything the plugin
+        // sent while handling the message. The platform's queue is delivered in order, so once
+        // this delivery is acknowledged everything before it has been printed; with no replies
+        // an empty delivery serves as that marker.
+        let (receipt, delivered) = oneshot::channel();
+        let message = OutboundMessage {
+            request: DeliverMessageRequest {
+                platform: PLATFORM.to_string(),
+                channel_id: CHANNEL.to_string(),
+                recipient_id: SENDER.to_string(),
+                segments: result.replies().to_vec(),
+                event_id,
+            },
+            split_lines: matches!(
+                result,
+                PipelineResult::LlmReplied {
+                    split_lines: true,
+                    ..
+                }
+            ),
+            receipt: Some(receipt),
+        };
+        if self.engine.outbound_sender().send(message).await.is_err() {
+            println!("[sandbox] the outbound queue is closed; replies were not delivered");
+        } else if delivered.await.is_err() {
+            println!("[sandbox] the reply was dropped before delivery");
+        }
+        result
+    }
+
+    /// Prints the system prompt and tools of the last model request.
+    fn print_last_prompt(&self) {
+        let Some(request) = self.model.last_request() else {
+            println!("The model has not been asked anything yet; send a message first.");
+            return;
+        };
+        let system = request
+            .messages
+            .iter()
+            .find(|message| message.role == Role::System)
+            .and_then(|message| message.content.as_deref())
+            .unwrap_or("(none)");
+        println!("--- system prompt ---\n{system}");
+        let tools: Vec<&str> = request
+            .tools
+            .iter()
+            .map(|tool| tool.name.as_str())
+            .collect();
+        println!(
+            "--- tools ({}) ---\n{}",
+            tools.len(),
+            if tools.is_empty() {
+                "(none)".to_string()
+            } else {
+                tools.join("\n")
+            }
+        );
+        println!(
+            "--- {} message(s) of history and the current turn ---",
+            request
+                .messages
+                .iter()
+                .filter(|message| message.role != Role::System)
+                .count()
+        );
+    }
+
+    /// Stops in the node's order: deliver what is queued, then stop the plugin, then the core.
+    async fn shutdown(self) {
+        self.engine.drain(self.worker, self.dispatcher).await;
+        if let Err(err) = self.supervisor.stop_all().await {
+            println!("[sandbox] stopping the plugin host failed: {err}");
+        }
+        let _ = self.server_shutdown.send(());
+        let _ = self.server.await;
+    }
+}
+
+/// Prints what the loaded plugins declare.
+fn print_plugin_summary(host: &ManagedHost) {
     println!("\n[Host Connected] ID: {}", host.host_id);
     for meta in host.metas() {
         println!(
@@ -204,220 +638,226 @@ pub async fn run_sandbox(path: &Path, opts: SandboxOptions) -> Result<(), Sandbo
             meta.name, meta.id, meta.version
         );
         if !meta.commands.is_empty() {
-            println!("Declared Commands:");
+            println!("Commands:");
             for cmd in &meta.commands {
-                println!(
-                    "  - /{:<15} Usage: {:<20} ({})",
-                    cmd.name, cmd.usage, cmd.description
-                );
-            }
-        }
-        if !meta.tools.is_empty() {
-            println!("Declared Tools (LLM Function Calling):");
-            for tool in &meta.tools {
-                println!("  - {:<16} {}", tool.name, tool.description);
-            }
-        }
-    }
-    println!("============================================================\n");
-
-    // 4. Non-interactive direct execution mode
-    if let Some(ref cmd_name) = opts.command {
-        execute_sandbox_command(&host, cmd_name, &opts.args).await?;
-        let _ = supervisor.stop_all().await;
-        let _ = shutdown_tx.send(());
-        let _ = server_task.await;
-        return Ok(());
-    }
-
-    if let Some(ref tool_name) = opts.tool {
-        execute_sandbox_tool(&host, tool_name, &opts.args).await?;
-        let _ = supervisor.stop_all().await;
-        let _ = shutdown_tx.send(());
-        let _ = server_task.await;
-        return Ok(());
-    }
-
-    if opts.non_interactive {
-        println!("Non-interactive probe completed successfully.");
-        let _ = supervisor.stop_all().await;
-        let _ = shutdown_tx.send(());
-        let _ = server_task.await;
-        return Ok(());
-    }
-
-    // 5. Interactive terminal REPL mode
-    println!("Entering interactive terminal sandbox.");
-    println!("Commands:");
-    println!("  /<cmd> [args...]       Execute a declared slash command");
-    println!("  call <tool> [json]     Invoke an LLM Tool with JSON arguments");
-    println!("  help                   Display available commands and tools");
-    println!("  exit / quit            Shut down the sandbox and exit\n");
-
-    let stdin = tokio::io::stdin();
-    let reader = BufReader::new(stdin);
-    let mut lines = reader.lines();
-
-    loop {
-        print!("kanon-sandbox> ");
-        let _ = std::io::Write::flush(&mut std::io::stdout());
-
-        match lines.next_line().await {
-            Ok(Some(line)) => {
-                let trimmed = line.trim();
-                if trimmed.is_empty() {
-                    continue;
-                }
-
-                if trimmed == "exit" || trimmed == "quit" || trimmed == "/exit" {
-                    println!("Exiting sandbox...");
-                    break;
-                }
-
-                if trimmed == "help" || trimmed == "/help" {
-                    for meta in host.metas() {
-                        println!("Plugin: {}", meta.name);
-                        for c in &meta.commands {
-                            println!("  Command: /{} - {}", c.name, c.description);
-                        }
-                        for t in &meta.tools {
-                            println!("  Tool: {} - {}", t.name, t.description);
-                        }
-                    }
-                    continue;
-                }
-
-                if trimmed.starts_with('/') {
-                    let parts: Vec<&str> = trimmed.split_whitespace().collect();
-                    let cmd_name = parts[0].trim_start_matches('/');
-                    let args: Vec<String> = parts.iter().skip(1).map(|s| s.to_string()).collect();
-
-                    if let Err(e) = execute_sandbox_command(&host, cmd_name, &args).await {
-                        println!("Error: {}", e);
-                    }
-                } else if trimmed.starts_with("call ") {
-                    let rest = trimmed.trim_start_matches("call ").trim();
-                    let mut parts = rest.splitn(2, ' ');
-                    let tool_name = parts.next().unwrap_or_default();
-                    let json_str = parts.next().unwrap_or("{}");
-                    let args = vec![json_str.to_string()];
-
-                    if let Err(e) = execute_sandbox_tool(&host, tool_name, &args).await {
-                        println!("Error: {}", e);
-                    }
+                let usage = if cmd.usage.is_empty() {
+                    format!("/{}", cmd.name)
                 } else {
+                    cmd.usage.clone()
+                };
+                println!("  {usage:<24} {}", cmd.description);
+                for sub in &cmd.subcommands {
+                    let usage = if sub.usage.is_empty() {
+                        format!("/{} {}", cmd.name, sub.name)
+                    } else {
+                        sub.usage.clone()
+                    };
+                    println!("    {usage:<22} {}", sub.description);
+                }
+                if !cmd.platforms.is_empty() && !cmd.platforms.iter().any(|p| p == PLATFORM) {
                     println!(
-                        "Unrecognized input. Start commands with '/' or invoke tools with 'call <name> <json>'. Type 'exit' to quit."
+                        "    (only on {}; the sandbox will not route it)",
+                        cmd.platforms.join(", ")
                     );
                 }
             }
-            Ok(None) => break, // EOF reached (e.g. piped stdin)
-            Err(e) => {
-                println!("Error reading input: {}", e);
-                break;
+        }
+        if !meta.triggers.is_empty() {
+            println!("Triggers:");
+            for trigger in &meta.triggers {
+                println!("  {:<24} {}", trigger.name, trigger.pattern);
             }
         }
+        if !meta.tools.is_empty() {
+            println!("Tools:");
+            for tool in &meta.tools {
+                println!("  {:<24} {}", tool.name, tool.description);
+            }
+        }
+        let mut hooks = Vec::new();
+        if meta.rewrites_system_prompt {
+            hooks.push("system prompt rewrite");
+        }
+        if meta.prepares_turns {
+            hooks.push("turn preparation");
+        }
+        if meta.decorates_replies {
+            hooks.push("reply decoration");
+        }
+        if meta.serves_http {
+            hooks.push("HTTP routes (not served by the sandbox)");
+        }
+        if !hooks.is_empty() {
+            println!("Hooks: {}", hooks.join(", "));
+        }
     }
-
-    // Graceful teardown
-    let _ = supervisor.stop_all().await;
-    let _ = shutdown_tx.send(());
-    let _ = server_task.await;
-    println!("Sandbox terminated.");
-
-    Ok(())
+    println!("============================================================\n");
 }
 
-/// Executes a slash command on the managed host and renders results.
-async fn execute_sandbox_command(
-    host: &ManagedHost,
+/// Prints the REPL's usage.
+fn print_repl_help() {
+    println!("Type messages as you would in a chat; the mock model answers anything that is not");
+    println!("a command or trigger. Sandbox commands start with ':'.");
+    println!(
+        "  <text>                 Send a message (\"/cmd args\" runs a command, \"/help\" lists them)"
+    );
+    println!("  !tool <name> [json]    Inside a message: make the mock model call that tool");
+    println!("  :call <tool> [json]    Call a tool directly, without the model");
+    println!("  :prompt                Show the system prompt and tools of the last model request");
+    println!("  :help                  Show this help");
+    println!("  :quit                  Shut down the sandbox (also Ctrl-D)\n");
+}
+
+/// Runs the offline sandbox for the plugin at `path`.
+pub async fn run_sandbox(path: &Path, opts: SandboxOptions) -> Result<(), SandboxError> {
+    let (manifest_path, _root) = find_manifest_path(path)?;
+
+    println!("============================================================");
+    println!(" Kanon Offline Sandbox");
+    println!(" Manifest: {}", manifest_path.display());
+    println!(
+        " Model:    {MOCK_PROVIDER}/{MOCK_MODEL} (no network; echoes, or calls `!tool <name> [json]`)"
+    );
+    println!("============================================================");
+
+    let mut sandbox = Sandbox::start(&manifest_path).await?;
+    print_plugin_summary(&sandbox.host);
+    let outcome = drive(&mut sandbox, &opts).await;
+    sandbox.shutdown().await;
+    println!("Sandbox terminated.");
+    outcome
+}
+
+/// Does what the options ask for: a command, a tool call, scripted messages, or the REPL.
+async fn drive(sandbox: &mut Sandbox, opts: &SandboxOptions) -> Result<(), SandboxError> {
+    if let Some(command) = &opts.command {
+        return run_command(sandbox, command, &opts.args).await;
+    }
+    if let Some(tool) = &opts.tool {
+        return call_tool(&sandbox.host, tool, &opts.args.join(" ")).await;
+    }
+    for message in &opts.messages {
+        print_labeled("you>", message);
+        sandbox.send(message).await;
+    }
+    if opts.non_interactive || !opts.messages.is_empty() {
+        return Ok(());
+    }
+    repl(sandbox).await
+}
+
+/// Runs `/command args` through the pipeline, failing unless a plugin answered it successfully.
+async fn run_command(
+    sandbox: &mut Sandbox,
     command: &str,
     args: &[String],
-) -> Result<CommandExecuteResponse, SandboxError> {
-    let clean_cmd = command.trim_start_matches('/');
-    let plugin_id = host
-        .metas()
-        .iter()
-        .find(|m| m.commands.iter().any(|c| c.name == clean_cmd))
-        .map(|m| m.id.clone())
-        .ok_or_else(|| SandboxError::CommandNotFound(clean_cmd.to_string()))?;
-
-    let req = CommandExecuteRequest {
-        plugin_id,
-        command: clean_cmd.to_string(),
-        args: args.to_vec(),
-        context: None,
-        raw_args: args.join(" "),
-        continuation: false,
+) -> Result<(), SandboxError> {
+    let name = command.trim_start_matches('/');
+    let text = if args.is_empty() {
+        format!("/{name}")
+    } else {
+        format!("/{name} {}", args.join(" "))
     };
-
-    println!("[Executing] /{} with args: {:?}", clean_cmd, args);
-    let start = std::time::Instant::now();
-    let resp = host.execute_command(req).await?;
-    let elapsed = start.elapsed();
-
-    println!(
-        "[Response] (Status: {}, RTT: {:.2}ms)",
-        if resp.success { "SUCCESS" } else { "FAILED" },
-        elapsed.as_secs_f64() * 1000.0
-    );
-    if !resp.replies.is_empty() {
-        println!("Replies:");
-        let rendered = format_segments(&resp.replies);
-        println!("  {}", rendered);
+    print_labeled("you>", &text);
+    match sandbox.send(&text).await {
+        PipelineResult::CommandExecuted { success: true, .. }
+        | PipelineResult::BuiltinReplied { .. }
+        | PipelineResult::SessionRotated { .. }
+        | PipelineResult::ModelListed { .. }
+        | PipelineResult::ModelSelected { .. } => Ok(()),
+        PipelineResult::CommandNotFound { .. } => {
+            Err(SandboxError::CommandNotFound(name.to_string()))
+        }
+        _ => Err(SandboxError::CommandFailed(name.to_string())),
     }
-    if !resp.error_message.is_empty() {
-        println!("Error Message: {}", resp.error_message);
-    }
-    println!();
-
-    Ok(resp)
 }
 
-/// Invokes a declared tool on the managed host and renders results.
-async fn execute_sandbox_tool(
+/// The interactive terminal loop.
+async fn repl(sandbox: &mut Sandbox) -> Result<(), SandboxError> {
+    print_repl_help();
+    let mut lines = BufReader::new(tokio::io::stdin()).lines();
+    loop {
+        print!("you> ");
+        let _ = std::io::Write::flush(&mut std::io::stdout());
+        let Some(line) = lines.next_line().await? else {
+            // EOF: Ctrl-D, or the end of piped input.
+            println!();
+            return Ok(());
+        };
+        let input = line.trim();
+        if input.is_empty() {
+            continue;
+        }
+        let Some(sandbox_command) = input.strip_prefix(':') else {
+            sandbox.send(input).await;
+            continue;
+        };
+        let (name, rest) = sandbox_command
+            .split_once(char::is_whitespace)
+            .map(|(name, rest)| (name, rest.trim()))
+            .unwrap_or((sandbox_command, ""));
+        match name {
+            "quit" | "q" | "exit" => return Ok(()),
+            "help" => print_repl_help(),
+            "prompt" => sandbox.print_last_prompt(),
+            "call" => {
+                let (tool, args) = rest
+                    .split_once(char::is_whitespace)
+                    .map(|(tool, args)| (tool, args.trim()))
+                    .unwrap_or((rest, ""));
+                if tool.is_empty() {
+                    println!("Usage: :call <tool> [json]");
+                } else if let Err(err) = call_tool(&sandbox.host, tool, args).await {
+                    println!("Error: {err}");
+                }
+            }
+            other => println!("Unknown sandbox command ':{other}'; type :help."),
+        }
+    }
+}
+
+/// The event a direct tool call is attributed to: the developer in the sandbox chat.
+fn direct_call_context() -> PipelineEventRequest {
+    PipelineEventRequest {
+        event_id: "sandbox-direct-call".to_string(),
+        platform: PLATFORM.to_string(),
+        channel_id: CHANNEL.to_string(),
+        sender_id: SENDER.to_string(),
+        ..PipelineEventRequest::default()
+    }
+}
+
+/// Calls a declared tool directly, without the model, and prints its result.
+async fn call_tool(
     host: &ManagedHost,
     tool_name: &str,
-    args: &[String],
-) -> Result<ToolCallResponse, SandboxError> {
-    let _has_tool = host
+    json_args: &str,
+) -> Result<(), SandboxError> {
+    let declared = host
         .metas()
         .iter()
-        .any(|m| m.tools.iter().any(|t| t.name == tool_name));
-
-    if !_has_tool {
+        .any(|meta| meta.tools.iter().any(|tool| tool.name == tool_name));
+    if !declared {
         return Err(SandboxError::ToolNotFound(tool_name.to_string()));
     }
 
-    let json_arg = args.join(" ");
-    let parsed_json: serde_json::Value = if json_arg.trim().is_empty() {
+    let parsed_json: serde_json::Value = if json_args.trim().is_empty() {
         serde_json::json!({})
     } else {
-        serde_json::from_str(&json_arg)?
+        serde_json::from_str(json_args)?
     };
-
-    let structured_payload = json_to_prost_struct(&parsed_json);
     let req = ToolCallRequest {
-        call_id: format!(
-            "test_call_{}",
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_millis()
-        ),
+        call_id: "sandbox-direct-call".to_string(),
         tool_name: tool_name.to_string(),
-        session_id: "sandbox_session".to_string(),
-        payload: structured_payload.map(tool_call_request::Payload::StructuredArgs),
-        // The sandbox has no platform conversation to attach.
-        context: None,
+        session_id: DIRECT_CALL_SESSION.to_string(),
+        payload: kanon_llm::tool_router::json_to_prost_struct(&parsed_json)
+            .map(tool_call_request::Payload::StructuredArgs),
+        context: Some(direct_call_context()),
     };
 
-    println!(
-        "[Invoking Tool] '{}' with payload: {}",
-        tool_name, parsed_json
-    );
+    println!("[Invoking Tool] '{tool_name}' with payload: {parsed_json}");
     let start = std::time::Instant::now();
-    let resp = host.on_call_tool(req).await?;
+    let resp: ToolCallResponse = host.on_call_tool(req).await?;
     let elapsed = start.elapsed();
 
     println!(
@@ -425,28 +865,30 @@ async fn execute_sandbox_tool(
         if resp.success { "SUCCESS" } else { "FAILED" },
         elapsed.as_secs_f64() * 1000.0
     );
-    if let Some(ref payload) = resp.payload {
-        match payload {
-            tool_call_response::Payload::StructuredResult(s) => {
-                let json_val = kanon_llm::tool_router::prost_struct_to_json(s.clone());
-                println!(
-                    "Result: {}",
-                    serde_json::to_string_pretty(&json_val).unwrap_or_default()
-                );
-            }
-            tool_call_response::Payload::RawBytes(bytes) => {
-                println!(
-                    "Raw bytes (len {}): {}",
-                    bytes.len(),
-                    String::from_utf8_lossy(bytes)
-                );
-            }
+    match &resp.payload {
+        Some(tool_call_response::Payload::StructuredResult(s)) => {
+            let json_val = kanon_llm::tool_router::prost_struct_to_json(s.clone());
+            println!(
+                "Result: {}",
+                serde_json::to_string_pretty(&json_val).unwrap_or_default()
+            );
         }
+        Some(tool_call_response::Payload::RawBytes(bytes)) => {
+            println!(
+                "Raw bytes (len {}): {}",
+                bytes.len(),
+                String::from_utf8_lossy(bytes)
+            );
+        }
+        None => {}
     }
     if !resp.error_message.is_empty() {
         println!("Error: {}", resp.error_message);
     }
     println!();
-
-    Ok(resp)
+    if resp.success {
+        Ok(())
+    } else {
+        Err(SandboxError::ToolFailed(tool_name.to_string()))
+    }
 }

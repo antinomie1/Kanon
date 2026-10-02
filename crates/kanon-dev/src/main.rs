@@ -3,14 +3,18 @@
 //! Provides unified management commands across the entire plugin lifecycle:
 //! - `plugin create <name> --lang <rust|python|ts>`: Project scaffolding
 //! - `lint [path]`: Static manifest and schema validation
-//! - `test [path]`: Offline terminal sandbox for commands and tool calling
+//! - `test [path]`: Offline sandbox node: real pipeline, KV and conversations, mock model
+//! - `dev [path]`: Rebuild and restart the plugin on a running node after every change
 //! - `pack [path]`: Standard `.kpk` bundle distribution packager
 
-use clap::{Parser, Subcommand};
+use clap::{Args, Parser, Subcommand};
 use std::path::PathBuf;
 use std::process::ExitCode;
 
-use kanon_dev::{SandboxOptions, create_plugin_project, lint_plugin, pack_plugin, run_sandbox};
+use kanon_dev::{
+    DEFAULT_NODE_URL, SandboxOptions, create_plugin_project, lint_plugin, pack_plugin, run_dev,
+    run_sandbox,
+};
 
 #[derive(Parser)]
 #[command(
@@ -46,23 +50,8 @@ enum Commands {
         /// Path to plugin directory or plugin.toml
         path: Option<PathBuf>,
     },
-    /// Run offline sandbox environment for command and tool testing
-    Test {
-        /// Path to plugin directory or plugin.toml
-        path: Option<PathBuf>,
-        /// Specific command to execute (e.g. /calc or calc)
-        #[arg(short, long)]
-        command: Option<String>,
-        /// Specific tool to call
-        #[arg(short, long)]
-        tool: Option<String>,
-        /// Arguments for the command or JSON arguments for the tool
-        #[arg(short, long)]
-        args: Vec<String>,
-        /// Run in non-interactive probe mode
-        #[arg(long)]
-        non_interactive: bool,
-    },
+    /// Run the plugin in an offline sandbox node (real pipeline, KV and conversations, mock model)
+    Test(TestArgs),
     /// Pack a plugin into a .kpk distribution archive with SHA-256 checksum
     Pack {
         /// Path to plugin directory or plugin.toml
@@ -71,8 +60,36 @@ enum Commands {
         #[arg(short, long)]
         output: Option<PathBuf>,
     },
-    /// Start dev server with hot reload
-    Dev,
+    /// Rebuild and restart the plugin on a running node whenever its files change
+    Dev {
+        /// Path to plugin directory or plugin.toml
+        path: Option<PathBuf>,
+        /// Management API address of the node serving the plugin
+        #[arg(long, default_value = DEFAULT_NODE_URL)]
+        node: String,
+    },
+}
+
+/// Options of the sandbox (`test` and `plugin test`).
+#[derive(Args)]
+struct TestArgs {
+    /// Path to plugin directory or plugin.toml
+    path: Option<PathBuf>,
+    /// Run one command through the pipeline (e.g. /calc or calc) and fail unless it succeeds
+    #[arg(short, long)]
+    command: Option<String>,
+    /// Call one tool directly, without the model
+    #[arg(short, long)]
+    tool: Option<String>,
+    /// Arguments for the command, or JSON arguments for the tool
+    #[arg(short, long)]
+    args: Vec<String>,
+    /// Send a message as the user; repeat for a conversation (e.g. -m "/note add milk" -m "!tool dice {}")
+    #[arg(short, long = "message")]
+    messages: Vec<String>,
+    /// Start the plugin, print what it declares and exit
+    #[arg(long)]
+    non_interactive: bool,
 }
 
 #[derive(Subcommand)]
@@ -101,23 +118,8 @@ enum PluginAction {
         #[arg(short, long)]
         output: Option<PathBuf>,
     },
-    /// Run offline sandbox tests
-    Test {
-        /// Path to plugin directory or plugin.toml
-        path: Option<PathBuf>,
-        /// Specific command to execute
-        #[arg(short, long)]
-        command: Option<String>,
-        /// Specific tool to call
-        #[arg(short, long)]
-        tool: Option<String>,
-        /// Arguments for command or tool
-        #[arg(short, long)]
-        args: Vec<String>,
-        /// Non-interactive execution
-        #[arg(long)]
-        non_interactive: bool,
-    },
+    /// Run the plugin in an offline sandbox node
+    Test(TestArgs),
 }
 
 #[tokio::main]
@@ -128,19 +130,9 @@ async fn main() -> ExitCode {
         Commands::Plugin { action } => handle_plugin_action(action).await,
         Commands::Create { name, lang, output } => handle_create(&name, &lang, output.as_deref()),
         Commands::Lint { path } => handle_lint(path.as_deref()),
-        Commands::Test {
-            path,
-            command,
-            tool,
-            args,
-            non_interactive,
-        } => handle_test(path.as_deref(), command, tool, args, non_interactive).await,
+        Commands::Test(args) => handle_test(args).await,
         Commands::Pack { path, output } => handle_pack(path.as_deref(), output.as_deref()),
-        Commands::Dev => {
-            println!("Starting Kanon dev server with file watcher and hot reload...");
-            println!("(Press Ctrl+C to stop)");
-            ExitCode::SUCCESS
-        }
+        Commands::Dev { path, node } => handle_dev(path.as_deref(), &node).await,
     }
 }
 
@@ -151,13 +143,7 @@ async fn handle_plugin_action(action: PluginAction) -> ExitCode {
         }
         PluginAction::Lint { path } => handle_lint(path.as_deref()),
         PluginAction::Pack { path, output } => handle_pack(path.as_deref(), output.as_deref()),
-        PluginAction::Test {
-            path,
-            command,
-            tool,
-            args,
-            non_interactive,
-        } => handle_test(path.as_deref(), command, tool, args, non_interactive).await,
+        PluginAction::Test(args) => handle_test(args).await,
     }
 }
 
@@ -169,16 +155,11 @@ fn handle_create(name: &str, lang: &str, output: Option<&std::path::Path>) -> Ex
                 lang,
                 dir.display()
             );
+            // The sandbox builds Rust plugins and installs dependencies itself, so trying the new
+            // plugin is a single command.
             println!("  Next steps:");
             println!("    cd {}", dir.display());
-            if lang == "rust" {
-                println!("    cargo build");
-            } else if lang == "python" || lang == "py" {
-                println!("    uv sync");
-            } else {
-                println!("    npm install");
-            }
-            println!("    kanon-dev test .");
+            println!("    kanon-dev test .        # chat with it in the offline sandbox");
             ExitCode::SUCCESS
         }
         Err(e) => {
@@ -257,25 +238,31 @@ fn handle_pack(path: Option<&std::path::Path>, output: Option<&std::path::Path>)
     }
 }
 
-async fn handle_test(
-    path: Option<&std::path::Path>,
-    command: Option<String>,
-    tool: Option<String>,
-    args: Vec<String>,
-    non_interactive: bool,
-) -> ExitCode {
-    let target = path.unwrap_or_else(|| std::path::Path::new("."));
+async fn handle_test(args: TestArgs) -> ExitCode {
+    let target = args.path.unwrap_or_else(|| PathBuf::from("."));
     let opts = SandboxOptions {
-        command,
-        tool,
-        args,
-        non_interactive,
+        command: args.command,
+        tool: args.tool,
+        args: args.args,
+        messages: args.messages,
+        non_interactive: args.non_interactive,
     };
 
-    match run_sandbox(target, opts).await {
+    match run_sandbox(&target, opts).await {
         Ok(()) => ExitCode::SUCCESS,
         Err(e) => {
             eprintln!("Sandbox error: {}", e);
+            ExitCode::FAILURE
+        }
+    }
+}
+
+async fn handle_dev(path: Option<&std::path::Path>, node: &str) -> ExitCode {
+    let target = path.unwrap_or_else(|| std::path::Path::new("."));
+    match run_dev(target, node).await {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(e) => {
+            eprintln!("Dev error: {}", e);
             ExitCode::FAILURE
         }
     }

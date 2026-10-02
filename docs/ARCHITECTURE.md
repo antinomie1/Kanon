@@ -450,7 +450,7 @@ sequenceDiagram
 | `ANY` | `/api/v1/plugins/{id}/http/{path}` | 转发给声明了 `serves_http` 的插件的 `OnHttpRequest`：请求体 ≤ 3 MiB，30 秒超时，剔除逐跳头。未知插件或未声明 → `404`，宿主未运行 → `503`，宿主出错 → `502`，超时 → `504`，过大 → `413` |
 | `GET` | `/api/v1/plugins/{id}/config` | 获取指定插件的配置项当前值、JSON Schema 及当前单调递增版本号 `version` |
 | `PUT` | `/api/v1/plugins/{id}/config` | 校验配置 → 检查 CAS 乐观锁版本向量 → 触发跨进程热重载 → 原子持久化（版本冲突返回 409，宿主拒绝则不落盘） |
-| `POST` | `/api/v1/plugins/{id}/restart` | 重启指定插件所在的宿主进程（依赖 Supervisor 记录的启动配方） |
+| `POST` | `/api/v1/plugins/{id}/restart` | 重启指定插件所在的宿主进程；插件已启用但无宿主运行（崩溃或启动失败）时按磁盘上的清单重新启动 |
 | `POST` | `/api/v1/plugins/{id}/actions/{action}` | 触发插件的**管理动作**（运维操作，永不进入模型的函数列表；区别于 `tools`） |
 | `POST` | `/api/v1/plugins/{id}/tools/{tool}` | 以 JSON 参数直接调用插件声明的工具（调试用） |
 | `GET` | `/api/v1/tools` | 列出模型当前可调用的**全部工具**及其提供方（内置 / 插件 / MCP），名称与分发规则和模型实际收到的完全一致 |
@@ -612,8 +612,8 @@ sequenceDiagram
 | 命令 | 功能说明 | 跨语言行为 |
 | :--- | :--- | :--- |
 | **`kanon-dev plugin create <name> --lang <rust\|python\|ts>`** | 自动生成标准插件骨架项目 | - `rust`: 生成 `Cargo.toml`、`src/lib.rs` 或 `main.rs` 与 `plugin.toml`<br>- `python`: 生成基于 `uv` 的 `pyproject.toml`、`main.py`<br>- `ts`: 生成 `package.json`、`tsconfig.json`、`src/index.ts` |
-| **`kanon-dev dev`** | 启动热重载开发服务器 | 监听插件源码变动。Rust 插件执行增量编译并重启；Python/TS 插件秒级热重启 Host 进程 |
-| **`kanon-dev test <path>`** | 脱机交互与测试驱动器 | 提供纯命令行终端沙盒，直接输入 `/calc`、`/weather` 或触发 Tool Calling，脱机验证插件输出 |
+| **`kanon-dev dev <path> [--node <url>]`** | 对运行中的节点热重载插件 | 轮询插件目录变动，经管理 API `POST /api/v1/plugins/{id}/restart` 重启插件宿主。Rust 插件先执行 `cargo build`，失败则保留运行中版本；Python/TS 插件直接重启，依赖由 Supervisor 按需重装 |
+| **`kanon-dev test <path>`** | 脱机交互与测试驱动器 | 进程内最小节点（真实流水线、内置命令、钩子、内存 KV、临时会话库）+ mock 模型；支持交互 REPL、`-m` 脚本化多轮对话、`-c`/`-t` 单次执行，`!tool` 触发完整 Tool Calling 轮次，`:prompt` 查看请求 |
 | **`kanon-dev lint <path>`** | 静态清单与类型规范校验 | 静态校验 `plugin.toml` 的 JSON Schema、命令命名冲突与权限合法性 |
 | **`kanon-dev pack <path>`** | 打包可分发插件制品 | 自动校验依赖并打包为 `.kpk` (Kanon Plugin Package) 标准分发包，供发布到插件中心 |
 
