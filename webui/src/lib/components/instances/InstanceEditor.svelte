@@ -1,6 +1,7 @@
 <script lang="ts">
 import { ChevronDown, Plus, Send, Trash2 } from 'lucide-svelte';
 import { deleteInstance, toggleInstance } from '../../instanceActions';
+import { agentName } from '../../stores/agents.svelte';
 import { t } from '../../stores/i18n.svelte';
 import { instancesStore } from '../../stores/instances.svelte';
 import { describeReplyPolicy } from '../../stores/replyPolicy.svelte';
@@ -245,6 +246,23 @@ function testChat() {
 
     <Section title={t('instances.sec_brain')} hint={t('instances.sec_brain_hint')}>
       <div class="grid gap-3.5 sm:grid-cols-2">
+        <label class="min-w-0">
+          <span class="label">{t('instances.field_agent')}</span>
+          <!-- Only the built-in agent exists today, so the picker shows what answers rather than
+               offering a real choice; agents added by the node later appear without a change. -->
+          <Select bind:value={store.formAgent} disabled={store.agentChoices.length < 2}>
+            <option value="">
+              {store.nodeDefaultAgent
+                ? t('instances.agent_inherit_named', {
+                    agent: agentName(store.nodeDefaultAgent),
+                  })
+                : t('instances.agent_inherit')}
+            </option>
+            {#each store.agentChoices as agent (agent)}
+              <option value={agent}>{agentName(agent)}</option>
+            {/each}
+          </Select>
+        </label>
         <label class="min-w-0">
           <span class="label">{t('instances.field_model')}</span>
           <Select bind:value={store.formModel}>

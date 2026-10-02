@@ -5,11 +5,13 @@
 //! they are answered. Without an enabled instance claiming a platform, the node has no bot to
 //! answer as, so inbound events are dropped instead of being fed to the model.
 //!
-//! An instance owns exactly four things:
+//! An instance owns, among its policy overrides:
 //!
 //! - **adapters**: the platform identifiers it serves. A platform can be claimed by at most one
 //!   *enabled* instance, which keeps routing deterministic (no "first match wins" ambiguity);
 //! - **persona**: either a persona from the node catalog or a prompt written for this instance;
+//! - **agent**: an optional override of the node's default agent (see
+//!   [`kanon_llm::selectable_agents`]);
 //! - **model**: an optional override of the node's default model;
 //! - **sessions**: conversations answered by this instance are namespaced by it. A chat can hold
 //!   several conversations (`/new`, `/ls`, `/switch`, `/del`); the instance remembers which one
@@ -145,6 +147,9 @@ pub struct BotInstance {
     /// Prompt written for this instance; takes precedence over `persona_id`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub system_prompt: Option<String>,
+    /// Agent override; `None` means "use the node's default agent".
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent: Option<String>,
     /// Model override; `None` means "use the node's default model".
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model: Option<String>,
@@ -209,6 +214,9 @@ pub struct InstanceDraft {
     /// Prompt written specifically for this instance.
     #[serde(default)]
     pub system_prompt: Option<String>,
+    /// Optional agent override; absent inherits the node's default agent.
+    #[serde(default)]
+    pub agent: Option<String>,
     /// Optional model override.
     #[serde(default)]
     pub model: Option<String>,
@@ -663,10 +671,16 @@ impl InstanceRegistry {
         Ok(())
     }
 
-    /// Validates that no two enabled instances claim the same platform.
+    /// Validates the stored document: every agent override names a selectable agent and no two
+    /// enabled instances claim the same platform.
     async fn validate_all(&self) -> Result<(), InstanceError> {
         let instances = self.instances.read().await;
         for instance in instances.values() {
+            if let Some(agent) = instance.agent.as_deref() {
+                kanon_llm::check_agent_id(agent).map_err(|err| {
+                    InstanceError::Invalid(format!("instance '{}': {err}", instance.id))
+                })?;
+            }
             Self::validate_claims(&instances, instance)?;
         }
         Ok(())
@@ -789,6 +803,14 @@ fn build_instance(
         }
     }
 
+    let agent = draft
+        .agent
+        .map(|agent| agent.trim().to_string())
+        .filter(|agent| !agent.is_empty());
+    if let Some(agent) = agent.as_deref() {
+        kanon_llm::check_agent_id(agent).map_err(InstanceError::Invalid)?;
+    }
+
     let model = draft
         .model
         .map(|model| model.trim().to_string())
@@ -821,6 +843,7 @@ fn build_instance(
         adapters,
         persona_id,
         system_prompt,
+        agent,
         model,
         reply_policy: draft.reply_policy,
         context_policy: draft.context_policy,

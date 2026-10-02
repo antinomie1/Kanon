@@ -13,6 +13,7 @@ import type {
   ReplyPolicy,
   SessionScope,
 } from '../types';
+import { agentsStore } from './agents.svelte';
 import {
   type CommandPolicyDraft,
   commandPolicyOfDraft,
@@ -86,6 +87,8 @@ class InstancesStore {
   formAdapters = $state<string[]>([]);
   formPersonaId = $state('');
   formSystemPrompt = $state('');
+  /** Agent identifier; empty means the instance inherits the node's default agent. */
+  formAgent = $state('');
   /** Canonical catalog reference; empty means the instance inherits the node default model. */
   formModel = $state('');
   /** `inherit` sends `reply_policy: null`. */
@@ -156,6 +159,16 @@ class InstancesStore {
   /** Whether Bash is switched on node-wide; an instance scope cannot enable it on its own. */
   get nodeBashEnabled(): boolean {
     return this.catalog?.node_bash_enabled ?? false;
+  }
+
+  /** Agents the operator may assign, as the node lists them. */
+  get agentChoices(): string[] {
+    return agentsStore.agents;
+  }
+
+  /** Node default agent shown by the "inherit" option. */
+  get nodeDefaultAgent(): string | null {
+    return agentsStore.defaultAgent;
   }
 
   /** Node default model shown by the "inherit" option, when one is configured. */
@@ -332,6 +345,8 @@ class InstancesStore {
           api.getPlugins(),
           api.getSkills(),
           api.getMcpServers(),
+          // Fills the agent store for the editor's picker; it reports its own errors.
+          agentsStore.load(),
         ]);
       this.catalog = catalog;
       this.adapters = adapters.adapters;
@@ -366,6 +381,7 @@ class InstancesStore {
     this.formAdapters = [];
     this.formPersonaId = '';
     this.formSystemPrompt = '';
+    this.formAgent = '';
     this.formModel = '';
     this.formReplyPolicyMode = 'inherit';
     this.formReplyProbability = 0.5;
@@ -399,6 +415,7 @@ class InstancesStore {
     this.formAdapters = [...instance.adapters];
     this.formPersonaId = instance.persona_id ?? '';
     this.formSystemPrompt = instance.system_prompt ?? '';
+    this.formAgent = instance.agent ?? '';
     this.formModel = instance.model ?? '';
     // A null override is the `inherit` choice; any stored policy is shown verbatim.
     this.formReplyPolicyMode = instance.reply_policy?.mode ?? 'inherit';
@@ -471,6 +488,7 @@ class InstancesStore {
       adapters: this.formAdapters,
       persona_id: this.formPersonaId || null,
       system_prompt: this.formSystemPrompt.trim() || null,
+      agent: this.formAgent || null,
       model: this.formModel.trim() || null,
       reply_policy:
         this.formReplyPolicyMode === 'inherit'
@@ -555,6 +573,7 @@ class InstancesStore {
         adapters: instance.adapters,
         persona_id: instance.persona_id,
         system_prompt: instance.system_prompt,
+        agent: instance.agent,
         model: instance.model,
         reply_policy: instance.reply_policy,
         context_policy: instance.context_policy,

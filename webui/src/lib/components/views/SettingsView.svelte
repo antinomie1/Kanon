@@ -1,6 +1,7 @@
 <script lang="ts">
 import {
   Bell,
+  Bot,
   MessageCircleReply,
   Palette,
   Server,
@@ -11,6 +12,7 @@ import {
 import { t } from '../../stores/i18n.svelte';
 import { router } from '../../stores/router.svelte';
 import type { IconComponent } from '../../types';
+import AgentSettings from '../settings/AgentSettings.svelte';
 import AppearanceSettings from '../settings/AppearanceSettings.svelte';
 import BashSettings from '../settings/BashSettings.svelte';
 import CommandSettings from '../settings/CommandSettings.svelte';
@@ -22,6 +24,7 @@ import PageHead from '../ui/PageHead.svelte';
 
 const sections: { id: string; icon: IconComponent }[] = [
   { id: 'appearance', icon: Palette },
+  { id: 'agent', icon: Bot },
   { id: 'replies', icon: MessageCircleReply },
   { id: 'context', icon: TextQuote },
   { id: 'events', icon: Bell },
@@ -63,6 +66,8 @@ const current = $derived(
   <section class="group-list">
     {#if current === 'appearance'}
       <AppearanceSettings />
+    {:else if current === 'agent'}
+      <AgentSettings />
     {:else if current === 'replies'}
       <ReplySettings />
     {:else if current === 'context'}

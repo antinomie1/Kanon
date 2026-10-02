@@ -210,6 +210,8 @@ export interface BotInstanceView {
   adapters: string[];
   persona_id: string | null;
   system_prompt: string | null;
+  /** Agent override; `null` inherits the node's default agent. */
+  agent: string | null;
   model: string | null;
   /** Reply-policy override; `null` inherits the node-wide policy. */
   reply_policy: ReplyPolicy | null;
@@ -246,6 +248,8 @@ export interface InstanceRequest {
   adapters: string[];
   persona_id?: string | null;
   system_prompt?: string | null;
+  /** `null` (or omitted) inherits the node's default agent. */
+  agent?: string | null;
   model?: string | null;
   /** `null` (or omitted) inherits the node-wide reply policy. */
   reply_policy?: ReplyPolicy | null;
@@ -296,6 +300,14 @@ export interface ModelSpec {
   capabilities: ModelCapabilities;
   temperature?: number;
   source?: ModelSettingsSource;
+}
+
+/** Response of `GET /api/v1/agents` and `PUT /api/v1/agents/default`. */
+export interface AgentsResponse {
+  /** Agents an operator may select, node-wide or per instance (only `builtin` today). */
+  agents: string[];
+  /** Agent that answers for every instance without an override. */
+  default_agent: string;
 }
 
 /** Response of `GET /api/v1/models` and every model mutation. */

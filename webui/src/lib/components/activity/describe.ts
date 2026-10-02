@@ -42,6 +42,22 @@ function place(event: PipelineEventPayload): string | null {
   return platform ?? channel;
 }
 
+/** Title of a `no_reply` record by its cause; an unknown cause keeps the generic title. */
+function noReplyTitle(cause: unknown): string {
+  switch (cause) {
+    case 'reply_policy':
+      return t('activity.s_no_reply_policy');
+    case 'notice':
+      return t('activity.s_no_reply_notice');
+    case 'no_instance':
+      return t('activity.s_no_reply_instance');
+    case 'nothing_to_say':
+      return t('activity.s_no_reply_empty');
+    default:
+      return t('activity.s_no_reply');
+  }
+}
+
 /**
  * Turns one trace record into words.
  *
@@ -146,6 +162,12 @@ export function describe(event: PipelineEventPayload): Described {
           : null,
       );
       return { title: t('activity.s_llm_replied'), tone: 'idle', details };
+    case 'no_reply': {
+      // The node closes every trace it does not answer, so the cause names a deliberate decision
+      // rather than leaving the list to look like a stalled pipeline.
+      add(text(event.reason));
+      return { title: noReplyTitle(event.cause), tone: 'idle', details };
+    }
     case 'tool_call_started':
       return {
         title: t('activity.s_tool_started', {

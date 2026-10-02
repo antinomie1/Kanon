@@ -79,6 +79,20 @@ pub enum PipelineStage {
         /// Character length of the generated reply.
         content_length: usize,
     },
+    /// The pipeline finished the event without answering it.
+    ///
+    /// Closes the trace of every event that ends silently — most often a group message the bot
+    /// was not addressed in. Without it such a trace stops after `pre_filter_passed`, which reads
+    /// like a stalled pipeline rather than a deliberate decision.
+    NoReply {
+        /// Unique identifier of the inbound event.
+        event_id: String,
+        /// Stable machine-readable cause: `reply_policy`, `notice`, `no_instance` or
+        /// `nothing_to_say`.
+        cause: &'static str,
+        /// Human-readable detail, suitable for logs and traces.
+        reason: String,
+    },
     /// Outbound replies were enqueued towards the outbound dispatcher.
     OutboundQueued {
         /// Unique identifier of the inbound event that produced the replies.
@@ -136,6 +150,7 @@ impl PipelineStage {
             PipelineStage::CommandMatched { .. } => "command_matched",
             PipelineStage::CommandNotFound { .. } => "command_not_found",
             PipelineStage::LlmReplied { .. } => "llm_replied",
+            PipelineStage::NoReply { .. } => "no_reply",
             PipelineStage::OutboundQueued { .. } => "outbound_queued",
             PipelineStage::OutboundDelivered { .. } => "outbound_delivered",
             PipelineStage::OutboundFailed { .. } => "outbound_failed",
@@ -153,6 +168,7 @@ impl PipelineStage {
             | PipelineStage::CommandMatched { event_id, .. }
             | PipelineStage::CommandNotFound { event_id, .. }
             | PipelineStage::LlmReplied { event_id, .. }
+            | PipelineStage::NoReply { event_id, .. }
             | PipelineStage::OutboundQueued { event_id, .. }
             | PipelineStage::CircuitBreakerTripped { event_id, .. } => event_id,
             // Delivery stages are emitted by the outbound dispatcher, which no longer knows the

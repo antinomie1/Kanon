@@ -3,9 +3,9 @@ import type { BotInstanceView, TraceRecord } from './types';
 /**
  * What finally happened to one inbound message, as far as the trace stream tells.
  *
- * `open` means no terminal stage was seen: the message may still be in flight, or the reply
- * policy decided not to answer, which the node does not trace. The console therefore never claims
- * that an open message is "thinking".
+ * `open` means nothing was answered: the message may still be in flight, or the node closed it
+ * with `no_reply` (most often a group message the bot was not addressed in). Both read as
+ * "received, no reply", so the console never claims that an open message is "thinking".
  */
 export type MessageOutcome =
   | 'replied'

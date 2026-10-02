@@ -42,8 +42,8 @@ pub mod tool_router;
 pub mod visible_reply;
 
 pub use agent::{
-    Agent, AgentConfig, AgentHook, AgentOutput, AgentTool, NativeTool, NativeToolFn, NoopHost,
-    ToolOutput, TurnOptions,
+    Agent, AgentConfig, AgentHook, AgentOutput, AgentTool, BUILTIN_AGENT, NativeTool, NativeToolFn,
+    NoopHost, ToolOutput, TurnOptions, check_agent_id, selectable_agents,
 };
 pub use builtin::{AgentBuilder, BuiltinAgent, FAILED_TOOL_RESULT, STOPPED_TOOL_RESULT};
 pub use compaction::{COMPACTION_INSTRUCTION, CompactionPolicy};

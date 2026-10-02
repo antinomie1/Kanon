@@ -25,6 +25,33 @@ use crate::memory::Memory;
 use crate::session::SessionManager;
 use crate::tool_router::{ExecutedToolCall, ToolAttachment, ToolHost};
 
+/// Identifier of [`crate::BuiltinAgent`], Kanon's own model-and-tool loop.
+pub const BUILTIN_AGENT: &str = "builtin";
+
+/// Identifiers of the agents an operator may select, node-wide or for one bot instance.
+///
+/// The built-in agent is the only one today, so a selection can only name the agent that already
+/// answers every turn and nothing downstream dispatches on it yet. Agents provided by plugins are
+/// meant to join this list; the dispatch belongs in [`crate::AgentFactory`] once they do.
+pub fn selectable_agents() -> &'static [&'static str] {
+    &[BUILTIN_AGENT]
+}
+
+/// Checks that `id` names a selectable agent.
+///
+/// An unknown identifier is refused rather than mapped to the built-in agent: a setting that
+/// silently answers with a different engine than the one it names would mislead the operator.
+pub fn check_agent_id(id: &str) -> Result<(), String> {
+    if selectable_agents().contains(&id) {
+        Ok(())
+    } else {
+        Err(format!(
+            "unknown agent '{id}'; available: {}",
+            selectable_agents().join(", ")
+        ))
+    }
+}
+
 /// Answers conversation turns for the node.
 ///
 /// A turn is one user message in one session. The agent owns what happens between receiving it

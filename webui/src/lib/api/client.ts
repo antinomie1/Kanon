@@ -1,5 +1,6 @@
 import type {
   AdaptersResponse,
+  AgentsResponse,
   BashPolicy,
   CallPluginToolResponse,
   ChatCompletionRequest,
@@ -184,6 +185,15 @@ export const api = {
     request<FetchModelsResponse>('/api/v1/providers/models', {
       method: 'POST',
       body: JSON.stringify(req),
+    }),
+
+  // Agents an operator may select, plus the node's default one. Instances override it with
+  // `agent`; an unknown agent is refused with 400.
+  getAgents: () => request<AgentsResponse>('/api/v1/agents'),
+  setDefaultAgent: (agent: string) =>
+    request<AgentsResponse>('/api/v1/agents/default', {
+      method: 'PUT',
+      body: JSON.stringify({ agent }),
     }),
 
   // Model catalog: per-model context window, modalities and sampling overrides keyed by reference.

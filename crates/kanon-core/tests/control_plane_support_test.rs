@@ -340,14 +340,20 @@ async fn pipeline_worker_emits_ingest_and_outbound_stages() {
     drop(event_tx);
 
     // No dispatcher task runs here and no adapter can produce a reply, so only the inbound
-    // stages are expected: the pipeline itself must never invent outbound traffic.
+    // stages are expected: the pipeline itself must never invent outbound traffic. Nothing
+    // answers, so the trace is closed by `no_reply` rather than left open.
     engine.run_worker_loop(event_rx).await;
 
     let stages = observer.stages.lock().expect("stage lock");
     let names: Vec<&str> = stages.iter().map(PipelineStage::name).collect();
     assert_eq!(
         names,
-        vec!["ingested", "pre_filter_started", "pre_filter_passed"]
+        vec![
+            "ingested",
+            "pre_filter_started",
+            "pre_filter_passed",
+            "no_reply"
+        ]
     );
 }
 

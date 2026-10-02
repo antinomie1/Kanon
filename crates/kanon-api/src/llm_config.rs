@@ -35,7 +35,7 @@ use kanon_adapter_milky::MilkyConfig;
 use kanon_adapter_onebot::OneBotConfig;
 use kanon_adapter_qqofficial::QqOfficialConfig;
 use kanon_core::{BashPolicy, CommandPolicy, ContextPolicy, EventPolicy, ReplyPolicy};
-use kanon_llm::{ModelRef, ModelSpec, ProviderEntry};
+use kanon_llm::{BUILTIN_AGENT, ModelRef, ModelSpec, ProviderEntry};
 use serde::{Deserialize, Serialize};
 
 /// Default location of the node's system configuration, relative to the node working directory.
@@ -117,10 +117,12 @@ pub fn provider_presets() -> Vec<ProviderPresetDef> {
 /// One value is passed around instead of loose fields because these settings are always read,
 /// written and applied together: a default model without its provider, or a model catalog without
 /// the endpoints it belongs to, would be an inconsistent node.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone)]
 pub struct NodeSettings {
     /// Configured provider endpoints.
     pub providers: Vec<ProviderEntry>,
+    /// Agent that answers for every instance without an agent override.
+    pub default_agent: String,
     /// Canonical `<provider>/<model-id>` the node answers with by default.
     pub default_model: Option<String>,
     /// Per-model settings.
@@ -137,6 +139,24 @@ pub struct NodeSettings {
     pub bash_policy: BashPolicy,
 }
 
+impl Default for NodeSettings {
+    /// A node nobody has configured: no provider or model, default policies, and the built-in
+    /// agent, the one agent that needs no configuration of its own.
+    fn default() -> Self {
+        Self {
+            providers: Vec::new(),
+            default_agent: BUILTIN_AGENT.to_string(),
+            default_model: None,
+            models: Vec::new(),
+            reply_policy: ReplyPolicy::default(),
+            context_policy: ContextPolicy::default(),
+            event_policy: EventPolicy::default(),
+            command_policy: CommandPolicy::default(),
+            bash_policy: BashPolicy::default(),
+        }
+    }
+}
+
 impl NodeSettings {
     /// Whether any provider is configured.
     pub fn has_providers(&self) -> bool {
@@ -148,6 +168,7 @@ impl NodeSettings {
     /// The default model must name a configured provider: a default pointing nowhere would leave
     /// the console describing a node that cannot answer.
     pub fn validate(&self) -> Result<(), String> {
+        kanon_llm::check_agent_id(&self.default_agent)?;
         self.reply_policy.validate()?;
         self.command_policy.clone().prepare()?;
         self.bash_policy.validate()?;
@@ -264,6 +285,10 @@ struct SystemConfigDocument {
     /// Named provider endpoints, keyed by model-reference prefix.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     providers: Option<Vec<ProviderEntry>>,
+    /// Agent the node answers with by default; absent in documents written before agents were
+    /// selectable, which therefore keep the built-in agent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    default_agent: Option<String>,
     /// Canonical `<provider>/<model-id>` the node answers with by default.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     default_model: Option<String>,
@@ -485,6 +510,9 @@ impl SystemConfigStore {
         };
 
         let mut settings = NodeSettings {
+            default_agent: document
+                .default_agent
+                .unwrap_or_else(|| BUILTIN_AGENT.to_string()),
             reply_policy: document.reply_policy.unwrap_or_default(),
             context_policy: document.context_policy.unwrap_or_default(),
             event_policy: document.event_policy.unwrap_or_default(),
@@ -524,6 +552,9 @@ impl SystemConfigStore {
             }
         }
 
+        // An agent the node does not know is refused, not replaced by the built-in one: answering
+        // with a different engine than the one configured is the surprise this file must not hide.
+        kanon_llm::check_agent_id(&settings.default_agent)?;
         settings.bash_policy.validate()?;
         Ok(settings)
     }
@@ -537,6 +568,7 @@ impl SystemConfigStore {
         let mut document = self.read_document()?.unwrap_or_default();
 
         document.providers = Some(settings.providers.clone());
+        document.default_agent = Some(settings.default_agent.clone());
         document.default_model = settings.default_model.clone();
         document.models = Some(settings.models.clone());
         document.reply_policy = Some(settings.reply_policy);

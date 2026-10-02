@@ -293,3 +293,41 @@ async fn instance_policies_survive_a_restart() {
     assert!(context.include_timestamp);
     assert!(!context.include_sender_id);
 }
+
+#[tokio::test]
+async fn an_unknown_agent_is_refused_on_save_and_on_load() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let path = dir.path().join("instances.json");
+    let registry = InstanceRegistry::open(&path).await.expect("open catalog");
+
+    let mut builtin = draft("Agent Bot", true, &["qqofficial"]);
+    builtin.agent = Some(" builtin ".to_string());
+    let stored = registry.create(builtin).await.expect("builtin agent");
+    assert_eq!(stored.agent.as_deref(), Some("builtin"));
+
+    let mut unknown = draft("Other Bot", false, &[]);
+    unknown.agent = Some("dify".to_string());
+    let err = registry
+        .create(unknown)
+        .await
+        .expect_err("an agent the node cannot run must be refused");
+    assert!(
+        matches!(err, InstanceError::Invalid(_)),
+        "unexpected: {err}"
+    );
+
+    // A hand-edited catalog naming an unknown agent stops startup instead of quietly answering
+    // with the built-in agent.
+    std::fs::write(
+        &path,
+        r#"{"version": 1, "instances": [{"id": "a", "name": "A", "enabled": true, "agent": "dify"}]}"#,
+    )
+    .expect("seed catalog");
+    let err = InstanceRegistry::open(&path)
+        .await
+        .expect_err("unknown agent must be rejected on load");
+    assert!(
+        matches!(err, InstanceError::Invalid(_)),
+        "unexpected: {err}"
+    );
+}

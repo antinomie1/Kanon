@@ -3220,6 +3220,11 @@ impl PipelineEngine {
                     reason = %reason,
                     "Pipeline suppressed a reply by policy"
                 );
+                self.observe(PipelineStage::NoReply {
+                    event_id: event_id.clone(),
+                    cause: "reply_policy",
+                    reason: reason.clone(),
+                });
             }
             PipelineResult::BuiltinReplied { command, .. } => {
                 tracing::info!(
@@ -3245,9 +3250,19 @@ impl PipelineEngine {
                     outcome = %outcome,
                     "Pipeline handled a platform notice without answering"
                 );
+                self.observe(PipelineStage::NoReply {
+                    event_id: event_id.clone(),
+                    cause: "notice",
+                    reason: outcome.clone(),
+                });
             }
-            PipelineResult::NoInstance { .. } => {
+            PipelineResult::NoInstance { platform } => {
                 // Already logged with the platform in `process_event`; nothing was delivered.
+                self.observe(PipelineStage::NoReply {
+                    event_id: event_id.clone(),
+                    cause: "no_instance",
+                    reason: format!("no enabled bot instance serves platform '{platform}'"),
+                });
             }
             PipelineResult::Passed(_) => {
                 tracing::info!(
@@ -3255,6 +3270,11 @@ impl PipelineEngine {
                     channel_id = %channel_id,
                     "Pipeline event passed without a reply"
                 );
+                self.observe(PipelineStage::NoReply {
+                    event_id: event_id.clone(),
+                    cause: "nothing_to_say",
+                    reason: "the pipeline produced nothing to send".to_string(),
+                });
             }
         }
 

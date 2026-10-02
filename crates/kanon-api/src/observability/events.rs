@@ -258,6 +258,7 @@ impl EventBus {
                     MetricsRegistry::incr(&self.metrics.outbound_failed);
                 }
                 PipelineStage::PreFilterStarted { .. }
+                | PipelineStage::NoReply { .. }
                 | PipelineStage::CircuitBreakerTripped { .. } => {}
             },
             TraceEvent::LlmRequest { .. } => {

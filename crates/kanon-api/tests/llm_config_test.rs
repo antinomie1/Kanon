@@ -286,3 +286,33 @@ fn the_startup_section_survives_console_saves_and_rejects_unknown_keys() {
     std::fs::write(&path, r#"{"startup": {"api_address": "0.0.0.0:9000"}}"#).unwrap();
     assert!(store.load_startup().unwrap_err().contains("api_address"));
 }
+
+#[test]
+fn the_default_agent_is_builtin_until_set_and_an_unknown_one_stops_loading() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let path = dir.path().join("system.json");
+    let store = SystemConfigStore::new(&path);
+
+    // A document written before agents were selectable keeps the built-in agent.
+    std::fs::write(
+        &path,
+        r#"{"reply_policy": {"mode": "always", "probability": 0.5}}"#,
+    )
+    .expect("seed document");
+    let settings = store.load_node_settings().expect("load");
+    assert_eq!(settings.default_agent, "builtin");
+
+    store.save_node_settings(&settings).expect("save");
+    let saved: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&path).expect("read")).expect("json");
+    assert_eq!(saved["default_agent"], serde_json::json!("builtin"));
+
+    std::fs::write(&path, r#"{"default_agent": "dify"}"#).expect("seed unknown agent");
+    let err = store
+        .load_node_settings()
+        .expect_err("an agent the node cannot run must stop startup");
+    assert!(
+        err.contains("unknown agent 'dify'"),
+        "unexpected error: {err}"
+    );
+}

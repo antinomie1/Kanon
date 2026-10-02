@@ -45,6 +45,8 @@
 //! | `POST` | `/api/v1/providers` | Create or replace one named provider endpoint |
 //! | `POST` | `/api/v1/providers/delete` | Remove one named provider (and the default model it served) |
 //! | `POST` | `/api/v1/providers/test` | Probe a configured endpoint with its stored credential |
+//! | `GET` | `/api/v1/agents` | Selectable agents plus the node's default agent |
+//! | `PUT` | `/api/v1/agents/default` | Set the node's default agent (persisted, live) |
 //! | `GET` | `/api/v1/models` | Per-model settings catalog (`provider/model-id`) plus the default model |
 //! | `PUT` | `/api/v1/models` | Upsert one model catalog entry |
 //! | `PUT` | `/api/v1/models/default` | Set (or clear) the one global default model (persisted, live) |
@@ -68,6 +70,7 @@
 //! | `POST` | `/api/v1/chat/completions` | Sandbox chat with JSON or SSE responses |
 
 pub mod adapters;
+pub mod agents;
 pub mod chat;
 pub mod health;
 pub mod instances;
@@ -114,6 +117,7 @@ pub fn api_router() -> Router<ApiState> {
         .merge(system::routes())
         .merge(providers::routes())
         .merge(models::routes())
+        .merge(agents::routes())
 }
 
 /// Fallback handler returning a structured `404` for unknown paths.

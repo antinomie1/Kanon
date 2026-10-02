@@ -68,6 +68,8 @@ pub struct InstanceView {
     pub persona_id: Option<String>,
     /// Prompt written for this instance.
     pub system_prompt: Option<String>,
+    /// Agent override; `null` means the node's default agent.
+    pub agent: Option<String>,
     /// Model override; `null` means the node's default model.
     pub model: Option<String>,
     /// Reply-policy override; `null` inherits the node-wide policy.
@@ -139,6 +141,9 @@ pub struct InstanceRequest {
     /// Prompt written specifically for this instance.
     #[serde(default)]
     pub system_prompt: Option<String>,
+    /// Optional agent override; omit or `null` to use the node's default agent.
+    #[serde(default)]
+    pub agent: Option<String>,
     /// Optional model override; omit or `null` to use the node's default.
     #[serde(default)]
     pub model: Option<String>,
@@ -179,6 +184,7 @@ impl From<InstanceRequest> for InstanceDraft {
             adapters: request.adapters,
             persona_id: request.persona_id,
             system_prompt: request.system_prompt,
+            agent: request.agent,
             model: request.model,
             reply_policy: request.reply_policy,
             context_policy: request.context_policy,
@@ -229,6 +235,7 @@ async fn view(state: &ApiState, instance: &BotInstance) -> InstanceView {
         adapters: instance.adapters.clone(),
         persona_id: instance.persona_id.clone(),
         system_prompt: instance.system_prompt.clone(),
+        agent: instance.agent.clone(),
         model: instance.model.clone(),
         reply_policy: instance.reply_policy,
         context_policy: instance.context_policy,

@@ -465,6 +465,8 @@ sequenceDiagram
 | `POST` | `/api/v1/providers` | 新增或替换一个命名提供商端点（校验 → 持久化至 `data/system.json` → 热应用）；省略密钥即保留已存密钥 |
 | `POST` | `/api/v1/providers/delete` | 删除提供商及其模型目录；若它正是全局默认模型的提供商，则同时清空默认模型 |
 | `POST` | `/api/v1/providers/test` | 以提供商名称探测连通性：服务端使用已存密钥，浏览器永远拿不到密钥 |
+| `GET` | `/api/v1/agents` | 查询可选的 Agent（目前只有内置 `builtin`）与节点默认 Agent；实例可用 `agent` 覆盖，留空即继承 |
+| `PUT` | `/api/v1/agents/default` | 设置节点默认 Agent：校验是可选 Agent → 持久化至 `data/system.json` → 热应用；未知 Agent 返回 `400` |
 | `GET` | `/api/v1/models` | 查询按 `provider/model-id` 索引的模型目录，并返回**全局默认模型** |
 | `PUT` | `/api/v1/models/default` | 设置（或置空）唯一的全局默认模型：校验其提供商已配置 → 持久化 → 热应用（流水线、`RequestLLM`、聊天接口下一请求即生效，无需重启） |
 | `GET` | `/api/v1/metrics` | 导出 Prometheus 格式的系统与消息吞吐指标 |
@@ -489,7 +491,7 @@ sequenceDiagram
 - **过滤协商**：两条信道均支持查询参数（`level` / `plugin_id` / `session_id` / `kind`）与运行时 `{"type":"filter",...}` 控制帧；
   连接建立后先回送 `ready` 帧回显生效过滤器，订阅端滞后于广播缓冲时显式推送 `{"type":"lagged","skipped":N}`，绝不静默丢弃。
 - **事件分层**：流水线事件以 `kind="pipeline"` 承载，并附带细粒度 `stage` 字段
-  （`ingested` → `pre_filter_started` → `pre_filter_passed` / `pre_filter_blocked` → `command_matched` → `llm_replied` → `outbound_queued`），
+  （`ingested` → `pre_filter_started` → `pre_filter_passed` / `pre_filter_blocked` → `command_matched` → `llm_replied` → `outbound_queued`；不作答即以 `no_reply` 收尾并给出 `cause`：`reply_policy` / `notice` / `no_instance` / `nothing_to_say`），
   控制台既可订阅 `kind=pipeline` 观察全链路，也可按 `kind=ingested` 等单阶段精确过滤；LLM 与 Tool Calling 阶段由 `EventBus` 本身作为
   `AgentHook` 注入 Agent，与流水线阶段共用同一条有序事件流。
 
@@ -516,7 +518,7 @@ sequenceDiagram
 
 | 文件 | 内容 |
 | :--- | :--- |
-| `system.json` | 提供商端点（含密钥，权限 `0600`）、模型目录、**全局默认模型**、回复/上下文/事件策略、适配器配置 |
+| `system.json` | 提供商端点（含密钥，权限 `0600`）、模型目录、**全局默认模型**、默认 Agent、回复/上下文/事件策略、适配器配置 |
 | `instances.json` | Bot 实例目录（适配器归属、人设/模型/策略覆盖、各会话的当前对话代数） |
 | `personas.json` | 运营者自建人设（基础助手内置，不落盘） |
 | `sessions.db` | 对话历史、压缩摘要与会话记录（SQLite WAL，见 8.8）；启动时无法打开即启动失败 |

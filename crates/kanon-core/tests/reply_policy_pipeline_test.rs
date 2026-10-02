@@ -9,7 +9,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 
 use async_trait::async_trait;
 use kanon_core::instance::{InstanceDraft, InstanceRegistry};
-use kanon_core::pipeline::{PipelineEngine, PipelineResult};
+use kanon_core::pipeline::{PipelineEngine, PipelineObserver, PipelineResult, PipelineStage};
 use kanon_core::supervisor::Supervisor;
 use kanon_core::{
     META_BOT_MENTIONED, META_CONVERSATION_KIND, ReplyMode, ReplyPolicy, ReplyPolicyStore,
@@ -23,7 +23,7 @@ use kanon_llm::{
     ProviderRuntime, SessionManager,
 };
 use kanon_proto::prost_types;
-use kanon_proto::v1::PipelineEventRequest;
+use kanon_proto::v1::{IngestEventRequest, PipelineEventRequest};
 
 /// Provider that answers every turn and counts how often it was asked.
 struct CountingProvider {
@@ -197,6 +197,56 @@ async fn mention_only_suppresses_an_unaddressed_group_message() {
         calls.load(Ordering::SeqCst),
         0,
         "the model must not be called"
+    );
+}
+
+/// Observer that keeps every stage it is shown, in order.
+#[derive(Default)]
+struct StageLog(std::sync::Mutex<Vec<PipelineStage>>);
+
+impl PipelineObserver for StageLog {
+    fn on_stage(&self, stage: &PipelineStage) {
+        self.0.lock().expect("stage log lock").push(stage.clone());
+    }
+}
+
+/// A suppressed message must end its trace explicitly; otherwise the console shows it stopping
+/// after `pre_filter_passed`, which reads like a stalled pipeline.
+#[tokio::test]
+async fn an_unaddressed_group_message_closes_its_trace_with_no_reply() {
+    let registry = Arc::new(InstanceRegistry::in_memory());
+    instance(&registry, Some(ReplyPolicy::new(ReplyMode::Mention))).await;
+    let temp = tempfile::tempdir().expect("temp dir");
+    let supervisor = Arc::new(Supervisor::new(Some(temp.path().to_path_buf()), None));
+    let stages = Arc::new(StageLog::default());
+    let engine = Arc::new(
+        PipelineEngine::new(supervisor)
+            .with_instances(registry)
+            .with_reply_policy(Arc::new(ReplyPolicyStore::new(ReplyPolicy::default())))
+            .with_observer(stages.clone()),
+    );
+
+    let (sender, receiver) = tokio::sync::mpsc::channel(4);
+    let worker = engine.start_worker(receiver);
+    sender
+        .send(IngestEventRequest {
+            platform: "policy".to_string(),
+            event: Some(event("e-silent", "随便聊聊", "group", false)),
+        })
+        .await
+        .expect("event queued");
+    // Closing the queue lets the worker exit once the event has been handled.
+    drop(sender);
+    worker.await.expect("worker exits");
+
+    let stages = stages.0.lock().expect("stage log lock");
+    let last = stages.last().expect("stages observed");
+    assert!(
+        matches!(
+            last,
+            PipelineStage::NoReply { event_id, cause: "reply_policy", .. } if event_id == "e-silent"
+        ),
+        "unexpected last stage: {last:?}"
     );
 }
 
