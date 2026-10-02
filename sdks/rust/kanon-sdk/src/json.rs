@@ -40,6 +40,35 @@ pub fn from_struct(value: prost_types::Struct) -> serde_json::Map<String, serde_
         .collect()
 }
 
+/// Rewrites every number that is a whole value within the exactly representable range of a
+/// double (|n| < 2^53) as a JSON integer, recursively.
+///
+/// Protobuf carries all numbers as doubles, so a model's `{"days": 3}` arrives as `3.0`, which
+/// serde refuses to deserialize into an integer field. Typed tool arguments go through this
+/// first; floating-point fields still accept the integers.
+pub(crate) fn integral_numbers(value: serde_json::Value) -> serde_json::Value {
+    /// 2^53: beyond it a double no longer holds every integer, so the value was never exact.
+    const EXACT: f64 = 9_007_199_254_740_992.0;
+    match value {
+        serde_json::Value::Number(number) => match number.as_f64() {
+            Some(float) if number.is_f64() && float.fract() == 0.0 && float.abs() < EXACT => {
+                serde_json::Value::from(float as i64)
+            }
+            _ => serde_json::Value::Number(number),
+        },
+        serde_json::Value::Array(items) => {
+            serde_json::Value::Array(items.into_iter().map(integral_numbers).collect())
+        }
+        serde_json::Value::Object(fields) => serde_json::Value::Object(
+            fields
+                .into_iter()
+                .map(|(key, value)| (key, integral_numbers(value)))
+                .collect(),
+        ),
+        other => other,
+    }
+}
+
 /// Converts a protobuf `Value` into JSON. An unset kind becomes `null`, and a non-finite number
 /// (which JSON cannot represent) becomes `null` too.
 pub fn from_value(value: prost_types::Value) -> serde_json::Value {

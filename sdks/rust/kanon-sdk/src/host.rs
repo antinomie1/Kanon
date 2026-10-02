@@ -220,8 +220,10 @@ impl<P: Plugin> KanonHost<P> {
             }
         };
 
-        let handle = CoreHandle::new(channel);
+        // `KANON_HOST_ID` is part of the Supervisor's startup contract; a host started by hand
+        // (tests, debugging) registers under its plugin id instead.
         let host_id = std::env::var("KANON_HOST_ID").unwrap_or_else(|_| plugin_id.to_string());
+        let handle = CoreHandle::new(channel).with_identity(plugin_id, host_id.clone());
         let registration = RegisterHostRequest {
             host_id,
             runtime: "rust".to_string(),
@@ -396,22 +398,36 @@ struct PipelineServiceImpl<P: Plugin> {
 
 #[tonic::async_trait]
 impl<P: Plugin> MessagePipelineService for PipelineServiceImpl<P> {
-    /// Not supported by the Rust SDK yet: the system prompt is left unchanged.
+    /// Lets the plugin rewrite the system prompt. A handler error, and an empty replacement
+    /// (which the core would refuse anyway), are answered as errors so the core logs them and
+    /// keeps the prompt unchanged.
     async fn on_llm_request(
         &self,
-        _request: Request<kanon_proto::v1::LlmRequestHookRequest>,
+        request: Request<kanon_proto::v1::LlmRequestHookRequest>,
     ) -> Result<Response<kanon_proto::v1::LlmRequestHookResult>, Status> {
-        Ok(Response::new(kanon_proto::v1::LlmRequestHookResult {
-            system_prompt: None,
-        }))
+        let plugin = self.plugin.read().await;
+        match plugin.on_llm_request(request.into_inner()).await {
+            Ok(Some(prompt)) if prompt.trim().is_empty() => Err(Status::internal(
+                "the system prompt rewrite returned an empty prompt",
+            )),
+            Ok(system_prompt) => Ok(Response::new(kanon_proto::v1::LlmRequestHookResult {
+                system_prompt,
+            })),
+            Err(err) => Err(Status::internal(err.to_string())),
+        }
     }
 
-    /// Not supported by the Rust SDK yet.
+    /// Serves one HTTP request. Handler failures are the plugin's to answer (the `Router`
+    /// turns them into 500 responses); an error from a hand-written plugin becomes a status.
     async fn on_http_request(
         &self,
-        _request: Request<kanon_proto::v1::HttpRequest>,
+        request: Request<kanon_proto::v1::HttpRequest>,
     ) -> Result<Response<kanon_proto::v1::HttpResponse>, Status> {
-        Err(Status::unimplemented("this plugin serves no HTTP routes"))
+        let plugin = self.plugin.read().await;
+        match plugin.on_http_request(request.into_inner()).await {
+            Ok(response) => Ok(Response::new(response)),
+            Err(err) => Err(Status::internal(err.to_string())),
+        }
     }
 
     async fn on_pre_filter(

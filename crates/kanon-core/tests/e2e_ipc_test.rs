@@ -83,9 +83,41 @@ async fn test_core_plugin_ipc_handshake_and_pipeline() {
     assert_eq!(meta.id, "org.kanon.plugin.demo_rust");
     assert_eq!(meta.name, "Demo Rust Plugin");
     assert_eq!(meta.version, "0.1.0");
-    assert_eq!(meta.commands.len(), 1);
-    assert_eq!(meta.commands[0].name, "rustcalc");
+    let names: Vec<&str> = meta.commands.iter().map(|c| c.name.as_str()).collect();
+    assert_eq!(names, ["rustcalc", "note", "rules"]);
     assert_eq!(meta.commands[0].usage, "/rustcalc <expr>");
+    // A command group reaches the core as one command listing its subcommands.
+    let subcommands: Vec<&str> = meta.commands[1]
+        .subcommands
+        .iter()
+        .map(|c| c.name.as_str())
+        .collect();
+    assert_eq!(subcommands, ["add", "list"]);
+    assert!(meta.rewrites_system_prompt && meta.serves_http);
+
+    // A group without a subcommand answers with its help, dispatched inside the host.
+    let help = managed_host
+        .execute_command(CommandExecuteRequest {
+            plugin_id: "org.kanon.plugin.demo_rust".to_string(),
+            command: "note".to_string(),
+            ..Default::default()
+        })
+        .await
+        .expect("OnExecuteCommand RPC failed");
+    assert!(help.success);
+    match help
+        .replies
+        .first()
+        .and_then(|reply| reply.segment.as_ref())
+    {
+        Some(Segment::Text(text)) => assert!(
+            text.content
+                .contains("/note add <text> — Save a note for this chat"),
+            "Unexpected group help: {}",
+            text.content
+        ),
+        other => panic!("Expected the group's help, got {other:?}"),
+    }
 
     // 6. Test MessagePipelineService::OnExecuteCommand via IPC
     let cmd_request = CommandExecuteRequest {

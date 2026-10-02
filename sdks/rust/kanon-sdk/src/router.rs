@@ -3,19 +3,32 @@
 //! methods and repeating them in [`PluginMeta`].
 //!
 //! ```ignore
+//! /// Arguments of `get_weather`; doc comments become the schema's descriptions.
+//! #[derive(Deserialize, JsonSchema)]
+//! struct WeatherArgs {
+//!     /// City name, e.g. "Paris".
+//!     city: String,
+//! }
+//!
 //! let plugin = Router::new("org.example.echo", "Echo", "0.1.0")
-//!     .command(CommandSpec::new("echo").usage("/echo <text>"), |event| async move {
-//!         Ok(event.raw_args().to_string())
+//!     .command("echo", |event| async move { Ok(event.raw_args().to_string()) })
+//!     .command_group(CommandSpec::new("admin").description("Moderation"), |group| {
+//!         group.command("ban", |event| async move { Ok(format!("banned {}", event.raw_args())) })
 //!     })
 //!     .trigger(TriggerSpec::new("ping", "^ping$"), |event| async move {
 //!         Ok(vec![segment::quote(event.event_id()), segment::text("pong")])
-//!     });
+//!     })
+//!     .tool(
+//!         ToolSpec::typed::<WeatherArgs>("get_weather").description("Get the forecast"),
+//!         |args, _event| async move { Ok(json!({ "city": args.city, "sky": "clear" })) },
+//!     )
+//!     .http_route("GET", "/status", |_request| async move { Ok(json!({ "ok": true })) });
 //! KanonHost::new(plugin).run().await?;
 //! ```
 //!
 //! Handlers are `'static` closures; share state by capturing an `Arc`. The context handed to
 //! `on_load` (data directory, configuration, Core handle) is available through
-//! [`Router::context`].
+//! [`Router::context`], which also adds and removes tools at runtime.
 
 use std::collections::HashMap;
 use std::future::Future;
@@ -25,21 +38,31 @@ use std::sync::{Arc, RwLock};
 use async_trait::async_trait;
 use kanon_proto::v1::{
     CommandAccess, CommandExecuteRequest, CommandExecuteResponse, CommandMeta, ConversationKind,
-    DecorateReplyRequest, EventKind, EventNotification, LlmResponseEvent, MessageSegment,
-    MessageSentEvent, PipelineEventRequest, PluginMeta, PreFilterResult, PrepareTurnRequest,
-    ReplySource, ToolCallRequest, ToolCallResponse, ToolMeta, TriggerMeta, event_notification,
+    DecorateReplyRequest, EventKind, EventNotification, HttpRequest, HttpResponse,
+    LlmRequestHookRequest, LlmResponseEvent, MessageSegment, MessageSentEvent,
+    PipelineEventRequest, PluginMeta, PreFilterResult, PrepareTurnRequest, ReplySource,
+    ToolCallRequest, ToolCallResponse, ToolMeta, TriggerMeta, event_notification,
     tool_call_request, tool_call_response,
 };
+use schemars::JsonSchema;
+use serde::Serialize;
+use serde::de::DeserializeOwned;
 
 use crate::context::{CoreHandle, PluginContext};
-use crate::event::{CommandEvent, Conversations, MessageEvent, Session};
+use crate::error::CoreError;
+use crate::event::{
+    AgentBegin, AgentDone, CommandEvent, Conversations, MessageEvent, Session, ToolCall, ToolResult,
+};
+use crate::group::CommandGroup;
+use crate::http::{IntoResponse, Request, Routes};
 use crate::plugin::{Plugin, PluginResult};
 use crate::segment::IntoReply;
 
 /// A boxed, sendable future, the return type of stored handlers.
 type BoxFuture<T> = Pin<Box<dyn Future<Output = T> + Send + 'static>>;
 
-type CommandHandler =
+/// A stored command, trigger or subcommand handler.
+pub(crate) type CommandHandler =
     Arc<dyn Fn(CommandEvent) -> BoxFuture<PluginResult<Vec<MessageSegment>>> + Send + Sync>;
 type ToolHandler = Arc<
     dyn Fn(serde_json::Value, Option<MessageEvent>) -> BoxFuture<PluginResult<serde_json::Value>>
@@ -53,10 +76,12 @@ type DecorateHandler =
     Arc<dyn Fn(Reply) -> BoxFuture<PluginResult<Option<Vec<MessageSegment>>>> + Send + Sync>;
 type PrepareHandler =
     Arc<dyn Fn(MessageEvent, String) -> BoxFuture<PluginResult<String>> + Send + Sync>;
+type PromptHandler =
+    Arc<dyn Fn(SystemPrompt) -> BoxFuture<PluginResult<Option<String>>> + Send + Sync>;
 type PreFilterHandler =
     Arc<dyn Fn(MessageEvent) -> BoxFuture<PluginResult<Option<PreFilterResult>>> + Send + Sync>;
 
-/// Declaration of a slash command.
+/// Declaration of a slash command. A plain name converts into one: `.command("echo", ..)`.
 #[derive(Debug, Clone)]
 pub struct CommandSpec(CommandMeta);
 
@@ -117,6 +142,22 @@ impl CommandSpec {
         self.0.conversation_kinds.push(kind as i32);
         self
     }
+
+    pub(crate) fn into_meta(self) -> CommandMeta {
+        self.0
+    }
+}
+
+impl From<&str> for CommandSpec {
+    fn from(name: &str) -> Self {
+        Self::new(name)
+    }
+}
+
+impl From<String> for CommandSpec {
+    fn from(name: String) -> Self {
+        Self::new(name)
+    }
 }
 
 /// Declaration of a regular-expression trigger on plain messages.
@@ -171,23 +212,67 @@ impl TriggerSpec {
     }
 }
 
-/// Declaration of a tool the model may call.
-#[derive(Debug, Clone)]
-pub struct ToolSpec(ToolMeta);
+/// Declaration of a tool the model may call, whose handler receives arguments of type `A`.
+///
+/// - [`ToolSpec::typed`] infers the JSON Schema from a `#[derive(Deserialize, JsonSchema)]`
+///   struct and hands the handler that struct;
+/// - [`ToolSpec::new`] takes an explicit schema ([`parameters`](ToolSpec::parameters)) and
+///   hands the handler the raw JSON object.
+pub struct ToolSpec<A = serde_json::Value> {
+    meta: ToolMeta,
+    /// Turns the model's JSON arguments into the handler's argument type.
+    parse: fn(serde_json::Value) -> Result<A, serde_json::Error>,
+}
+
+impl<A> Clone for ToolSpec<A> {
+    fn clone(&self) -> Self {
+        Self {
+            meta: self.meta.clone(),
+            parse: self.parse,
+        }
+    }
+}
+
+impl<A> std::fmt::Debug for ToolSpec<A> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_tuple("ToolSpec").field(&self.meta).finish()
+    }
+}
 
 impl ToolSpec {
-    /// A tool named `name`.
+    /// A tool named `name` whose handler receives the arguments as a JSON object; declare their
+    /// schema with [`parameters`](Self::parameters).
     pub fn new(name: impl Into<String>) -> Self {
-        Self(ToolMeta {
-            name: name.into(),
-            ..Default::default()
-        })
+        Self {
+            meta: ToolMeta {
+                name: name.into(),
+                ..Default::default()
+            },
+            parse: Ok,
+        }
     }
 
-    /// What the tool does, for the model.
-    pub fn description(mut self, description: impl Into<String>) -> Self {
-        self.0.description = description.into();
-        self
+    /// A tool named `name` whose arguments deserialize into `A`; the parameters schema is
+    /// generated from `A` (see [`crate::schema::tool_parameters`]) and doc comments on its
+    /// fields become their descriptions.
+    ///
+    /// Arguments the model gets wrong (a missing field, a wrong type) are reported back to it as
+    /// a failed call naming the problem, so it can correct itself; the handler never runs.
+    ///
+    /// # Panics
+    /// If `A` is not a struct with named fields.
+    pub fn typed<A: DeserializeOwned + JsonSchema>(name: impl Into<String>) -> ToolSpec<A> {
+        let serde_json::Value::Object(schema) = crate::schema::tool_parameters::<A>() else {
+            unreachable!("tool_parameters always returns an object");
+        };
+        ToolSpec {
+            meta: ToolMeta {
+                name: name.into(),
+                parameters: Some(crate::json::to_struct(schema)),
+                ..Default::default()
+            },
+            parse: parse_typed::<A>,
+        }
     }
 
     /// JSON Schema of the arguments; must be a JSON object.
@@ -196,11 +281,28 @@ impl ToolSpec {
     /// If `schema` is not an object — a schema mistake should stop the plugin at startup.
     pub fn parameters(mut self, schema: serde_json::Value) -> Self {
         let serde_json::Value::Object(fields) = schema else {
-            panic!("tool '{}': parameters must be a JSON object", self.0.name);
+            panic!(
+                "tool '{}': parameters must be a JSON object",
+                self.meta.name
+            );
         };
-        self.0.parameters = Some(crate::json::to_struct(fields));
+        self.meta.parameters = Some(crate::json::to_struct(fields));
         self
     }
+}
+
+impl<A> ToolSpec<A> {
+    /// What the tool does, for the model.
+    pub fn description(mut self, description: impl Into<String>) -> Self {
+        self.meta.description = description.into();
+        self
+    }
+}
+
+/// Deserializes typed tool arguments. Protobuf turned every number into a double on the way, so
+/// whole numbers become integers again first, or `{"days": 3}` could not fill a `u32`.
+fn parse_typed<A: DeserializeOwned>(value: serde_json::Value) -> Result<A, serde_json::Error> {
+    serde_json::from_value(crate::json::integral_numbers(value))
 }
 
 /// A lifecycle event, as delivered to [`Router::subscribe`] handlers.
@@ -212,6 +314,14 @@ pub enum Event {
     Notice(MessageEvent),
     /// The model answered a message.
     LlmResponse(LlmResponseEvent),
+    /// The agent started answering a message.
+    AgentBegin(AgentBegin),
+    /// The agent finished a turn.
+    AgentDone(AgentDone),
+    /// The model asked for a tool call (before it runs).
+    ToolCall(ToolCall),
+    /// A tool call finished.
+    ToolResult(ToolResult),
 }
 
 /// A reply about to be delivered, as seen by a [`Router::decorate_reply`] handler.
@@ -227,21 +337,73 @@ pub struct Reply {
     pub command: String,
 }
 
-/// Shared view of the context the host hands to `on_load`, readable from handlers.
-#[derive(Debug, Clone, Default)]
-pub struct ContextSlot(Arc<RwLock<Option<PluginContext>>>);
+/// The system prompt of a turn about to be answered, as seen by a
+/// [`Router::rewrite_system_prompt`] handler.
+#[derive(Debug, Clone)]
+pub struct SystemPrompt {
+    /// The message the model is about to answer.
+    pub event: MessageEvent,
+    /// The model conversation; the rewrite must be the same for every turn of it.
+    pub session_id: String,
+    /// The prompt as built so far (instance prompt or persona, skill catalog, and earlier
+    /// plugins' rewrites).
+    pub prompt: String,
+}
+
+/// One registered tool: what the model sees and what runs.
+#[derive(Clone)]
+struct ToolEntry {
+    meta: ToolMeta,
+    handler: ToolHandler,
+}
+
+/// State shared between a [`Router`] and every [`ContextSlot`] clone.
+#[derive(Default)]
+struct Shared {
+    context: RwLock<Option<PluginContext>>,
+    /// In declaration order, which is the order `PluginMeta.tools` reports them in.
+    tools: RwLock<Vec<ToolEntry>>,
+}
+
+/// Shared handle to a running [`Router`]: the context the host hands to `on_load` (data
+/// directory, configuration, Core handle), and the tool registry for adding and removing tools
+/// at runtime. Clone it into handlers.
+#[derive(Clone, Default)]
+pub struct ContextSlot(Arc<Shared>);
+
+impl std::fmt::Debug for ContextSlot {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let tools: Vec<String> = self
+            .tool_metas()
+            .into_iter()
+            .map(|meta| meta.name)
+            .collect();
+        f.debug_struct("ContextSlot")
+            .field("context", &self.get())
+            .field("tools", &tools)
+            .finish()
+    }
+}
 
 impl ContextSlot {
     /// The context, `None` before the host loaded the plugin.
     pub fn get(&self) -> Option<PluginContext> {
         self.0
+            .context
             .read()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
             .clone()
     }
 
-    /// The Core handle, `None` before loading or in standalone mode.
-    pub fn core(&self) -> Option<CoreHandle> {
+    /// The Core handle, for handlers that have no event to take it from (HTTP routes, actions,
+    /// background tasks). Fails with [`CoreError::Standalone`] before the host loaded the plugin
+    /// and in standalone mode.
+    pub fn core(&self) -> Result<CoreHandle, CoreError> {
+        self.handle().ok_or(CoreError::Standalone)
+    }
+
+    /// The Core handle if there is one, for events built by the router.
+    fn handle(&self) -> Option<CoreHandle> {
         self.get().and_then(|ctx| ctx.core)
     }
 
@@ -249,23 +411,127 @@ impl ContextSlot {
         apply(
             &mut self
                 .0
+                .context
                 .write()
                 .unwrap_or_else(|poisoned| poisoned.into_inner()),
         );
+    }
+
+    // The tool table is only ever touched under a short, synchronous lock: never across an
+    // await, so a slow tool or refresh cannot block `GetPluginMeta`.
+    fn tools(&self) -> std::sync::RwLockReadGuard<'_, Vec<ToolEntry>> {
+        self.0
+            .tools
+            .read()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
+    fn tools_mut(&self) -> std::sync::RwLockWriteGuard<'_, Vec<ToolEntry>> {
+        self.0
+            .tools
+            .write()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
+    fn tool_metas(&self) -> Vec<ToolMeta> {
+        self.tools()
+            .iter()
+            .map(|entry| entry.meta.clone())
+            .collect()
+    }
+
+    fn tool_handler(&self, name: &str) -> Option<ToolHandler> {
+        self.tools()
+            .iter()
+            .find(|entry| entry.meta.name == name)
+            .map(|entry| entry.handler.clone())
+    }
+
+    fn insert_tool(&self, entry: ToolEntry) -> Result<(), String> {
+        let mut tools = self.tools_mut();
+        if entry.meta.name.is_empty() {
+            return Err("a tool name must not be empty".to_string());
+        }
+        if tools.iter().any(|known| known.meta.name == entry.meta.name) {
+            return Err(format!("tool '{}' is already declared", entry.meta.name));
+        }
+        tools.push(entry);
+        Ok(())
+    }
+
+    /// Removes tool `name`, returning it and where it was.
+    fn take_tool(&self, name: &str) -> Option<(usize, ToolEntry)> {
+        let mut tools = self.tools_mut();
+        let index = tools.iter().position(|entry| entry.meta.name == name)?;
+        Some((index, tools.remove(index)))
+    }
+
+    /// Adds a tool while the plugin runs and tells the core, which offers it from the next turn
+    /// on. Takes the same [`ToolSpec`] and handler as [`Router::tool`].
+    ///
+    /// The tool list is part of the model's request prefix: every change invalidates the
+    /// provider's prompt cache, so change tools rarely (on configuration, not per message).
+    ///
+    /// Fails with [`CoreError::InvalidArgument`] when the name is taken, and with the core's
+    /// error when it cannot refresh the plugin's metadata — the tool is then removed again, so
+    /// the plugin and the core never disagree. In standalone mode there is no core to tell, and
+    /// the tool is only registered.
+    pub async fn add_tool<A, F, Fut, R>(
+        &self,
+        spec: ToolSpec<A>,
+        handler: F,
+    ) -> Result<(), CoreError>
+    where
+        A: Send + 'static,
+        F: Fn(A, Option<MessageEvent>) -> Fut + Send + Sync + 'static,
+        Fut: Future<Output = PluginResult<R>> + Send + 'static,
+        R: Serialize + 'static,
+    {
+        let name = spec.meta.name.clone();
+        self.insert_tool(tool_entry(spec, handler))
+            .map_err(CoreError::InvalidArgument)?;
+        if let Some(core) = self.handle() {
+            if let Err(err) = core.refresh_plugin_meta().await {
+                self.take_tool(&name);
+                return Err(err);
+            }
+        }
+        Ok(())
+    }
+
+    /// Removes tool `name` while the plugin runs and tells the core; returns whether it existed.
+    ///
+    /// When the core cannot refresh the plugin's metadata the tool is restored and the core's
+    /// error returned.
+    pub async fn remove_tool(&self, name: &str) -> Result<bool, CoreError> {
+        let Some((index, entry)) = self.take_tool(name) else {
+            return Ok(false);
+        };
+        if let Some(core) = self.handle() {
+            if let Err(err) = core.refresh_plugin_meta().await {
+                let mut tools = self.tools_mut();
+                let index = index.min(tools.len());
+                tools.insert(index, entry);
+                return Err(err);
+            }
+        }
+        Ok(true)
     }
 }
 
 /// A [`Plugin`] built from handler closures. See the [module docs](self).
 pub struct Router {
+    /// Everything but `tools`, which live in the shared registry so they can change at runtime.
     meta: PluginMeta,
     // Commands and triggers share one namespace: Core names either in `CommandExecuteRequest`.
     commands: HashMap<String, CommandHandler>,
-    tools: HashMap<String, ToolHandler>,
     actions: HashMap<String, ActionHandler>,
     events: Vec<(EventKind, EventHandler)>,
     decorator: Option<DecorateHandler>,
     pre_filter: Option<PreFilterHandler>,
     preparer: Option<PrepareHandler>,
+    prompt_rewriter: Option<PromptHandler>,
+    http: Routes,
     context: ContextSlot,
     conversations: Conversations,
 }
@@ -281,12 +547,13 @@ impl Router {
                 ..Default::default()
             },
             commands: HashMap::new(),
-            tools: HashMap::new(),
             actions: HashMap::new(),
             events: Vec::new(),
             decorator: None,
             pre_filter: None,
             preparer: None,
+            prompt_rewriter: None,
+            http: Routes::default(),
             context: ContextSlot::default(),
             conversations: Conversations::default(),
         }
@@ -305,7 +572,7 @@ impl Router {
     }
 
     /// The context slot, filled when the host loads the plugin; clone it into handlers that
-    /// need the data directory or configuration.
+    /// need the data directory, configuration or Core handle, or that add tools at runtime.
     pub fn context(&self) -> ContextSlot {
         self.context.clone()
     }
@@ -318,21 +585,62 @@ impl Router {
         );
     }
 
-    /// Declares a slash command. The handler answers by returning text or segments (`Ok(())`
-    /// for no reply), or through `event.reply(..)`.
+    /// Declares a slash command (`spec` is a name or a [`CommandSpec`]). The handler answers by
+    /// returning text or segments (`Ok(())` for no reply), or through `event.reply(..)`.
     ///
     /// # Panics
     /// If a command or trigger with the same name was already declared.
-    pub fn command<F, Fut, R>(mut self, spec: CommandSpec, handler: F) -> Self
+    pub fn command<F, Fut, R>(mut self, spec: impl Into<CommandSpec>, handler: F) -> Self
     where
         F: Fn(CommandEvent) -> Fut + Send + Sync + 'static,
         Fut: Future<Output = PluginResult<R>> + Send + 'static,
         R: IntoReply + 'static,
     {
-        self.claim_command_name(&spec.0.name);
+        let meta = spec.into().into_meta();
+        self.claim_command_name(&meta.name);
         self.commands
-            .insert(spec.0.name.clone(), box_command(handler));
-        self.meta.commands.push(spec.0);
+            .insert(meta.name.clone(), box_command(handler));
+        self.meta.commands.push(meta);
+        self
+    }
+
+    /// Declares a command group: `/name <subcommand> ...`, with the subcommands declared in
+    /// `build`. `spec` (a name or a [`CommandSpec`]) sets the group's description, access and
+    /// scope, which apply to every subcommand.
+    ///
+    /// ```ignore
+    /// router.command_group(CommandSpec::new("admin").access(CommandAccess::Admins), |group| {
+    ///     group
+    ///         .command(CommandSpec::new("ban").usage("/admin ban <user>"), ban)
+    ///         .command("unban", unban)
+    /// })
+    /// ```
+    ///
+    /// `/name` alone or an unknown subcommand answers with the group's help; `/help` lists the
+    /// subcommands through `CommandMeta.subcommands`.
+    ///
+    /// # Panics
+    /// If the name is taken, or the group has no subcommand.
+    pub fn command_group(
+        mut self,
+        spec: impl Into<CommandSpec>,
+        build: impl FnOnce(CommandGroup) -> CommandGroup,
+    ) -> Self {
+        let mut meta = spec.into().into_meta();
+        self.claim_command_name(&meta.name);
+        let group = build(CommandGroup::new(&meta.name));
+        meta.subcommands = group.metas();
+        assert!(
+            !meta.subcommands.is_empty(),
+            "command group '/{}' declares no subcommand",
+            meta.name
+        );
+        if meta.usage == format!("/{}", meta.name) {
+            meta.usage = format!("/{} <subcommand>", meta.name);
+        }
+        self.commands
+            .insert(meta.name.clone(), group.into_handler(meta.clone()));
+        self.meta.commands.push(meta);
         self
     }
 
@@ -353,28 +661,24 @@ impl Router {
         self
     }
 
-    /// Declares a tool. The handler receives the model's arguments (a JSON object) and the
-    /// message the model was answering (`None` outside a platform conversation), and returns
-    /// a JSON result; a non-object result is wrapped as `{"result": value}`. An error is
+    /// Declares a tool. The handler receives the model's arguments (a typed struct for
+    /// [`ToolSpec::typed`], a JSON object for [`ToolSpec::new`]) and the message the model was
+    /// answering (`None` outside a platform conversation), and returns anything serializable;
+    /// a result that is not a JSON object is wrapped as `{"result": value}`. An error is
     /// reported to the model as a failed call.
     ///
     /// # Panics
     /// If a tool with the same name was already declared.
-    pub fn tool<F, Fut>(mut self, spec: ToolSpec, handler: F) -> Self
+    pub fn tool<A, F, Fut, R>(self, spec: ToolSpec<A>, handler: F) -> Self
     where
-        F: Fn(serde_json::Value, Option<MessageEvent>) -> Fut + Send + Sync + 'static,
-        Fut: Future<Output = PluginResult<serde_json::Value>> + Send + 'static,
+        A: Send + 'static,
+        F: Fn(A, Option<MessageEvent>) -> Fut + Send + Sync + 'static,
+        Fut: Future<Output = PluginResult<R>> + Send + 'static,
+        R: Serialize + 'static,
     {
-        assert!(
-            !self.tools.contains_key(&spec.0.name),
-            "tool '{}' is already declared",
-            spec.0.name
-        );
-        self.tools.insert(
-            spec.0.name.clone(),
-            Arc::new(move |args, event| Box::pin(handler(args, event))),
-        );
-        self.meta.tools.push(spec.0);
+        if let Err(err) = self.context.insert_tool(tool_entry(spec, handler)) {
+            panic!("{err}");
+        }
         self
     }
 
@@ -392,13 +696,19 @@ impl Router {
         self
     }
 
-    /// Subscribes to a lifecycle event. Core never waits on event handlers, and an error is
-    /// only logged.
+    /// Subscribes to a lifecycle event: message delivery, notices, model answers, and the
+    /// agent's progress ([`EventKind::AgentBegin`], [`EventKind::AgentDone`],
+    /// [`EventKind::ToolCall`], [`EventKind::ToolResult`]). Core never waits on event handlers,
+    /// and an error is only logged.
     pub fn subscribe<F, Fut>(mut self, kind: EventKind, handler: F) -> Self
     where
         F: Fn(Event) -> Fut + Send + Sync + 'static,
         Fut: Future<Output = PluginResult<()>> + Send + 'static,
     {
+        assert!(
+            kind != EventKind::Unspecified,
+            "subscribe to a concrete event kind"
+        );
         if !self.meta.events.contains(&(kind as i32)) {
             self.meta.events.push(kind as i32);
         }
@@ -437,6 +747,45 @@ impl Router {
         self
     }
 
+    /// Sets the system prompt rewriter: once per turn, before the first model request, the
+    /// handler sees the prompt and returns `Ok(Some(prompt))` to replace it or `Ok(None)` to
+    /// keep it.
+    ///
+    /// The system prompt opens every request and decides the provider's prompt cache, so the
+    /// rewrite must give the same result for every turn of a conversation: no clocks, counters
+    /// or per-message data (use [`prepare_turn`](Self::prepare_turn) for those). An error, an
+    /// empty prompt or a late answer leaves the prompt unchanged.
+    ///
+    /// (Named after what it does rather than the hook, `Plugin::on_llm_request`, which an
+    /// inherent method of the same name would hide.)
+    pub fn rewrite_system_prompt<F, Fut>(mut self, handler: F) -> Self
+    where
+        F: Fn(SystemPrompt) -> Fut + Send + Sync + 'static,
+        Fut: Future<Output = PluginResult<Option<String>>> + Send + 'static,
+    {
+        self.meta.rewrites_system_prompt = true;
+        self.prompt_rewriter = Some(Arc::new(move |prompt| Box::pin(handler(prompt))));
+        self
+    }
+
+    /// Serves `method path` under `/api/v1/plugins/<id>/http/`. The handler returns a
+    /// [`Response`](crate::http::Response), a `serde_json::Value` (sent as JSON) or text; an
+    /// error is logged and answers 500. Unknown paths answer 404, other methods on a
+    /// declared path 405.
+    ///
+    /// # Panics
+    /// If `method` is not a word, `path` does not start with `/`, or the route was declared.
+    pub fn http_route<F, Fut, R>(mut self, method: &str, path: &str, handler: F) -> Self
+    where
+        F: Fn(Request) -> Fut + Send + Sync + 'static,
+        Fut: Future<Output = PluginResult<R>> + Send + 'static,
+        R: IntoResponse + 'static,
+    {
+        self.http.add(method, path, handler);
+        self.meta.serves_http = true;
+        self
+    }
+
     /// Sets the pre-filter, which sees every message before commands and the model.
     pub fn pre_filter<F, Fut>(mut self, handler: F) -> Self
     where
@@ -455,7 +804,7 @@ impl Router {
     ) -> CommandExecuteResponse {
         let session = Session::new(self.conversations.clone());
         let done = session.open_turn();
-        let event = CommandEvent::new(request, self.context.core(), Some(session.clone()));
+        let event = CommandEvent::new(request, self.context.handle(), Some(session.clone()));
 
         // The handler runs as its own task because it may outlive this RPC by suspending in
         // `wait_next`. A second task watches it so a panic still answers the waiting RPC.
@@ -483,6 +832,10 @@ impl Router {
 
         settle(done).await
     }
+
+    fn message(&self, raw: Option<PipelineEventRequest>) -> Option<MessageEvent> {
+        raw.map(|raw| MessageEvent::new(raw, self.context.handle()))
+    }
 }
 
 /// Waits for a turn's response.
@@ -496,7 +849,8 @@ async fn settle(
     })
 }
 
-fn box_command<F, Fut, R>(handler: F) -> CommandHandler
+/// Boxes a command, trigger or subcommand handler.
+pub(crate) fn box_command<F, Fut, R>(handler: F) -> CommandHandler
 where
     F: Fn(CommandEvent) -> Fut + Send + Sync + 'static,
     Fut: Future<Output = PluginResult<R>> + Send + 'static,
@@ -506,6 +860,33 @@ where
         let future = handler(event);
         Box::pin(async move { future.await.map(IntoReply::into_segments) })
     })
+}
+
+/// Erases a tool's argument and result types behind the JSON the wire carries.
+fn tool_entry<A, F, Fut, R>(spec: ToolSpec<A>, handler: F) -> ToolEntry
+where
+    A: Send + 'static,
+    F: Fn(A, Option<MessageEvent>) -> Fut + Send + Sync + 'static,
+    Fut: Future<Output = PluginResult<R>> + Send + 'static,
+    R: Serialize + 'static,
+{
+    let name = spec.meta.name.clone();
+    let parse = spec.parse;
+    let handler: ToolHandler = Arc::new(move |args, event| match parse(args) {
+        Ok(args) => {
+            let future = handler(args, event);
+            Box::pin(async move { Ok(serde_json::to_value(future.await?)?) })
+        }
+        // Worded for the model, which reads it and can retry with corrected arguments.
+        Err(err) => {
+            let message = format!("invalid arguments for tool '{name}': {err}");
+            Box::pin(async move { Err(message.into()) })
+        }
+    });
+    ToolEntry {
+        meta: spec.meta,
+        handler,
+    }
 }
 
 /// Converts a handler's JSON result into the `Struct` the wire carries.
@@ -521,7 +902,9 @@ fn result_struct(value: serde_json::Value) -> prost_types::Struct {
 #[async_trait]
 impl Plugin for Router {
     fn meta(&self) -> PluginMeta {
-        self.meta.clone()
+        let mut meta = self.meta.clone();
+        meta.tools = self.context.tool_metas();
+        meta
     }
 
     async fn on_load(&mut self, ctx: &mut PluginContext) -> PluginResult<()> {
@@ -544,7 +927,7 @@ impl Plugin for Router {
         req: PipelineEventRequest,
     ) -> PluginResult<Option<PreFilterResult>> {
         match &self.pre_filter {
-            Some(handler) => handler(MessageEvent::new(req, self.context.core())).await,
+            Some(handler) => handler(MessageEvent::new(req, self.context.handle())).await,
             None => Ok(None),
         }
     }
@@ -565,7 +948,7 @@ impl Plugin for Router {
                 let done = waiter.session.open_turn();
                 let event = CommandEvent::new(
                     req.clone(),
-                    self.context.core(),
+                    self.context.handle(),
                     Some(waiter.session.clone()),
                 );
                 if waiter.resume.send(event).is_ok() {
@@ -587,7 +970,7 @@ impl Plugin for Router {
     }
 
     async fn on_call_tool(&self, req: ToolCallRequest) -> PluginResult<ToolCallResponse> {
-        let Some(handler) = self.tools.get(&req.tool_name) else {
+        let Some(handler) = self.context.tool_handler(&req.tool_name) else {
             return Ok(ToolCallResponse {
                 call_id: req.call_id,
                 success: false,
@@ -601,9 +984,7 @@ impl Plugin for Router {
             }
             _ => serde_json::Value::Object(serde_json::Map::new()),
         };
-        let event = req
-            .context
-            .map(|ctx| MessageEvent::new(ctx, self.context.core()));
+        let event = self.message(req.context);
         Ok(match handler(args, event).await {
             Ok(value) => ToolCallResponse {
                 call_id: req.call_id,
@@ -639,19 +1020,59 @@ impl Plugin for Router {
     }
 
     async fn on_event(&self, notification: EventNotification) -> PluginResult<()> {
+        use event_notification::Detail;
         let (kind, event) = match notification.detail {
-            Some(event_notification::Detail::MessageSent(sent)) => {
-                (EventKind::MessageSent, Event::MessageSent(sent))
-            }
-            Some(event_notification::Detail::Notice(notice)) => (
+            Some(Detail::MessageSent(sent)) => (EventKind::MessageSent, Event::MessageSent(sent)),
+            Some(Detail::Notice(notice)) => (
                 EventKind::Notice,
-                Event::Notice(MessageEvent::new(notice, self.context.core())),
+                Event::Notice(MessageEvent::new(notice, self.context.handle())),
             ),
-            Some(event_notification::Detail::LlmResponse(answer)) => {
+            Some(Detail::LlmResponse(answer)) => {
                 (EventKind::LlmResponse, Event::LlmResponse(answer))
             }
-            // Agent and tool events are not routed to handlers yet.
-            Some(_) | None => return Ok(()),
+            Some(Detail::AgentBegin(begin)) => (
+                EventKind::AgentBegin,
+                Event::AgentBegin(AgentBegin {
+                    event: self.message(begin.context),
+                    session_id: begin.session_id,
+                }),
+            ),
+            Some(Detail::AgentDone(done)) => (
+                EventKind::AgentDone,
+                Event::AgentDone(AgentDone {
+                    event: self.message(done.context),
+                    session_id: done.session_id,
+                    success: done.success,
+                    content: done.content,
+                    error: done.error,
+                    tools: done.tools,
+                }),
+            ),
+            Some(Detail::ToolCall(call)) => (
+                EventKind::ToolCall,
+                Event::ToolCall(ToolCall {
+                    event: self.message(call.context),
+                    session_id: call.session_id,
+                    tool_name: call.tool_name,
+                    arguments: serde_json::Value::Object(
+                        call.arguments
+                            .map(crate::json::from_struct)
+                            .unwrap_or_default(),
+                    ),
+                }),
+            ),
+            Some(Detail::ToolResult(result)) => (
+                EventKind::ToolResult,
+                Event::ToolResult(ToolResult {
+                    event: self.message(result.context),
+                    session_id: result.session_id,
+                    tool_name: result.tool_name,
+                    success: result.success,
+                    result: result.result,
+                }),
+            ),
+            // A notification always names its kind; an empty one is a core or version bug.
+            None => return Err("event notification without a detail".into()),
         };
         for (_, handler) in self.events.iter().filter(|(k, _)| *k == kind) {
             // One failing subscriber must not stop the others.
@@ -670,7 +1091,7 @@ impl Plugin for Router {
             return Ok(None);
         };
         handler(Reply {
-            event: MessageEvent::new(req.context.unwrap_or_default(), self.context.core()),
+            event: MessageEvent::new(req.context.unwrap_or_default(), self.context.handle()),
             segments: req.segments,
             source: ReplySource::try_from(req.source).unwrap_or(ReplySource::Unspecified),
             command: req.command,
@@ -683,9 +1104,25 @@ impl Plugin for Router {
             return Ok(String::new());
         };
         handler(
-            MessageEvent::new(req.context.unwrap_or_default(), self.context.core()),
+            MessageEvent::new(req.context.unwrap_or_default(), self.context.handle()),
             req.session_id,
         )
         .await
+    }
+
+    async fn on_llm_request(&self, req: LlmRequestHookRequest) -> PluginResult<Option<String>> {
+        let Some(handler) = &self.prompt_rewriter else {
+            return Ok(None);
+        };
+        handler(SystemPrompt {
+            event: MessageEvent::new(req.context.unwrap_or_default(), self.context.handle()),
+            session_id: req.session_id,
+            prompt: req.system_prompt,
+        })
+        .await
+    }
+
+    async fn on_http_request(&self, req: HttpRequest) -> PluginResult<HttpResponse> {
+        Ok(self.http.dispatch(req).await)
     }
 }

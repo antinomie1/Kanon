@@ -12,3 +12,21 @@ isolated = false
 name = "rustcalc"
 description = "High-performance calculation command"
 usage = "/rustcalc <expr>"
+
+[[commands]]
+name = "note"
+description = "Notes for this chat"
+usage = "/note add <text> | /note list"
+
+[[commands]]
+name = "rules"
+description = "Set extra instructions for the assistant in this chat"
+usage = "/rules [text]"
+
+[[tools]]
+name = "fast_calc"
+description = "High-performance mathematical calculation tool"
+
+[[tools]]
+name = "dice"
+description = "Rolls dice for the user."

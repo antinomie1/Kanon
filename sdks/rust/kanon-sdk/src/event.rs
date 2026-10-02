@@ -36,7 +36,9 @@ use kanon_proto::v1::{
 };
 use tokio::sync::oneshot;
 
+use crate::agent::AgentRequest;
 use crate::context::CoreHandle;
+use crate::error::CoreError;
 use crate::plugin::PluginResult;
 use crate::segment::IntoReply;
 
@@ -68,9 +70,11 @@ impl MessageEvent {
         &self.raw
     }
 
-    /// The host's Core handle, `None` in standalone mode.
-    pub fn core(&self) -> Option<&CoreHandle> {
-        self.core.as_ref()
+    /// The host's Core handle, for storage, conversations, rendering and other core calls:
+    /// `event.core()?.kv_get::<u32>("visits").await?`. Fails with [`CoreError::Standalone`] in
+    /// standalone mode, where there is no core.
+    pub fn core(&self) -> Result<&CoreHandle, CoreError> {
+        self.core.as_ref().ok_or(CoreError::Standalone)
     }
 
     /// Platform-qualified id of this message; quote it with [`segment::quote`](crate::segment::quote).
@@ -167,15 +171,86 @@ impl MessageEvent {
 
     /// Sends a message to this conversation right away and waits for delivery.
     ///
-    /// Use this for progress notes during long work. Fails in standalone mode, where there is
-    /// no Core to deliver through.
-    pub async fn send(&self, content: impl IntoReply) -> PluginResult<DeliverMessageResponse> {
-        let core = self
-            .core
-            .as_ref()
-            .ok_or("no Core connection: cannot send messages in standalone mode")?;
-        Ok(core.reply_to(&self.raw, content).await?)
+    /// Use this for progress notes during long work. Fails with [`CoreError::Standalone`] in
+    /// standalone mode, where there is no Core to deliver through.
+    pub async fn send(&self, content: impl IntoReply) -> Result<DeliverMessageResponse, CoreError> {
+        self.core()?.reply_to(&self.raw, content).await
     }
+
+    /// Prepares an agent run for `prompt` serving this message's chat; shorthand for
+    /// `core.agent(prompt).event(&event)`. Configure it with the builder methods and `.await`
+    /// it; in standalone mode it fails with [`CoreError::Standalone`].
+    ///
+    /// ```ignore
+    /// let reply = event.agent(event.text()).in_conversation().use_tools().await?;
+    /// ```
+    pub fn agent(&self, prompt: impl Into<String>) -> AgentRequest {
+        AgentRequest::new(self.core.clone(), prompt.into()).event(self)
+    }
+}
+
+/// The agent started answering a message (subscribe to [`EventKind::AgentBegin`]).
+///
+/// [`EventKind::AgentBegin`]: kanon_proto::v1::EventKind::AgentBegin
+#[derive(Debug, Clone)]
+pub struct AgentBegin {
+    /// The message being answered; `None` outside a platform conversation (console chat).
+    pub event: Option<MessageEvent>,
+    /// The model conversation the turn belongs to.
+    pub session_id: String,
+}
+
+/// The agent finished a turn, with an answer or an error (subscribe to
+/// [`EventKind::AgentDone`]).
+///
+/// [`EventKind::AgentDone`]: kanon_proto::v1::EventKind::AgentDone
+#[derive(Debug, Clone)]
+pub struct AgentDone {
+    /// The message that was answered; `None` outside a platform conversation.
+    pub event: Option<MessageEvent>,
+    /// The model conversation the turn belongs to.
+    pub session_id: String,
+    /// Whether the turn produced an answer.
+    pub success: bool,
+    /// The final answer when `success`, before reply decoration.
+    pub content: String,
+    /// Why the turn ended without an answer (a failure category, or `stopped`).
+    pub error: String,
+    /// Tools the turn called, in order.
+    pub tools: Vec<String>,
+}
+
+/// The model asked for a tool call; sent before the tool runs, for observation only (subscribe
+/// to [`EventKind::ToolCall`]).
+///
+/// [`EventKind::ToolCall`]: kanon_proto::v1::EventKind::ToolCall
+#[derive(Debug, Clone)]
+pub struct ToolCall {
+    /// The message whose turn called the tool; `None` outside a platform conversation.
+    pub event: Option<MessageEvent>,
+    /// The model conversation the turn belongs to.
+    pub session_id: String,
+    /// The name the model used (namespaced as `<plugin>__<tool>` when names collide).
+    pub tool_name: String,
+    /// The arguments, a JSON object (numbers arrive as floats).
+    pub arguments: serde_json::Value,
+}
+
+/// A tool call finished (subscribe to [`EventKind::ToolResult`]).
+///
+/// [`EventKind::ToolResult`]: kanon_proto::v1::EventKind::ToolResult
+#[derive(Debug, Clone)]
+pub struct ToolResult {
+    /// The message whose turn called the tool; `None` outside a platform conversation.
+    pub event: Option<MessageEvent>,
+    /// The model conversation the turn belongs to.
+    pub session_id: String,
+    /// The name the model used.
+    pub tool_name: String,
+    /// Whether the tool succeeded.
+    pub success: bool,
+    /// The result text the model reads.
+    pub result: String,
 }
 
 /// Returned by [`CommandEvent::wait_next`] when no answer arrived: the sender did not answer in
@@ -338,6 +413,8 @@ pub struct CommandEvent {
     message: MessageEvent,
     request: CommandExecuteRequest,
     session: Option<Arc<Session>>,
+    /// The subcommand a command group dispatched to, if any.
+    subcommand: Option<String>,
 }
 
 impl Deref for CommandEvent {
@@ -359,6 +436,33 @@ impl CommandEvent {
             message,
             request,
             session,
+            subcommand: None,
+        }
+    }
+
+    /// This event as seen by subcommand `name` of a command group: the subcommand's word
+    /// (`typed`, possibly an alias) is removed from `args` and `raw_args`. The session is
+    /// shared, so replies, `wait_next` and `pass_to_model` behave as for the group itself.
+    pub(crate) fn for_subcommand(&self, name: &str, typed: &str) -> Self {
+        let mut request = self.request.clone();
+        if !request.args.is_empty() {
+            request.args.remove(0);
+        }
+        let rest = request.raw_args.trim_start();
+        // The core splits arguments on whitespace (respecting quotes), so the word normally
+        // starts `raw_args`; when it was quoted, drop the first whitespace-separated token.
+        let rest = match rest.strip_prefix(typed) {
+            Some(after) if after.is_empty() || after.starts_with(char::is_whitespace) => after,
+            _ => rest
+                .split_once(char::is_whitespace)
+                .map_or("", |(_, after)| after),
+        };
+        request.raw_args = rest.trim_start().to_string();
+        Self {
+            message: self.message.clone(),
+            request,
+            session: self.session.clone(),
+            subcommand: Some(name.to_string()),
         }
     }
 
@@ -372,12 +476,18 @@ impl CommandEvent {
         &self.message
     }
 
-    /// Canonical command (or trigger) name.
+    /// Canonical command (or trigger) name; for a command group, the group's name.
     pub fn command(&self) -> &str {
         &self.request.command
     }
 
-    /// Arguments split on whitespace, quotes respected. For a trigger, its regex groups.
+    /// The canonical subcommand name when a command group dispatched this event.
+    pub fn subcommand(&self) -> Option<&str> {
+        self.subcommand.as_deref()
+    }
+
+    /// Arguments split on whitespace, quotes respected. For a trigger, its regex groups. In a
+    /// subcommand handler the subcommand's own word is not included.
     pub fn args(&self) -> &[String] {
         &self.request.args
     }

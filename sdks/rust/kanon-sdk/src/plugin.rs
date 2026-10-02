@@ -7,8 +7,9 @@ use crate::context::PluginContext;
 use async_trait::async_trait;
 use kanon_proto::v1::{
     CommandExecuteRequest, CommandExecuteResponse, DecorateReplyRequest, DeliverMessageRequest,
-    DeliverMessageResponse, EventNotification, MessageSegment, PipelineEventRequest, PluginMeta,
-    PreFilterResult, PrepareTurnRequest, ToolCallRequest, ToolCallResponse,
+    DeliverMessageResponse, EventNotification, HttpRequest, HttpResponse, LlmRequestHookRequest,
+    MessageSegment, PipelineEventRequest, PluginMeta, PreFilterResult, PrepareTurnRequest,
+    ToolCallRequest, ToolCallResponse,
 };
 
 /// Result alias for plugin operations.
@@ -138,5 +139,23 @@ pub trait Plugin: Send + Sync + 'static {
     /// error, or an answer later than three seconds, adds nothing and the turn goes ahead.
     async fn on_prepare_turn(&self, _req: PrepareTurnRequest) -> PluginResult<String> {
         Ok(String::new())
+    }
+
+    /// Rewrites the system prompt of a model conversation; called only when
+    /// `PluginMeta.rewrites_system_prompt` is set, once per turn before the first model request.
+    ///
+    /// Return `Ok(None)` to leave the prompt unchanged or `Ok(Some(prompt))` to replace it (an
+    /// empty replacement is refused). The prompt opens every request and decides the provider's
+    /// prompt cache, so the rewrite must be deterministic for a conversation: no clocks,
+    /// counters or per-message data — those belong in [`on_prepare_turn`](Self::on_prepare_turn).
+    /// An error, or a late answer, leaves the prompt unchanged.
+    async fn on_llm_request(&self, _req: LlmRequestHookRequest) -> PluginResult<Option<String>> {
+        Ok(None)
+    }
+
+    /// Serves an HTTP request under `/api/v1/plugins/<id>/http/`; called only when
+    /// `PluginMeta.serves_http` is set. The default answers 404.
+    async fn on_http_request(&self, _req: HttpRequest) -> PluginResult<HttpResponse> {
+        Ok(crate::http::into_wire(crate::http::Response::not_found()))
     }
 }

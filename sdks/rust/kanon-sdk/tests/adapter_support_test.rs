@@ -559,7 +559,7 @@ async fn core_handle_calls_the_platform_api_with_json() {
         .call_platform_api("onebot", "x", serde_json::json!([1]))
         .await
         .expect_err("non-object parameters");
-    assert_eq!(rejected.code(), tonic::Code::InvalidArgument);
+    assert_eq!(rejected.code(), Some(tonic::Code::InvalidArgument));
     let _ = std::fs::remove_file(&socket);
 }
 

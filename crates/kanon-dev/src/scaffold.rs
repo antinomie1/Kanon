@@ -122,7 +122,7 @@ id = "org.kanon.plugin.{snake_name}"
 name = "{pascal_name} Plugin"
 version = "0.1.0"
 author = "Kanon Dev"
-description = "High-performance Kanon plugin written in Rust"
+description = "Kanon plugin written in Rust"
 runtime = "rust"
 entrypoint = "target/debug/{snake_name}"
 isolated = false
@@ -130,28 +130,37 @@ priority = 500
 
 [[commands]]
 name = "{snake_name}_echo"
-description = "Echoes the provided message with prefix"
+description = "Echoes the message back"
 usage = "/{snake_name}_echo <message>"
-priority = 500
 
 [[tools]]
-name = "{snake_name}_calc"
-description = "Performs mathematical calculations"
-parameters = {{ type = "object", properties = {{ expr = {{ type = "string", description = "Mathematical expression" }} }} }}
+name = "{snake_name}_add"
+description = "Adds two numbers."
+parameters = {{ type = "object", properties = {{ a = {{ type = "number", description = "First number." }}, b = {{ type = "number", description = "Second number." }} }}, required = ["a", "b"] }}
 "#
     );
 
+    let sdk_dependency = sdk_path(dir, "sdks/rust/kanon-sdk", "Cargo.toml")
+        .map(|path| format!("{{ path = \"{path}\" }}"))
+        .unwrap_or_else(|| "\"0.1.0\"".to_string());
+    // The empty `[workspace]` makes the plugin its own workspace, so it also builds when created
+    // inside another one (such as a Kanon checkout), and `target/` stays next to `plugin.toml`
+    // where the entrypoint expects it.
     let cargo_toml = format!(
         r#"[package]
 name = "{snake_name}"
 version = "0.1.0"
 edition = "2024"
-description = "Kanon Rust Plugin: {pascal_name}"
+description = "Kanon plugin in Rust: {pascal_name}"
 
 [dependencies]
-kanon-sdk = "0.1.0"
+kanon-sdk = {sdk_dependency}
 tokio = {{ version = "1.40", features = ["full"] }}
+serde = {{ version = "1.0", features = ["derive"] }}
 serde_json = "1.0"
+schemars = "1"
+
+[workspace]
 "#
     );
 
@@ -159,74 +168,51 @@ serde_json = "1.0"
     fs::create_dir_all(&src_dir)?;
 
     let main_rs = format!(
-        r#"//! Starter implementation for {pascal_name} plugin.
+        r#"//! {pascal_name} plugin for Kanon.
+//!
+//! See docs/PLUGIN_GUIDE.md in the Kanon repository for commands, tools, events and core calls.
 
-use kanon_sdk::prelude::message_segment::Segment;
 use kanon_sdk::prelude::*;
 
-struct {pascal_name}Plugin;
+/// Arguments of `{snake_name}_add`. The schema the model sees is generated from this struct;
+/// the doc comments describe the parameters.
+#[derive(Deserialize, JsonSchema)]
+struct AddArgs {{
+    /// First number.
+    a: f64,
+    /// Second number.
+    b: f64,
+}}
 
-#[async_trait]
-impl Plugin for {pascal_name}Plugin {{
-    fn meta(&self) -> PluginMeta {{
-        PluginMeta {{
-            id: "org.kanon.plugin.{snake_name}".to_string(),
-            name: "{pascal_name} Plugin".to_string(),
-            version: "0.1.0".to_string(),
-            author: "Kanon Dev".to_string(),
-            description: "High-performance Kanon plugin written in Rust".to_string(),
-            commands: vec![CommandMeta {{
-                name: "{snake_name}_echo".to_string(),
-                description: "Echoes the provided message with prefix".to_string(),
-                usage: "/{snake_name}_echo <message>".to_string(),
-                priority: 500,
-            }}],
-            tools: vec![ToolMeta {{
-                name: "{snake_name}_calc".to_string(),
-                description: "Performs mathematical calculations".to_string(),
-                parameters: None,
-            }}],
-        }}
-    }}
-
-    async fn on_load(&mut self, ctx: &mut PluginContext) -> PluginResult<()> {{
-        println!("{pascal_name} Plugin loaded with data dir: {{:?}}", ctx.data_dir);
-        Ok(())
-    }}
-
-    async fn on_pre_filter(&self, _req: PipelineEventRequest) -> PluginResult<Option<PreFilterResult>> {{
-        Ok(None)
-    }}
-
-    async fn on_execute_command(&self, req: CommandExecuteRequest) -> PluginResult<CommandExecuteResponse> {{
-        let text = format!("[{pascal_name}] Echo: {{}}", req.args.join(" "));
-        let reply = MessageSegment {{
-            segment: Some(Segment::Text(TextSegment {{ content: text }})),
-        }};
-        Ok(CommandExecuteResponse {{
-            success: true,
-            replies: vec![reply],
-            error_message: String::new(),
-        }})
-    }}
-
-    async fn on_call_tool(&self, req: ToolCallRequest) -> PluginResult<ToolCallResponse> {{
-        let mut fields = std::collections::BTreeMap::new();
-        fields.insert("result".to_string(), prost_types::Value {{
-            kind: Some(prost_types::value::Kind::StringValue("Sample computation from Rust".to_string())),
-        }});
-        Ok(ToolCallResponse {{
-            call_id: req.call_id,
-            success: true,
-            error_message: String::new(),
-            payload: Some(tool_call_response::Payload::StructuredResult(prost_types::Struct {{ fields }})),
-        }})
-    }}
+fn plugin() -> Router {{
+    Router::new("org.kanon.plugin.{snake_name}", "{pascal_name} Plugin", "0.1.0")
+        .author("Kanon Dev")
+        .description("Kanon plugin written in Rust")
+        .command(
+            CommandSpec::new("{snake_name}_echo")
+                .description("Echoes the message back")
+                .usage("/{snake_name}_echo <message>"),
+            |event| async move {{
+                // Returning text replies with it; raw_args is the text after the command name.
+                let text = match event.raw_args() {{
+                    "" => "Say something!",
+                    text => text,
+                }};
+                Ok(format!("[{pascal_name}] {{text}}"))
+            }},
+        )
+        .tool(
+            ToolSpec::typed::<AddArgs>("{snake_name}_add").description("Adds two numbers."),
+            |args, _event| async move {{
+                // Arguments the model got wrong are reported back to it before this runs.
+                Ok(args.a + args.b)
+            }},
+        )
 }}
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {{
-    KanonHost::new({pascal_name}Plugin).run().await?;
+    KanonHost::new(plugin()).run().await?;
     Ok(())
 }}
 "#
