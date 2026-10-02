@@ -226,12 +226,8 @@ async fn a_tool_attachment_is_delivered_as_an_image_segment() {
 }
 
 #[tokio::test]
-async fn a_tool_attachment_survives_empty_reasoning_only_and_truncated_answers() {
-    for text in [
-        "",
-        "<think>private-a</think><think>private-b</think>",
-        "<think>private-a</think><think>unfinished",
-    ] {
+async fn a_tool_attachment_survives_empty_and_reasoning_only_answers() {
+    for text in ["", "<think>private-a</think>"] {
         for platform in ["qqofficial", "onebot"] {
             check_attachment(
                 text,

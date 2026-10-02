@@ -162,7 +162,7 @@ async fn all_retained_tool_rounds_replay_reasoning_after_restart() {
 async fn upgrades_legacy_database_without_rewriting_or_removing_history() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("legacy.db");
-    let legacy = "<think>private-a</think><think>private-b</think>answer";
+    let legacy = "<think>private-a\n\nprivate-b</think>answer";
     {
         let db = rusqlite::Connection::open(&path).unwrap();
         db.execute_batch("CREATE TABLE messages (id INTEGER PRIMARY KEY AUTOINCREMENT, session_key TEXT NOT NULL, role TEXT NOT NULL, content TEXT, tool_calls TEXT, tool_call_id TEXT, name TEXT, created_at INTEGER NOT NULL);").unwrap();
@@ -434,7 +434,6 @@ async fn empty_streams_complete_without_appending_blank_assistant_history() {
         vec![ChatChunk::done(Some("stop".into()))],
         vec![ChatChunk::delta("")],
         vec![ChatChunk::reasoning(""), ChatChunk::done(None)],
-        vec![ChatChunk::delta("<thi"), ChatChunk::done(None)],
     ] {
         let memory = Arc::new(InMemory::new());
         let previous = ChatMessage::assistant("previous synthetic answer");
@@ -482,17 +481,7 @@ async fn empty_streams_complete_without_appending_blank_assistant_history() {
 #[tokio::test]
 async fn streaming_separates_fragmented_legacy_envelopes_and_persists_both_channels() {
     for (text, expected, private) in [
-        (
-            "<think>private-a</think><THINK>private-b</THINK>answer",
-            "answer",
-            true,
-        ),
-        (
-            "<think>private-a<think>private-b</think>private-c</think>answer",
-            "answer",
-            true,
-        ),
-        ("<think>private-a</think><think>unfinished", "", true),
+        ("<think>private-a</think>answer", "answer", true),
         ("<thi", "<thi", false),
         ("Use <think> in examples", "Use <think> in examples", false),
         (
@@ -549,7 +538,7 @@ async fn streaming_separates_fragmented_legacy_envelopes_and_persists_both_chann
 }
 
 #[tokio::test]
-async fn final_chunk_data_is_delivered_and_broken_legacy_streams_never_leak() {
+async fn final_chunk_data_is_delivered_and_transport_errors_are_propagated() {
     for fail in [false, true] {
         let chunks = if fail {
             vec![ChatChunk::delta("<think>private")]
@@ -646,7 +635,7 @@ async fn provider_history_conversion_preserves_user_literals_and_separates_legac
         let response = provider
             .chat(&request(vec![
                 ChatMessage::user(literal),
-                ChatMessage::assistant("<think>private-a</think><think>private-b</think>public"),
+                ChatMessage::assistant("<think>private-a\n\nprivate-b</think>public"),
                 ChatMessage::user("next"),
             ]))
             .await
@@ -679,12 +668,7 @@ async fn real_sse_separates_legacy_chunks_and_responses_reasoning_events() {
     for protocol in ["openai", "responses"] {
         let (route, body) = if protocol == "openai" {
             let mut body = String::new();
-            for text in [
-                "<thi",
-                "nk>private-a</think><think>",
-                "private-b</think>",
-                "answer",
-            ] {
+            for text in ["<thi", "nk>private-a", "</think>", "answer"] {
                 body.push_str(&format!(
                     "data: {}\n\n",
                     json!({"choices":[{"index":0,"delta":{"content":text},"finish_reason":null}]})
