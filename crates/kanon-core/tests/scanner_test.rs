@@ -2,7 +2,7 @@
 
 use std::fs;
 
-use kanon_core::manifest::{PluginManifest, PluginScanner};
+use kanon_core::manifest::{PluginManifest, PluginScanner, PluginSection};
 use kanon_core::supervisor::Supervisor;
 
 #[test]
@@ -194,4 +194,66 @@ entrypoint = "main.py"
         .await;
     let empty = supervisor.get_unavailable_plugins().await;
     assert!(empty.is_empty());
+}
+
+#[tokio::test]
+async fn a_plugin_built_for_another_node_version_is_refused_with_the_reason() {
+    let temp_dir = tempfile::tempdir().expect("tempdir");
+    let supervisor = Supervisor::new(Some(temp_dir.path().to_path_buf()), None);
+    let manifest_path = temp_dir.path().join("plugin.toml");
+    fs::write(
+        &manifest_path,
+        r#"
+[plugin]
+id = "future"
+name = "Future Plugin"
+version = "1.0.0"
+runtime = "rust"
+entrypoint = "missing-binary"
+kanon_version = ">=99"
+"#,
+    )
+    .expect("write manifest");
+
+    let err = supervisor
+        .spawn_from_manifest(&manifest_path, None)
+        .await
+        .expect_err("refused before launch");
+    assert!(err.to_string().contains("requires Kanon >=99"), "{err}");
+    let unavailable = supervisor.get_unavailable_plugins().await;
+    assert_eq!(unavailable.len(), 1);
+    assert!(unavailable[0].reason.contains(kanon_core::KANON_VERSION));
+}
+
+#[test]
+fn kanon_version_requirements_are_semver() {
+    let section = |requirement: Option<&str>| PluginSection {
+        id: "p".to_string(),
+        name: "P".to_string(),
+        version: "1.0.0".to_string(),
+        author: None,
+        description: None,
+        runtime: "rust".to_string(),
+        entrypoint: "p".to_string(),
+        isolated: None,
+        priority: None,
+        kanon_version: requirement.map(str::to_string),
+        platforms: Vec::new(),
+        homepage: None,
+        repository: None,
+    };
+    let current = semver::Version::parse(kanon_core::KANON_VERSION).unwrap();
+    let range = format!(
+        ">={}.{}, <{}",
+        current.major,
+        current.minor,
+        current.major + 1
+    );
+    assert!(kanon_core::check_kanon_version(&section(None)).is_ok());
+    assert!(kanon_core::check_kanon_version(&section(Some(&range))).is_ok());
+    assert!(kanon_core::check_kanon_version(&section(Some("<0.0.1"))).is_err());
+    assert!(
+        kanon_core::check_kanon_version(&section(Some("latest please"))).is_err(),
+        "a malformed requirement is not ignored"
+    );
 }

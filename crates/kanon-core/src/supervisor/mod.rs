@@ -1173,6 +1173,22 @@ impl Supervisor {
             );
         }
 
+        // A plugin built for another node version is refused before anything is installed or
+        // started, and recorded as unavailable with the reason so the console shows it.
+        if let Err(err) = crate::manifest::check_kanon_version(&manifest.plugin) {
+            let reason = err.to_string();
+            self.record_unavailable_plugin(
+                manifest,
+                manifest_path_ref.to_path_buf(),
+                reason.clone(),
+            )
+            .await;
+            return Err(SupervisorError::RuntimeUnavailable {
+                runtime: "kanon".to_string(),
+                reason,
+            });
+        }
+
         let host_id = manifest.plugin.id.replace('.', "_");
         let priority = manifest.plugin.priority.unwrap_or(500);
         let parent = manifest_path_ref.parent().unwrap_or_else(|| Path::new("."));

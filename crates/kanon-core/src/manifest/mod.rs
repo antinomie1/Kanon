@@ -160,6 +160,37 @@ pub struct PluginManifest {
     pub tools: Vec<ToolDefinitionEntry>,
 }
 
+/// The node version plugins' `kanon_version` requirements are checked against.
+pub const KANON_VERSION: &str = env!("CARGO_PKG_VERSION");
+
+/// Checks a plugin's `kanon_version` requirement against this node ([`KANON_VERSION`]).
+///
+/// A plugin without a requirement runs on any node. A requirement that is not valid semver is an
+/// error rather than "no requirement": the author meant to restrict something.
+pub fn check_kanon_version(section: &PluginSection) -> Result<(), ManifestError> {
+    let Some(requirement) = section.kanon_version.as_deref() else {
+        return Ok(());
+    };
+    let parsed = semver::VersionReq::parse(requirement).map_err(|err| {
+        ManifestError::Invalid(format!(
+            "kanon_version '{requirement}' is not a semver requirement: {err}"
+        ))
+    })?;
+    let node = semver::Version::parse(KANON_VERSION).map_err(|err| {
+        ManifestError::Invalid(format!(
+            "node version '{KANON_VERSION}' is not semver: {err}"
+        ))
+    })?;
+    if parsed.matches(&node) {
+        Ok(())
+    } else {
+        Err(ManifestError::Invalid(format!(
+            "plugin '{}' requires Kanon {requirement}, but this node is {KANON_VERSION}",
+            section.id
+        )))
+    }
+}
+
 impl PluginManifest {
     /// Loads and parses a `plugin.toml` manifest from a given file path.
     pub fn load_from_file(path: impl AsRef<Path>) -> Result<Self, ManifestError> {

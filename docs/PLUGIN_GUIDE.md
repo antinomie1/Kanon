@@ -129,6 +129,10 @@ runtime = "python"                # rust | python | typescript
 entrypoint = "main.py"            # Rust 为可执行文件路径，如 target/release/weather
 isolated = false
 priority = 100                    # 1..1000，越小越先执行，默认 500
+kanon_version = ">=0.1, <0.3"     # 可选：适用的节点版本（semver 要求）
+platforms = ["qq", "telegram"]    # 可选：面向的平台，仅用于展示；省略表示全部
+homepage = "https://example.com/weather"
+repository = "https://github.com/example/kanon-weather"  # 控制台可据此从 Git 安装
 
 [config_schema]                   # 控制台据此渲染配置表单（JSON Schema）
 type = "object"
@@ -156,6 +160,7 @@ capabilities = ["sender_name", "quote_reply", "send_image", "send_file"]
 - **运行时以代码为准**。命令、触发器、工具、事件订阅都由插件在握手时通过 `GetPluginMeta` 上报（即装饰器/`Router` 中的声明）。`[[commands]]` / `[[tools]]` 只用于插件未运行时的控制台展示，两处应保持一致。
 - **未知小节直接报错**，包括旧的 `[dependencies]`：依赖只写在 `pyproject.toml` / `package.json` / `Cargo.toml` 里。
 - `priority` 同时决定前置过滤链顺序、同名命令的胜出者与回复装饰的执行顺序。
+- `kanon_version` 在安装和启动时校验：节点版本不满足要求时插件不会启动，控制台显示“需要 Kanon …，当前节点为 …”；写错的要求（不是合法 semver）同样报错而不是被忽略。省略即任何节点都可运行。
 - `[adapter]` 必须写在静态清单而不是代码里：核心要在收到第一条消息前就知道平台归哪个宿主。
 
 ---

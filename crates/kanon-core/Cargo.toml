@@ -27,6 +27,7 @@ bollard = { version = "0.20", default-features = false, features = ["pipe"] }
 regex = "1"
 futures-util = { version = "0.3", default-features = false, features = ["std"] }
 sha2 = "0.11"
+semver = "1"
 
 [target.'cfg(target_os = "macos")'.dependencies]
 sysinfo = { version = "0.33", default-features = false, features = ["system"] }
