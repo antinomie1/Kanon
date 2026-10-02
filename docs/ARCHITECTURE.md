@@ -156,9 +156,11 @@ kanon/
      - 仅对缺少运行时的插件输出清晰友好的告警日志，将其状态标记为 `RuntimeUnavailable`；
      - 机器人核心、IM 适配网络连接及所有 Rust 插件依然照常运行。
 4. **可选运行时的极简治理（仅在用户需要时生效）**：
-   - **Python**：每个插件使用自己目录下的 `.venv`（由开发者或运维执行 `uv sync` 创建）。`.venv` 不存在即标记 `RuntimeUnavailable`，绝不回退到共享或系统解释器。
-   - **TypeScript**：仅在激活 TS 插件时，优先检测 `bun` 或 `node/tsx`；若插件的 `package.json` 声明了 `dependencies`，则要求其 `node_modules` 已安装。
-   - **Kanon 不是包管理器**：`kanon` 与 `kanon-dev` 都不安装、解析或锁定插件依赖，这些完全交给各语言原生工具。
+   - **Python**：每个插件使用自己目录下的 `.venv`，绝不回退到共享或系统解释器。
+   - **TypeScript**：仅在激活 TS 插件时，优先检测 `bun` 或 `node/tsx`；若插件的 `package.json` 声明了 `dependencies`，则使用插件自己的 `node_modules`。
+   - **自动安装依赖（调用原生工具）**：启动插件前，若其环境不存在，或比描述它的文件（`pyproject.toml`、`uv.lock`、`package.json`、锁文件）旧，Supervisor 在插件目录内调用该生态自己的工具：Python 为 `uv sync`（有 `uv.lock` 时加 `--locked`，并显式指定 `UV_PROJECT_ENVIRONMENT=<plugin>/.venv`）；TypeScript 按锁文件选工具——`bun.lock` 用 `bun install --frozen-lockfile`，`package-lock.json` 用 `npm ci`，都没有时用 `bun install`（无 bun 时 `npm install`）。成功后在环境内写入标记文件 `.kanon-installed`，以它的修改时间判断“是否过期”，所以改了依赖的插件在下次启动时自动重装，最新的插件只多几次 `stat`。
+   - 安装有超时（10 分钟，超时即终止子进程），同一插件目录同一时间只有一次安装；失败时插件标记为 `RuntimeUnavailable`，原因附工具输出的最后 20 行，下次启动再试。工具未安装而环境已存在时沿用现有环境并记录警告；环境也不存在则报告 `RuntimeUnavailable`。
+   - **Kanon 不是包管理器**：`kanon` 与 `kanon-dev` 自己不解析、不下载、不锁定任何包，只调用原生工具；运维可在 `data/system.json` 的 `startup.install_dependencies` 设为 `false` 关闭自动安装，此时由运维自行安装，环境缺失即 `RuntimeUnavailable`。
 
 ### 2.6 事件入站异步队列与防锁步机制 (Async Ingest Queue & Lockstep Prevention)
 
@@ -223,7 +225,7 @@ kanon/
 
 - **清单是静态的**：核心无需启动子进程即可据此渲染配置表单、确定平台归属与调度优先级；命令、触发器、工具等运行期能力以握手时的 `GetPluginMeta` 为准，清单中的 `[[commands]]` / `[[tools]]` 仅供控制台离线展示。
 - **严格解析**：未知小节或字段（包括旧的 `[dependencies]`）直接解析失败。
-- **清单不声明依赖**：Python 依赖写在 `pyproject.toml`（附 `uv.lock`），TypeScript 写在 `package.json`（附锁文件），由原生工具安装到插件目录内的 `.venv` / `node_modules`；缺失即 `RuntimeUnavailable`。
+- **清单不声明依赖**：Python 依赖写在 `pyproject.toml`（附 `uv.lock`），TypeScript 写在 `package.json`（附锁文件），Supervisor 启动插件前调用原生工具安装到插件目录内的 `.venv` / `node_modules`（见 2.5）；安装失败即 `RuntimeUnavailable`。
 
 ---
 
@@ -488,6 +490,7 @@ sequenceDiagram
 | `log` | `info` | 标准 `tracing` 过滤指令 |
 | `run_dir` | 平台运行时目录 | IPC 套接字（`core.sock`、`host_<id>.sock`）所在目录 |
 | `typescript_runtime` | 依次在 `PATH` 中查找 `bun`、`node` | TypeScript 插件的解释器 |
+| `install_dependencies` | `true` | 启动 Python / TypeScript 插件前用原生工具安装其依赖（见 2.5）；`false` 时由运维自行安装 |
 
 需要预置配置的部署（容器镜像、CI）直接随附一份准备好的 `data/system.json`。Supervisor 向宿主子进程注入的 `KANON_HOST_ID` / `KANON_HOST_SOCK` / `KANON_CORE_SOCK`（以及 Windows 上的 `KANON_IPC_TOKEN`）属于进程启动契约，不是运维配置。
 
@@ -499,6 +502,7 @@ sequenceDiagram
 | `instances.json` | Bot 实例目录（适配器归属、人设/模型/策略覆盖、各会话的当前对话代数） |
 | `personas.json` | 运营者自建人设（基础助手内置，不落盘） |
 | `sessions.db` | 对话历史、压缩摘要与会话记录（SQLite WAL，见 8.8）；启动时无法打开即启动失败 |
+| `kv.db` | 插件的中心 KV 存储（SQLite WAL，见第 7 节）；启动时无法打开即启动失败 |
 | `toggles.json`、`mcp.json`、`skills/`、`attachments/`、`dead_letter/` | 插件/技能/MCP 开关、MCP 服务器定义、已安装技能、工具附件、出站死信 |
 | `plugins/<id>/` | 各插件的专属数据目录 |
 
@@ -604,8 +608,8 @@ sequenceDiagram
    - 必须包含 `README.md` 与可选的 `LICENSE`。
 2. **多语言制品打包规范**：
    - **Rust 插件**：打包对应编译目标的预编译原生可执行文件（如 `bin/x86_64-unknown-linux-gnu/<plugin>` 或 `bin/x86_64-pc-windows-msvc/<plugin>.exe`），做到用户端零编译闪电加载；
-   - **Python 插件**：携带插件源码、`pyproject.toml` 与 `uv.lock`；安装后由运维在插件目录执行 `uv sync` 复现 `.venv`（Kanon 不代为安装）；
-   - **TypeScript 插件**：携带转译后的 `dist/` 或源码及附带锁定文件的 `package.json`，安装后在插件目录执行 `npm install` / `bun install`（支持由 `bun` 或 `node/tsx` 直接加载）。
+   - **Python 插件**：携带插件源码、`pyproject.toml` 与 `uv.lock`；首次启动时 Supervisor 在插件目录执行 `uv sync --locked` 复现 `.venv`；
+   - **TypeScript 插件**：携带转译后的 `dist/` 或源码及附带锁定文件的 `package.json`，首次启动时按锁文件执行 `bun install --frozen-lockfile` 或 `npm ci`（支持由 `bun` 或 `node/tsx` 直接加载）。
 
 ---
 

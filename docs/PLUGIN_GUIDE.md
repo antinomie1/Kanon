@@ -43,13 +43,15 @@ kanon-dev pack ./my_plugin                     # 打包为 .kpk（附 SHA-256 �
 
 ### 2.2 依赖安装
 
-Kanon **不安装任何依赖**，也不回退到系统解释器：
+只需在插件目录里声明依赖，**节点启动插件前会自动安装**：环境不存在，或比依赖声明旧（改了 `pyproject.toml` / `package.json` / 锁文件）时，在插件目录调用该语言自己的工具。每个插件有自己的环境，绝不回退到共享或系统解释器：
 
-| 语言 | 依赖声明 | 安装位置 | 安装方式 | 缺失时 |
+| 语言 | 依赖声明 | 安装位置 | 自动执行 | 失败时 |
 | --- | --- | --- | --- | --- |
-| Python | `pyproject.toml` + `uv.lock` | `<plugin>/.venv` | 在插件目录执行 `uv sync` | 报告 `RuntimeUnavailable` |
-| TypeScript | `package.json` + 锁文件 | `<plugin>/node_modules` | `npm install` / `bun install` | 报告 `RuntimeUnavailable` |
-| Rust | `Cargo.toml` | 编译产物 | `cargo build --release` | 入口文件不存在即启动失败 |
+| Python | `pyproject.toml`（建议附 `uv.lock`） | `<plugin>/.venv` | `uv sync`（有 `uv.lock` 时 `uv sync --locked`） | `RuntimeUnavailable`，附工具输出末尾 |
+| TypeScript | `package.json` + 锁文件 | `<plugin>/node_modules` | `bun.lock` → `bun install --frozen-lockfile`；`package-lock.json` → `npm ci`；无锁文件 → `bun install` 或 `npm install` | 同上 |
+| Rust | `Cargo.toml` | 编译产物 | 不自动构建，需 `cargo build --release` | 入口文件不存在即启动失败 |
+
+节点所在机器需要装有 `uv`（Python 插件）或 `bun` / `npm`（TypeScript 插件）。安装最长 10 分钟；失败的原因显示在控制台的插件状态里，下次启动会重试。运维可在 `data/system.json` 设置 `"startup": { "install_dependencies": false }` 关闭自动安装，改为自己在插件目录执行上述命令。
 
 Python 插件以 `<plugin>/.venv` 中的解释器运行 `python -m kanon_host.main`，因此 `kanon-sdk` 必须是插件自己的依赖。TypeScript 插件优先使用 `node_modules/@kanon/sdk-and-host` 里的宿主脚本，运行时优先 `bun`，其次 `node`。
 

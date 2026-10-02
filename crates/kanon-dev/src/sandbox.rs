@@ -171,10 +171,12 @@ pub async fn run_sandbox(path: &Path, opts: SandboxOptions) -> Result<(), Sandbo
     let core_sock = run_dir.join("core.sock");
 
     // 2. Initialize Supervisor with the isolated runtime directory
-    let supervisor = Arc::new(Supervisor::new(
-        Some(run_dir.clone()),
-        Some(core_sock.clone()),
-    ));
+    // Dependencies are installed with the plugin's own tool, exactly as the node does, so a
+    // plugin that runs here runs there.
+    let supervisor = Arc::new(
+        Supervisor::new(Some(run_dir.clone()), Some(core_sock.clone()))
+            .with_dependency_installer(Some(kanon_core::DependencyInstaller::new())),
+    );
 
     // 3. Start Core IPC Server wired with Supervisor
     let (event_tx, _event_rx) = mpsc::channel(DEFAULT_INGEST_QUEUE_CAPACITY);

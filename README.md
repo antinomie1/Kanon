@@ -35,10 +35,12 @@ an explicit development mode).
 
 - A Rust 2024 edition toolchain (stable).
 - Optional, and only for the plugins that need them: Python 3.10+ (with `uv`) and Node.js or Bun.
-  Each Python/TypeScript plugin declares its packages in its own `pyproject.toml` / `package.json`
-  and is installed in its own directory (`uv sync`, `npm install` or `bun install`); Kanon never
-  installs packages. A missing runtime or environment marks the affected plugin unavailable; it
-  never blocks the node.
+  Each Python/TypeScript plugin declares its packages in its own `pyproject.toml` / `package.json`;
+  before starting it, the node runs the plugin's own tool in its directory (`uv sync`, `bun install`
+  or `npm ci`) when its environment is missing or out of date. Set
+  `startup.install_dependencies` to `false` in `data/system.json` to install them yourself. A
+  missing runtime or a failed install marks the affected plugin unavailable; it never blocks the
+  node.
 
 ## Quick start
 

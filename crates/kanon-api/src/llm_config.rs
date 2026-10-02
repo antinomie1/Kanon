@@ -221,6 +221,10 @@ pub struct StartupConfig {
     /// `PATH`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub typescript_runtime: Option<PathBuf>,
+    /// Install a Python or TypeScript plugin's dependencies with its native tool (`uv sync`,
+    /// `bun install`, `npm ci`) before launch when its environment is missing or out of date.
+    /// When `false`, the operator installs them and a missing environment is reported instead.
+    pub install_dependencies: bool,
 }
 
 impl Default for StartupConfig {
@@ -230,6 +234,7 @@ impl Default for StartupConfig {
             log: "info".to_string(),
             run_dir: None,
             typescript_runtime: None,
+            install_dependencies: true,
         }
     }
 }

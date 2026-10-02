@@ -74,7 +74,7 @@ Kanon 是基于 Rust 2024 构建的高性能多平台聊天机器人微内核，
 - **Rust 标准**：统一 **Rust 2024 Edition**，异步基于 Tokio/Tonic/Axum。错误用 `thiserror`/`anyhow` 显式追踪。`cargo check --workspace` 必须保持 **0 错误、0 警告**。
 - **测试隔离规范**：所有测试代码必须从业务代码中独立剥离至 `tests/` 目录，禁止在 `src/` 中内联测试，确保逻辑代码零冗余。
 - **配置只来自配置文件**：节点 `kanon` 与 `kanon-dev` 不得以环境变量作为配置来源；运维配置统一写在 `data/system.json`（启动期设置在其 `startup` 小节）。例外仅限 Supervisor 注入宿主子进程的启动契约（`KANON_HOST_ID`、`KANON_HOST_SOCK`、`KANON_CORE_SOCK`、`KANON_IPC_TOKEN`）以及 `PATH`、`XDG_RUNTIME_DIR` 等操作系统变量。
-- **kanon-dev 不是包管理器**：禁止让 `kanon-dev`（以及节点 `kanon`）封装 uv/pip/npm/bun 的安装、解析或锁定功能。Python/TS 插件依赖只在插件目录的 `pyproject.toml` / `package.json`（附锁文件）中声明，由开发者或运维用原生工具在插件目录内自行安装（`<plugin>/.venv`、`<plugin>/node_modules`）；环境缺失时插件必须报告 `RuntimeUnavailable`，禁止回退到共享或系统解释器。
+- **Kanon 不是包管理器**：`kanon` 与 `kanon-dev` 禁止自己解析、下载或锁定包，只能在插件目录内调用该生态的原生工具（`uv sync`、`bun install`、`npm ci`，见 `crates/kanon-core/src/supervisor/deps.rs`）。Python/TS 插件依赖只在插件目录的 `pyproject.toml` / `package.json`（附锁文件）中声明，安装到插件自己的 `<plugin>/.venv`、`<plugin>/node_modules`；安装失败或环境缺失时插件必须报告 `RuntimeUnavailable`，禁止回退到共享或系统解释器。
 - **测试只加有用的**：只为真实行为、失败路径与回归补充测试；禁止堆砌重复、琐碎或只为凑数量的测试。
 - **提示词静态优先**：模型请求固定为 `工具 → 单条系统块（人设 + 技能目录 + 摘要）→ 仅追加历史 → 当前轮`。时间、发送者等运行时才知道的信息只能进入当前轮用户消息；工具列表按名称排序、Schema 键名排序；钩子不得在对话开始后再插入 system 消息。任何会改变请求前缀的改动都必须有测试证明前缀仍稳定（`crates/kanon-llm/tests/prompt_layout_test.rs`）。
 - **记忆仅追加**：会话历史除 `Memory::compact_history` 与 `clear` 外禁止删除或重排消息，禁止再引入滑动窗口；删除对话（`/del`、`DeleteConversation`）只能经 `SessionManager::delete_session` 整段删除；外部写入会话（追加、删除）必须先 `try_lock` 该会话的写锁，拿不到即报忙，禁止排队等待运行中的轮次；压缩必须复用会话自己的请求前缀，且模型未给出摘要时绝不丢弃历史。

@@ -28,6 +28,8 @@ use kanon_transport::{connect_ipc, core_socket_path, default_run_dir, host_socke
 
 pub mod circuit_breaker;
 pub use circuit_breaker::{CircuitBreaker, CircuitBreakerConfig, CircuitState};
+mod deps;
+pub use deps::{DEFAULT_INSTALL_TIMEOUT, DependencyInstaller};
 
 /// Errors arising during supervisor operations.
 #[derive(Debug, Error)]
@@ -646,6 +648,8 @@ pub struct Supervisor {
     unavailable_plugins: Arc<RwLock<HashMap<String, UnavailablePlugin>>>,
     /// Interpreter for TypeScript plugins; `bun`, then `node`, from `PATH` when unset.
     typescript_runtime: Option<PathBuf>,
+    /// Installs plugins' dependencies before launch; `None` only checks that they are present.
+    dependencies: Option<Arc<DependencyInstaller>>,
     /// Host ids whose process this supervisor is starting right now (see [`LaunchGuard`]).
     ///
     /// A launched host calls `RegisterHost` while its launch is still waiting for the socket, and
@@ -836,6 +840,7 @@ impl Supervisor {
             config_versions: Arc::new(RwLock::new(HashMap::new())),
             unavailable_plugins: Arc::new(RwLock::new(HashMap::new())),
             typescript_runtime: None,
+            dependencies: None,
             launching: Arc::new(std::sync::Mutex::new(HashSet::new())),
         }
     }
@@ -844,6 +849,14 @@ impl Supervisor {
     /// lookup, as the node's `startup.typescript_runtime` setting asks.
     pub fn with_typescript_runtime(mut self, runtime: Option<PathBuf>) -> Self {
         self.typescript_runtime = runtime;
+        self
+    }
+
+    /// Installs Python and TypeScript plugins' dependencies with their native tool before each
+    /// launch when their environment is missing or out of date (see [`DependencyInstaller`]).
+    /// Without an installer a launch only checks that the environment exists.
+    pub fn with_dependency_installer(mut self, installer: Option<DependencyInstaller>) -> Self {
+        self.dependencies = installer.map(Arc::new);
         self
     }
 
@@ -1133,10 +1146,11 @@ impl Supervisor {
     /// dynamically resolving the runtime launcher (Rust native binary, the plugin's own Python
     /// virtual environment, or Node/Bun runtime for TypeScript).
     ///
-    /// Kanon never installs plugin dependencies. A Python plugin must ship a `.venv` built by the
-    /// operator (`uv sync`), and a TypeScript plugin that declares dependencies must have its
-    /// `node_modules` installed; otherwise the plugin is reported as `RuntimeUnavailable` before
-    /// any process starts, instead of crashing on an import error inside a restart loop.
+    /// Every plugin runs in its own environment (`<plugin>/.venv`, `<plugin>/node_modules`). With
+    /// a [`DependencyInstaller`] that environment is created or refreshed with the plugin's native
+    /// tool first; without one it must already exist. Either way a missing environment reports
+    /// the plugin as `RuntimeUnavailable` before any process starts, instead of crashing on an
+    /// import error inside a restart loop.
     pub async fn spawn_from_manifest(
         &self,
         manifest_path: impl AsRef<Path>,
@@ -1202,14 +1216,18 @@ impl Supervisor {
                         // Each plugin runs in its own environment so two plugins can never
                         // disagree about a package version. There is deliberately no fallback to a
                         // shared or system interpreter: it would start without the plugin's packages.
-                        let python_bin = plugin_python(parent).ok_or_else(|| {
-                            SupervisorError::RuntimeUnavailable {
-                                runtime: "python".to_string(),
-                                reason: format!(
+                        let python_bin = match &self.dependencies {
+                            Some(installer) => installer.prepare_python(parent).await,
+                            None => deps::plugin_python(parent).ok_or_else(|| {
+                                format!(
                                     "Python environment '{}' not found; run `uv sync` in the plugin directory",
                                     parent.join(".venv").display()
-                                ),
-                            }
+                                )
+                            }),
+                        }
+                        .map_err(|reason| SupervisorError::RuntimeUnavailable {
+                            runtime: "python".to_string(),
+                            reason,
                         })?;
 
                         // The host runner ships with the SDK, which the plugin's environment
@@ -1229,11 +1247,13 @@ impl Supervisor {
                         .await
                     }
                     "typescript" | "ts" => {
-                        ensure_node_modules(parent).map_err(|reason| {
-                            SupervisorError::RuntimeUnavailable {
-                                runtime: "typescript".to_string(),
-                                reason,
-                            }
+                        match &self.dependencies {
+                            Some(installer) => installer.prepare_node(parent).await,
+                            None => ensure_node_modules(parent),
+                        }
+                        .map_err(|reason| SupervisorError::RuntimeUnavailable {
+                            runtime: "typescript".to_string(),
+                            reason,
                         })?;
 
                         let node_bin = self
@@ -1817,40 +1837,15 @@ impl Drop for Supervisor {
     }
 }
 
-/// Returns the interpreter of the plugin's own virtual environment (`<plugin>/.venv`).
-///
-/// `is_file` follows the venv's interpreter symlink, so an environment whose base Python was
-/// removed counts as missing rather than failing later with a confusing spawn error.
-fn plugin_python(plugin_dir: &Path) -> Option<PathBuf> {
-    let python = if cfg!(windows) {
-        plugin_dir.join(".venv").join("Scripts").join("python.exe")
-    } else {
-        plugin_dir.join(".venv").join("bin").join("python")
-    };
-    python.is_file().then_some(python)
-}
-
 /// Fails when the plugin's `package.json` declares dependencies that are not installed.
 ///
 /// Node resolves a plugin's imports from `<plugin>/node_modules`, so that directory is the
 /// plugin's environment. A plugin without `package.json` or without dependencies needs none.
 fn ensure_node_modules(plugin_dir: &Path) -> Result<(), String> {
-    let manifest = plugin_dir.join("package.json");
-    let content = match std::fs::read_to_string(&manifest) {
-        Ok(content) => content,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
-        Err(error) => return Err(format!("cannot read '{}': {error}", manifest.display())),
-    };
-    let package: serde_json::Value = serde_json::from_str(&content)
-        .map_err(|error| format!("invalid '{}': {error}", manifest.display()))?;
-    let has_dependencies = package
-        .get("dependencies")
-        .and_then(serde_json::Value::as_object)
-        .is_some_and(|dependencies| !dependencies.is_empty());
-    if has_dependencies && !plugin_dir.join("node_modules").is_dir() {
+    if deps::declares_node_dependencies(plugin_dir)? && !plugin_dir.join("node_modules").is_dir() {
         return Err(format!(
             "dependencies in '{}' are not installed; run `npm install` or `bun install` in the plugin directory",
-            manifest.display()
+            plugin_dir.join("package.json").display()
         ));
     }
     Ok(())

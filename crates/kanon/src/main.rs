@@ -20,7 +20,8 @@
 //!     "api_addr": "127.0.0.1:8080",
 //!     "log": "info",
 //!     "run_dir": "/run/kanon",
-//!     "typescript_runtime": "/usr/bin/node"
+//!     "typescript_runtime": "/usr/bin/node",
+//!     "install_dependencies": true
 //!   }
 //! }
 //! ```
@@ -75,7 +76,12 @@ async fn main() -> StartupResult<()> {
     // The supervisor owns the socket layout: `core.sock` lives in the run directory it resolves.
     let supervisor = Arc::new(
         Supervisor::new(startup.run_dir.clone(), None)
-            .with_typescript_runtime(startup.typescript_runtime.clone()),
+            .with_typescript_runtime(startup.typescript_runtime.clone())
+            .with_dependency_installer(
+                startup
+                    .install_dependencies
+                    .then(kanon_core::DependencyInstaller::new),
+            ),
     );
     let socket_path = supervisor.core_sock_path().to_path_buf();
 
