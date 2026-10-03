@@ -38,7 +38,8 @@ pub const META_NOTICE_TARGET: &str = "kanon.notice_target";
 /// invitation; only the adapter that wrote it can read it.
 pub const META_REQUEST_TOKEN: &str = "kanon.request_token";
 
-/// How many answered messages are remembered as possible recall targets.
+/// How many answered messages are remembered as possible recall targets, and how many
+/// conversations may independently retain pending recall notes.
 const LEDGER_CAPACITY: usize = 1024;
 
 /// How many recall notes wait per conversation; older ones are dropped first.
@@ -204,7 +205,14 @@ impl EventPolicyStore {
 #[derive(Debug, Default)]
 pub struct RecallLedger {
     seen: Mutex<Seen>,
-    notes: Mutex<HashMap<String, VecDeque<String>>>,
+    notes: Mutex<PendingNotes>,
+}
+
+#[derive(Debug, Default)]
+struct PendingNotes {
+    entries: HashMap<String, VecDeque<String>>,
+    /// Conversations ordered by their newest recall, oldest first.
+    order: VecDeque<String>,
 }
 
 #[derive(Debug, Default)]
@@ -238,6 +246,10 @@ impl RecallLedger {
     }
 
     /// Queues a note for the recalled message when the model saw it; returns whether it did.
+    ///
+    /// Pending conversations have their own bounded window: identifying newer messages as
+    /// recall targets must not discard an already queued note. If that window fills, the
+    /// conversation with the oldest pending recall is forgotten first.
     pub fn note_recall(&self, target_event_id: &str, actor: Option<&str>) -> bool {
         let Some((conversation, excerpt)) = self
             .seen
@@ -255,21 +267,34 @@ impl RecallLedger {
             format!("[通知] {who}撤回了之前的消息「{excerpt}」")
         };
         let mut notes = self.notes.lock().unwrap_or_else(|p| p.into_inner());
-        let queue = notes.entry(conversation).or_default();
+        let queue = notes.entries.entry(conversation.clone()).or_default();
         queue.push_back(note);
         while queue.len() > NOTES_PER_CONVERSATION {
             queue.pop_front();
+        }
+        if let Some(position) = notes.order.iter().position(|key| key == &conversation) {
+            notes.order.remove(position);
+        }
+        notes.order.push_back(conversation);
+        while notes.order.len() > LEDGER_CAPACITY {
+            if let Some(oldest) = notes.order.pop_front() {
+                notes.entries.remove(&oldest);
+            }
         }
         true
     }
 
     /// Takes the notes waiting for a conversation.
     pub fn take_notes(&self, conversation: &str) -> Vec<String> {
-        self.notes
-            .lock()
-            .unwrap_or_else(|p| p.into_inner())
-            .remove(conversation)
-            .map(Vec::from)
-            .unwrap_or_default()
+        let mut notes = self.notes.lock().unwrap_or_else(|p| p.into_inner());
+        let Some(queue) = notes.entries.remove(conversation) else {
+            return Vec::new();
+        };
+        // Remove the ordering key too, so a later recall for this conversation starts a fresh
+        // window rather than being evicted through a stale entry from its previous visit.
+        if let Some(position) = notes.order.iter().position(|key| key == conversation) {
+            notes.order.remove(position);
+        }
+        Vec::from(queue)
     }
 }
