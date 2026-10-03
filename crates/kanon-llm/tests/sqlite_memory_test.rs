@@ -107,6 +107,76 @@ async fn test_sqlite_memory_file_persistence_and_reload() {
 }
 
 #[tokio::test]
+async fn corrupt_history_fails_without_mutating_rows_or_caching_a_partial_history() {
+    for (role, tool_calls, expected_error) in [
+        ("unknown", None, "unknown message role"),
+        ("assistant", Some("[{"), "invalid message tool calls"),
+        ("assistant", Some("{}"), "invalid message tool calls"),
+    ] {
+        let dir = tempdir().unwrap();
+        let db_path = dir.path().join("corrupt.db");
+        let memory = SqliteMemory::open(&db_path).unwrap();
+        let expected = vec![
+            ChatMessage::user("Check the weather"),
+            ChatMessage::assistant_tool_calls(
+                vec![ToolCall {
+                    id: "call_weather".into(),
+                    name: "weather".into(),
+                    arguments: serde_json::json!({"city": "Tokyo"}),
+                }],
+                None,
+            ),
+            ChatMessage::tool_response("call_weather", "Sunny"),
+        ];
+        memory
+            .extend_messages("session", expected.clone())
+            .await
+            .unwrap();
+
+        // Corrupt a middle row before the first read, after a valid prefix has been stored.
+        let conn = rusqlite::Connection::open(&db_path).unwrap();
+        let valid_calls = serde_json::to_string(expected[1].tool_calls.as_ref().unwrap()).unwrap();
+        conn.execute(
+            "UPDATE messages SET role = ?1, tool_calls = ?2 WHERE id = 2",
+            rusqlite::params![role, tool_calls.unwrap_or(&valid_calls)],
+        )
+        .unwrap();
+        let stored_rows = || {
+            conn.prepare("SELECT * FROM messages ORDER BY id")
+                .unwrap()
+                .query_map([], |row| {
+                    (0..row.as_ref().column_count())
+                        .map(|column| row.get::<_, rusqlite::types::Value>(column))
+                        .collect::<rusqlite::Result<Vec<_>>>()
+                })
+                .unwrap()
+                .collect::<rusqlite::Result<Vec<_>>>()
+                .unwrap()
+        };
+        let before = stored_rows();
+
+        // A repeated read must not find a partial cache left by the previous failed read.
+        for _ in 0..2 {
+            let error = memory.snapshot("session").await.unwrap_err();
+            assert!(
+                matches!(error, kanon_llm::error::MemoryError::Serialization(_)),
+                "{error}"
+            );
+            assert!(error.to_string().contains(expected_error), "{error}");
+        }
+        assert_eq!(stored_rows(), before, "failed reads must preserve all rows");
+
+        // Repairing the stored row is enough; a failed read must not poison later reads.
+        conn.execute(
+            "UPDATE messages SET role = 'assistant', tool_calls = ?1 WHERE id = 2",
+            rusqlite::params![valid_calls],
+        )
+        .unwrap();
+        assert_eq!(memory.snapshot("session").await.unwrap().messages, expected);
+    }
+}
+
+#[tokio::test]
 async fn test_sqlite_history_is_append_only_on_disk_and_in_the_cache() {
     let dir = tempdir().expect("Failed to create temporary directory");
     let db_path = dir.path().join("append_only.db");

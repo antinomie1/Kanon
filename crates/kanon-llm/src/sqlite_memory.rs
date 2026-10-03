@@ -245,11 +245,21 @@ impl SqliteMemory {
                     "user" => Role::User,
                     "assistant" => Role::Assistant,
                     "tool" => Role::Tool,
-                    _ => Role::User,
+                    _ => {
+                        return Err(MemoryError::Serialization(format!(
+                            "unknown message role '{role_str}' in session '{session_key}'"
+                        )));
+                    }
                 };
 
-                let tool_calls: Option<Vec<ToolCall>> =
-                    tool_calls_json.and_then(|s| serde_json::from_str(&s).ok());
+                let tool_calls: Option<Vec<ToolCall>> = tool_calls_json
+                    .map(|json| serde_json::from_str(&json))
+                    .transpose()
+                    .map_err(|error| {
+                        MemoryError::Serialization(format!(
+                            "invalid message tool calls in session '{session_key}': {error}"
+                        ))
+                    })?;
                 let mut message = ChatMessage {
                     role,
                     content,
@@ -267,6 +277,8 @@ impl SqliteMemory {
             (summary, loaded_messages)
         };
 
+        // Publish only a fully decoded history. Corrupt rows must neither change the stored
+        // conversation nor leave a partial cache that would hide the error on the next read.
         state.cache.insert(
             session_key.to_string(),
             SessionMemory::from_parts(summary, loaded_messages),
@@ -305,7 +317,9 @@ fn insert_message(
     let tool_calls_json = message
         .tool_calls
         .as_ref()
-        .and_then(|calls| serde_json::to_string(calls).ok());
+        .map(serde_json::to_string)
+        .transpose()
+        .map_err(|error| MemoryError::Serialization(error.to_string()))?;
     tx.execute(
         "INSERT INTO messages (session_key, role, content, tool_calls, tool_call_id, name, created_at, reasoning_content)
          VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
