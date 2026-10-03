@@ -369,7 +369,7 @@ pub struct ChatChunk {
     pub is_finished: bool,
     /// Termination reason, present on final chunk (e.g. `stop`, `tool_calls`, `length`).
     pub finish_reason: Option<String>,
-    /// Incremental or assembled tool calls, if any.
+    /// Complete tool calls, emitted once after their argument fragments have been assembled.
     pub tool_calls: Vec<ToolCall>,
 }
 

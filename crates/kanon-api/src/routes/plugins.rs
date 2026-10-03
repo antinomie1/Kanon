@@ -5,10 +5,9 @@
 //!   cached on [`kanon_core::ManagedHost`] at handshake time.
 //! - The **static manifest** is authoritative for declaration-time facts the process does not
 //!   report over gRPC, namely the `[config_schema]` JSON Schema used to render console forms.
-//! - Configuration updates are committed in the order *validate → hot reload → persist*: the
-//!   plugin host judges the payload first, and only an accepted configuration is written to
-//!   disk. A rejected reload therefore leaves both the running plugin and the persisted file
-//!   untouched.
+//! - Configuration updates hold one plugin lock across *validate → persist → hot reload*.
+//!   A rejected reload restores the previous file before releasing the lock; an uncertain RPC
+//!   outcome also removes the host from routing. Reads use the same lock for values and version.
 
 use std::collections::BTreeMap;
 use std::path::PathBuf;
@@ -534,6 +533,7 @@ async fn get_config(
     State(state): State<ApiState>,
     AxumPath(plugin_id): AxumPath<String>,
 ) -> Result<Json<PluginConfigView>, ApiError> {
+    let transaction = state.supervisor().lock_plugin_config(&plugin_id).await;
     let host = state
         .supervisor()
         .find_host_for_plugin(&plugin_id)
@@ -552,7 +552,7 @@ async fn get_config(
     let stored = store.load(&plugin_id)?;
     let persisted = stored.as_object().is_some_and(|map| !map.is_empty());
     let values = PluginConfigStore::apply_defaults(schema.as_ref(), &stored);
-    let version = state.supervisor().config_version(&plugin_id).await;
+    let version = transaction.version();
 
     Ok(Json(PluginConfigView {
         plugin_id,
@@ -563,21 +563,45 @@ async fn get_config(
     }))
 }
 
-/// Validates, hot reloads and persists a plugin configuration.
+/// Completes a configuration commit even if its HTTP caller disconnects during the host RPC.
 async fn put_config(
     State(state): State<ApiState>,
     AxumPath(plugin_id): AxumPath<String>,
     Json(body): Json<UpdateConfigRequest>,
 ) -> Result<Json<UpdateConfigResponse>, ApiError> {
+    // Reserve the transaction before detaching it. A caller cancelled while queued has made
+    // no change, and shutdown can discover every detached commit through its held guard.
+    let transaction = state.supervisor().lock_plugin_config(&plugin_id).await;
+    tokio::spawn(async move {
+        let result = commit_plugin_config(&state, &plugin_id, body, transaction).await;
+        // A disconnected caller no longer consumes the response, so transaction failures must
+        // be logged by the task that owns the lock and rollback, not just by IntoResponse.
+        if let Err(error) = &result {
+            tracing::error!(plugin_id = %plugin_id, %error, "Plugin configuration commit failed");
+        }
+        result.map(Json)
+    })
+    .await
+    .map_err(|error| ApiError::Internal(format!("Configuration task failed: {error}")))?
+}
+
+/// Saves and applies one candidate under the same lock used by readers and lifecycle routes.
+async fn commit_plugin_config(
+    state: &ApiState,
+    plugin_id: &str,
+    body: UpdateConfigRequest,
+    mut transaction: kanon_core::supervisor::PluginConfigGuard,
+) -> Result<UpdateConfigResponse, ApiError> {
     if !body.values.is_object() {
         return Err(ApiError::BadRequest(
             "Field 'values' must be a JSON object".to_string(),
         ));
     }
 
+    transaction.check_version(body.version)?;
     let host = state
         .supervisor()
-        .find_host_for_plugin(&plugin_id)
+        .find_host_for_plugin(plugin_id)
         .await
         .ok_or_else(|| {
             ApiError::NotFound(format!(
@@ -592,27 +616,51 @@ async fn put_config(
     PluginConfigStore::validate(schema.as_ref(), &body.values)
         .map_err(|reason| ApiError::BadRequest(format!("Invalid configuration: {reason}")))?;
 
-    // Step 1: let the plugin host accept or reject the payload before anything becomes durable.
-    // Optimistic concurrency control (CAS) verifies the version vector and rejects stale reloads.
-    let applied_version = state
-        .supervisor()
-        .reload_plugin_config_cas(&plugin_id, &body.values, body.version)
-        .await?;
-
-    // Step 2: persist only an accepted configuration. `spawn_blocking` keeps small filesystem
-    // writes off the async worker threads shared with request handling.
+    // Persist before changing the host: a full disk or read-only directory must not change live
+    // behavior. Retain the exact previous file until the host accepts, including its absence.
     let store = state.config_store().clone();
     let values = body.values.clone();
-    let persist_id = plugin_id.clone();
-    tokio::task::spawn_blocking(move || store.store(&persist_id, &values))
+    let persist_id = plugin_id.to_string();
+    let backup = tokio::task::spawn_blocking(move || store.replace(&persist_id, &values))
         .await
         .map_err(|err| ApiError::Internal(format!("Persistence task failed: {err}")))??;
+
+    let applied_version = match transaction.reload(&host, &body.values).await {
+        Ok(version) => version,
+        Err(error) => {
+            let restored = tokio::task::spawn_blocking(move || backup.restore())
+                .await
+                .map_err(|err| ApiError::Internal(format!("Restoration task failed: {err}")))
+                .and_then(std::convert::identity);
+            let rejected = matches!(
+                &error,
+                kanon_core::SupervisorError::ConfigReloadRejected { .. }
+            );
+            if !rejected || restored.is_err() {
+                // A lost RPC response cannot prove which values the host accepted. Restoring a
+                // file alone is insufficient: remove this host until a restart reads that file.
+                let stopped = state.supervisor().stop_host(&host.host_id).await;
+                if let Err(restore_error) = restored {
+                    return Err(ApiError::Internal(format!(
+                        "{error}; previous configuration could not be restored: {restore_error}; \
+                         host stop result: {stopped:?}. Inspect the saved configuration before restarting"
+                    )));
+                }
+                stopped?;
+                return Err(ApiError::Upstream(format!(
+                    "{error}; the previous configuration was restored and the host was removed \
+                     from routing because its applied configuration could not be confirmed"
+                )));
+            }
+            return Err(error.into());
+        }
+    };
 
     state
         .observability()
         .events
         .publish(TraceEvent::PluginConfigUpdated {
-            plugin_id: plugin_id.clone(),
+            plugin_id: plugin_id.to_string(),
             host_id: host.host_id.clone(),
         });
 
@@ -623,13 +671,13 @@ async fn put_config(
         "Plugin configuration updated and hot reloaded"
     );
 
-    Ok(Json(UpdateConfigResponse {
-        plugin_id,
+    Ok(UpdateConfigResponse {
+        plugin_id: plugin_id.to_string(),
         host_id: host.host_id.clone(),
         values: body.values,
         reloaded: true,
         version: applied_version,
-    }))
+    })
 }
 
 /// Restarts the host process that owns a plugin, or starts it when no host runs it.
@@ -641,6 +689,7 @@ async fn restart_plugin(
     State(state): State<ApiState>,
     AxumPath(plugin_id): AxumPath<String>,
 ) -> Result<Json<RestartResponse>, ApiError> {
+    let _configuration = state.supervisor().lock_plugin_config(&plugin_id).await;
     // Checked before the host lookup: a disabled plugin has no host by design, and "enable it
     // first" is far more useful than "not loaded by any active host".
     if !state
@@ -835,6 +884,7 @@ async fn set_plugin_enabled(
     AxumPath(plugin_id): AxumPath<String>,
     Json(body): Json<SetPluginEnabledRequest>,
 ) -> Result<Json<PluginStateResponse>, ApiError> {
+    let _configuration = state.supervisor().lock_plugin_config(&plugin_id).await;
     let running = state.supervisor().find_host_for_plugin(&plugin_id).await;
     let manifest_path = if running.is_none() {
         Some(find_manifest_path(&state, &plugin_id)?)

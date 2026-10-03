@@ -6,11 +6,13 @@ export interface StreamCallbacks {
   onError?: (err: Error) => void;
 }
 
+/** Reads the gateway's delta/done/error protocol; only an explicit terminal event is success. */
 export async function streamChatCompletion(
   req: ChatCompletionRequest,
   callbacks: StreamCallbacks,
   signal?: AbortSignal,
 ): Promise<void> {
+  let reader: ReadableStreamDefaultReader<Uint8Array> | undefined;
   try {
     const res = await fetch('/api/v1/chat/completions', {
       method: 'POST',
@@ -27,7 +29,7 @@ export async function streamChatCompletion(
       throw new Error(`HTTP ${res.status}: ${errText}`);
     }
 
-    const reader = res.body?.getReader();
+    reader = res.body?.getReader();
     if (!reader) {
       throw new Error('ReadableStream not supported on response body');
     }
@@ -54,25 +56,29 @@ export async function streamChatCompletion(
             return;
           }
 
-          try {
-            const data = JSON.parse(payload);
-            if (data.delta !== undefined || data.reasoning !== undefined) {
-              callbacks.onChunk(data.delta ?? '', data.reasoning ?? undefined);
-            }
-            if (data.finish_reason) {
-              callbacks.onFinish?.(data.finish_reason);
-            }
-          } catch {
-            // raw text fallback
-            callbacks.onChunk(payload);
+          const data = JSON.parse(payload);
+          if (data.type === 'error') {
+            throw new Error(data.message || 'Chat completion failed');
+          }
+          if (data.type !== 'delta' && data.type !== 'done') {
+            throw new Error('Unexpected chat stream event');
+          }
+          if (data.delta !== undefined || data.reasoning !== undefined) {
+            callbacks.onChunk(data.delta ?? '', data.reasoning ?? undefined);
+          }
+          if (data.type === 'done') {
+            callbacks.onFinish?.(data.finish_reason ?? 'stop');
+            return;
           }
         }
       }
     }
 
-    callbacks.onFinish?.('stop');
+    throw new Error('Chat stream ended before a completion event');
   } catch (err) {
     if (signal?.aborted) return;
     callbacks.onError?.(err instanceof Error ? err : new Error(String(err)));
+  } finally {
+    reader?.releaseLock();
   }
 }

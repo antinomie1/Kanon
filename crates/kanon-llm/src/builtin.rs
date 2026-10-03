@@ -311,10 +311,30 @@ impl BuiltinAgent {
     async fn run_turn(
         &self,
         session_id: &str,
-        mut message: ChatMessage,
+        message: ChatMessage,
         hosts: &[Arc<dyn ToolHost>],
         options: TurnOptions,
     ) -> Result<AgentOutput, AgentError> {
+        let (user_input, media) = self.start_turn(session_id, message).await?;
+
+        // From here on the turn is part of history. However it ends, the next turn has to find a
+        // conversation the provider accepts, and one that does not ask the model to redo the work
+        // that just failed.
+        match self
+            .answer(session_id, &user_input, media, hosts, options, None)
+            .await
+        {
+            Ok(output) => Ok(output),
+            Err(err) => Err(self.close_failed_turn(session_id, err).await),
+        }
+    }
+
+    /// Enriches the message under the caller's task scope, then commits the turn once.
+    async fn start_turn(
+        &self,
+        session_id: &str,
+        mut message: ChatMessage,
+    ) -> Result<(String, Option<Vec<ContentPart>>), AgentError> {
         for hook in &self.hooks {
             hook.on_user_message(session_id, &mut message).await?;
         }
@@ -328,16 +348,7 @@ impl BuiltinAgent {
         let media = message.parts.take();
         self.memory.push_message(session_id, message).await?;
 
-        // From here on the turn is part of history. However it ends, the next turn has to find a
-        // conversation the provider accepts, and one that does not ask the model to redo the work
-        // that just failed.
-        match self
-            .answer(session_id, &user_input, media, hosts, options)
-            .await
-        {
-            Ok(output) => Ok(output),
-            Err(err) => Err(self.close_failed_turn(session_id, err).await),
-        }
+        Ok((user_input, media))
     }
 
     /// The reasoning and tool loop of [`BuiltinAgent::run_turn`], run once the user message is stored.
@@ -348,6 +359,7 @@ impl BuiltinAgent {
         media: Option<Vec<ContentPart>>,
         hosts: &[Arc<dyn ToolHost>],
         options: TurnOptions,
+        stream: Option<&tokio::sync::mpsc::Sender<Result<ChatChunk, GatewayError>>>,
     ) -> Result<AgentOutput, AgentError> {
         // 2. Dynamically aggregate tools from both native tools and active plugin hosts
         let tools = if options.without_tools {
@@ -369,20 +381,35 @@ impl BuiltinAgent {
             let mut request = self.build_request(session_id, &tools).await?;
             attach_turn_media(&mut request, media.as_ref());
 
-            let Some(response) = unless_stopped(stop.as_ref(), self.provider.chat(&request)).await
-            else {
-                return Err(AgentError::Stopped);
-            };
-            let mut response = response?;
+            let mut response = self.complete_round(&request, stream, stop.as_ref()).await?;
             response.separate_reasoning();
 
             // Recover tool calls a model emitted as text markup instead of structured calls, so the
             // loop executes them instead of sending the markup to the chat platform as an answer.
+            let had_structured_calls = !response.tool_calls.is_empty();
             normalize_textual_tool_calls(&mut response);
+            if stream.is_some() && !had_structured_calls && !response.tool_calls.is_empty() {
+                // Text has already been delivered. Never reinterpret it as an executable command
+                // afterward; providers used for streaming must emit structured tool calls.
+                return Err(GatewayError::InvalidResponse(
+                    "streaming requires structured tool calls; textual tool markup was not executed".into(),
+                ).into());
+            }
 
-            // Lifecycle Hook: after LLM response (e.g. for auditing / token counting)
+            // Streaming is append-only delivery as well: an observer may inspect the complete
+            // response, but cannot retroactively replace text already delivered to the client.
+            let streamed_text =
+                stream.map(|_| (response.content.clone(), response.reasoning_content.clone()));
             for hook in &self.hooks {
                 hook.on_llm_response(session_id, &mut response).await?;
+            }
+            if let Some((content, reasoning)) = streamed_text
+                && (response.content != content || response.reasoning_content != reasoning)
+            {
+                return Err(GatewayError::InvalidResponse(
+                    "response hooks cannot rewrite text already streamed".into(),
+                )
+                .into());
             }
 
             response.separate_reasoning();
@@ -410,7 +437,11 @@ impl BuiltinAgent {
                         .map(|u| u.total_tokens as usize)
                         .unwrap_or_else(|| {
                             crate::token::estimate_text_tokens(&user_input)
-                                + crate::token::estimate_message_tokens(&reply)
+                                + if response.has_assistant_payload() {
+                                    crate::token::estimate_message_tokens(&reply)
+                                } else {
+                                    0
+                                }
                         });
                     sm.record_turn(session_id, tokens_used);
                 }
@@ -441,9 +472,21 @@ impl BuiltinAgent {
                     iterations = iterations,
                     "Agent reasoning iteration ceiling reached; breaking loop"
                 );
-                let fallback = response.content.clone().unwrap_or_else(|| {
-                    "Agent reasoning recursion limit reached; execution terminated.".to_string()
-                });
+                let fallback = response
+                    .content
+                    .clone()
+                    .filter(|text| !text.is_empty())
+                    .unwrap_or_else(|| {
+                        "Agent reasoning recursion limit reached; execution terminated.".to_string()
+                    });
+                if let Some(output) = stream
+                    && response.content.as_deref().unwrap_or_default().is_empty()
+                {
+                    let _ =
+                        unless_stopped(stop.as_ref(), output.send(Ok(ChatChunk::delta(&fallback))))
+                            .await
+                            .ok_or(AgentError::Stopped)?;
+                }
                 let mut message = ChatMessage::assistant(&fallback);
                 message.reasoning_content = response.reasoning_content;
                 self.memory
@@ -686,7 +729,10 @@ impl BuiltinAgent {
 
                         if !is_success && self.config.stop_on_tool_failure {
                             tracing::warn!(tool = %call.name, "Tool reported failure and stop_on_tool_failure is enabled");
-                            break;
+                            return Err(AgentError::Memory(format!(
+                                "Plugin tool '{}' failed",
+                                call.name
+                            )));
                         }
                     }
                     Err(status) => {
@@ -773,10 +819,69 @@ impl BuiltinAgent {
             .await
     }
 
-    /// Executes the agent reasoning loop with tool resolution, streaming the final assistant response.
-    ///
-    /// Tool rounds run to completion first; only the final text answer streams. The full assistant
-    /// message is committed into session memory once the stream completes.
+    /// Reads one model round, forwarding only text deltas; the shared loop handles complete tools.
+    async fn complete_round(
+        &self,
+        request: &ChatRequest,
+        stream: Option<&tokio::sync::mpsc::Sender<Result<ChatChunk, GatewayError>>>,
+        stop: Option<&StopSignal>,
+    ) -> Result<ChatResponse, AgentError> {
+        let Some(output) = stream else {
+            return unless_stopped(stop, self.provider.chat(request))
+                .await
+                .ok_or(AgentError::Stopped)?
+                .map_err(AgentError::from);
+        };
+        let inner = unless_stopped(stop, self.provider.chat_stream(request))
+            .await
+            .ok_or(AgentError::Stopped)??;
+        let mut inner = crate::gateway::reasoning::separate_stream(inner);
+        let mut response = ChatResponse {
+            content: Some(String::new()),
+            ..ChatResponse::default()
+        };
+        loop {
+            let next = unless_stopped(stop, inner.next())
+                .await
+                .ok_or(AgentError::Stopped)?;
+            let Some(chunk) = next else {
+                return Err(GatewayError::InvalidResponse(
+                    "model stream ended before its terminal marker".into(),
+                )
+                .into());
+            };
+            let mut chunk = chunk?;
+            if let Some(reasoning) = &chunk.reasoning_text {
+                response
+                    .reasoning_content
+                    .get_or_insert_default()
+                    .push_str(reasoning);
+            }
+            response
+                .content
+                .get_or_insert_default()
+                .push_str(&chunk.delta_text);
+            response.tool_calls.append(&mut chunk.tool_calls);
+            let finished = chunk.is_finished;
+            if finished {
+                response.finish_reason = chunk.finish_reason.take();
+                chunk.is_finished = false;
+            }
+            if !chunk.delta_text.is_empty() || chunk.reasoning_text.is_some() {
+                // A disconnected reader does not cancel committed work: finish the model/tool
+                // round and persist it before releasing its writer. Explicit /stop still cancels.
+                let _ = unless_stopped(stop, output.send(Ok(chunk)))
+                    .await
+                    .ok_or(AgentError::Stopped)?;
+            }
+            if finished {
+                break;
+            }
+        }
+        Ok(response)
+    }
+
+    /// Runs the same turn state machine with streamed model rounds and one durable completion.
     async fn stream_turn(
         &self,
         session_id: &str,
@@ -788,259 +893,44 @@ impl BuiltinAgent {
             .as_ref()
             .map(|sessions| sessions.agent_write(session_id))
             .transpose()?;
-        // Enrich only the originating message; request hooks must not fabricate later turns.
-        let mut message = ChatMessage::user(user_input);
-        for hook in &self.hooks {
-            hook.on_user_message(session_id, &mut message).await?;
-        }
-        self.memory.push_message(session_id, message).await?;
-
-        // 2. Dynamically aggregate tools
-        let tools = self.collect_tools(hosts);
-
-        let mut iterations = 0;
-
-        // If tools are available, execute intermediate tool turns first
-        while !tools.is_empty() && iterations < self.config.max_iterations {
-            let request = self.build_request(session_id, &tools).await?;
-
-            let mut response = self.provider.chat(&request).await?;
-            response.separate_reasoning();
-
-            for hook in &self.hooks {
-                hook.on_llm_response(session_id, &mut response).await?;
-            }
-
-            response.separate_reasoning();
-
-            // If no tools were called, this is the final response
-            if response.tool_calls.is_empty() {
-                if response.has_assistant_payload() {
-                    self.memory
-                        .push_message(session_id, response.assistant_message())
-                        .await?;
-                }
-                let final_content = response.content.clone().unwrap_or_default();
-                let (tx, rx) = tokio::sync::mpsc::channel(2);
-                let _ = tx
-                    .send(Ok(ChatChunk {
-                        delta_text: final_content,
-                        reasoning_text: response.reasoning_content,
-                        ..ChatChunk::default()
-                    }))
-                    .await;
-                let _ = tx.send(Ok(ChatChunk::done(response.finish_reason))).await;
-                return Ok(Box::pin(tokio_stream::wrappers::ReceiverStream::new(rx)));
-            }
-
-            // Otherwise, execute tools
-            iterations += 1;
-            self.memory
-                .push_message(session_id, response.assistant_message())
-                .await?;
-
-            for call in response.tool_calls {
-                let mut permitted = true;
-                for hook in &self.hooks {
-                    if !hook.on_before_tool_call(session_id, &call).await? {
-                        permitted = false;
-                        break;
-                    }
-                }
-                if !permitted {
-                    let veto_msg =
-                        format!("Tool '{}' execution was denied by agent policy", call.name);
-                    self.memory
-                        .push_message(session_id, ChatMessage::tool_response(&call.id, &veto_msg))
-                        .await?;
-                    continue;
-                }
-
-                if let Some(native_tool) =
-                    self.tools.iter().find(|t| t.definition().name == call.name)
-                {
-                    // A stream carries text only; attachments are dropped here exactly as plugin
-                    // attachments are below.
-                    let (result_str, is_success) =
-                        match native_tool.call(session_id, call.arguments.clone()).await {
-                            Ok(output) => (output.text, true),
-                            Err(err) => (format!("Error: {err}"), false),
-                        };
-                    for hook in &self.hooks {
-                        hook.on_after_tool_call(session_id, &call, &result_str, is_success)
-                            .await?;
-                    }
-                    self.memory
-                        .push_message(
-                            session_id,
-                            ChatMessage::tool_response(&call.id, &result_str),
-                        )
-                        .await?;
-                    continue;
-                }
-
-                let target = find_tool_target(&call.name, hosts);
-                let (target_host, plugin_id, actual_tool_name) = match target {
-                    Some((h, pid, tname)) => (h, pid, tname),
-                    None => {
-                        let err_msg = format!("Tool '{}' not registered", call.name);
-                        self.memory
-                            .push_message(
-                                session_id,
-                                ChatMessage::tool_response(&call.id, &err_msg),
-                            )
-                            .await?;
-                        continue;
-                    }
-                };
-
-                let structured_args = match &call.arguments {
-                    serde_json::Value::Object(_) => json_to_prost_struct(&call.arguments),
-                    _ => None,
-                };
-                let tool_req = ToolCallRequest {
-                    call_id: call.id.clone(),
-                    tool_name: actual_tool_name,
-                    session_id: session_id.to_string(),
-                    payload: structured_args.map(tool_call_request::Payload::StructuredArgs),
-                    // The host attaches the platform event of the turn; the agent never knew it.
-                    context: None,
-                };
-
-                tracing::debug!(
-                    agent = %self.name,
-                    tool = %call.name,
-                    host_id = %target_host.host_id(),
-                    plugin_id = %plugin_id,
-                    "Agent stream dispatching tool RPC to host"
-                );
-
-                match target_host.call_tool(tool_req).await {
-                    Ok(resp) => {
-                        let is_success = resp.success;
-                        let redactions: Vec<String> = resp
-                            .attachments
-                            .iter()
-                            .filter_map(|attachment| attachment.file_path.clone())
-                            .collect();
-                        let result_str = if !is_success {
-                            format!("Error: {}", resp.error_message)
-                        } else {
-                            match resp.payload {
-                                Some(tool_call_response::Payload::StructuredResult(s)) => {
-                                    prost_struct_to_json(s).to_string()
-                                }
-                                Some(tool_call_response::Payload::RawBytes(bytes)) => {
-                                    String::from_utf8_lossy(&bytes).to_string()
-                                }
-                                None => "{}".to_string(),
-                            }
-                        };
-                        let result_str = redact_tool_paths(result_str, &redactions);
-                        for hook in &self.hooks {
-                            hook.on_after_tool_call(session_id, &call, &result_str, is_success)
-                                .await?;
-                        }
-                        self.memory
-                            .push_message(
-                                session_id,
-                                ChatMessage::tool_response(&call.id, result_str),
-                            )
-                            .await?;
-                    }
-                    Err(st) => {
-                        let err_msg = format!("Tool RPC failed: {st}");
-                        self.memory
-                            .push_message(
-                                session_id,
-                                ChatMessage::tool_response(&call.id, &err_msg),
-                            )
-                            .await?;
-                    }
-                }
-            }
-        }
-
-        // Final streaming generation turn (pure assistant reply). It deliberately offers no tools:
-        // a stream cannot carry tool calls, so this turn must answer in text. That reshapes the
-        // top of the prompt, which is acceptable only because it is the exceptional path taken
-        // when no tools exist or the tool loop ran out of iterations.
-        let request = self.build_request(session_id, &[]).await?;
-
-        let inner_stream =
-            crate::gateway::reasoning::separate_stream(self.provider.chat_stream(&request).await?);
+        let (user_input, media) = self
+            .start_turn(session_id, ChatMessage::user(user_input))
+            .await?;
+        let stop = crate::stop::current();
+        let agent = self.clone();
+        let session_id = session_id.to_string();
+        let hosts = hosts.to_vec();
         let (tx, rx) = tokio::sync::mpsc::channel(32);
-        let memory = self.memory.clone();
-        let sid = session_id.to_string();
-        let sm_opt = self.session_manager.clone();
-        let hooks = self.hooks.clone();
-        let user_toks = crate::token::estimate_text_tokens(user_input);
-
         tokio::spawn(async move {
-            // The producer owns the writer through its final persistence, not the SSE body.
+            // The producer, not the SSE reader, owns the writer through failure recovery and
+            // the final commit. Tokio does not inherit task locals, so carry the stop explicitly.
             let _writing = writing;
-            let mut inner = inner_stream;
-            let mut response = ChatResponse::default();
-            while let Some(chunk_res) = inner.next().await {
-                let mut chunk = match chunk_res {
-                    Ok(chunk) => chunk,
-                    Err(error) => {
-                        // Unfinished legacy text remains private even on transport failure.
-                        let _ = tx.send(Err(error)).await;
-                        return;
-                    }
-                };
-                if let Some(reasoning) = &chunk.reasoning_text {
-                    response
-                        .reasoning_content
-                        .get_or_insert_default()
-                        .push_str(reasoning);
-                }
-                response
-                    .content
-                    .get_or_insert_default()
-                    .push_str(&chunk.delta_text);
-                let finished = chunk.is_finished;
-                if finished {
-                    response.finish_reason = chunk.finish_reason.take();
-                    chunk.is_finished = false;
-                }
-                if (!chunk.delta_text.is_empty() || chunk.reasoning_text.is_some())
-                    && tx.send(Ok(chunk)).await.is_err()
-                {
-                    return;
-                }
-                if finished {
-                    break;
-                }
-            }
-
-            // Persist both channels before announcing completion, including reasoning-only turns.
-            // A terminal marker or empty delta is not an assistant turn in append-only history.
-            let reply = response.assistant_message();
-            let has_reply = response.has_assistant_payload();
-            let reply_tokens = if has_reply {
-                crate::token::estimate_message_tokens(&reply)
-            } else {
-                0
+            let turn = agent.answer(
+                &session_id,
+                &user_input,
+                media,
+                &hosts,
+                TurnOptions::default(),
+                Some(&tx),
+            );
+            let result = match stop {
+                Some(stop) => crate::with_stop_signal(stop, turn).await,
+                None => turn.await,
             };
-            if has_reply && let Err(error) = memory.push_message(&sid, reply).await {
-                let _ = tx
-                    .send(Err(crate::error::GatewayError::InvalidResponse(format!(
-                        "Failed to persist streaming assistant response: {error}"
-                    ))))
-                    .await;
-                return;
+            match result {
+                Ok(output) => {
+                    let _ = tx.send(Ok(ChatChunk::done(output.finish_reason))).await;
+                }
+                Err(error) => {
+                    let error = agent.close_failed_turn(&session_id, error).await;
+                    let gateway = match error {
+                        AgentError::Gateway(error) => error,
+                        other => GatewayError::InvalidResponse(other.to_string()),
+                    };
+                    let _ = tx.send(Err(gateway)).await;
+                }
             }
-            if let Some(ref sm) = sm_opt {
-                sm.record_turn(&sid, user_toks + reply_tokens);
-            }
-            for hook in &hooks {
-                let _ = hook.on_llm_response(&sid, &mut response).await;
-            }
-            let _ = tx.send(Ok(ChatChunk::done(response.finish_reason))).await;
         });
-
         Ok(Box::pin(tokio_stream::wrappers::ReceiverStream::new(rx)))
     }
 }

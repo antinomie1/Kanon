@@ -12,6 +12,7 @@
 //! full JSON Schema engine. Anything outside that subset is left for the plugin to judge and
 //! report through its reload response.
 
+use std::io::Write;
 use std::path::{Path, PathBuf};
 
 use serde_json::{Map, Value};
@@ -20,6 +21,38 @@ use crate::error::ApiError;
 
 /// File name used for persisted plugin configuration.
 const CONFIG_FILE_NAME: &str = "config.json";
+
+/// Exact previous file state, retained until a running host accepts a saved candidate.
+pub(crate) struct PluginConfigBackup {
+    path: PathBuf,
+    previous: Option<Vec<u8>>,
+}
+
+impl PluginConfigBackup {
+    /// Restores the previous file, including absence for a plugin configured for the first time.
+    pub(crate) fn restore(self) -> Result<(), ApiError> {
+        match self.previous {
+            Some(bytes) => write_atomic(&self.path, &bytes),
+            None => {
+                std::fs::remove_file(self.path)?;
+                Ok(())
+            }
+        }
+    }
+}
+
+/// Uses a unique file in the destination directory so concurrent callers never share a staging file.
+fn write_atomic(path: &Path, bytes: &[u8]) -> Result<(), ApiError> {
+    let dir = path
+        .parent()
+        .ok_or_else(|| ApiError::Internal("Configuration path has no parent directory".into()))?;
+    std::fs::create_dir_all(dir)?;
+    let mut pending = tempfile::NamedTempFile::new_in(dir)?;
+    pending.write_all(bytes)?;
+    pending.as_file().sync_all()?;
+    pending.persist(path).map_err(|error| error.error)?;
+    Ok(())
+}
 
 /// Persistent store for per-plugin configuration values.
 #[derive(Debug, Clone)]
@@ -86,23 +119,29 @@ impl PluginConfigStore {
     /// crash mid-write leaves the previous configuration intact instead of a truncated file.
     pub fn store(&self, plugin_id: &str, values: &Value) -> Result<(), ApiError> {
         let path = self.config_path(plugin_id)?;
-        let dir = path.parent().ok_or_else(|| {
-            ApiError::Internal(format!(
-                "Configuration path for '{plugin_id}' has no parent directory"
-            ))
-        })?;
-
-        std::fs::create_dir_all(dir)?;
-
         let serialized = serde_json::to_string_pretty(values).map_err(|err| {
             ApiError::Internal(format!("Failed to serialize configuration: {err}"))
         })?;
+        write_atomic(&path, serialized.as_bytes())
+    }
 
-        let tmp_path = dir.join(format!("{CONFIG_FILE_NAME}.tmp"));
-        std::fs::write(&tmp_path, serialized)?;
-        std::fs::rename(&tmp_path, &path)?;
-
-        Ok(())
+    /// Saves a candidate and keeps the exact previous file for a rejected hot reload.
+    ///
+    /// The caller must hold the supervisor's per-plugin configuration guard through acceptance
+    /// or restoration. A filesystem failure here occurs before the host sees the candidate.
+    pub(crate) fn replace(
+        &self,
+        plugin_id: &str,
+        values: &Value,
+    ) -> Result<PluginConfigBackup, ApiError> {
+        let path = self.config_path(plugin_id)?;
+        let previous = match std::fs::read(&path) {
+            Ok(bytes) => Some(bytes),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+            Err(error) => return Err(error.into()),
+        };
+        self.store(plugin_id, values)?;
+        Ok(PluginConfigBackup { path, previous })
     }
 
     /// Merges schema-declared defaults underneath the provided values.

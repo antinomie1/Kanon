@@ -36,6 +36,7 @@ message PluginActionResponse {
 // 2. 消息与事件管道服务 (运行在 Host 端，Core 主动连接各 Host 端点发起调用)
 service MessagePipelineService {
   rpc OnPreFilter (PipelineEventRequest) returns (PreFilterResult);
+  // Commands, triggers and continuations share a 30-second deadline; timeout is not a rollback.
   rpc OnExecuteCommand (CommandExecuteRequest) returns (CommandExecuteResponse);
   rpc OnCallTool (ToolCallRequest) returns (ToolCallResponse);
   // Fire-and-forget lifecycle events, sent only for the kinds a plugin lists in `PluginMeta.events`.

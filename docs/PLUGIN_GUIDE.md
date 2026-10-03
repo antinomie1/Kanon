@@ -48,7 +48,7 @@ kanon-dev dev ./my_plugin                      # 热重载：改动后在运行�
 kanon-dev pack ./my_plugin                     # 打包为 .kpk（附 SHA-256 校验）
 ```
 
-`kanon-dev pack` 只打包节点运行插件所需的文件：`plugin.toml`、代码（Rust 插件先 `cargo build --release`，二进制放在 `entrypoint` 指向的路径，不含源码；Python/TS 插件为脚本与 `pyproject.toml`/`uv.lock`、`package.json`/锁文件）以及 `pages/`、`i18n/`。测试、文档和其他文件不会进包；打包后会逐个列出包内文件。
+`kanon-dev pack` 默认打包 `plugin.toml`、代码（Rust 插件先 `cargo build --release`，二进制放在 `entrypoint` 指向的路径，不含源码；Python/TS 插件为脚本与 `pyproject.toml`/`uv.lock`、`package.json`/锁文件）以及 `pages/`、`i18n/`。额外运行资源在 `[plugin]` 中显式声明，例如 `include = ["assets", "prompts/system.md", "tsconfig.json"]`；目录会完整打包，不按文件扩展名过滤。路径必须相对于插件目录，不支持通配符、上级路径和符号链接；声明的资源缺失时打包失败。测试、文档和其他未声明的文件不会进包；打包后会逐个列出包内文件。
 
 **沙盒 `kanon-dev test`** 在进程内启动一个最小节点：真实的流水线、内置命令（`/ls`、`/new`、`/switch`、`/del` 等）、钩子、中心 KV 与会话存储（均在临时目录），模型换成本地 mock，不需要聊天平台和 API Key。Rust 插件会先 `cargo build`，Python/TS 插件会先安装依赖。
 

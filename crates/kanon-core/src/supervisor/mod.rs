@@ -31,6 +31,9 @@ pub use circuit_breaker::{CircuitBreaker, CircuitBreakerConfig, CircuitState};
 mod deps;
 pub use deps::{DEFAULT_INSTALL_TIMEOUT, DependencyInstaller};
 
+/// Maximum time a command, trigger or captured reply may occupy an inbound chat lane.
+pub const COMMAND_TIMEOUT: Duration = Duration::from_secs(30);
+
 /// Errors arising during supervisor operations.
 #[derive(Debug, Error)]
 pub enum SupervisorError {
@@ -55,6 +58,9 @@ pub enum SupervisorError {
     /// Requested host was not found in the supervisor registry.
     #[error("Host '{0}' not found in supervisor")]
     HostNotFound(String),
+    /// The host already runs or another operation currently owns its launch.
+    #[error("Host '{0}' is already running or being launched")]
+    HostBusy(String),
     /// Requested plugin is not loaded by any active host.
     #[error("Plugin '{0}' is not loaded by any active host")]
     PluginNotFound(String),
@@ -91,6 +97,115 @@ pub enum SupervisorError {
 impl From<tonic::Status> for SupervisorError {
     fn from(status: tonic::Status) -> Self {
         Self::Rpc(Box::new(status))
+    }
+}
+
+/// Exclusive access to one plugin's configuration value and version until the complete commit ends.
+///
+/// The control plane holds this guard while saving or restoring the file. Readers acquire the
+/// same guard before loading the file, so they cannot pair old values with a newly applied version.
+pub struct PluginConfigGuard {
+    plugin_id: String,
+    version: tokio::sync::OwnedMutexGuard<u64>,
+}
+
+impl PluginConfigGuard {
+    /// Returns the version protected by this transaction.
+    pub fn version(&self) -> u64 {
+        *self.version
+    }
+
+    /// Rejects a stale editor before it changes either the file or the running host.
+    pub fn check_version(&self, expected: Option<u64>) -> Result<(), SupervisorError> {
+        if let Some(expected) = expected
+            && expected != self.version()
+        {
+            return Err(SupervisorError::StaleConfigVersion {
+                plugin_id: self.plugin_id.clone(),
+                current_version: self.version(),
+                requested_version: expected,
+            });
+        }
+        Ok(())
+    }
+
+    /// Applies the candidate to its host and advances the version only after acceptance.
+    pub async fn reload(
+        &mut self,
+        host: &ManagedHost,
+        config: &serde_json::Value,
+    ) -> Result<u64, SupervisorError> {
+        if !host.declares_plugin(&self.plugin_id) {
+            return Err(SupervisorError::PluginNotFound(self.plugin_id.clone()));
+        }
+        let plugin_id = self.plugin_id.as_str();
+        let next_ver = self.version() + 1;
+
+        let structured = kanon_llm::tool_router::json_to_prost_struct(config)
+            .ok_or(SupervisorError::InvalidConfigPayload)?;
+
+        // The transaction may outlive its HTTP caller. Bound every host await so a plugin that
+        // never answers cannot retain its configuration lock and pending file indefinitely.
+        let response = tokio::time::timeout(
+            Duration::from_secs(10),
+            host.reload_config(plugin_id, structured, next_ver),
+        )
+        .await
+        .map_err(|_| {
+            tonic::Status::deadline_exceeded("Configuration reload timed out after 10s")
+        })??;
+        if !response.success {
+            return Err(SupervisorError::ConfigReloadRejected {
+                host_id: host.host_id.clone(),
+                plugin_id: plugin_id.to_string(),
+                reason: response.error_message,
+            });
+        }
+
+        let applied = if response.applied_version > 0 {
+            response.applied_version
+        } else {
+            next_ver
+        };
+
+        *self.version = applied;
+
+        tracing::info!(
+            plugin_id = %plugin_id,
+            host_id = %host.host_id,
+            version = applied,
+            "Plugin configuration reloaded with version token"
+        );
+
+        // A plugin may derive its commands and tools from its configuration (an API key that
+        // enables a tool, for example), so the metadata is asked for again. The configuration
+        // itself is already applied, which is why a failed refresh is reported, not rolled back:
+        // the previous metadata stays in effect until the next reload or restart.
+        let metadata = tokio::time::timeout(Duration::from_secs(10), host.get_plugin_meta())
+            .await
+            .unwrap_or_else(|_| {
+                Err(tonic::Status::deadline_exceeded(
+                    "Plugin metadata refresh timed out after 10s",
+                ))
+            });
+        match metadata {
+            Ok(metas) if metas.iter().any(|meta| meta.id == plugin_id) => host.set_metas(metas),
+            // A host that stops declaring the plugin it just reconfigured is inconsistent;
+            // adopting that answer would make the plugin vanish from routing and the console.
+            Ok(_) => tracing::warn!(
+                plugin_id = %plugin_id,
+                host_id = %host.host_id,
+                "Refreshed metadata no longer declares the reloaded plugin; keeping the previous commands and tools"
+            ),
+            Err(status) => tracing::warn!(
+                plugin_id = %plugin_id,
+                host_id = %host.host_id,
+                error = %status,
+                "Plugin metadata could not be refreshed after a configuration reload; keeping the previous commands and tools"
+            ),
+        }
+
+        Ok(applied)
     }
 }
 
@@ -342,21 +457,40 @@ impl ManagedHost {
         Ok(response.into_inner())
     }
 
-    /// Dispatches a slash command to this host for execution.
+    /// Dispatches a command with a deadline so an unresponsive host cannot exhaust chat lanes.
     pub async fn execute_command(
         &self,
         req: CommandExecuteRequest,
     ) -> Result<CommandExecuteResponse, tonic::Status> {
+        let Some(permit) = self.circuit_breaker.try_acquire() else {
+            return Err(tonic::Status::unavailable(format!(
+                "Circuit breaker is OPEN for host '{}'",
+                self.host_id
+            )));
+        };
         let start = std::time::Instant::now();
+        let deadline = tokio::time::Instant::now() + COMMAND_TIMEOUT;
         let mut client = self.pipeline_client.clone();
-        match client.on_execute_command(req).await {
+        let mut request = tonic::Request::new(req);
+        request.set_timeout(COMMAND_TIMEOUT);
+        // The local deadline also bounds channel readiness. The wire deadline lets a host
+        // cancel its handler; neither side retries a command whose effects may have committed.
+        let response = tokio::select! {
+            // Tonic may report its wire timeout as Cancelled. Once our deadline is reached,
+            // give the local timer priority so the public error remains DeadlineExceeded.
+            biased;
+            () = tokio::time::sleep_until(deadline) => Err(tonic::Status::deadline_exceeded(
+                "Plugin command exceeded the 30-second deadline; its effects may have committed",
+            )),
+            response = client.on_execute_command(request) => response,
+        };
+        match response {
             Ok(response) => {
-                self.circuit_breaker.record_success(start.elapsed());
+                permit.success(start.elapsed());
                 Ok(response.into_inner())
             }
             Err(status) => {
-                self.circuit_breaker
-                    .record_failure(&format!("Command gRPC error: {}", status.code()));
+                permit.failure(&format!("Command gRPC error: {}", status.code()));
                 Err(status)
             }
         }
@@ -647,8 +781,8 @@ pub struct Supervisor {
     hosts: Arc<RwLock<HashMap<String, Arc<ManagedHost>>>>,
     /// Registry of in-process platform adapters.
     adapters: Arc<AdapterRegistry>,
-    /// Monotonically increasing configuration version tracking per plugin for CAS updates.
-    config_versions: Arc<RwLock<HashMap<String, u64>>>,
+    /// Per-plugin transaction locks and configuration versions; unrelated hosts never share an RPC lock.
+    config_versions: Arc<RwLock<HashMap<String, Arc<Mutex<u64>>>>>,
     /// Plugins whose launch was prevented or deferred due to missing runtime environments.
     unavailable_plugins: Arc<RwLock<HashMap<String, UnavailablePlugin>>>,
     /// Interpreter for TypeScript plugins; `bun`, then `node`, from `PATH` when unset.
@@ -685,12 +819,17 @@ struct LaunchGuard {
 }
 
 impl LaunchGuard {
-    fn new(launching: &Arc<std::sync::Mutex<HashSet<String>>>, host_id: &str) -> Self {
-        lock_launching(launching).insert(host_id.to_string());
-        Self {
+    fn new(
+        launching: &Arc<std::sync::Mutex<HashSet<String>>>,
+        host_id: &str,
+    ) -> Result<Self, SupervisorError> {
+        if !lock_launching(launching).insert(host_id.to_string()) {
+            return Err(SupervisorError::HostBusy(host_id.to_string()));
+        }
+        Ok(Self {
             launching: launching.clone(),
             host_id: host_id.to_string(),
-        }
+        })
     }
 }
 
@@ -908,12 +1047,22 @@ impl Supervisor {
 
     /// Returns the currently applied configuration version for a plugin (0 if never configured).
     pub async fn config_version(&self, plugin_id: &str) -> u64 {
-        self.config_versions
-            .read()
+        self.lock_plugin_config(plugin_id).await.version()
+    }
+
+    /// Locks one plugin's complete configuration transaction, including persistence by the caller.
+    pub async fn lock_plugin_config(&self, plugin_id: &str) -> PluginConfigGuard {
+        let lock = self
+            .config_versions
+            .write()
             .await
-            .get(plugin_id)
-            .copied()
-            .unwrap_or(0)
+            .entry(plugin_id.to_string())
+            .or_insert_with(|| Arc::new(Mutex::new(0)))
+            .clone();
+        PluginConfigGuard {
+            plugin_id: plugin_id.to_string(),
+            version: lock.lock_owned().await,
+        }
     }
 
     /// Returns the built-in adapter registry owned by this supervisor.
@@ -1037,13 +1186,17 @@ impl Supervisor {
         args: &[&str],
         priority: i32,
     ) -> Result<Arc<ManagedHost>, SupervisorError> {
+        let launching = LaunchGuard::new(&self.launching, host_id)?;
+        if self.get_host(host_id).await.is_some() {
+            return Err(SupervisorError::HostBusy(host_id.to_string()));
+        }
         let spec = LaunchSpec::Direct {
             executable: executable_path.as_ref().to_path_buf(),
             args: args.iter().map(|a| (*a).to_string()).collect(),
             priority,
         };
         self.launch_host(
-            host_id,
+            &launching,
             executable_path.as_ref(),
             args,
             priority,
@@ -1060,16 +1213,16 @@ impl Supervisor {
     /// plugin declaration for metadata / configuration-schema queries.
     async fn launch_host(
         &self,
-        host_id: &str,
+        launching: &LaunchGuard,
         executable_path: &Path,
         args: &[&str],
         priority: i32,
         spec: LaunchSpec,
         manifest: Option<PluginManifest>,
     ) -> Result<Arc<ManagedHost>, SupervisorError> {
-        // Held until this function returns: the host registers itself while we are still
-        // waiting for its socket below, and that registration must not dial it (see `launching`).
-        let _launching = LaunchGuard::new(&self.launching, host_id);
+        // Every caller reserves the whole operation, including dependency installation. The
+        // host's registration is acknowledged without dialing it while that reservation lives.
+        let host_id = launching.host_id.as_str();
         let socket_path = host_socket_path(host_id, Some(&self.run_dir));
 
         tracing::info!(
@@ -1186,6 +1339,23 @@ impl Supervisor {
         let manifest_path_ref = manifest_path.as_ref();
         let manifest = PluginManifest::load_from_file(manifest_path_ref)
             .map_err(|e| SupervisorError::Manifest(e.to_string()))?;
+        let host_id = manifest.plugin.id.replace('.', "_");
+        let launching = LaunchGuard::new(&self.launching, &host_id)?;
+        if self.get_host(&host_id).await.is_some() {
+            return Err(SupervisorError::HostBusy(host_id));
+        }
+        self.launch_manifest(manifest_path_ref, executable_override, manifest, &launching)
+            .await
+    }
+
+    /// Resolves dependencies and starts a manifest while its caller owns the launch reservation.
+    async fn launch_manifest(
+        &self,
+        manifest_path_ref: &Path,
+        executable_override: Option<&Path>,
+        manifest: PluginManifest,
+        launching: &LaunchGuard,
+    ) -> Result<Arc<ManagedHost>, SupervisorError> {
         if let Some(adapter) = manifest
             .adapter
             .as_ref()
@@ -1216,7 +1386,6 @@ impl Supervisor {
             });
         }
 
-        let host_id = manifest.plugin.id.replace('.', "_");
         let priority = manifest.plugin.priority.unwrap_or(500);
         let parent = manifest_path_ref.parent().unwrap_or_else(|| Path::new("."));
 
@@ -1233,7 +1402,7 @@ impl Supervisor {
         let result = async {
             if let Some(override_path) = executable_override {
                 self.launch_host(
-                    &host_id,
+                    launching,
                     override_path,
                     &[],
                     priority,
@@ -1246,7 +1415,7 @@ impl Supervisor {
                     "rust" => {
                         let exec_path = parent.join(&manifest.plugin.entrypoint);
                         self.launch_host(
-                            &host_id,
+                            launching,
                             &exec_path,
                             &[],
                             priority,
@@ -1280,7 +1449,7 @@ impl Supervisor {
                         let args = ["-m", "kanon_host.main", "--plugin", manifest_str.as_ref()];
 
                         self.launch_host(
-                            &host_id,
+                            launching,
                             &python_bin,
                             &args,
                             priority,
@@ -1329,7 +1498,7 @@ impl Supervisor {
                         let args = [host_script_str.as_ref(), "--plugin", manifest_str.as_ref()];
 
                         self.launch_host(
-                            &host_id,
+                            launching,
                             &node_bin,
                             &args,
                             priority,
@@ -1367,9 +1536,8 @@ impl Supervisor {
 
     /// Restarts the host process identified by `host_id` using its recorded launch recipe.
     ///
-    /// The old process is terminated and unregistered first, then relaunched with an identical
-    /// command line and a fresh `GetPluginMeta` handshake, so a failed relaunch surfaces as an
-    /// explicit error while the registry never retains a half-dead host entry.
+    /// The old process is terminated first, then replaced after a fresh handshake. A failed
+    /// launch retains its recipe and crashed state so the watchdog can retry it later.
     pub async fn restart_host(&self, host_id: &str) -> Result<Arc<ManagedHost>, SupervisorError> {
         let host = self
             .get_host(host_id)
@@ -1381,12 +1549,20 @@ impl Supervisor {
             .cloned()
             .ok_or_else(|| SupervisorError::RestartUnavailable(host_id.to_string()))?;
         let manifest = host.manifest().cloned();
+        let launching = LaunchGuard::new(&self.launching, host_id)?;
 
         tracing::info!(host_id = %host_id, "Restarting plugin host process");
 
-        self.stop_host(host_id).await?;
+        {
+            let mut child = host.child.lock().await;
+            if let Some(mut child) = child.take() {
+                terminate_child(&mut child, HOST_SHUTDOWN_GRACE).await?;
+            }
+        }
+        let restarts = host.health().await.restarts;
+        host.report_health("restarting", restarts, None).await;
 
-        match &spec {
+        let result = match &spec {
             LaunchSpec::Direct {
                 executable,
                 args,
@@ -1394,7 +1570,7 @@ impl Supervisor {
             } => {
                 let arg_refs: Vec<&str> = args.iter().map(String::as_str).collect();
                 self.launch_host(
-                    host_id,
+                    &launching,
                     executable,
                     &arg_refs,
                     *priority,
@@ -1408,10 +1584,30 @@ impl Supervisor {
                 executable_override,
                 ..
             } => {
-                self.spawn_from_manifest(manifest_path, executable_override.as_deref())
-                    .await
+                let manifest = PluginManifest::load_from_file(manifest_path)
+                    .map_err(|error| SupervisorError::Manifest(error.to_string()));
+                match manifest {
+                    Ok(manifest) if manifest.plugin.id.replace('.', "_") == host_id => {
+                        self.launch_manifest(
+                            manifest_path,
+                            executable_override.as_deref(),
+                            manifest,
+                            &launching,
+                        )
+                        .await
+                    }
+                    Ok(_) => Err(SupervisorError::Manifest(
+                        "Plugin id changed; restart the node to load its new identity".to_string(),
+                    )),
+                    Err(error) => Err(error),
+                }
             }
+        };
+        if let Err(error) = &result {
+            host.report_health("crashed", restarts, Some(error.to_string()))
+                .await;
         }
+        result
     }
 
     /// Locates the host process that declares the given plugin identifier.
@@ -1445,75 +1641,13 @@ impl Supervisor {
         config: &serde_json::Value,
         expected_version: Option<u64>,
     ) -> Result<u64, SupervisorError> {
+        let mut transaction = self.lock_plugin_config(plugin_id).await;
+        transaction.check_version(expected_version)?;
         let host = self
             .find_host_for_plugin(plugin_id)
             .await
             .ok_or_else(|| SupervisorError::PluginNotFound(plugin_id.to_string()))?;
-
-        let mut versions = self.config_versions.write().await;
-        let current_ver = *versions.get(plugin_id).unwrap_or(&0);
-
-        if let Some(expected) = expected_version
-            && expected != current_ver
-        {
-            return Err(SupervisorError::StaleConfigVersion {
-                plugin_id: plugin_id.to_string(),
-                current_version: current_ver,
-                requested_version: expected,
-            });
-        }
-
-        let next_ver = current_ver + 1;
-
-        let structured = kanon_llm::tool_router::json_to_prost_struct(config)
-            .ok_or(SupervisorError::InvalidConfigPayload)?;
-
-        let response = host.reload_config(plugin_id, structured, next_ver).await?;
-        if !response.success {
-            return Err(SupervisorError::ConfigReloadRejected {
-                host_id: host.host_id.clone(),
-                plugin_id: plugin_id.to_string(),
-                reason: response.error_message,
-            });
-        }
-
-        let applied = if response.applied_version > 0 {
-            response.applied_version
-        } else {
-            next_ver
-        };
-
-        versions.insert(plugin_id.to_string(), applied);
-
-        tracing::info!(
-            plugin_id = %plugin_id,
-            host_id = %host.host_id,
-            version = applied,
-            "Plugin configuration reloaded with version token"
-        );
-
-        // A plugin may derive its commands and tools from its configuration (an API key that
-        // enables a tool, for example), so the metadata is asked for again. The configuration
-        // itself is already applied, which is why a failed refresh is reported, not rolled back:
-        // the previous metadata stays in effect until the next reload or restart.
-        match host.get_plugin_meta().await {
-            Ok(metas) if metas.iter().any(|meta| meta.id == plugin_id) => host.set_metas(metas),
-            // A host that stops declaring the plugin it just reconfigured is inconsistent;
-            // adopting that answer would make the plugin vanish from routing and the console.
-            Ok(_) => tracing::warn!(
-                plugin_id = %plugin_id,
-                host_id = %host.host_id,
-                "Refreshed metadata no longer declares the reloaded plugin; keeping the previous commands and tools"
-            ),
-            Err(status) => tracing::warn!(
-                plugin_id = %plugin_id,
-                host_id = %host.host_id,
-                error = %status,
-                "Plugin metadata could not be refreshed after a configuration reload; keeping the previous commands and tools"
-            ),
-        }
-
-        Ok(applied)
+        transaction.reload(&host, config).await
     }
 
     /// Fetches a host's plugin metadata again, for a plugin that changed its tools, commands or
@@ -1661,8 +1795,8 @@ impl Supervisor {
     /// Why this is separate from shutdown handling: a host can die at any time (panic, OOM,
     /// `SIGKILL`, a plugin's own `process.exit`). Without a monitor the supervisor keeps the dead
     /// host in its registry, so the console shows it as healthy and every routed event fails
-    /// against a closed socket. The watchdog prunes the entry, relaunches from the recorded
-    /// recipe with exponential backoff, and parks a repeatedly-crashing host as `crashed` so the
+    /// against a closed socket. The watchdog retains the launch recipe, relaunches with
+    /// exponential backoff, and parks a repeatedly-crashing host as `crashed` so the
     /// fault is visible instead of silently looped.
     ///
     /// Disabled plugins are never restarted: their absence is intentional.
@@ -1695,9 +1829,24 @@ impl Supervisor {
         budgets: &mut HashMap<String, RestartBudget>,
     ) {
         for host in self.get_all_hosts().await {
+            // A retained entry can temporarily have no child while an operator restarts it.
+            // Only retry once that whole launch has finished, including dependency setup.
+            if lock_launching(&self.launching).contains(&host.host_id) {
+                continue;
+            }
             let Some(plugin_id) = host.primary_plugin_id() else {
                 continue;
             };
+            // Configuration commits and operator lifecycle actions use the same plugin lock.
+            // A restart must read only a committed file, never an in-flight candidate.
+            let _configuration = self.lock_plugin_config(&plugin_id).await;
+            if !self
+                .get_host(&host.host_id)
+                .await
+                .is_some_and(|current| Arc::ptr_eq(&current, &host))
+            {
+                continue;
+            }
 
             let attempts = budgets
                 .get(&host.host_id)
@@ -1711,17 +1860,31 @@ impl Supervisor {
                 continue;
             }
 
-            let exit_status = {
+            let health = host.health().await;
+            let failure = {
                 let mut guard = host.child.lock().await;
                 match guard.as_mut() {
-                    // `try_wait` reaps the child; `None` means it is still running.
-                    Some(child) => child.try_wait().ok().flatten(),
+                    // `try_wait` reaps the child; a missing child with a launch recipe means
+                    // the previous launch failed and still needs supervision.
+                    Some(child) => match child.try_wait() {
+                        Ok(status) => status.map(|status| format!("exited with {status}")),
+                        Err(error) => {
+                            tracing::error!(host_id = %host.host_id, %error, "Failed to inspect host process");
+                            continue;
+                        }
+                    },
+                    None if host.is_restartable() => Some(
+                        health
+                            .last_error
+                            .clone()
+                            .unwrap_or_else(|| "host has no running child".to_string()),
+                    ),
                     // Externally registered hosts have no child handle to observe.
                     None => continue,
                 }
             };
 
-            let Some(status) = exit_status else {
+            let Some(failure) = failure else {
                 // Still alive: a host that stayed up long enough has earned a fresh budget.
                 let budget = budgets.entry(host.host_id.clone()).or_default();
                 let healthy = budget
@@ -1744,10 +1907,9 @@ impl Supervisor {
             tracing::error!(
                 host_id = %host.host_id,
                 plugin_id = %plugin_id,
-                status = %status,
-                "Plugin host exited unexpectedly"
+                reason = %failure,
+                "Plugin host is not running"
             );
-            let failure = format!("exited with {status}");
 
             if !host.is_restartable() {
                 tracing::error!(
@@ -1762,19 +1924,17 @@ impl Supervisor {
             let now = Instant::now();
 
             if budget.attempts >= HOST_WATCHDOG_MAX_RESTARTS {
-                // Park it: a plugin that dies immediately on every launch needs a human.
-                if budget.next_at.is_none() {
+                // Keep the parked entry visible, including its recipe for an operator restart.
+                if health.state != "crashed" {
                     tracing::error!(
                         host_id = %host.host_id,
                         plugin_id = %plugin_id,
                         attempts = budget.attempts,
                         "Host crashed after repeated restarts; parking it as crashed until an operator restarts it"
                     );
-                    budget.next_at = Some(now);
-                    host.report_health("crashed", budget.attempts, Some(failure.clone()))
-                        .await;
-                    let _ = self.stop_host(&host.host_id).await;
                 }
+                host.report_health("crashed", budget.attempts, Some(failure.clone()))
+                    .await;
                 continue;
             }
 
@@ -1787,7 +1947,7 @@ impl Supervisor {
             }
 
             // Exponential backoff: 2s, 4s, 8s, 16s, capped at 30s.
-            let backoff = Duration::from_secs(2u64.saturating_pow(budget.attempts).min(30));
+            let backoff = Duration::from_secs(2u64.saturating_pow(budget.attempts + 1).min(30));
             budget.attempts += 1;
             let attempt = budget.attempts;
             budget.last_attempt = Some(now);
@@ -1813,7 +1973,8 @@ impl Supervisor {
                         error = %err,
                         "Failed to restart crashed plugin host"
                     );
-                    host.report_health("crashed", attempt, Some(err.to_string()))
+                    budget.next_at = Some(Instant::now() + backoff);
+                    host.report_health("restarting", attempt, Some(err.to_string()))
                         .await;
                 }
             }
@@ -1851,8 +2012,23 @@ impl Supervisor {
         }
     }
 
-    /// Stops all managed host processes and cleans up runtime sockets.
+    /// Finishes outstanding configuration commits, then stops all managed host processes.
+    ///
+    /// The caller must first stop HTTP, watchdogs and other lifecycle work from admitting new
+    /// operations. Configuration handlers reserve their lock before detaching, so after those
+    /// entry points drain this snapshot includes every remaining commit or rollback, even one
+    /// that has already removed its host. No host may be killed halfway through that transaction.
     pub async fn stop_all(&self) -> Result<(), SupervisorError> {
+        let configurations: Vec<_> = self
+            .config_versions
+            .read()
+            .await
+            .values()
+            .cloned()
+            .collect();
+        for configuration in configurations {
+            drop(configuration.lock().await);
+        }
         let host_ids: Vec<String> = self.hosts.read().await.keys().cloned().collect();
         for id in host_ids {
             let _ = self.stop_host(&id).await;

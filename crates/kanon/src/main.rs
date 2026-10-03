@@ -355,7 +355,15 @@ async fn main() -> StartupResult<()> {
             Vec::new()
         }
     };
-    launch_plugins(&supervisor, plugins, &plugin_state).await;
+    // Dependency installation belongs to optional plugins, not node readiness. Keep the task
+    // owned by main so shutdown can cancel an install or handshake before stopping live hosts.
+    let plugin_startup = {
+        let supervisor = supervisor.clone();
+        let plugin_state = plugin_state.clone();
+        tokio::spawn(async move {
+            launch_plugins(&supervisor, plugins, &plugin_state).await;
+        })
+    };
 
     // A crashed host is otherwise invisible: the supervisor would keep advertising a dead process
     // as healthy and route events into a closed socket. The watchdog prunes and restarts it.
@@ -391,6 +399,24 @@ async fn main() -> StartupResult<()> {
     // start would serve each message twice.
     kanon_core::shutdown_signal().await;
 
+    // No launcher or watchdog may publish a new host after the shutdown sweep starts. Awaiting
+    // cancellation drops any in-flight child handles, whose kill_on_drop stops unfinished work.
+    plugin_startup.abort();
+    if let Err(err) = plugin_startup.await
+        && !err.is_cancelled()
+    {
+        tracing::error!(error = %err, "Plugin startup task failed");
+    }
+    host_watchdog.abort();
+    mcp_watchdog.abort();
+    for task in [host_watchdog, mcp_watchdog] {
+        if let Err(err) = task.await
+            && !err.is_cancelled()
+        {
+            tracing::error!(error = %err, "Watchdog task failed");
+        }
+    }
+
     // Order matters. The console stops first. The pipeline then drains: ingress closes, queued
     // events go to the dead-letter log, and the event in progress and the queued replies get a
     // bounded grace. Only after that do the IPC server, adapters and hosts stop, because the
@@ -408,8 +434,6 @@ async fn main() -> StartupResult<()> {
     for (platform, error) in supervisor.adapters().stop_all().await {
         tracing::warn!(platform = %platform, error = %error, "Adapter failed to stop cleanly");
     }
-    host_watchdog.abort();
-    mcp_watchdog.abort();
     supervisor.stop_all().await?;
 
     tracing::info!("Kanon node shut down gracefully");
@@ -566,6 +590,9 @@ async fn launch_plugins(
     for discovered in plugins {
         let plugin_id = discovered.manifest.plugin.id.clone();
         let runtime = discovered.manifest.plugin.runtime.clone();
+        // Startup, operator edits and watchdog restarts agree on the same per-plugin boundary.
+        // Keep it until the host has read its saved configuration and entered the registry.
+        let _configuration = supervisor.lock_plugin_config(&plugin_id).await;
 
         // A disabled plugin is not spawned at all: no host process, no routing, no adapter.
         if !plugin_state.is_enabled(PLUGIN_SECTION, &plugin_id).await {

@@ -243,6 +243,8 @@ async fn install_from_dir(
     validate_manifest(&manifest)?;
 
     let plugin_id = manifest.plugin.id.clone();
+    // Replacement must not switch the registered host halfway through a configuration commit.
+    let _configuration = state.supervisor().lock_plugin_config(&plugin_id).await;
     let source_dir = manifest_file.parent().unwrap_or(source_path).to_path_buf();
     let plugins_root = state.plugins_dir().to_path_buf();
     std::fs::create_dir_all(&plugins_root)?;

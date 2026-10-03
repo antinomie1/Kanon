@@ -9,7 +9,7 @@
 //!   stable across turns (see [`crate::memory`] for why that matters);
 //! - Atomic compaction: the covered prefix is deleted and the summary written in one transaction,
 //!   so a failure never loses the previous history;
-//! - High-concurrency in-memory read cache (sub-5µs lookups via lock-free [`DashMap`]);
+//! - A bounded read cache updated atomically with its SQLite connection;
 //! - Bounded LRU cache eviction preventing memory leak under millions of sessions;
 //! - Transactional commit points and WAL (Write-Ahead Logging) checkpoints;
 //! - Strict error semantics: write errors fail fast and prevent silent cache-DB divergence;
@@ -19,11 +19,9 @@
 //!   status), which can share the database file with the conversation history.
 
 use async_trait::async_trait;
-use dashmap::DashMap;
 use rusqlite::{Connection, params};
-use std::collections::VecDeque;
+use std::collections::{HashMap, VecDeque};
 use std::path::Path;
-use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 use tokio::sync::Mutex;
 
@@ -37,17 +35,18 @@ pub type PersistentMemory = SqliteMemory;
 
 /// Persistent conversational memory backend backed by an embedded SQLite database.
 pub struct SqliteMemory {
-    /// Exclusive thread-safe database connection handle.
-    conn: Arc<Mutex<Connection>>,
-    /// High-performance in-memory read cache preventing repeated disk I/O amplification.
-    cache: Arc<DashMap<String, SessionMemory>>,
-    /// LRU session access queue tracking recency for cache eviction.
-    lru_order: Arc<Mutex<VecDeque<String>>>,
-    /// Per-session serialization lock ensuring sequential consistency across concurrent operations
-    /// on the same session (preventing SQLite commit and memory cache update order divergence).
-    session_locks: Arc<DashMap<String, Arc<Mutex<()>>>>,
+    /// One owner for database commits, cache updates and eviction. SQLite already serializes this
+    /// connection; a second lock domain would let eviction race a committed cache update.
+    state: Mutex<SqliteState>,
     /// Maximum count of active sessions kept in the in-memory cache.
     max_cached_sessions: usize,
+}
+
+/// Database and its derived cache, protected together for the duration of each operation.
+struct SqliteState {
+    conn: Connection,
+    cache: HashMap<String, SessionMemory>,
+    lru_order: VecDeque<String>,
 }
 
 impl SqliteMemory {
@@ -93,8 +92,10 @@ impl SqliteMemory {
     /// Ensures all pending Write-Ahead Log pages are safely written back to the
     /// main database file without blocking concurrent readers.
     pub async fn commit_point(&self) -> Result<(), MemoryError> {
-        let conn = self.conn.lock().await;
-        conn.execute_batch("PRAGMA wal_checkpoint(PASSIVE);")?;
+        let state = self.state.lock().await;
+        state
+            .conn
+            .execute_batch("PRAGMA wal_checkpoint(PASSIVE);")?;
         Ok(())
     }
 
@@ -105,12 +106,9 @@ impl SqliteMemory {
 
     /// Commits and updates the timestamp for a specific session.
     pub async fn commit_session(&self, session_key: &str) -> Result<(), MemoryError> {
-        let lock = self.session_lock(session_key);
-        let _guard = lock.lock().await;
-
+        let state = self.state.lock().await;
         let now = current_timestamp();
-        let conn = self.conn.lock().await;
-        conn.execute(
+        state.conn.execute(
             "UPDATE sessions SET updated_at = ?1 WHERE session_key = ?2",
             params![now, session_key],
         )?;
@@ -164,10 +162,11 @@ impl SqliteMemory {
         Self::ensure_column(&conn, "sessions", "summary")?;
 
         Ok(Self {
-            conn: Arc::new(Mutex::new(conn)),
-            cache: Arc::new(DashMap::new()),
-            lru_order: Arc::new(Mutex::new(VecDeque::new())),
-            session_locks: Arc::new(DashMap::new()),
+            state: Mutex::new(SqliteState {
+                conn,
+                cache: HashMap::new(),
+                lru_order: VecDeque::new(),
+            }),
             max_cached_sessions: Self::DEFAULT_CACHE_CAPACITY,
         })
     }
@@ -188,52 +187,31 @@ impl SqliteMemory {
         Ok(())
     }
 
-    /// Retrieves or allocates the serialization lock for a session key.
-    fn session_lock(&self, session_key: &str) -> Arc<Mutex<()>> {
-        self.session_locks
-            .entry(session_key.to_string())
-            .or_insert_with(|| Arc::new(Mutex::new(())))
-            .clone()
-    }
-
-    /// Updates LRU order and evicts least recently accessed sessions if cache capacity is exceeded.
-    async fn touch_lru(&self, session_key: &str) {
-        let mut lru = self.lru_order.lock().await;
-        if let Some(pos) = lru.iter().position(|k| k == session_key) {
-            lru.remove(pos);
+    /// Evicts only between complete operations, while the connection and cache share one lock.
+    fn touch_lru(&self, state: &mut SqliteState, session_key: &str) {
+        if let Some(pos) = state.lru_order.iter().position(|key| key == session_key) {
+            state.lru_order.remove(pos);
         }
-        lru.push_back(session_key.to_string());
-
-        // Evict LRU entries from memory cache when exceeding capacity
-        while self.cache.len() > self.max_cached_sessions && !lru.is_empty() {
-            if let Some(evicted_key) = lru.pop_front() {
-                if evicted_key != session_key {
-                    self.cache.remove(&evicted_key);
-                    // Also evict the session lock if it is no longer actively held
-                    if let Some(entry) = self.session_locks.get(&evicted_key)
-                        && Arc::strong_count(&entry) <= 2
-                    {
-                        drop(entry);
-                        self.session_locks.remove(&evicted_key);
-                    }
-                } else {
-                    // Put back if it's the current active key and break
-                    lru.push_back(evicted_key);
-                    break;
-                }
-            }
+        state.lru_order.push_back(session_key.to_string());
+        while state.cache.len() > self.max_cached_sessions {
+            let Some(key) = state.lru_order.pop_front() else {
+                break;
+            };
+            state.cache.remove(&key);
         }
     }
 
     /// Ensures a session is loaded from SQLite into the in-memory read cache.
-    async fn ensure_session_cached(&self, session_key: &str) -> Result<(), MemoryError> {
-        if self.cache.contains_key(session_key) {
-            self.touch_lru(session_key).await;
+    fn ensure_session_cached(
+        state: &mut SqliteState,
+        session_key: &str,
+    ) -> Result<(), MemoryError> {
+        if state.cache.contains_key(session_key) {
             return Ok(());
         }
 
         let (summary, loaded_messages) = {
-            let conn = self.conn.lock().await;
+            let conn = &state.conn;
 
             // Query the summary of earlier compactions
             let mut session_stmt =
@@ -289,11 +267,10 @@ impl SqliteMemory {
             (summary, loaded_messages)
         };
 
-        self.cache.insert(
+        state.cache.insert(
             session_key.to_string(),
             SessionMemory::from_parts(summary, loaded_messages),
         );
-        self.touch_lru(session_key).await;
         Ok(())
     }
 }
@@ -361,19 +338,14 @@ impl Memory for SqliteMemory {
         session_key: &str,
         messages: Vec<ChatMessage>,
     ) -> Result<(), MemoryError> {
-        let lock = self.session_lock(session_key);
-        let _guard = lock.lock().await;
-
-        self.ensure_session_cached(session_key).await?;
-
+        let mut state = self.state.lock().await;
         let now = current_timestamp();
 
         // 1. Batch insert in a single SQLite transaction.
         // If the write fails the whole transaction rolls back and the memory cache stays untouched,
         // so the cache can never run ahead of the database.
         {
-            let mut conn = self.conn.lock().await;
-            let tx = conn.transaction()?;
+            let tx = state.conn.transaction()?;
             tx.execute(
                 "INSERT OR IGNORE INTO sessions (session_key, summary, updated_at) VALUES (?1, NULL, ?2)",
                 params![session_key, now],
@@ -385,25 +357,23 @@ impl Memory for SqliteMemory {
         }
 
         // 2. ONLY upon successful database commit, update the in-memory read cache.
-        self.cache
-            .entry(session_key.to_string())
-            .or_default()
-            .extend_messages(messages);
-
-        self.touch_lru(session_key).await;
+        if let Some(session) = state.cache.get_mut(session_key) {
+            session.extend_messages(messages);
+            self.touch_lru(&mut state, session_key);
+        }
         Ok(())
     }
 
     async fn snapshot(&self, session_key: &str) -> Result<MemorySnapshot, MemoryError> {
-        let lock = self.session_lock(session_key);
-        let _guard = lock.lock().await;
-
-        self.ensure_session_cached(session_key).await?;
-        Ok(self
+        let mut state = self.state.lock().await;
+        Self::ensure_session_cached(&mut state, session_key)?;
+        let snapshot = state
             .cache
             .get(session_key)
             .map(|session| session.snapshot())
-            .unwrap_or_default())
+            .unwrap_or_default();
+        self.touch_lru(&mut state, session_key);
+        Ok(snapshot)
     }
 
     async fn compact_history(
@@ -412,29 +382,28 @@ impl Memory for SqliteMemory {
         covered: usize,
         summary: String,
     ) -> Result<(), MemoryError> {
-        let lock = self.session_lock(session_key);
-        let _guard = lock.lock().await;
-
-        self.ensure_session_cached(session_key).await?;
-
-        let held = self
-            .cache
-            .get(session_key)
-            .map(|session| session.len())
-            .unwrap_or(0);
-        if covered > held {
-            return Err(MemoryError::Backend(format!(
-                "cannot compact {covered} messages: the history only holds {held}"
-            )));
-        }
-
+        let mut state = self.state.lock().await;
         let now = current_timestamp();
 
         // 1. Delete the covered prefix and store the summary in one transaction. If anything fails
         // (disk full, crash) the transaction aborts and the previous history is untouched.
         {
-            let mut conn = self.conn.lock().await;
-            let tx = conn.transaction()?;
+            let tx = state.conn.transaction()?;
+            let held: i64 = tx.query_row(
+                "SELECT COUNT(*) FROM messages WHERE session_key = ?1",
+                params![session_key],
+                |row| row.get(0),
+            )?;
+            let covered_rows = i64::try_from(covered).map_err(|_| {
+                MemoryError::Backend(
+                    "compaction message count exceeds SQLite's integer range".into(),
+                )
+            })?;
+            if covered_rows > held {
+                return Err(MemoryError::Backend(format!(
+                    "cannot compact {covered} messages: the history only holds {held}"
+                )));
+            }
 
             // Message ids grow with insertion order, so the covered prefix is the `covered`
             // smallest ids of the session; anything appended since has a larger id and survives.
@@ -442,7 +411,7 @@ impl Memory for SqliteMemory {
                 "DELETE FROM messages
                  WHERE session_key = ?1
                  AND id IN (SELECT id FROM messages WHERE session_key = ?1 ORDER BY id ASC LIMIT ?2)",
-                params![session_key, covered as i64],
+                params![session_key, covered_rows],
             )?;
             tx.execute(
                 "INSERT INTO sessions (session_key, summary, updated_at)
@@ -456,21 +425,18 @@ impl Memory for SqliteMemory {
         }
 
         // 2. ONLY upon successful commit, mirror the fold into the read cache.
-        if let Some(mut session) = self.cache.get_mut(session_key) {
+        if let Some(session) = state.cache.get_mut(session_key) {
             session.compact(covered, summary)?;
+            self.touch_lru(&mut state, session_key);
         }
-
-        self.touch_lru(session_key).await;
         Ok(())
     }
 
     async fn clear(&self, session_key: &str) -> Result<(), MemoryError> {
-        let lock = self.session_lock(session_key);
-        let _guard = lock.lock().await;
+        let mut state = self.state.lock().await;
 
         {
-            let mut conn = self.conn.lock().await;
-            let tx = conn.transaction()?;
+            let tx = state.conn.transaction()?;
             tx.execute(
                 "DELETE FROM messages WHERE session_key = ?1",
                 params![session_key],
@@ -481,20 +447,21 @@ impl Memory for SqliteMemory {
             )?;
             tx.commit()?;
         }
-        self.cache.remove(session_key);
-        let mut lru = self.lru_order.lock().await;
-        if let Some(pos) = lru.iter().position(|k| k == session_key) {
-            lru.remove(pos);
+        state.cache.remove(session_key);
+        if let Some(pos) = state.lru_order.iter().position(|k| k == session_key) {
+            state.lru_order.remove(pos);
         }
         Ok(())
     }
 
     async fn session_count(&self) -> Result<usize, MemoryError> {
-        let conn = self.conn.lock().await;
-        let count: i64 = conn.query_row("SELECT COUNT(*) FROM sessions", [], |row| {
-            let count: i64 = row.get(0)?;
-            Ok(count)
-        })?;
+        let state = self.state.lock().await;
+        let count: i64 = state
+            .conn
+            .query_row("SELECT COUNT(*) FROM sessions", [], |row| {
+                let count: i64 = row.get(0)?;
+                Ok(count)
+            })?;
         Ok(count as usize)
     }
 
@@ -502,8 +469,8 @@ impl Memory for SqliteMemory {
         // The database is authoritative: the cache only ever mirrors committed rows, so reading
         // here never misses a message the cache holds. `substr` compares the prefix literally,
         // where `LIKE` would treat `%` and `_` in a chat id as wildcards.
-        let conn = self.conn.lock().await;
-        let mut stmt = conn.prepare(
+        let state = self.state.lock().await;
+        let mut stmt = state.conn.prepare(
             "SELECT s.session_key,
                     (SELECT COUNT(*) FROM messages m
                       WHERE m.session_key = s.session_key AND m.role IN ('user', 'assistant')),

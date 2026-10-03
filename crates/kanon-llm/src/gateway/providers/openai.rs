@@ -536,92 +536,83 @@ impl LlmProvider for OpenAiChatProvider {
 
         tokio::spawn(async move {
             let mut decoder = SseDecoder::new();
-            let mut has_finished = false;
+            let mut calls = std::collections::BTreeMap::<usize, super::PendingToolCall>::new();
 
             while let Some(chunk_res) = byte_stream.next().await {
                 let chunk = match chunk_res {
-                    Ok(c) => c,
-                    Err(e) => {
-                        let _ = tx.send(Err(GatewayError::Http(e))).await;
+                    Ok(chunk) => chunk,
+                    Err(error) => {
+                        let _ = tx.send(Err(GatewayError::Http(error))).await;
                         return;
                     }
                 };
-
-                let events = decoder.decode(&chunk);
-                for ev in events {
-                    if ev.data.trim() == "[DONE]" {
-                        if !has_finished {
-                            let _ = tx.send(Ok(ChatChunk::done(Some("stop".to_string())))).await;
-                        }
+                for event in decoder.decode(&chunk) {
+                    if event.data.trim() == "[DONE]" {
+                        let _ = tx
+                            .send(super::finish_tool_calls(calls, Some("stop".into())))
+                            .await;
                         return;
                     }
-
-                    if let Ok(stream_resp) =
-                        serde_json::from_str::<wire::OpenAiStreamResponse>(&ev.data)
+                    let response =
+                        match serde_json::from_str::<wire::OpenAiStreamResponse>(&event.data) {
+                            Ok(response) => response,
+                            Err(error) => {
+                                let _ = tx.send(Err(GatewayError::Json(error))).await;
+                                return;
+                            }
+                        };
+                    // The gateway requests one choice. Other choices must never share its tool ids.
+                    for choice in response
+                        .choices
+                        .into_iter()
+                        .filter(|choice| choice.index == 0)
                     {
-                        for choice in stream_resp.choices {
-                            let finish_reason = choice.finish_reason;
-                            let is_done = finish_reason.is_some();
-                            if is_done {
-                                has_finished = true;
+                        for delta in choice.delta.tool_calls.unwrap_or_default() {
+                            let Some(index) = delta.index else {
+                                let _ = tx
+                                    .send(Err(GatewayError::InvalidResponse(
+                                        "streamed tool call has no index".into(),
+                                    )))
+                                    .await;
+                                return;
+                            };
+                            let call = calls.entry(index).or_default();
+                            if let Some(id) = delta.id {
+                                call.id.push_str(&id);
                             }
-
-                            let delta_text = choice.delta.content.unwrap_or_default();
-                            let reasoning_text = choice.delta.reasoning_content;
-
-                            let tool_calls: Vec<ToolCall> = choice
-                                .delta
-                                .tool_calls
-                                .unwrap_or_default()
-                                .into_iter()
-                                .map(|tc| ToolCall {
-                                    id: tc.id.unwrap_or_default(),
-                                    name: tc
-                                        .function
-                                        .as_ref()
-                                        .and_then(|f| f.name.clone())
-                                        .unwrap_or_default(),
-                                    arguments: tc
-                                        .function
-                                        .as_ref()
-                                        .and_then(|f| f.arguments.as_ref())
-                                        .and_then(|args| serde_json::from_str(args).ok())
-                                        .unwrap_or(serde_json::json!({})),
-                                })
-                                .collect();
-
-                            let has_content = !delta_text.is_empty()
-                                || reasoning_text.is_some()
-                                || !tool_calls.is_empty();
-
-                            if has_content {
-                                let out_chunk = ChatChunk {
-                                    delta_text,
-                                    reasoning_text,
-                                    is_finished: false,
-                                    finish_reason: None,
-                                    tool_calls,
-                                };
-
-                                if tx.send(Ok(out_chunk)).await.is_err() {
-                                    return;
+                            if let Some(function) = delta.function {
+                                if let Some(name) = function.name {
+                                    call.name.push_str(&name);
+                                }
+                                if let Some(arguments) = function.arguments {
+                                    call.arguments.push_str(&arguments);
                                 }
                             }
-
-                            if is_done {
-                                let done_chunk = ChatChunk::done(finish_reason);
-                                if tx.send(Ok(done_chunk)).await.is_err() {
-                                    return;
-                                }
-                            }
+                        }
+                        let out = ChatChunk {
+                            delta_text: choice.delta.content.unwrap_or_default(),
+                            reasoning_text: choice.delta.reasoning_content,
+                            ..ChatChunk::default()
+                        };
+                        if (!out.delta_text.is_empty() || out.reasoning_text.is_some())
+                            && tx.send(Ok(out)).await.is_err()
+                        {
+                            return;
+                        }
+                        if choice.finish_reason.is_some() {
+                            let _ = tx
+                                .send(super::finish_tool_calls(calls, choice.finish_reason))
+                                .await;
+                            return;
                         }
                     }
                 }
             }
-
-            if !has_finished {
-                let _ = tx.send(Ok(ChatChunk::done(None))).await;
-            }
+            let _ = tx
+                .send(Err(GatewayError::InvalidResponse(
+                    "OpenAI stream ended before its terminal event".into(),
+                )))
+                .await;
         });
 
         Ok(crate::gateway::reasoning::separate_stream(Box::pin(

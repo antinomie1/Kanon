@@ -45,19 +45,27 @@ class HostServiceImpl(pb_grpc.PluginHostServiceServicer):
                 error_message=f"Stale config version {request.version}: current is {self._config_version}",
                 applied_version=self._config_version,
             )
-        self._config_version = request.version
         if request.HasField("config"):
             new_config = MessageToDict(request.config)
+            previous = self.plugin.context.config if self.plugin.context is not None else None
             if self.plugin.context is not None:
                 self.plugin.context.config = new_config
             try:
                 await self.plugin.on_config_reload(new_config)
-            except Exception as exc:
+            except BaseException as exc:
+                # Rejection must preserve both the accepted cache and its version, or the
+                # core's retry of this version would be rejected as stale forever.
+                if self.plugin.context is not None:
+                    self.plugin.context.config = previous
+                # Cancellation and process-exit signals still propagate after cache rollback.
+                if not isinstance(exc, Exception):
+                    raise
                 return pb.ReloadPluginConfigResponse(
                     success=False,
                     error_message=f"on_config_reload failed: {exc}",
                     applied_version=self._config_version,
                 )
+        self._config_version = request.version
         return pb.ReloadPluginConfigResponse(
             success=True,
             error_message="",

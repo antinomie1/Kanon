@@ -49,7 +49,9 @@ Supervisor 启动宿主时注入的**启动契约**（插件不得把其他环�
 握手时调用，返回宿主内每个插件的 `PluginMeta`。核心的命令路由、触发器、工具目录、事件订阅与装饰器列表**全部**以此为准（`plugin.toml` 中的 `[[commands]]`/`[[tools]]` 仅用于控制台离线展示）。
 
 ### `ReloadPluginConfig(ReloadPluginConfigRequest) → ReloadPluginConfigResponse`
-推送新配置。`version` 为单调递增的 CAS 版本：`version <= 当前版本` 必须拒绝（`success = false`，`applied_version` 为当前版本）。插件拒绝配置时返回 `success = false` 与原因，核心不会持久化该配置。
+推送新配置。`version` 为单调递增的 CAS 版本：`version <= 当前版本` 必须拒绝（`success = false`，`applied_version` 为当前版本）。插件拒绝配置时返回 `success = false` 与原因，并保留原配置与原版本。
+
+控制台更新以单插件事务锁串行执行校验、保存候选配置与热加载，读取配置也使用该锁，保证返回的配置值与版本对应。写盘失败不会调用宿主；宿主明确拒绝后，核心在释放锁前恢复原配置文件（原本没有文件则删除候选文件）。RPC 超过 10 秒或结果不确定时同样恢复文件，并将宿主移出路由，待重启从文件重新加载；恢复失败会显式报告并移出宿主，要求检查配置后再重启。HTTP 请求断开不会中断已经开始的事务。节点在候选文件保存后崩溃，重启时以该文件为准。
 
 ### `InvokeAction(PluginActionRequest) → PluginActionResponse`
 控制台调用的管理动作（`POST /api/v1/plugins/{id}/actions/{action}`），从不暴露给模型。失败以 `success = false` + `error_message` 表达，`result` 为 JSON 对象。
@@ -81,6 +83,8 @@ Supervisor 启动宿主时注入的**启动契约**（插件不得把其他环�
 ### `OnExecuteCommand(CommandExecuteRequest) → CommandExecuteResponse`
 
 斜杠命令、正则触发器与会话续接共用此 RPC。
+
+核心设置 **30 秒**截止时间；超时返回 `DEADLINE_EXCEEDED` 并释放聊天处理名额。超时不代表宿主内已经开始的外部副作用被撤销，调用方不会自动重试命令。
 
 | 请求字段 | 说明 |
 | --- | --- |
@@ -445,6 +449,7 @@ Supervisor 启动宿主时注入的**启动契约**（插件不得把其他环�
 | 项目 | 值 |
 | --- | --- |
 | 前置过滤链总预算 | 30ms（单插件 5ms 告警） |
+| `OnExecuteCommand` 命令 / 触发器 / 续接 | 30 秒 |
 | 会话接管 `capture_seconds` 上限 | 600 秒 |
 | `OnEvent` 单订阅者等待 | 5 秒 |
 | `OnDecorateReply` 单装饰器 | 3 秒 |

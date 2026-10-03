@@ -7,6 +7,7 @@
 //!   Python / TypeScript plugin's scripts together with the dependency declaration and lockfile
 //!   from which the node installs the plugin's environment;
 //! - `pages/` and `i18n/`, which the node serves to the console.
+//! - additional runtime resources explicitly named by `[plugin].include`.
 //!
 //! Everything else (the sources of a compiled plugin, tests, documentation, editor and build
 //! state) stays out. The bundle's SHA-256 is saved next to it in `<bundle>.kpk.sha256`.
@@ -95,11 +96,39 @@ pub fn pack_plugin(plugin_path: &Path, output_dir: Option<&Path>) -> Result<Pack
         &manifest.plugin.runtime,
         &mut contents,
     )?;
+    for resource in &manifest.plugin.include {
+        let relative = Path::new(resource);
+        // Explicit resources are portable, literal paths. Reject escaping paths and symlinks
+        // instead of silently shipping something different from what the author declared.
+        if relative.as_os_str().is_empty()
+            || resource.contains(['\\', ':'])
+            || !relative
+                .components()
+                .all(|part| matches!(part, Component::Normal(_)))
+        {
+            return Err(PackError::Manifest(format!(
+                "invalid package include path: {resource}"
+            )));
+        }
+        // Check each ancestor too: an included file may otherwise traverse a directory symlink.
+        let mut path = plugin_root.to_path_buf();
+        for part in relative.components() {
+            path.push(part);
+            if fs::symlink_metadata(&path)?.file_type().is_symlink() {
+                return Err(PackError::Manifest(format!(
+                    "package include traverses a symlink: {resource}"
+                )));
+            }
+        }
+        collect_resource(plugin_root, relative, &mut contents)?;
+    }
     if manifest.plugin.runtime == "rust" {
         let binary = build_release(plugin_root, &manifest)?;
+        contents.retain(|(name, _)| name != &entrypoint);
         contents.push((entrypoint.clone(), binary));
     }
     contents.sort();
+    contents.dedup_by(|a, b| a.0 == b.0);
 
     // 3. Resolve destination directory and archive filename
     let out_dir = output_dir.unwrap_or(plugin_root);
@@ -107,13 +136,37 @@ pub fn pack_plugin(plugin_path: &Path, output_dir: Option<&Path>) -> Result<Pack
     let archive_name = format!("{}.kpk", manifest.plugin.id);
     let bundle_path = out_dir.join(&archive_name);
     let checksum_path = out_dir.join(format!("{archive_name}.sha256"));
+    // Repacking must not truncate a file that this same package is about to read.
+    let output_root = out_dir.canonicalize()?;
+    for (_, source) in &contents {
+        let source = source.canonicalize()?;
+        if source == output_root.join(&archive_name)
+            || source == output_root.join(format!("{archive_name}.sha256"))
+        {
+            return Err(PackError::Manifest(
+                "package includes its own output; choose a different output directory".into(),
+            ));
+        }
+    }
 
     // 4. Build the ZIP archive
     let mut zip = ZipWriter::new(File::create(&bundle_path)?);
     let options = SimpleFileOptions::default().compression_method(zip::CompressionMethod::Deflated);
     for (name, source) in &contents {
-        // The node may run the entrypoint directly (a Rust binary), so it stays executable.
-        let mode = if *name == entrypoint { 0o755 } else { 0o644 };
+        // Resource directories may include helper executables as well as data. Preserve their
+        // executable bits, while keeping the manifest's entrypoint executable on every platform.
+        #[cfg(unix)]
+        let resource_mode = {
+            use std::os::unix::fs::PermissionsExt;
+            0o644 | (fs::metadata(source)?.permissions().mode() & 0o111)
+        };
+        #[cfg(not(unix))]
+        let resource_mode = 0o644;
+        let mode = if *name == entrypoint {
+            0o755
+        } else {
+            resource_mode
+        };
         zip.start_file(name.as_str(), options.unix_permissions(mode))?;
         std::io::copy(&mut File::open(source)?, &mut zip)?;
     }
@@ -142,6 +195,32 @@ pub fn pack_plugin(plugin_path: &Path, output_dir: Option<&Path>) -> Result<Pack
     })
 }
 
+/// Collects an explicitly declared resource without filtering extensions or hidden file names.
+fn collect_resource(
+    root: &Path,
+    relative: &Path,
+    contents: &mut Vec<(String, PathBuf)>,
+) -> std::io::Result<()> {
+    let path = root.join(relative);
+    let kind = fs::symlink_metadata(&path)?.file_type();
+    if kind.is_file() {
+        contents.push((archive_path(relative), path));
+    } else if kind.is_dir() {
+        for entry in fs::read_dir(&path)? {
+            collect_resource(root, &relative.join(entry?.file_name()), contents)?;
+        }
+    } else {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            format!(
+                "package resource must be a regular file or directory: {}",
+                relative.display()
+            ),
+        ));
+    }
+    Ok(())
+}
+
 /// Collects the packaged files below `dir` as (archive path, file on disk).
 fn collect_files(
     root: &Path,
@@ -150,7 +229,8 @@ fn collect_files(
     contents: &mut Vec<(String, PathBuf)>,
 ) -> std::io::Result<()> {
     for entry in fs::read_dir(dir)? {
-        let path = entry?.path();
+        let entry = entry?;
+        let path = entry.path();
         let Ok(relative) = path.strip_prefix(root) else {
             continue;
         };
@@ -158,14 +238,25 @@ fn collect_files(
             .file_name()
             .map(|name| name.to_string_lossy())
             .unwrap_or_default();
-        if name.starts_with('.') {
+        if name.starts_with('.') || SKIPPED_DIRS.contains(&name.as_ref()) {
             continue;
         }
-        if path.is_dir() {
-            if !SKIPPED_DIRS.contains(&name.as_ref()) {
-                collect_files(root, &path, runtime, contents)?;
+        let kind = entry.file_type()?;
+        if kind.is_symlink() {
+            if path.is_dir() || is_packaged(relative, runtime) {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidInput,
+                    format!(
+                        "package input must not be a symlink: {}",
+                        relative.display()
+                    ),
+                ));
             }
-        } else if path.is_file() && is_packaged(relative, runtime) {
+            continue;
+        }
+        if kind.is_dir() {
+            collect_files(root, &path, runtime, contents)?;
+        } else if kind.is_file() && is_packaged(relative, runtime) {
             contents.push((archive_path(relative), path));
         }
     }

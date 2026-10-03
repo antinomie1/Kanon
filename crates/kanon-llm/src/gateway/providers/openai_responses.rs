@@ -557,56 +557,117 @@ impl LlmProvider for OpenAiResponsesProvider {
 
         tokio::spawn(async move {
             let mut decoder = SseDecoder::new();
+            let mut calls = std::collections::BTreeMap::<usize, super::PendingToolCall>::new();
 
             while let Some(chunk_res) = byte_stream.next().await {
                 let chunk = match chunk_res {
-                    Ok(c) => c,
-                    Err(e) => {
-                        let _ = tx.send(Err(GatewayError::Http(e))).await;
+                    Ok(chunk) => chunk,
+                    Err(error) => {
+                        let _ = tx.send(Err(GatewayError::Http(error))).await;
                         return;
                     }
                 };
-
-                let events = decoder.decode(&chunk);
-                for ev in events {
-                    if ev.data.trim() == "[DONE]" {
+                for event in decoder.decode(&chunk) {
+                    if event.data.trim() == "[DONE]" {
                         let _ = tx
-                            .send(Ok(ChatChunk::done(Some("completed".to_string()))))
+                            .send(super::finish_tool_calls(calls, Some("completed".into())))
                             .await;
                         return;
                     }
-
-                    if let Ok(val) = serde_json::from_str::<serde_json::Value>(&ev.data) {
-                        let event_type = ev.event.as_deref().or_else(|| val["type"].as_str());
-
-                        if let Some("response.output_text.delta" | "response.refusal.delta") =
-                            event_type
+                    let value: serde_json::Value = match serde_json::from_str(&event.data) {
+                        Ok(value) => value,
+                        Err(error) => {
+                            let _ = tx.send(Err(GatewayError::Json(error))).await;
+                            return;
+                        }
+                    };
+                    let event_type = event.event.as_deref().or_else(|| value["type"].as_str());
+                    match event_type {
+                        Some("response.output_item.added" | "response.output_item.done")
+                            if value["item"]["type"] == "function_call" =>
                         {
-                            if let Some(delta) = val["delta"].as_str()
+                            let Some(index) = value["output_index"].as_u64() else {
+                                let _ = tx
+                                    .send(Err(GatewayError::InvalidResponse(
+                                        "function call has no output index".into(),
+                                    )))
+                                    .await;
+                                return;
+                            };
+                            let item = &value["item"];
+                            calls.insert(
+                                index as usize,
+                                super::PendingToolCall {
+                                    id: item["call_id"].as_str().unwrap_or_default().into(),
+                                    name: item["name"].as_str().unwrap_or_default().into(),
+                                    arguments: item["arguments"]
+                                        .as_str()
+                                        .unwrap_or_default()
+                                        .into(),
+                                },
+                            );
+                        }
+                        Some(
+                            "response.function_call_arguments.delta"
+                            | "response.function_call_arguments.done",
+                        ) => {
+                            let call = value["output_index"]
+                                .as_u64()
+                                .and_then(|index| calls.get_mut(&(index as usize)));
+                            let Some(call) = call else {
+                                let _ = tx
+                                    .send(Err(GatewayError::InvalidResponse(
+                                        "arguments precede their function call".into(),
+                                    )))
+                                    .await;
+                                return;
+                            };
+                            if event_type == Some("response.function_call_arguments.done") {
+                                if let Some(arguments) = value["arguments"].as_str() {
+                                    call.arguments = arguments.into();
+                                }
+                            } else if let Some(delta) = value["delta"].as_str() {
+                                call.arguments.push_str(delta);
+                            }
+                        }
+                        Some("response.output_text.delta" | "response.refusal.delta") => {
+                            if let Some(delta) = value["delta"].as_str()
                                 && tx.send(Ok(ChatChunk::delta(delta))).await.is_err()
                             {
                                 return;
                             }
-                        } else if let Some("response.completed" | "response.done") = event_type {
-                            let _ = tx
-                                .send(Ok(ChatChunk::done(Some("completed".to_string()))))
-                                .await;
-                            return;
-                        } else if let Some(
+                        }
+                        Some(
                             "response.reasoning_summary_text.delta"
                             | "response.reasoning_text.delta",
-                        ) = event_type
-                            && let Some(delta) = val.get("delta").and_then(|d| d.as_str())
-                            && tx.send(Ok(ChatChunk::reasoning(delta))).await.is_err()
-                        {
+                        ) => {
+                            if let Some(delta) = value["delta"].as_str()
+                                && tx.send(Ok(ChatChunk::reasoning(delta))).await.is_err()
+                            {
+                                return;
+                            }
+                        }
+                        Some("response.completed" | "response.done") => {
+                            let _ = tx
+                                .send(super::finish_tool_calls(calls, Some("completed".into())))
+                                .await;
                             return;
                         }
-                        // Unknown delta events (arguments, signatures, metadata) are not answer text.
+                        Some("response.failed" | "response.incomplete" | "error") => {
+                            let _ = tx
+                                .send(Err(GatewayError::InvalidResponse(value.to_string())))
+                                .await;
+                            return;
+                        }
+                        _ => {}
                     }
                 }
             }
-
-            let _ = tx.send(Ok(ChatChunk::done(None))).await;
+            let _ = tx
+                .send(Err(GatewayError::InvalidResponse(
+                    "Responses stream ended before its terminal event".into(),
+                )))
+                .await;
         });
 
         Ok(crate::gateway::reasoning::separate_stream(Box::pin(

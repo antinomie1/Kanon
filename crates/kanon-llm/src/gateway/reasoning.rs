@@ -66,6 +66,7 @@ pub(crate) fn separate_stream(mut stream: super::ChatChunkStream) -> super::Chat
         let mut filter = ReasoningStream::default();
         let mut finish_reason = None;
         let mut has_native_reasoning = false;
+        let mut completed = false;
         while let Some(result) = stream.next().await {
             let mut chunk = match result {
                 Ok(chunk) => chunk,
@@ -78,6 +79,7 @@ pub(crate) fn separate_stream(mut stream: super::ChatChunkStream) -> super::Chat
             chunk.delta_text = filter.push(&chunk.delta_text, has_native_reasoning);
             let finished = chunk.is_finished;
             if finished {
+                completed = true;
                 finish_reason = chunk.finish_reason.take();
                 chunk.is_finished = false;
             }
@@ -91,6 +93,14 @@ pub(crate) fn separate_stream(mut stream: super::ChatChunkStream) -> super::Chat
             if finished {
                 break;
             }
+        }
+        if !completed {
+            let _ = tx
+                .send(Err(crate::error::GatewayError::InvalidResponse(
+                    "model stream ended before its terminal marker".into(),
+                )))
+                .await;
+            return;
         }
         let (answer, reasoning) = filter.finish();
         if !answer.is_empty() || reasoning.is_some() {

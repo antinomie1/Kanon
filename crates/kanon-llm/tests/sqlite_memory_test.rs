@@ -492,3 +492,66 @@ async fn test_sqlite_memory_concurrent_same_session_ordering() {
         );
     }
 }
+
+/// Cache eviction must never split a database commit from its cached history update.
+#[tokio::test(flavor = "multi_thread", worker_threads = 8)]
+async fn concurrent_eviction_preserves_complete_histories_and_compaction() {
+    let memory = Arc::new(
+        SqliteMemory::open_in_memory()
+            .unwrap()
+            .with_cache_capacity(1),
+    );
+    let start = Arc::new(tokio::sync::Barrier::new(8));
+    let mut tasks = Vec::new();
+    for worker in 0..8 {
+        let memory = memory.clone();
+        let start = start.clone();
+        tasks.push(tokio::spawn(async move {
+            let key = format!("worker-{worker}");
+            start.wait().await;
+            for turn in 0..50 {
+                memory
+                    .push_message(&key, ChatMessage::user(format!("message-{turn}")))
+                    .await
+                    .unwrap();
+                let snapshot = memory.snapshot(&key).await.unwrap();
+                assert_eq!(snapshot.messages.len(), turn + 1, "{key}");
+                assert_eq!(snapshot.messages[0].content.as_deref(), Some("message-0"));
+            }
+            memory
+                .compact_history(&key, 49, "first 49 messages".into())
+                .await
+                .unwrap();
+            let snapshot = memory.snapshot(&key).await.unwrap();
+            assert_eq!(snapshot.summary.as_deref(), Some("first 49 messages"));
+            assert_eq!(snapshot.messages.len(), 1);
+            assert_eq!(snapshot.messages[0].content.as_deref(), Some("message-49"));
+        }));
+    }
+    for task in tasks {
+        task.await.unwrap();
+    }
+}
+
+#[tokio::test]
+async fn zero_capacity_reads_and_writes_keep_the_database_authoritative() {
+    let memory = SqliteMemory::open_in_memory()
+        .unwrap()
+        .with_cache_capacity(0);
+    for turn in 0..3 {
+        memory
+            .push_message("s", ChatMessage::user(format!("message-{turn}")))
+            .await
+            .unwrap();
+        assert_eq!(memory.snapshot("s").await.unwrap().messages.len(), turn + 1);
+    }
+    memory
+        .compact_history("s", 2, "earlier messages".into())
+        .await
+        .unwrap();
+    let snapshot = memory.snapshot("s").await.unwrap();
+    assert_eq!(snapshot.summary.as_deref(), Some("earlier messages"));
+    assert_eq!(snapshot.messages.len(), 1);
+    memory.clear("s").await.unwrap();
+    assert!(memory.snapshot("s").await.unwrap().messages.is_empty());
+}

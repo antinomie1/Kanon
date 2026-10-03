@@ -76,12 +76,12 @@ pub struct CircuitBreakerConfig {
 }
 
 impl CircuitBreakerConfig {
-    /// Configuration baseline tailored for local inter-process communication (IPC) with plugin hosts.
-    /// Uses 50ms latency threshold for local sub-process execution.
+    /// Configuration baseline for plugin business calls, tripping on failures and timeouts.
+    /// Successful calls may perform external I/O, so their duration is not an IPC health signal.
     pub fn for_host() -> Self {
         Self {
             failure_threshold: 5,
-            latency_threshold: Some(Duration::from_millis(50)),
+            latency_threshold: None,
             window_size: 20,
             min_samples_for_latency: 5,
             cooldown_period: Duration::from_secs(5),

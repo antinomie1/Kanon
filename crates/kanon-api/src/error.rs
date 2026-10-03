@@ -109,6 +109,9 @@ impl From<kanon_core::SupervisorError> for ApiError {
             SupervisorError::HostNotFound(id) => {
                 ApiError::NotFound(format!("Host '{id}' not found in supervisor"))
             }
+            SupervisorError::HostBusy(id) => {
+                ApiError::Conflict(format!("Host '{id}' is already being started"))
+            }
             SupervisorError::PluginNotFound(id) => {
                 ApiError::NotFound(format!("Plugin '{id}' is not loaded by any active host"))
             }

@@ -21,3 +21,6 @@ kanon-transport = { path = "../kanon-transport" }
 tokio = { version = "1.40", features = ["full"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt", "registry"] }
+
+[dev-dependencies]
+tempfile = "3.12"

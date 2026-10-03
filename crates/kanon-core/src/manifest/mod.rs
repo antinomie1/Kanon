@@ -60,6 +60,10 @@ pub struct PluginSection {
     /// Source repository (a Git URL the console can install from).
     #[serde(default)]
     pub repository: Option<String>,
+    /// Additional files or directories to ship in a `.kpk`, relative to the plugin root.
+    /// Directories include all their contents; glob patterns and paths outside the root are not supported.
+    #[serde(default)]
+    pub include: Vec<String>,
 }
 
 /// Command metadata declared under `[[commands]]` in `plugin.toml`.

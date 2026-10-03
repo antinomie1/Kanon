@@ -50,7 +50,7 @@ pub trait LlmProvider: Send + Sync {
                         reasoning_text: resp.reasoning_content,
                         is_finished: false,
                         finish_reason: None,
-                        tool_calls: resp.tool_calls.clone(),
+                        tool_calls: Vec::new(),
                     }))
                     .await;
             }

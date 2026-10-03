@@ -541,44 +541,119 @@ impl LlmProvider for AnthropicMessagesProvider {
         tokio::spawn(async move {
             let mut decoder = SseDecoder::new();
             let mut finish_reason: Option<String> = None;
+            let mut calls = std::collections::BTreeMap::<usize, super::PendingToolCall>::new();
 
             while let Some(chunk_res) = byte_stream.next().await {
                 let chunk = match chunk_res {
-                    Ok(c) => c,
-                    Err(e) => {
-                        let _ = tx.send(Err(GatewayError::Http(e))).await;
+                    Ok(chunk) => chunk,
+                    Err(error) => {
+                        let _ = tx.send(Err(GatewayError::Http(error))).await;
                         return;
                     }
                 };
-
-                let events = decoder.decode(&chunk);
-                for ev in events {
-                    if let Ok(val) = serde_json::from_str::<serde_json::Value>(&ev.data) {
-                        let event_type = ev.event.as_deref().or_else(|| val["type"].as_str());
-
-                        if let Some("content_block_delta") = event_type {
-                            if let Some("text_delta") = val["delta"]["type"].as_str()
-                                && let Some(text) = val["delta"]["text"].as_str()
-                                && tx.send(Ok(ChatChunk::delta(text))).await.is_err()
-                            {
-                                return;
-                            }
-                        } else if let Some("message_delta") = event_type {
-                            if let Some(stop_reason) = val["delta"]["stop_reason"].as_str() {
-                                finish_reason = Some(match stop_reason {
-                                    "tool_use" => "tool_calls".to_string(),
-                                    other => other.to_string(),
-                                });
-                            }
-                        } else if let Some("message_stop") = event_type {
-                            let _ = tx.send(Ok(ChatChunk::done(finish_reason.clone()))).await;
+                for event in decoder.decode(&chunk) {
+                    let value: serde_json::Value = match serde_json::from_str(&event.data) {
+                        Ok(value) => value,
+                        Err(error) => {
+                            let _ = tx.send(Err(GatewayError::Json(error))).await;
                             return;
                         }
+                    };
+                    let event_type = event.event.as_deref().or_else(|| value["type"].as_str());
+                    match event_type {
+                        Some("content_block_start")
+                            if value["content_block"]["type"] == "tool_use" =>
+                        {
+                            let Some(index) = value["index"].as_u64() else {
+                                let _ = tx
+                                    .send(Err(GatewayError::InvalidResponse(
+                                        "tool block has no index".into(),
+                                    )))
+                                    .await;
+                                return;
+                            };
+                            let block = &value["content_block"];
+                            // Empty input is a placeholder; input_json_delta carries the actual JSON.
+                            let input = block.get("input").filter(|input| {
+                                input.as_object().is_some_and(|object| !object.is_empty())
+                            });
+                            calls.insert(
+                                index as usize,
+                                super::PendingToolCall {
+                                    id: block["id"].as_str().unwrap_or_default().into(),
+                                    name: block["name"].as_str().unwrap_or_default().into(),
+                                    arguments: input
+                                        .map(serde_json::Value::to_string)
+                                        .unwrap_or_default(),
+                                },
+                            );
+                        }
+                        Some("content_block_delta") => match value["delta"]["type"].as_str() {
+                            Some("text_delta") => {
+                                if let Some(text) = value["delta"]["text"].as_str()
+                                    && tx.send(Ok(ChatChunk::delta(text))).await.is_err()
+                                {
+                                    return;
+                                }
+                            }
+                            Some("thinking_delta") => {
+                                if let Some(text) = value["delta"]["thinking"].as_str()
+                                    && tx.send(Ok(ChatChunk::reasoning(text))).await.is_err()
+                                {
+                                    return;
+                                }
+                            }
+                            Some("input_json_delta") => {
+                                let call = value["index"]
+                                    .as_u64()
+                                    .and_then(|index| calls.get_mut(&(index as usize)));
+                                let Some(call) = call else {
+                                    let _ = tx
+                                        .send(Err(GatewayError::InvalidResponse(
+                                            "arguments precede their tool block".into(),
+                                        )))
+                                        .await;
+                                    return;
+                                };
+                                if let Some(partial) = value["delta"]["partial_json"].as_str() {
+                                    call.arguments.push_str(partial);
+                                }
+                            }
+                            _ => {}
+                        },
+                        Some("message_delta") => {
+                            finish_reason = value["delta"]["stop_reason"].as_str().map(|reason| {
+                                if reason == "tool_use" {
+                                    "tool_calls"
+                                } else {
+                                    reason
+                                }
+                                .to_string()
+                            });
+                        }
+                        Some("message_stop") => {
+                            let _ = tx
+                                .send(super::finish_tool_calls(calls, finish_reason))
+                                .await;
+                            return;
+                        }
+                        Some("error") => {
+                            let _ = tx
+                                .send(Err(GatewayError::InvalidResponse(
+                                    value["error"].to_string(),
+                                )))
+                                .await;
+                            return;
+                        }
+                        _ => {}
                     }
                 }
             }
-
-            let _ = tx.send(Ok(ChatChunk::done(finish_reason))).await;
+            let _ = tx
+                .send(Err(GatewayError::InvalidResponse(
+                    "Anthropic stream ended before message_stop".into(),
+                )))
+                .await;
         });
 
         Ok(crate::gateway::reasoning::separate_stream(Box::pin(

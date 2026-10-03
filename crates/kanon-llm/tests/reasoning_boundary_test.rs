@@ -1,6 +1,7 @@
 //! Protocol, persistence and stream regressions using only synthetic local fixtures.
 
 use async_trait::async_trait;
+use axum::response::IntoResponse;
 use axum::{Json, Router, routing::post};
 use kanon_llm::BuiltinAgent;
 use kanon_llm::{
@@ -40,6 +41,7 @@ async fn all_retained_tool_rounds_replay_reasoning_after_restart() {
         async move {
             let mut requests = captured.lock().unwrap();
             let n = requests.len();
+            let streaming = body["stream"] == true;
             requests.push(body);
             let message = if n < 2 {
                 json!({"role":"assistant", "content":null, "reasoning_content":format!("private-{n}"),
@@ -47,7 +49,19 @@ async fn all_retained_tool_rounds_replay_reasoning_after_restart() {
             } else {
                 json!({"role":"assistant", "content":"public answer", "reasoning_content":format!("private-{n}")})
             };
-            Json(json!({"choices":[{"index":0,"message":message,"finish_reason":if n < 2 {"tool_calls"} else {"stop"}}]}))
+            let finish_reason = if n < 2 { "tool_calls" } else { "stop" };
+            if streaming {
+                let mut delta = message;
+                if let Some(calls) = delta["tool_calls"].as_array_mut() {
+                    for (index, call) in calls.iter_mut().enumerate() {
+                        call["index"] = json!(index);
+                    }
+                }
+                let event = json!({"choices":[{"index":0,"delta":delta,"finish_reason":finish_reason}]});
+                ([("content-type", "text/event-stream")], format!("data: {event}\n\ndata: [DONE]\n\n")).into_response()
+            } else {
+                Json(json!({"choices":[{"index":0,"message":message,"finish_reason":finish_reason}]})).into_response()
+            }
         }
     }))).await;
     let dir = tempfile::tempdir().unwrap();
@@ -102,7 +116,8 @@ async fn all_retained_tool_rounds_replay_reasoning_after_restart() {
         .tool(tool())
         .compaction(None)
         .build();
-    // The console's non-streaming tool path must expose reasoning only in its dedicated channel.
+    // Resuming with a genuine SSE response must replay stored reasoning and keep new reasoning
+    // separate from visible text even when tools remain available.
     let mut stream = agent
         .run_standalone_stream("s", "next question")
         .await
@@ -251,7 +266,7 @@ async fn empty_final_responses_are_not_persisted_in_either_agent_entrypoint() {
             let memory = Arc::new(InMemory::new());
             let agent = BuiltinAgent::builder("fixture", Arc::new(FinalResponseFixture(response)))
                 .memory(memory.clone())
-                // Offering a tool selects the non-streaming preflight in run_stream.
+                // A declared but unused tool must not change final-response persistence.
                 .tool(NativeTool::new(
                     ToolDefinition {
                         name: "unused".into(),
@@ -430,9 +445,8 @@ async fn explicitly_enabled_reasoning_replays_verbatim_in_stream_requests() {
 #[tokio::test]
 async fn empty_streams_complete_without_appending_blank_assistant_history() {
     for chunks in [
-        vec![],
         vec![ChatChunk::done(Some("stop".into()))],
-        vec![ChatChunk::delta("")],
+        vec![ChatChunk::delta(""), ChatChunk::done(None)],
         vec![ChatChunk::reasoning(""), ChatChunk::done(None)],
     ] {
         let memory = Arc::new(InMemory::new());
@@ -663,7 +677,6 @@ async fn provider_history_conversion_preserves_user_literals_and_separates_legac
 
 #[tokio::test]
 async fn real_sse_separates_legacy_chunks_and_responses_reasoning_events() {
-    use axum::response::IntoResponse;
     use kanon_llm::OpenAiResponsesProvider;
     for protocol in ["openai", "responses"] {
         let (route, body) = if protocol == "openai" {
@@ -679,7 +692,9 @@ async fn real_sse_separates_legacy_chunks_and_responses_reasoning_events() {
         } else {
             let events = [
                 json!({"type":"response.reasoning_summary_text.delta","delta":"private-a"}),
-                json!({"type":"response.function_call_arguments.delta","delta":"not answer"}),
+                json!({"type":"response.output_item.added","output_index":0,"item":{"type":"function_call","call_id":"call-1","name":"lookup","arguments":""}}),
+                json!({"type":"response.function_call_arguments.delta","output_index":0,"delta":"{\"query\":"}),
+                json!({"type":"response.function_call_arguments.delta","output_index":0,"delta":"\"not answer\"}"}),
                 json!({"type":"response.future_metadata.delta","delta":"not answer either"}),
                 json!({"type":"response.output_text.delta","delta":"answer"}),
                 json!({"type":"response.completed"}),
@@ -708,11 +723,21 @@ async fn real_sse_separates_legacy_chunks_and_responses_reasoning_events() {
             .unwrap();
         let mut answer = String::new();
         let mut reasoning = String::new();
+        let mut calls = Vec::new();
         while let Some(chunk) = stream.next().await {
             let chunk = chunk.unwrap();
             assert!(!chunk.delta_text.contains("private"));
             answer.push_str(&chunk.delta_text);
             reasoning.push_str(chunk.reasoning_text.as_deref().unwrap_or_default());
+            calls.extend(chunk.tool_calls);
+        }
+        if protocol == "responses" {
+            assert_eq!(calls.len(), 1);
+            assert_eq!(calls[0].id, "call-1");
+            assert_eq!(calls[0].name, "lookup");
+            assert_eq!(calls[0].arguments, json!({"query":"not answer"}));
+        } else {
+            assert!(calls.is_empty());
         }
         assert_eq!(answer, "answer");
         assert!(reasoning.contains("private-a"));
@@ -743,7 +768,7 @@ async fn responses_refusal_deltas_are_visible_and_persisted_once() {
     for event_header in [false, true] {
         let events = [
             json!({"type":"response.reasoning_summary_text.delta","delta":"private"}),
-            json!({"type":"response.function_call_arguments.delta","delta":"internal arguments"}),
+            json!({"type":"response.future_arguments.delta","delta":"internal arguments"}),
             json!({"type":"response.future_metadata.delta","delta":"internal metadata"}),
             json!({"type":"response.refusal.delta","delta":"synthetic "}),
             json!({"type":"response.refusal.delta","delta":"refusal"}),

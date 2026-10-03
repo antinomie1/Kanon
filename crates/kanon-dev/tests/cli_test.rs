@@ -341,6 +341,109 @@ fn test_plugin_pack_bundle_and_sha256() {
 }
 
 #[test]
+fn package_includes_declared_runtime_resources_and_rejects_missing_inputs() {
+    use std::io::Read;
+
+    let tmp = tempdir().unwrap();
+    let plugin = tmp.path().join("resource_plugin");
+    create_plugin_project("resources", "python", Some(&plugin)).unwrap();
+    let manifest_path = plugin.join("plugin.toml");
+    let original = std::fs::read_to_string(&manifest_path).unwrap();
+    std::fs::write(
+        &manifest_path,
+        original.replacen(
+            "[plugin]",
+            "[plugin]\ninclude = [\"assets\", \"main.py\"]",
+            1,
+        ),
+    )
+    .unwrap();
+    std::fs::create_dir(plugin.join("assets")).unwrap();
+    std::fs::write(plugin.join("assets/rules.json"), "{\"required\":true}").unwrap();
+    std::fs::write(plugin.join("assets/prompt.md"), "Answer from the rules.").unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::write(plugin.join("assets/helper"), "#!/bin/sh\nexit 0\n").unwrap();
+        std::fs::set_permissions(
+            plugin.join("assets/helper"),
+            std::fs::Permissions::from_mode(0o755),
+        )
+        .unwrap();
+        // An excluded documentation link is unrelated to the declared runtime resources.
+        std::os::unix::fs::symlink("unshipped-notes", plugin.join("notes.txt")).unwrap();
+    }
+
+    let report = pack_plugin(&plugin, Some(&tmp.path().join("out"))).unwrap();
+    assert_eq!(
+        report
+            .files
+            .iter()
+            .filter(|name| *name == "main.py")
+            .count(),
+        1
+    );
+    let mut archive = ZipArchive::new(File::open(report.bundle_path).unwrap()).unwrap();
+    let mut rules = String::new();
+    archive
+        .by_name("assets/rules.json")
+        .unwrap()
+        .read_to_string(&mut rules)
+        .unwrap();
+    assert_eq!(rules, "{\"required\":true}");
+    assert!(archive.by_name("assets/prompt.md").is_ok());
+    #[cfg(unix)]
+    assert_eq!(
+        archive
+            .by_name("assets/helper")
+            .unwrap()
+            .unix_mode()
+            .unwrap()
+            & 0o111,
+        0o111
+    );
+
+    for include in [
+        "missing.json",
+        "../outside",
+        ".",
+        "/absolute",
+        "C:\\outside",
+    ] {
+        let include = serde_json::to_string(include).unwrap();
+        std::fs::write(
+            &manifest_path,
+            original.replacen("[plugin]", &format!("[plugin]\ninclude = [{include}]"), 1),
+        )
+        .unwrap();
+        assert!(pack_plugin(&plugin, Some(&tmp.path().join("out"))).is_err());
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn package_rejects_resource_symlinks() {
+    let tmp = tempdir().unwrap();
+    let plugin = tmp.path().join("linked_plugin");
+    create_plugin_project("linked", "python", Some(&plugin)).unwrap();
+    let manifest_path = plugin.join("plugin.toml");
+    let original = std::fs::read_to_string(&manifest_path).unwrap();
+    std::fs::write(
+        &manifest_path,
+        original.replacen("[plugin]", "[plugin]\ninclude = [\"assets\"]", 1),
+    )
+    .unwrap();
+    std::fs::create_dir(plugin.join("assets")).unwrap();
+    std::fs::write(tmp.path().join("outside.json"), "private").unwrap();
+    std::os::unix::fs::symlink(
+        tmp.path().join("outside.json"),
+        plugin.join("assets/rules.json"),
+    )
+    .unwrap();
+    assert!(pack_plugin(&plugin, Some(&tmp.path().join("out"))).is_err());
+}
+
+#[test]
 fn test_plugin_pack_rust_ships_release_binary_at_entrypoint() {
     let tmp = tempdir().expect("tempdir");
     let plugin_dir = tmp.path().join("bin_plugin");

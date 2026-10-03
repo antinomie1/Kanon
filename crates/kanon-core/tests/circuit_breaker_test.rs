@@ -62,6 +62,26 @@ fn create_test_host(
     )
 }
 
+#[test]
+fn successful_business_calls_do_not_trip_the_default_host_breaker() {
+    let breaker = CircuitBreaker::with_defaults();
+    for _ in 0..25 {
+        let permit = breaker.try_acquire().expect("healthy host accepts work");
+        // A tool or command can legitimately wait for a slow external service.
+        permit.success(Duration::from_secs(2));
+    }
+    assert_eq!(breaker.state(), CircuitState::Closed);
+    assert!(breaker.is_available());
+
+    for _ in 0..5 {
+        breaker
+            .try_acquire()
+            .expect("failure threshold not yet reached")
+            .failure("business call timed out");
+    }
+    assert_eq!(breaker.state(), CircuitState::Open);
+}
+
 #[tokio::test]
 async fn test_circuit_breaker_consecutive_failures_and_cooldown_recovery() {
     let config = CircuitBreakerConfig {

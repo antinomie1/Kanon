@@ -320,3 +320,96 @@ async fn test_openai_chat_streaming_reasoning_sse() {
     assert_eq!(accumulated_reasoning, "I think therefore ");
     assert_eq!(accumulated_content, "The answer is 42.");
 }
+
+/// All protocols expose complete calls once, never partial JSON disguised as empty arguments.
+#[tokio::test]
+async fn streamed_tool_arguments_are_assembled_and_malformed_arguments_fail() {
+    for protocol in ["openai", "responses", "anthropic"] {
+        for malformed in [false, true] {
+            let tail = if malformed { "Tokyo" } else { "Tokyo\"}" };
+            let events = match protocol {
+                "openai" => vec![
+                    serde_json::json!({"choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"id":"call-1","function":{"name":"weather","arguments":"{\"city\":\""}}]},"finish_reason":null}]}),
+                    serde_json::json!({"choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"function":{"arguments":tail}}]},"finish_reason":"tool_calls"}]}),
+                ],
+                "responses" => vec![
+                    serde_json::json!({"type":"response.output_item.added","output_index":0,"item":{"type":"function_call","call_id":"call-1","name":"weather","arguments":""}}),
+                    serde_json::json!({"type":"response.function_call_arguments.delta","output_index":0,"delta":"{\"city\":\""}),
+                    serde_json::json!({"type":"response.function_call_arguments.delta","output_index":0,"delta":tail}),
+                    serde_json::json!({"type":"response.completed"}),
+                ],
+                _ => vec![
+                    serde_json::json!({"type":"content_block_start","index":0,"content_block":{"type":"tool_use","id":"call-1","name":"weather","input":{}}}),
+                    serde_json::json!({"type":"content_block_delta","index":0,"delta":{"type":"input_json_delta","partial_json":"{\"city\":\""}}),
+                    serde_json::json!({"type":"content_block_delta","index":0,"delta":{"type":"input_json_delta","partial_json":tail}}),
+                    serde_json::json!({"type":"message_delta","delta":{"stop_reason":"tool_use"}}),
+                    serde_json::json!({"type":"message_stop"}),
+                ],
+            };
+            let body: String = events
+                .iter()
+                .map(|event| format!("data: {event}\n\n"))
+                .collect();
+            let route = match protocol {
+                "openai" => "/v1/chat/completions",
+                "responses" => "/v1/responses",
+                _ => "/v1/messages",
+            };
+            let app = Router::new().route(
+                route,
+                post(move || {
+                    let body = body.clone();
+                    async move { ([("content-type", "text/event-stream")], body) }
+                }),
+            );
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let base = format!("http://{}/v1", listener.local_addr().unwrap());
+            tokio::spawn(async move {
+                axum::serve(listener, app).await.unwrap();
+            });
+            let provider: Box<dyn LlmProvider> = match protocol {
+                "openai" => Box::new(OpenAiChatProvider::new(base, None, "fixture")),
+                "responses" => Box::new(OpenAiResponsesProvider::new("").with_base_url(base)),
+                _ => Box::new(AnthropicMessagesProvider::new(base, None, "fixture")),
+            };
+            let request = ChatRequest {
+                model: "fixture".into(),
+                messages: vec![ChatMessage::user("weather?")],
+                tools: vec![kanon_llm::ToolDefinition {
+                    name: "weather".into(),
+                    description: "weather".into(),
+                    parameters: serde_json::json!({"type":"object"}),
+                }],
+                temperature: None,
+                max_tokens: None,
+            };
+            let mut stream = provider.chat_stream(&request).await.unwrap();
+            let mut calls = Vec::new();
+            let mut finished = 0;
+            let mut failed = false;
+            while let Some(chunk) = stream.next().await {
+                match chunk {
+                    Ok(chunk) => {
+                        assert!(chunk.delta_text.is_empty());
+                        calls.extend(chunk.tool_calls);
+                        finished += usize::from(chunk.is_finished);
+                    }
+                    Err(_) => failed = true,
+                }
+            }
+            assert_eq!(failed, malformed, "{protocol}");
+            assert_eq!(finished, usize::from(!malformed), "{protocol}");
+            if malformed {
+                assert!(
+                    calls.is_empty(),
+                    "{protocol}: malformed arguments must not execute"
+                );
+            } else {
+                assert_eq!(calls.len(), 1, "{protocol}");
+                assert_eq!(calls[0].id, "call-1");
+                assert_eq!(calls[0].name, "weather");
+                assert_eq!(calls[0].arguments, serde_json::json!({"city":"Tokyo"}));
+            }
+        }
+    }
+}

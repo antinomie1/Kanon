@@ -241,6 +241,7 @@ fn kanon_version_requirements_are_semver() {
         platforms: Vec::new(),
         homepage: None,
         repository: None,
+        include: Vec::new(),
     };
     let current = semver::Version::parse(kanon_core::KANON_VERSION).unwrap();
     let range = format!(

@@ -197,7 +197,7 @@ async fn plugin_config_reports_upstream_failure() {
     assert_eq!(status, 502, "body: {body}");
     assert_eq!(error_code(&body), "upstream_error");
 
-    // Persistence happens only after the host accepts the payload.
+    // The tentative file is restored when the hot reload cannot be confirmed.
     assert!(
         !config_dir
             .join(FIXTURE_PLUGIN_ID)

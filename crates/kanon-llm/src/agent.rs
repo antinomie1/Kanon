@@ -107,7 +107,10 @@ pub trait Agent: Send + Sync {
             .await
     }
 
-    /// Answers one text turn, streaming the final reply.
+    /// Answers one text turn, streaming model text while the same tool loop records the turn.
+    ///
+    /// Tools must use structured calls. Textual tool markup fails explicitly instead of executing
+    /// text already delivered to the client. Response hooks cannot replace emitted text.
     async fn run_stream(
         &self,
         session_id: &str,
@@ -360,7 +363,11 @@ pub trait AgentHook: Send + Sync {
         Ok(())
     }
 
-    /// Invoked immediately upon receiving a completion response from the model.
+    /// Invoked immediately upon receiving a complete response from the model.
+    ///
+    /// Streaming has already delivered its text by this point. Hooks may observe that text and
+    /// inspect tool calls, but changing streamed content or reasoning fails the turn explicitly;
+    /// use request hooks to shape streamed answers before generation.
     async fn on_llm_response(
         &self,
         _session_id: &str,
