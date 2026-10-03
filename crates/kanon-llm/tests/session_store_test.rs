@@ -1,8 +1,10 @@
 //! Tests for durable session metadata: what a session is besides its messages must survive a
 //! restart, or a conversation would resume with the wrong persona, counters and status.
 
-use std::sync::Arc;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::collections::HashMap;
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex, mpsc};
+use std::time::Duration;
 
 use kanon_llm::error::MemoryError;
 use kanon_llm::gateway::types::ChatMessage;
@@ -299,4 +301,126 @@ async fn memory_and_session_store_can_share_one_database_file_under_concurrent_w
         assert_eq!(reopened.get_metadata(&key).unwrap().turn_count, 5);
         assert_eq!(reopened.memory().get_messages(&key).await.unwrap().len(), 5);
     }
+}
+
+/// Delays one commit before it reaches disk, exposing writes that escape metadata locking.
+struct DelayedStore {
+    rows: Mutex<HashMap<String, SessionMetadata>>,
+    delay_next: AtomicBool,
+    entered: mpsc::Sender<()>,
+    release: Mutex<mpsc::Receiver<()>>,
+}
+
+impl SessionStore for DelayedStore {
+    fn load_all(&self) -> Result<Vec<SessionMetadata>, MemoryError> {
+        Ok(self.rows.lock().unwrap().values().cloned().collect())
+    }
+
+    fn save(&self, metadata: &SessionMetadata) -> Result<(), MemoryError> {
+        if self.delay_next.swap(false, Ordering::SeqCst) {
+            self.entered.send(()).unwrap();
+            self.release.lock().unwrap().recv().unwrap();
+        }
+        self.rows
+            .lock()
+            .unwrap()
+            .insert(metadata.session_key.clone(), metadata.clone());
+        Ok(())
+    }
+
+    fn delete(&self, session_key: &str) -> Result<(), MemoryError> {
+        self.rows.lock().unwrap().remove(session_key);
+        Ok(())
+    }
+}
+
+/// Runs a second mutation while the first has updated memory but has not committed its row.
+fn race_metadata_commits(
+    first: impl FnOnce(&SessionManager) + Send + 'static,
+    second: impl FnOnce(&SessionManager) + Send + 'static,
+) -> (Arc<SessionManager>, Arc<DelayedStore>) {
+    let (entered, entered_rx) = mpsc::channel();
+    let (release_tx, release) = mpsc::channel();
+    let store = Arc::new(DelayedStore {
+        rows: Mutex::new(HashMap::new()),
+        delay_next: AtomicBool::new(false),
+        entered,
+        release: Mutex::new(release),
+    });
+    let sessions = Arc::new(
+        SessionManager::new(Arc::new(InMemory::new()))
+            .with_store(store.clone())
+            .unwrap(),
+    );
+    sessions.set_persona("s", "old");
+    store.delay_next.store(true, Ordering::SeqCst);
+    let writer_sessions = sessions.clone();
+    let writer = std::thread::spawn(move || first(&writer_sessions));
+    entered_rx.recv_timeout(Duration::from_secs(2)).unwrap();
+    let next_sessions = sessions.clone();
+    let (done, done_rx) = mpsc::channel();
+    let next = std::thread::spawn(move || {
+        second(&next_sessions);
+        done.send(()).unwrap();
+    });
+
+    // The old implementation lets the second operation finish first. Release and join both
+    // workers before asserting, so a failed regression never leaves a blocked test thread.
+    let overtook = done_rx.recv_timeout(Duration::from_millis(100)).is_ok();
+    release_tx.send(()).unwrap();
+    writer.join().unwrap();
+    next.join().unwrap();
+    assert!(!overtook, "a later mutation overtook an unfinished commit");
+    (sessions, store)
+}
+
+#[test]
+fn every_metadata_mutator_keeps_disk_commits_in_memory_order() {
+    for operation in ["create", "update", "close", "unbind", "sweep"] {
+        let key = if operation == "create" { "new" } else { "s" };
+        let (sessions, store) = race_metadata_commits(
+            move |sessions| match operation {
+                "create" => {
+                    sessions.get_or_create(key);
+                }
+                "update" => sessions.set_variable(key, "first", "kept"),
+                "close" => sessions.close_session(key),
+                "unbind" => {
+                    sessions.unbind_persona("old");
+                }
+                "sweep" => {
+                    sessions.sweep_idle_sessions(Duration::ZERO);
+                }
+                _ => unreachable!(),
+            },
+            move |sessions| sessions.set_variable(key, "latest", "kept"),
+        );
+        let restored = SessionManager::new(Arc::new(InMemory::new()))
+            .with_store(store)
+            .unwrap();
+        assert_eq!(
+            serde_json::to_value(restored.get_metadata(key)).unwrap(),
+            serde_json::to_value(sessions.get_metadata(key)).unwrap(),
+            "{operation} persisted an older record"
+        );
+    }
+}
+
+#[test]
+fn deleting_a_session_cannot_be_undone_by_an_older_metadata_commit() {
+    let (sessions, store) = race_metadata_commits(
+        |sessions| sessions.set_variable("s", "first", "kept"),
+        |sessions| {
+            tokio::runtime::Builder::new_current_thread()
+                .build()
+                .unwrap()
+                .block_on(sessions.delete_session("s"))
+                .unwrap();
+        },
+    );
+    assert!(sessions.get_metadata("s").is_none());
+    assert!(
+        store.load_all().unwrap().is_empty(),
+        "deleted session was resurrected"
+    );
 }

@@ -217,6 +217,8 @@ pub type RuntimeSessionMetadata = SessionMetadata;
 /// The store is synchronous on purpose: a write is one small row, and keeping it synchronous lets
 /// every [`SessionManager`] mutator stay a plain method instead of turning the whole session API
 /// async. Implementations must therefore be quick (an embedded database, not a network call).
+/// Writes run under the metadata shard lock to preserve commit order; implementations must not
+/// call back into the same manager.
 pub trait SessionStore: Send + Sync {
     /// Loads every stored session record.
     fn load_all(&self) -> Result<Vec<SessionMetadata>, MemoryError>;
@@ -376,18 +378,15 @@ impl SessionManager {
     /// Applies `change` to a session (creating it when missing) and persists it if `change`
     /// reports that it altered anything.
     ///
-    /// The store is written after the map's shard lock is released, so file I/O never blocks
-    /// other sessions.
+    /// Keep the existing shard lock through persistence. Releasing it before saving would let
+    /// an older snapshot overwrite a newer update or resurrect a concurrently deleted record.
     fn update(&self, session_key: &str, change: impl FnOnce(&mut SessionMetadata) -> bool) {
-        let changed = {
-            let mut entry = self
-                .metadata
-                .entry(session_key.to_string())
-                .or_insert_with(|| SessionMetadata::new(session_key, self.default_scope.clone()));
-            change(&mut entry).then(|| entry.clone())
-        };
-        if let Some(record) = changed {
-            self.persist(&record);
+        let mut entry = self
+            .metadata
+            .entry(session_key.to_string())
+            .or_insert_with(|| SessionMetadata::new(session_key, self.default_scope.clone()));
+        if change(&mut entry) {
+            self.persist(&entry);
         }
     }
 
@@ -397,12 +396,10 @@ impl SessionManager {
         session_key: &str,
         change: impl FnOnce(&mut SessionMetadata) -> bool,
     ) {
-        let changed = self
-            .metadata
-            .get_mut(session_key)
-            .and_then(|mut entry| change(&mut entry).then(|| entry.clone()));
-        if let Some(record) = changed {
-            self.persist(&record);
+        if let Some(mut entry) = self.metadata.get_mut(session_key)
+            && change(&mut entry)
+        {
+            self.persist(&entry);
         }
     }
 
@@ -431,18 +428,15 @@ impl SessionManager {
     fn get_or_create_scoped(&self, session_key: &str, scope: SessionScope) -> SessionMetadata {
         use dashmap::mapref::entry::Entry;
 
-        let (record, created) = match self.metadata.entry(session_key.to_string()) {
-            Entry::Occupied(existing) => (existing.get().clone(), false),
+        match self.metadata.entry(session_key.to_string()) {
+            Entry::Occupied(existing) => existing.get().clone(),
             Entry::Vacant(slot) => {
                 let record = SessionMetadata::new(session_key, scope);
-                slot.insert(record.clone());
-                (record, true)
+                let entry = slot.insert(record);
+                self.persist(&entry);
+                entry.clone()
             }
-        };
-        if created {
-            self.persist(&record);
         }
-        record
     }
 
     /// Returns existing metadata for a session, if present.
@@ -491,18 +485,15 @@ impl SessionManager {
     /// Called when a persona is deleted: those sessions fall back to the base assistant instead of
     /// pointing at a persona that no longer exists.
     pub fn unbind_persona(&self, persona_id: &str) -> usize {
-        let mut unbound = Vec::new();
+        let mut unbound = 0;
         for mut entry in self.metadata.iter_mut() {
             if entry.persona_id.as_deref() == Some(persona_id) {
                 entry.persona_id = None;
-                unbound.push(entry.clone());
+                self.persist(&entry);
+                unbound += 1;
             }
         }
-        // Persisted after the iteration, so no shard lock is held across file I/O.
-        for record in &unbound {
-            self.persist(record);
-        }
-        unbound.len()
+        unbound
     }
 
     /// Removes the persona binding of one session, which then uses the base assistant.
@@ -585,17 +576,15 @@ impl SessionManager {
     ///
     /// Returns the number of sessions transitioned to idle.
     pub fn sweep_idle_sessions(&self, max_idle: Duration) -> usize {
-        let mut swept = Vec::new();
+        let mut swept = 0;
         for mut entry in self.metadata.iter_mut() {
             if entry.status == SessionStatus::Active && entry.is_idle(max_idle) {
                 entry.status = SessionStatus::Idle;
-                swept.push(entry.clone());
+                self.persist(&entry);
+                swept += 1;
             }
         }
-        for record in &swept {
-            self.persist(record);
-        }
-        swept.len()
+        swept
     }
 
     /// Returns the number of currently tracked sessions.
@@ -677,10 +666,15 @@ impl SessionManager {
     pub async fn delete_session(&self, session_key: &str) -> Result<(), MemoryError> {
         let _writing = self.agent_write(session_key)?;
         self.memory.clear(session_key).await?;
+        // Acquire the same shard as metadata writers, including when the key is absent. This
+        // keeps a pending creation or update from saving a row after its deletion committed.
+        let entry = self.metadata.entry(session_key.to_string());
         if let Some(store) = &self.store {
             store.delete(session_key)?;
         }
-        self.metadata.remove(session_key);
+        if let dashmap::mapref::entry::Entry::Occupied(entry) = entry {
+            entry.remove();
+        }
         Ok(())
     }
 }
