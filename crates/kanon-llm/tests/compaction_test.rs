@@ -643,7 +643,9 @@ async fn completed_provider_statuses_and_omitted_compatible_status_allow_compact
             ChatMessage::user("three"),
             ChatMessage::assistant("four"),
         ] {
-            Memory::push_message(memory.as_ref(), "s", message).await.unwrap();
+            Memory::push_message(memory.as_ref(), "s", message)
+                .await
+                .unwrap();
         }
         assert!(agent.compact_session("s", &[]).await.unwrap(), "{reason:?}");
         let snapshot = memory.snapshot("s").await.unwrap();
