@@ -5,7 +5,7 @@
 //! coerced to zero, because a fabricated `0 bytes` reading would silently mislead operators.
 
 use serde::Serialize;
-use sysinfo::{Pid, ProcessesToUpdate, System};
+use sysinfo::{Pid, ProcessRefreshKind, ProcessesToUpdate, System};
 
 /// Resident and virtual memory consumption of the core process.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -24,9 +24,13 @@ pub fn sample_process_memory() -> Option<MemoryUsage> {
     let pid = Pid::from_u32(std::process::id());
     let mut system = System::new();
 
-    // Refresh only our own process: a full process-table scan would be needlessly expensive
-    // on a scrape endpoint that the console may poll every few seconds.
-    system.refresh_processes(ProcessesToUpdate::Some(&[pid]), true);
+    // The console polls this endpoint, so collect only this process's memory. The default
+    // process refresh also reads CPU, disk I/O and executable data that we never expose.
+    system.refresh_processes_specifics(
+        ProcessesToUpdate::Some(&[pid]),
+        true,
+        ProcessRefreshKind::nothing().with_memory(),
+    );
 
     system.process(pid).map(|process| MemoryUsage {
         resident_bytes: process.memory(),
