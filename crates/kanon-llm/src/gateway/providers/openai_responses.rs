@@ -243,11 +243,13 @@ impl OpenAiResponsesProvider {
     pub fn custom_headers(&self) -> &[(String, String)] {
         &self.custom_headers
     }
-}
 
-#[async_trait]
-impl LlmProvider for OpenAiResponsesProvider {
-    async fn chat(&self, req: &ChatRequest) -> Result<ChatResponse, GatewayError> {
+    /// Uses one wire mapping for complete and streamed requests so their cached prefixes agree.
+    async fn send_request(
+        &self,
+        req: &ChatRequest,
+        stream: bool,
+    ) -> Result<reqwest::Response, GatewayError> {
         let mut instructions = Vec::new();
         let mut input = Vec::new();
 
@@ -327,7 +329,7 @@ impl LlmProvider for OpenAiResponsesProvider {
             tools,
             temperature: req.temperature,
             max_output_tokens: req.max_tokens,
-            stream: false,
+            stream,
         };
 
         // 3. Dispatch HTTP request with bearer authorization & custom headers
@@ -355,6 +357,15 @@ impl LlmProvider for OpenAiResponsesProvider {
                 message: error_text,
             });
         }
+
+        Ok(resp)
+    }
+}
+
+#[async_trait]
+impl LlmProvider for OpenAiResponsesProvider {
+    async fn chat(&self, req: &ChatRequest) -> Result<ChatResponse, GatewayError> {
+        let resp = self.send_request(req, false).await?;
 
         let raw_bytes = resp.bytes().await.map_err(GatewayError::Http)?;
         let wire_resp: wire::ResponsesResponseWire = serde_json::from_slice(&raw_bytes)
@@ -449,110 +460,7 @@ impl LlmProvider for OpenAiResponsesProvider {
     }
 
     async fn chat_stream(&self, req: &ChatRequest) -> Result<ChatChunkStream, GatewayError> {
-        let mut instructions = Vec::new();
-        let mut input = Vec::new();
-
-        for msg in &req.messages {
-            let mut msg = msg.clone();
-            msg.separate_reasoning();
-            match msg.role {
-                Role::System => {
-                    if let Some(ref text) = msg.content {
-                        instructions.push(text.clone());
-                    }
-                }
-                Role::User => {
-                    input.push(wire::ResponsesInputItem::Message {
-                        role: "user".to_string(),
-                        content: user_content(&msg),
-                    });
-                }
-                Role::Assistant => {
-                    if let Some(ref text) = msg.content
-                        && !text.is_empty()
-                    {
-                        input.push(wire::ResponsesInputItem::Message {
-                            role: "assistant".to_string(),
-                            content: vec![wire::ResponsesContentPart::OutputText {
-                                text: text.clone(),
-                            }],
-                        });
-                    }
-                    if let Some(ref calls) = msg.tool_calls {
-                        for call in calls {
-                            input.push(wire::ResponsesInputItem::FunctionCall {
-                                call_id: call.id.clone(),
-                                name: call.name.clone(),
-                                arguments: call.arguments.to_string(),
-                            });
-                        }
-                    }
-                }
-                Role::Tool => {
-                    input.push(wire::ResponsesInputItem::FunctionCallOutput {
-                        call_id: msg.tool_call_id.clone().unwrap_or_default(),
-                        output: msg.content.clone().unwrap_or_default(),
-                    });
-                }
-            }
-        }
-
-        let instructions = if instructions.is_empty() {
-            None
-        } else {
-            Some(instructions.join("\n\n"))
-        };
-
-        let tools = if req.tools.is_empty() {
-            None
-        } else {
-            Some(
-                req.tools
-                    .iter()
-                    .map(|t| wire::ResponsesToolWire {
-                        tool_type: "function",
-                        name: t.name.clone(),
-                        description: t.description.clone(),
-                        parameters: t.parameters.clone(),
-                    })
-                    .collect(),
-            )
-        };
-
-        let body = wire::ResponsesRequest {
-            model: &req.model,
-            instructions,
-            input,
-            tools,
-            temperature: req.temperature,
-            max_output_tokens: req.max_tokens,
-            stream: true,
-        };
-
-        let mut req_builder = self
-            .client
-            .post(&self.endpoint)
-            .header("Content-Type", "application/json")
-            .json(&body);
-
-        if !self.api_key.is_empty() {
-            req_builder = req_builder.header("Authorization", format!("Bearer {}", self.api_key));
-        }
-
-        for (k, v) in &self.custom_headers {
-            req_builder = req_builder.header(k, v);
-        }
-
-        let resp = req_builder.send().await.map_err(GatewayError::Http)?;
-        let status = resp.status();
-
-        if !status.is_success() {
-            let error_text = resp.text().await.unwrap_or_default();
-            return Err(GatewayError::ApiStatus {
-                status: status.as_u16(),
-                message: error_text,
-            });
-        }
+        let resp = self.send_request(req, true).await?;
 
         let (tx, rx) = tokio::sync::mpsc::channel(32);
         let mut byte_stream = resp.bytes_stream();

@@ -266,6 +266,9 @@ fn apply_persona_override(
 fn map_agent_error(err: AgentError) -> ApiError {
     match err {
         AgentError::Busy(session) => ApiError::Conflict(format!("Session '{session}' is busy")),
+        AgentError::InvalidRequest(message) => {
+            ApiError::Internal(format!("Model request layout is invalid: {message}"))
+        }
         AgentError::Memory(message) => {
             ApiError::Internal(format!("Conversation memory failure: {message}"))
         }

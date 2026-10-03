@@ -21,6 +21,7 @@
 //! with one fixed separator. Structure is never conditional per turn — a field is either always
 //! present or always absent for a given configuration.
 
+use crate::error::AgentError;
 use crate::gateway::types::{ChatMessage, ChatRequest, Role, ToolDefinition};
 
 /// Separator placed between the parts of the merged system block.
@@ -85,16 +86,27 @@ pub fn system_text(messages: &[ChatMessage]) -> String {
 /// block*; it is what a provider's system-prompt cache keys on, and one canonical form means the
 /// number of hooks contributing to it can change without reshaping the prompt.
 ///
-/// A system message found *after* the conversation has started is left alone but reported: dynamic
-/// context injected in the middle of a request splits the cached prefix, and the fix (put it in the
-/// user message) belongs to whoever wrote that hook.
-pub fn normalize_request(request: &mut ChatRequest) {
+/// Tool definitions are canonicalized here, after hooks have finished changing them. A system
+/// message after the conversation starts is rejected: providers that extract all system messages
+/// would otherwise promote that turn's context into global instructions and invalidate the cache.
+pub fn normalize_request(request: &mut ChatRequest) -> Result<(), AgentError> {
     let leading = request
         .messages
         .iter()
         .take_while(|message| message.role == Role::System)
         .count();
 
+    if request.messages[leading..]
+        .iter()
+        .any(|message| message.role == Role::System)
+    {
+        return Err(AgentError::InvalidRequest(
+            "system messages must precede the conversation; put dynamic context in the user message"
+                .into(),
+        ));
+    }
+
+    request.tools = canonical_tools(std::mem::take(&mut request.tools));
     if leading > 0 {
         let merged = system_text(&request.messages);
         request.messages.drain(..leading);
@@ -103,19 +115,5 @@ pub fn normalize_request(request: &mut ChatRequest) {
         }
     }
 
-    let start = usize::from(
-        request
-            .messages
-            .first()
-            .is_some_and(|message| message.role == Role::System),
-    );
-    if request.messages[start..]
-        .iter()
-        .any(|message| message.role == Role::System)
-    {
-        tracing::warn!(
-            "A system message follows the conversation start; dynamic context belongs in the user \
-             message, otherwise it splits the cached prompt prefix"
-        );
-    }
+    Ok(())
 }

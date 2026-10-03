@@ -26,6 +26,7 @@ use kanon_llm::{COMPACTION_INSTRUCTION, CompactionPolicy};
 #[derive(Clone)]
 enum SummaryMode {
     Summary(&'static str),
+    Unfinished(&'static str),
     Empty,
     ToolCall,
     Fail,
@@ -109,6 +110,11 @@ impl LlmProvider for ScriptedProvider {
             SummaryMode::Summary(text) => Ok(ChatResponse {
                 content: Some((*text).to_string()),
                 finish_reason: Some("stop".to_string()),
+                ..ChatResponse::default()
+            }),
+            SummaryMode::Unfinished(reason) => Ok(ChatResponse {
+                content: Some("Only part of the conversation was summarized".to_string()),
+                finish_reason: Some((*reason).to_string()),
                 ..ChatResponse::default()
             }),
             SummaryMode::Empty => Ok(ChatResponse {
@@ -438,6 +444,14 @@ async fn a_summary_that_is_not_one_leaves_the_history_exactly_as_it_was() {
             "no summary",
         ),
         (SummaryMode::ToolCall, "no summary"),
+        (SummaryMode::Unfinished("length"), "incomplete summary"),
+        (SummaryMode::Unfinished("max_tokens"), "incomplete summary"),
+        (SummaryMode::Unfinished("incomplete"), "incomplete summary"),
+        (
+            SummaryMode::Unfinished("content_filter"),
+            "incomplete summary",
+        ),
+        (SummaryMode::Unfinished("refusal"), "incomplete summary"),
         (SummaryMode::Fail, "boom"),
     ] {
         let provider = Arc::new(ScriptedProvider::new(50, mode));
@@ -453,7 +467,7 @@ async fn a_summary_that_is_not_one_leaves_the_history_exactly_as_it_was() {
             .await
             .expect_err("no usable summary");
         assert!(error.to_string().contains(expected), "{error}");
-        if expected == "no summary" {
+        if expected != "boom" {
             assert!(matches!(error, AgentError::Compaction(_)), "{error}");
         }
 

@@ -331,6 +331,7 @@ impl ToolRouter {
             Err(AgentError::ToolNotFound(name)) => Err(ToolRouterError::ToolNotFound(name)),
             Err(AgentError::Stopped) => Err(ToolRouterError::Stopped),
             Err(AgentError::Busy(m))
+            | Err(AgentError::InvalidRequest(m))
             | Err(AgentError::Memory(m))
             | Err(AgentError::Compaction(m)) => Err(ToolRouterError::Gateway(
                 crate::error::GatewayError::InvalidResponse(m),

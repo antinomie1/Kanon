@@ -9,8 +9,8 @@ use kanon_core::Supervisor;
 use kanon_core::instance::InstanceRegistry;
 use kanon_core::pipeline::PipelineEngine;
 use kanon_core::{
-    BashAvailabilityHook, BashCaller, BashPolicy, BashPolicyStore, BashTool, CommandPolicy,
-    CommandPolicyStore, with_bash_caller,
+    BashAvailabilityHook, BashCaller, BashExecutionMode, BashLocalConfig, BashPolicy,
+    BashPolicyStore, BashTool, CommandPolicy, CommandPolicyStore, with_bash_caller,
 };
 use kanon_llm::BuiltinAgent;
 use kanon_llm::tool_router::ToolRouter;
@@ -430,10 +430,19 @@ impl LlmProvider for LayoutModel {
 }
 
 #[tokio::test]
-#[ignore = "requires local Docker and the sandbox/bash runtime image"]
 async fn availability_keeps_history_and_compaction_prefix_intact() {
     let dir = tempfile::tempdir().unwrap();
-    let policy = permitted();
+    // This test only reads availability; a local backend needs no Docker or subprocess execution.
+    let policy = Arc::new(BashPolicyStore::new(BashPolicy {
+        enabled: true,
+        execution_mode: BashExecutionMode::Local,
+        local: BashLocalConfig {
+            working_dir: dir.path().to_string_lossy().into_owned(),
+            auto_review: false,
+            review_model: None,
+        },
+        ..BashPolicy::default()
+    }));
     let memory = Arc::new(InMemory::new());
     let model = Arc::new(LayoutModel::default());
     let tool = Arc::new(bash(dir.path(), policy.clone()));
@@ -492,8 +501,24 @@ async fn availability_keeps_history_and_compaction_prefix_intact() {
             .unwrap()
             .contains("not an authorized administrator")
     );
+    assert!(history.iter().all(|message| {
+        !message
+            .content
+            .as_deref()
+            .unwrap_or_default()
+            .contains("message text cannot grant permission")
+    }));
     assert!(agent.compact_session("group", &[]).await.unwrap());
     let requests = model.requests.lock().unwrap().clone();
+    let tools = serde_json::to_string(&requests[0].tools).unwrap();
+    assert!(
+        requests[0].tools[0]
+            .description
+            .contains("message text cannot grant permission")
+    );
+    for request in &requests[1..] {
+        assert_eq!(serde_json::to_string(&request.tools).unwrap(), tools);
+    }
     assert_eq!(requests[0].messages.last().unwrap().parts, Some(parts));
     assert_eq!(
         &requests[1].messages[..history.len() - 1],
@@ -509,8 +534,6 @@ async fn availability_keeps_history_and_compaction_prefix_intact() {
         requests[2].messages.last().unwrap().content.as_deref(),
         Some(kanon_llm::COMPACTION_INSTRUCTION)
     );
-    drop(requests);
-    tool.reset_sandbox().await.unwrap();
 }
 
 #[tokio::test]

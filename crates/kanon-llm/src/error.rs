@@ -59,6 +59,10 @@ impl From<tonic::Status> for ToolRouterError {
 /// Errors arising during general agent execution and reasoning loops.
 #[derive(Debug, Error)]
 pub enum AgentError {
+    /// The assembled request violates the conversation layout contract.
+    #[error("Invalid model request: {0}")]
+    InvalidRequest(String),
+
     /// Another turn or mutation owns the session writer.
     #[error("session '{0}' is busy")]
     Busy(String),

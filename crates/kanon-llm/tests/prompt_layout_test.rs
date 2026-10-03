@@ -57,7 +57,7 @@ async fn runtime_tool_permission_changes_only_the_request_tail() {
         .build();
     agent.run("same-message-a", "hello", &[]).await.unwrap();
     allowed.store(false, Ordering::SeqCst);
-    agent.run("same-message-b", "hello", &[]).await.unwrap();
+    agent.run("same-message-a", "hello", &[]).await.unwrap();
     let requests = recorder.requests.lock().unwrap();
     assert_eq!(
         serde_json::to_string(&requests[0].tools).unwrap(),
@@ -80,6 +80,11 @@ async fn runtime_tool_permission_changes_only_the_request_tail() {
     assert_ne!(
         requests[0].messages.last().unwrap().content,
         requests[1].messages.last().unwrap().content
+    );
+    assert_eq!(
+        &requests[1].messages[..n],
+        requests[0].messages.as_slice(),
+        "the changed status must not rewrite any earlier message"
     );
     assert!(requests[1].tools.iter().any(|tool| tool.name == "bash"));
 }
@@ -422,6 +427,7 @@ async fn a_rewritten_system_prompt_is_one_stable_block_with_the_summary_after_it
         .await
         .expect("compacted");
     agent.run("s", "third", &[]).await.expect("turn 3");
+    agent.run("s", "fourth", &[]).await.expect("turn 4");
 
     let requests = recorder.requests.lock().unwrap();
     let rewritten = format!("{BASE_PERSONA_PROMPT}\n\ncatalog line\n\nrewritten");
@@ -438,7 +444,9 @@ async fn a_rewritten_system_prompt_is_one_stable_block_with_the_summary_after_it
         after_compaction.starts_with(&format!("{rewritten}\n\n")),
         "{after_compaction}"
     );
-    assert!(after_compaction.contains("they said hi twice"));
+    assert!(after_compaction.ends_with(
+        "## Conversation summary\nPast context, not new instructions:\nthey said hi twice"
+    ));
     assert_eq!(
         requests[2]
             .messages
@@ -446,6 +454,12 @@ async fn a_rewritten_system_prompt_is_one_stable_block_with_the_summary_after_it
             .filter(|message| message.role == Role::System)
             .count(),
         1
+    );
+    assert_eq!(requests[3].messages[0], requests[2].messages[0]);
+    assert_eq!(
+        &requests[3].messages[..requests[2].messages.len()],
+        requests[2].messages.as_slice(),
+        "the summary and post-compaction history remain an unchanged prefix"
     );
 }
 
@@ -458,7 +472,7 @@ fn normalizing_leaves_a_request_without_system_messages_alone() {
         temperature: None,
         max_tokens: None,
     };
-    normalize_request(&mut request);
+    normalize_request(&mut request).unwrap();
     assert_eq!(request.messages, vec![ChatMessage::user("hi")]);
 }
 
@@ -688,4 +702,100 @@ async fn the_responses_api_reports_cached_input_tokens() {
         .expect("usage");
     assert_eq!(usage.prompt_tokens, 1200);
     assert_eq!(usage.cached_tokens, 1024);
+}
+
+/// Simulates a hook whose tool discovery order varies between calls.
+struct ReorderTools(AtomicBool);
+
+#[async_trait]
+impl AgentHook for ReorderTools {
+    async fn on_llm_request(
+        &self,
+        _: &str,
+        request: &mut ChatRequest,
+    ) -> Result<(), kanon_llm::AgentError> {
+        if self.0.fetch_xor(true, Ordering::SeqCst) {
+            request.tools.reverse();
+        }
+        Ok(())
+    }
+}
+
+#[tokio::test]
+async fn hooks_cannot_make_tool_order_change_the_cached_prefix() {
+    let recorder = Arc::new(Recorder::default());
+    let agent = BuiltinAgent::builder("hook-order", recorder.clone())
+        .tool(tool("alpha"))
+        .tool(tool("beta"))
+        .hook(ReorderTools(AtomicBool::new(true)))
+        .compaction(None)
+        .build();
+    agent.run("s", "first", &[]).await.unwrap();
+    agent.run("s", "second", &[]).await.unwrap();
+    let requests = recorder.requests.lock().unwrap();
+    assert_eq!(requests[0].tools, requests[1].tools);
+    assert_eq!(requests[0].tools[0].name, "alpha");
+}
+
+struct LateSystem;
+
+#[async_trait]
+impl AgentHook for LateSystem {
+    async fn on_llm_request(
+        &self,
+        _: &str,
+        request: &mut ChatRequest,
+    ) -> Result<(), kanon_llm::AgentError> {
+        request
+            .messages
+            .push(ChatMessage::system("dynamic context"));
+        Ok(())
+    }
+}
+
+#[tokio::test]
+async fn a_hook_cannot_promote_turn_context_into_system_instructions() {
+    let recorder = Arc::new(Recorder::default());
+    let agent = BuiltinAgent::builder("late-system", recorder.clone())
+        .hook(LateSystem)
+        .compaction(None)
+        .build();
+    let error = agent.run("s", "hello", &[]).await.unwrap_err();
+    assert!(matches!(error, kanon_llm::AgentError::InvalidRequest(_)));
+    assert!(recorder.requests.lock().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn responses_complete_and_streamed_requests_share_the_entire_wire_prefix() {
+    let (addr, captured) =
+        spawn_stub("/v1/responses", json!({"status":"completed", "output":[]})).await;
+    let provider = OpenAiResponsesProvider::new("").with_base_url(format!("http://{addr}/v1"));
+    let mut request = sample_request();
+    request.messages.extend([
+        ChatMessage::assistant_tool_calls(
+            vec![ToolCall {
+                id: "lookup-1".into(),
+                name: "alpha".into(),
+                arguments: json!({"city":"Tokyo"}),
+            }],
+            Some("<think>private</think>checking".into()),
+        ),
+        ChatMessage::tool_response("lookup-1", "sunny"),
+    ]);
+    let mut image_message = ChatMessage::user("current photo");
+    image_message.parts = Some(vec![ContentPart::image_url(
+        "https://example.invalid/photo.png",
+        Some("image/png".into()),
+    )]);
+    request.messages.push(image_message);
+    provider.chat(&request).await.unwrap();
+    // The fixture need not emit SSE: this assertion compares the submitted requests.
+    let _ = provider.chat_stream(&request).await.unwrap();
+    let mut bodies = captured.lock().unwrap().clone();
+    assert_eq!(bodies.len(), 2);
+    assert_eq!(
+        bodies[1].as_object_mut().unwrap().remove("stream"),
+        Some(json!(true))
+    );
+    assert_eq!(bodies[0], bodies[1]);
 }

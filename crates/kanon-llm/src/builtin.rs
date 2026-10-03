@@ -19,7 +19,7 @@ use crate::gateway::types::{
     ChatMessage, ChatRequest, ChatResponse, ContentPart, Role, TokenUsage, ToolDefinition,
 };
 use crate::gateway::{ChatChunk, ChatChunkStream, LlmProvider};
-use crate::layout::{canonical_tools, normalize_request};
+use crate::layout::normalize_request;
 use crate::memory::{InMemory, Memory, MemorySnapshot};
 use crate::stop::{StopSignal, unless_stopped};
 use crate::tool_router::{
@@ -93,15 +93,11 @@ impl BuiltinAgent {
         &self.hooks
     }
 
-    /// Every tool offered to the model for one run, in the one canonical order.
-    ///
-    /// Native tools and plugin/MCP tools are merged and then sorted by name with sorted schema keys
-    /// (see [`crate::layout`]): the tool list is the very top of the prompt, so its bytes must not
-    /// depend on registration order, host start order or call frequency.
+    /// Merges native and plugin/MCP tools; final normalization follows the request hooks.
     fn collect_tools(&self, hosts: &[Arc<dyn ToolHost>]) -> Vec<ToolDefinition> {
         let mut tools: Vec<ToolDefinition> = self.tools.iter().map(|t| t.definition()).collect();
         tools.extend(aggregate_tools(hosts));
-        canonical_tools(tools)
+        tools
     }
 
     /// Builds the request for one model call, laid out static-first.
@@ -168,7 +164,7 @@ impl BuiltinAgent {
         for message in &mut request.messages {
             message.separate_reasoning();
         }
-        normalize_request(&mut request);
+        normalize_request(&mut request)?;
         Ok(request)
     }
 
@@ -208,6 +204,17 @@ impl BuiltinAgent {
         let mut response = self.provider.chat(&request).await?;
         for hook in &self.hooks {
             hook.on_llm_response(session_id, &mut response).await?;
+        }
+
+        // Partial or refused output cannot replace durable history, even when it contains text.
+        // Some compatible providers omit the finish reason, so only explicit failures reject it.
+        if let Some(
+            reason @ ("length" | "max_tokens" | "incomplete" | "content_filter" | "refusal"),
+        ) = response.finish_reason.as_deref()
+        {
+            return Err(AgentError::Compaction(format!(
+                "the model returned an incomplete summary (finish reason: {reason})"
+            )));
         }
 
         // A model that ignores the instruction and asks for a tool, or answers with nothing, has
@@ -1092,6 +1099,7 @@ fn closing_note(err: &AgentError) -> String {
         AgentError::Rpc(_) => "failed: a plugin tool call failed".to_string(),
         AgentError::ToolNotFound(name) => format!("failed: the tool '{name}' does not exist"),
         AgentError::Memory(_) => "failed: conversation storage failed".to_string(),
+        AgentError::InvalidRequest(_) => "failed: model request layout is invalid".to_string(),
         AgentError::Compaction(_) => "failed: conversation compaction failed".to_string(),
     };
     format!(
