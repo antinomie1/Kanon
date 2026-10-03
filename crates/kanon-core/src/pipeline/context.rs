@@ -88,7 +88,9 @@ pub fn build_user_message(
             }
             Some(Segment::Reply(reply)) => {
                 if !reply.snippet.trim().is_empty() {
-                    text.push(&format!("[引用] {}", reply.snippet.trim()));
+                    // Keep quoted data separate from the speaker's following text in this user
+                    // message. These labels describe content; they never create system roles.
+                    text.push(&format!("[引用]\n{}\n[引用结束]", reply.snippet.trim()));
                 }
             }
             Some(Segment::Image(image)) => {
@@ -196,6 +198,8 @@ fn custom_media_parts(type_name: &str, json: &Value, expand_forward: bool) -> Ve
             .unwrap_or_default(),
         "forward" if expand_forward => forward_messages(json)
             .iter()
+            // Attach images only from messages whose text is shown to the model.
+            .take(MAX_FORWARD_MESSAGES)
             .flat_map(|message| message["images"].as_array().into_iter().flatten())
             .filter_map(Value::as_str)
             .filter(|url| !url.trim().is_empty())
@@ -234,12 +238,12 @@ fn render_custom(type_name: &str, json: &Value, expand_forward: bool, text: &mut
             let mut detail = format!("[合并转发: {title}]");
             for message in messages.iter().take(MAX_FORWARD_MESSAGES) {
                 let sender = field_str(message, "sender").unwrap_or("某人");
-                let body: String = field_str(message, "text")
-                    .unwrap_or_default()
-                    .chars()
-                    .take(MAX_FORWARD_TEXT)
-                    .collect();
+                let mut characters = field_str(message, "text").unwrap_or_default().chars();
+                let body: String = characters.by_ref().take(MAX_FORWARD_TEXT).collect();
                 detail.push_str(&format!("\n{sender}: {body}"));
+                if characters.next().is_some() {
+                    detail.push('…');
+                }
             }
             if messages.len() > MAX_FORWARD_MESSAGES {
                 detail.push_str(&format!(
@@ -247,6 +251,8 @@ fn render_custom(type_name: &str, json: &Value, expand_forward: bool, text: &mut
                     messages.len()
                 ));
             }
+            // A following text segment belongs to the current speaker, not the last forwarded one.
+            detail.push_str("\n[合并转发结束]");
             detail
         }
         "forward" => {
@@ -258,6 +264,7 @@ fn render_custom(type_name: &str, json: &Value, expand_forward: bool, text: &mut
                     detail.push_str(value);
                 }
             }
+            detail.push_str("\n[合并转发结束]");
             detail
         }
         "file" => {
