@@ -26,7 +26,7 @@ use kanon_llm::{COMPACTION_INSTRUCTION, CompactionPolicy};
 #[derive(Clone)]
 enum SummaryMode {
     Summary(&'static str),
-    Unfinished(&'static str),
+    WithReason(Option<&'static str>),
     Empty,
     ToolCall,
     Fail,
@@ -112,9 +112,9 @@ impl LlmProvider for ScriptedProvider {
                 finish_reason: Some("stop".to_string()),
                 ..ChatResponse::default()
             }),
-            SummaryMode::Unfinished(reason) => Ok(ChatResponse {
-                content: Some("Only part of the conversation was summarized".to_string()),
-                finish_reason: Some((*reason).to_string()),
+            SummaryMode::WithReason(reason) => Ok(ChatResponse {
+                content: Some("SUMMARY-TEXT".to_string()),
+                finish_reason: reason.map(str::to_string),
                 ..ChatResponse::default()
             }),
             SummaryMode::Empty => Ok(ChatResponse {
@@ -444,14 +444,38 @@ async fn a_summary_that_is_not_one_leaves_the_history_exactly_as_it_was() {
             "no summary",
         ),
         (SummaryMode::ToolCall, "no summary"),
-        (SummaryMode::Unfinished("length"), "incomplete summary"),
-        (SummaryMode::Unfinished("max_tokens"), "incomplete summary"),
-        (SummaryMode::Unfinished("incomplete"), "incomplete summary"),
         (
-            SummaryMode::Unfinished("content_filter"),
+            SummaryMode::WithReason(Some("length")),
             "incomplete summary",
         ),
-        (SummaryMode::Unfinished("refusal"), "incomplete summary"),
+        (
+            SummaryMode::WithReason(Some("max_tokens")),
+            "incomplete summary",
+        ),
+        (
+            SummaryMode::WithReason(Some("incomplete")),
+            "incomplete summary",
+        ),
+        (
+            SummaryMode::WithReason(Some("content_filter")),
+            "incomplete summary",
+        ),
+        (
+            SummaryMode::WithReason(Some("refusal")),
+            "incomplete summary",
+        ),
+        (
+            SummaryMode::WithReason(Some("failed")),
+            "incomplete summary",
+        ),
+        (
+            SummaryMode::WithReason(Some("cancelled")),
+            "incomplete summary",
+        ),
+        (
+            SummaryMode::WithReason(Some("pause_turn")),
+            "incomplete summary",
+        ),
         (SummaryMode::Fail, "boom"),
     ] {
         let provider = Arc::new(ScriptedProvider::new(50, mode));
@@ -599,4 +623,31 @@ async fn compaction_excludes_reset_and_turn_writes_until_its_summary_is_committe
     assert_eq!(snapshot.summary.as_deref(), Some("SUMMARY-TEXT"));
     assert_eq!(kept.len(), 2, "the new exchange is not swallowed: {kept:?}");
     assert_eq!(kept[0], "arrived meanwhile");
+}
+
+#[tokio::test]
+async fn completed_provider_statuses_and_omitted_compatible_status_allow_compaction() {
+    for reason in [
+        None,
+        Some("stop"),
+        Some("end_turn"),
+        Some("stop_sequence"),
+        Some("completed"),
+    ] {
+        let provider = Arc::new(ScriptedProvider::new(50, SummaryMode::WithReason(reason)));
+        let memory = Arc::new(InMemory::new());
+        let agent = agent(provider, memory.clone());
+        for message in [
+            ChatMessage::user("one"),
+            ChatMessage::assistant("two"),
+            ChatMessage::user("three"),
+            ChatMessage::assistant("four"),
+        ] {
+            Memory::push_message(memory.as_ref(), "s", message).await.unwrap();
+        }
+        assert!(agent.compact_session("s", &[]).await.unwrap(), "{reason:?}");
+        let snapshot = memory.snapshot("s").await.unwrap();
+        assert_eq!(snapshot.summary.as_deref(), Some("SUMMARY-TEXT"));
+        assert!(snapshot.messages.is_empty());
+    }
 }

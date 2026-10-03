@@ -21,12 +21,13 @@ use crate::gateway::types::{
 use crate::gateway::{ChatChunk, ChatChunkStream, LlmProvider};
 use crate::layout::normalize_request;
 use crate::memory::{InMemory, Memory, MemorySnapshot};
+use crate::session::SessionWriters;
 use crate::stop::{StopSignal, unless_stopped};
 use crate::tool_router::{
     ExecutedToolCall, ToolAttachment, ToolHost, aggregate_tools, json_to_prost_struct,
     prost_struct_to_json,
 };
-use dashmap::{DashMap, DashSet};
+use dashmap::DashSet;
 use tokio_stream::StreamExt;
 
 /// Result recorded for a tool call that a stopped turn left without one.
@@ -66,8 +67,9 @@ pub struct BuiltinAgent {
     hooks: Vec<Arc<dyn AgentHook>>,
     /// Operational configuration.
     config: AgentConfig,
-    /// Serializes compactions of one session, so an automatic one and a manual one never overlap.
-    compaction_locks: Arc<DashMap<String, Arc<tokio::sync::Mutex<()>>>>,
+    /// Embedded agents without a session manager still serialize their compactions. Managed
+    /// agents already hold the session writer and need no second lock registry.
+    compaction_locks: Option<Arc<SessionWriters>>,
     /// Sessions with a compaction in flight, so a burst of turns schedules one, not many.
     compacting: Arc<DashSet<String>>,
 }
@@ -177,12 +179,12 @@ impl BuiltinAgent {
         session_id: &str,
         tools: &[ToolDefinition],
     ) -> Result<bool, AgentError> {
-        let lock = self
-            .compaction_locks
-            .entry(session_id.to_string())
-            .or_default()
-            .clone();
-        let _guard = lock.lock().await;
+        // Both managed callers acquire their session writer before entering here. Embedded
+        // callers share weakly retained writers so old session ids do not accumulate mutexes.
+        let _guard = match &self.compaction_locks {
+            Some(writers) => Some(writers.writer(session_id).lock_owned().await),
+            None => None,
+        };
 
         let snapshot = self.memory.snapshot(session_id).await?;
         let min_messages = self
@@ -207,10 +209,10 @@ impl BuiltinAgent {
         }
 
         // Partial or refused output cannot replace durable history, even when it contains text.
-        // Some compatible providers omit the finish reason, so only explicit failures reject it.
-        if let Some(
-            reason @ ("length" | "max_tokens" | "incomplete" | "content_filter" | "refusal"),
-        ) = response.finish_reason.as_deref()
+        // Compatible providers may omit the reason. Any explicit reason must confirm completion;
+        // accepting an unknown pause/failure status would permanently discard unsummarized facts.
+        if let Some(reason) = response.finish_reason.as_deref()
+            && !matches!(reason, "stop" | "end_turn" | "stop_sequence" | "completed")
         {
             return Err(AgentError::Compaction(format!(
                 "the model returned an incomplete summary (finish reason: {reason})"
@@ -1347,6 +1349,11 @@ impl AgentBuilder {
             );
         }
 
+        let compaction_locks = self
+            .session_manager
+            .is_none()
+            .then(|| Arc::new(SessionWriters::default()));
+
         BuiltinAgent {
             name: self.name,
             system_prompt: self.system_prompt,
@@ -1357,7 +1364,7 @@ impl AgentBuilder {
             tools: self.tools,
             hooks: self.hooks,
             config: self.config,
-            compaction_locks: Arc::new(DashMap::new()),
+            compaction_locks,
             compacting: Arc::new(DashSet::new()),
         }
     }

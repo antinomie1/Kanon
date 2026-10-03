@@ -266,6 +266,31 @@ impl SessionWriteGuard {
     }
 }
 
+/// Per-session writers shared by owners and waiters, without retaining inactive mutexes.
+#[derive(Default)]
+pub(crate) struct SessionWriters {
+    writers: Mutex<HashMap<String, Weak<tokio::sync::Mutex<()>>>>,
+}
+
+impl SessionWriters {
+    /// Returns the same writer while any owner or waiter still holds it.
+    pub(crate) fn writer(&self, session_id: &str) -> Arc<tokio::sync::Mutex<()>> {
+        let mut writers = self
+            .writers
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let Some(writer) = writers.get(session_id).and_then(Weak::upgrade) {
+            return writer;
+        }
+        // A waiter holds a strong reference too. Removing only expired entries avoids creating
+        // a second mutex while another operation is still queued on the original writer.
+        writers.retain(|_, writer| writer.strong_count() > 0);
+        let writer = Arc::new(tokio::sync::Mutex::new(()));
+        writers.insert(session_id.to_string(), Arc::downgrade(&writer));
+        writer
+    }
+}
+
 /// Comprehensive session lifecycle and state manager.
 ///
 /// Wraps an underlying [`Memory`] store and maintains concurrent, lock-sharded
@@ -280,7 +305,7 @@ pub struct SessionManager {
     /// Durable copy of `metadata`, when the node keeps sessions across restarts.
     store: Option<Arc<dyn SessionStore>>,
     /// Weak entries avoid retaining a mutex for every historical session.
-    writers: Mutex<HashMap<String, Weak<tokio::sync::Mutex<()>>>>,
+    writers: SessionWriters,
 }
 
 impl SessionManager {
@@ -291,27 +316,14 @@ impl SessionManager {
             metadata: DashMap::new(),
             default_scope: SessionScope::ChannelUser,
             store: None,
-            writers: Mutex::new(HashMap::new()),
+            writers: SessionWriters::default(),
         }
-    }
-
-    fn writer(&self, session_id: &str) -> Arc<tokio::sync::Mutex<()>> {
-        let mut writers = self
-            .writers
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        if let Some(writer) = writers.get(session_id).and_then(Weak::upgrade) {
-            return writer;
-        }
-        writers.retain(|_, writer| writer.strong_count() > 0);
-        let writer = Arc::new(tokio::sync::Mutex::new(()));
-        writers.insert(session_id.to_string(), Arc::downgrade(&writer));
-        writer
     }
 
     /// Immediately acquires the session writer; external mutations must never queue behind a turn.
     pub fn try_write(&self, session_id: &str) -> Result<SessionWriteGuard, MemoryError> {
-        self.writer(session_id)
+        self.writers
+            .writer(session_id)
             .try_lock_owned()
             .map(|guard| SessionWriteGuard {
                 guard: Arc::new(guard),
@@ -322,13 +334,13 @@ impl SessionManager {
     /// Waits for a prior writer, for ordered inbound turns and background compaction only.
     pub async fn write(&self, session_id: &str) -> SessionWriteGuard {
         SessionWriteGuard {
-            guard: Arc::new(self.writer(session_id).lock_owned().await),
+            guard: Arc::new(self.writers.writer(session_id).lock_owned().await),
         }
     }
 
     /// Acquires an agent writer or accepts the writer explicitly delegated by its caller.
     pub fn agent_write(&self, session_id: &str) -> Result<SessionWriteGuard, MemoryError> {
-        let writer = self.writer(session_id);
+        let writer = self.writers.writer(session_id);
         if let Ok(Some(guard)) = SESSION_WRITER.try_with(|guard| {
             let mut delegated = guard.borrow_mut();
             if delegated.as_ref().is_some_and(|guard| {
