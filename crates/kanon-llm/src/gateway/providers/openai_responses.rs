@@ -6,7 +6,6 @@
 //! Compatible with OpenAI `/v1/responses` and compatible gateways (e.g. SambaNova, OpenResponses).
 
 use async_trait::async_trait;
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 use tokio_stream::StreamExt;
 
@@ -16,8 +15,6 @@ use crate::gateway::types::{
     ChatMessage, ChatRequest, ChatResponse, ContentPart, Role, TokenUsage, ToolCall,
 };
 use crate::gateway::{ChatChunk, ChatChunkStream, LlmProvider};
-
-static CALL_ID_COUNTER: AtomicU64 = AtomicU64::new(1);
 
 /// Private wire structures representing the OpenAI Responses API format.
 #[allow(dead_code)]
@@ -111,8 +108,6 @@ mod wire {
         FunctionCall {
             #[serde(default)]
             call_id: Option<String>,
-            #[serde(default)]
-            id: Option<String>,
             name: String,
             arguments: serde_json::Value,
         },
@@ -146,6 +141,15 @@ mod wire {
         #[serde(default)]
         pub cached_tokens: Option<u32>,
     }
+}
+
+/// Requires the provider's result-correlation identifier, not the distinct output item `id`.
+/// Inventing an identifier would execute a tool whose result cannot be matched to its call.
+fn function_call_id(call_id: Option<&str>) -> Result<String, GatewayError> {
+    call_id
+        .filter(|id| !id.trim().is_empty())
+        .map(str::to_string)
+        .ok_or_else(|| GatewayError::InvalidResponse("function call has no call_id".into()))
 }
 
 /// Builds the content parts of a Responses API user message, including any images.
@@ -399,14 +403,10 @@ impl LlmProvider for OpenAiResponsesProvider {
                 }
                 wire::ResponsesOutputWire::FunctionCall {
                     call_id,
-                    id,
                     name,
                     arguments,
                 } => {
-                    let call_id = call_id.or(id).unwrap_or_else(|| {
-                        let cnt = CALL_ID_COUNTER.fetch_add(1, Ordering::Relaxed);
-                        format!("call_{cnt}")
-                    });
+                    let call_id = function_call_id(call_id.as_deref())?;
 
                     let parsed_args = match arguments {
                         serde_json::Value::String(s) => serde_json::from_str(&s)?,
@@ -507,10 +507,17 @@ impl LlmProvider for OpenAiResponsesProvider {
                                 return;
                             };
                             let item = &value["item"];
+                            let id = match function_call_id(item["call_id"].as_str()) {
+                                Ok(id) => id,
+                                Err(error) => {
+                                    let _ = tx.send(Err(error)).await;
+                                    return;
+                                }
+                            };
                             calls.insert(
                                 index as usize,
                                 super::PendingToolCall {
-                                    id: item["call_id"].as_str().unwrap_or_default().into(),
+                                    id,
                                     name: item["name"].as_str().unwrap_or_default().into(),
                                     arguments: item["arguments"]
                                         .as_str()

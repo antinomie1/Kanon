@@ -1,14 +1,16 @@
-//! Invalid provider arguments must fail before any tool in the response executes.
+//! Invalid provider tool calls must fail before any tool in the response executes.
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
+use axum::response::IntoResponse;
 use axum::{Json, Router, routing::post};
 use kanon_llm::gateway::providers::{OpenAiChatProvider, OpenAiResponsesProvider};
 use kanon_llm::{
     Agent, BuiltinAgent, ChatMessage, ChatRequest, LlmProvider, NativeTool, ToolDefinition,
 };
 use serde_json::{Value, json};
+use tokio_stream::StreamExt;
 
 async fn provider(
     responses: bool,
@@ -26,9 +28,30 @@ async fn provider(
             {"id": "second", "type": "function", "function": {"name": "lookup", "arguments": arguments}}
         ]}, "finish_reason": "tool_calls"}]})
     };
-    let app = Router::new().fallback(post(move || {
+    provider_with_body(responses, body).await
+}
+
+async fn provider_with_body(
+    responses: bool,
+    body: Value,
+) -> (Arc<dyn LlmProvider>, tokio::task::JoinHandle<()>) {
+    let app = Router::new().fallback(post(move |Json(request): Json<Value>| {
         let body = body.clone();
-        async { Json(body) }
+        async move {
+            if responses && request["stream"] == true {
+                let mut events = String::new();
+                for (index, item) in body["output"].as_array().unwrap().iter().enumerate() {
+                    let event = json!({
+                        "type": "response.output_item.done", "output_index": index, "item": item,
+                    });
+                    events.push_str(&format!("data: {event}\n\n"));
+                }
+                events.push_str("data: {\"type\":\"response.completed\"}\n\n");
+                ([("content-type", "text/event-stream")], events).into_response()
+            } else {
+                Json(body).into_response()
+            }
+        }
     }));
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let base_url = format!("http://{}/v1", listener.local_addr().unwrap());
@@ -105,5 +128,74 @@ async fn complete_arguments_preserve_encoded_json_and_responses_objects() {
         let response = result.unwrap();
         assert_eq!(response.tool_calls.len(), 2);
         assert_eq!(response.tool_calls[1].arguments, expected);
+    }
+}
+
+#[tokio::test]
+async fn responses_tool_calls_require_call_ids_in_complete_and_streamed_replies() {
+    for identity in [
+        json!({}),
+        json!({"id": "fc_item"}),
+        json!({"call_id": null, "id": "fc_item"}),
+        json!({"call_id": "", "id": "fc_item"}),
+        json!({"call_id": " \t", "id": "fc_item"}),
+        json!({"call_id": "call_real"}),
+        json!({"call_id": "call_real", "id": ""}),
+        json!({"call_id": "call_real", "id": "fc_distinct_item"}),
+    ] {
+        let valid = identity["call_id"] == "call_real";
+        let mut candidate = json!({"type": "function_call", "name": "lookup", "arguments": "{}"});
+        candidate
+            .as_object_mut()
+            .unwrap()
+            .extend(identity.as_object().unwrap().clone());
+        let body = json!({"output": [
+            {"type": "function_call", "call_id": "call_first", "name": "lookup", "arguments": "{}"},
+            candidate,
+        ]});
+        for streaming in [false, true] {
+            let (provider, server) = provider_with_body(true, body.clone()).await;
+            let request = ChatRequest {
+                model: "test-model".into(),
+                messages: vec![ChatMessage::user("look up a city")],
+                tools: vec![],
+                temperature: None,
+                max_tokens: None,
+            };
+            let result = if streaming {
+                provider
+                    .chat_stream(&request)
+                    .await
+                    .unwrap()
+                    .collect::<Vec<_>>()
+                    .await
+                    .into_iter()
+                    .collect::<Result<Vec<_>, _>>()
+                    .map(|chunks| {
+                        chunks
+                            .into_iter()
+                            .flat_map(|chunk| chunk.tool_calls)
+                            .collect()
+                    })
+            } else {
+                provider
+                    .chat(&request)
+                    .await
+                    .map(|response| response.tool_calls)
+            };
+            server.abort();
+            if valid {
+                let calls = result.unwrap();
+                assert_eq!(calls.len(), 2);
+                assert_eq!(calls[0].id, "call_first");
+                assert_eq!(calls[1].id, "call_real");
+            } else {
+                let error = result.expect_err("an invalid call_id must reject the entire response");
+                assert!(
+                    error.to_string().contains("function call has no call_id"),
+                    "identity={identity}, streaming={streaming}: {error}"
+                );
+            }
+        }
     }
 }
