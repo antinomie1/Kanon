@@ -338,6 +338,8 @@ impl OpenAiResponsesProvider {
             .post(&self.endpoint)
             .header("Content-Type", "application/json")
             .json(&body);
+        // Serialization owns the HTTP payload; the intermediate history can be released now.
+        drop(body);
 
         if !self.api_key.is_empty() {
             req_builder = req_builder.header("Authorization", format!("Bearer {}", self.api_key));

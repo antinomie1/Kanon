@@ -437,9 +437,11 @@ impl AnthropicMessagesProvider {
     /// Sends a wire request with the endpoint's credentials and headers.
     async fn send(
         &self,
-        wire_req: &wire::AnthropicMessagesRequest<'_>,
+        wire_req: wire::AnthropicMessagesRequest<'_>,
     ) -> Result<reqwest::Response, GatewayError> {
-        let mut req_builder = self.client.post(&self.endpoint).json(wire_req);
+        let mut req_builder = self.client.post(&self.endpoint).json(&wire_req);
+        // Do not retain another complete history while waiting for the provider.
+        drop(wire_req);
 
         if let Some(ref key) = self.api_key {
             req_builder = req_builder.header("x-api-key", key);
@@ -468,7 +470,7 @@ impl AnthropicMessagesProvider {
 impl LlmProvider for AnthropicMessagesProvider {
     async fn chat(&self, request: &ChatRequest) -> Result<ChatResponse, GatewayError> {
         let wire_req = self.build_wire_request(request, false);
-        let resp = self.send(&wire_req).await?;
+        let resp = self.send(wire_req).await?;
         let wire_resp: wire::AnthropicMessagesResponse = resp.json().await?;
 
         let mut text_output = String::new();
@@ -533,7 +535,7 @@ impl LlmProvider for AnthropicMessagesProvider {
 
     async fn chat_stream(&self, request: &ChatRequest) -> Result<ChatChunkStream, GatewayError> {
         let wire_req = self.build_wire_request(request, true);
-        let resp = self.send(&wire_req).await?;
+        let resp = self.send(wire_req).await?;
 
         let (tx, rx) = tokio::sync::mpsc::channel(32);
         let mut byte_stream = resp.bytes_stream();

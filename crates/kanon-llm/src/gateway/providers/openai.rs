@@ -330,6 +330,73 @@ impl OpenAiChatProvider {
             tool_call_id: msg.tool_call_id.clone(),
         })
     }
+    /// Sends complete and streamed requests through the same wire mapping.
+    async fn send_request(
+        &self,
+        request: &ChatRequest,
+        stream: bool,
+    ) -> Result<reqwest::Response, GatewayError> {
+        let model = if !request.model.is_empty() {
+            &request.model
+        } else {
+            &self.default_model
+        };
+
+        let messages = self.map_messages_to_wire(&request.messages);
+
+        let tools = if request.tools.is_empty() {
+            None
+        } else {
+            Some(
+                request
+                    .tools
+                    .iter()
+                    .map(|t| wire::OpenAiToolWire {
+                        r#type: "function".to_string(),
+                        function: wire::OpenAiFunctionWire {
+                            name: t.name.clone(),
+                            description: t.description.clone(),
+                            parameters: t.parameters.clone(),
+                        },
+                    })
+                    .collect(),
+            )
+        };
+
+        let wire_req = wire::OpenAiChatRequest {
+            model,
+            messages,
+            tools,
+            temperature: request.temperature,
+            max_tokens: request.max_tokens,
+            stream,
+        };
+
+        let mut req_builder = self.client.post(&self.endpoint).json(&wire_req);
+        // The HTTP body now owns the serialized bytes; release the copied history before I/O.
+        drop(wire_req);
+
+        if let Some(ref key) = self.api_key {
+            req_builder = req_builder.header("Authorization", format!("Bearer {key}"));
+        }
+
+        for (k, v) in &self.custom_headers {
+            req_builder = req_builder.header(k, v);
+        }
+
+        let resp = req_builder.send().await?;
+
+        let status = resp.status();
+        if !status.is_success() {
+            let err_body = resp.text().await.unwrap_or_default();
+            return Err(GatewayError::ApiStatus {
+                status: status.as_u16(),
+                message: err_body,
+            });
+        }
+
+        Ok(resp)
+    }
 }
 
 /// Renders a message's content in the OpenAI wire shape.
@@ -371,63 +438,7 @@ fn message_content(msg: &ChatMessage) -> Option<serde_json::Value> {
 #[async_trait]
 impl LlmProvider for OpenAiChatProvider {
     async fn chat(&self, request: &ChatRequest) -> Result<ChatResponse, GatewayError> {
-        let model = if !request.model.is_empty() {
-            &request.model
-        } else {
-            &self.default_model
-        };
-
-        let messages = self.map_messages_to_wire(&request.messages);
-
-        let tools = if request.tools.is_empty() {
-            None
-        } else {
-            Some(
-                request
-                    .tools
-                    .iter()
-                    .map(|t| wire::OpenAiToolWire {
-                        r#type: "function".to_string(),
-                        function: wire::OpenAiFunctionWire {
-                            name: t.name.clone(),
-                            description: t.description.clone(),
-                            parameters: t.parameters.clone(),
-                        },
-                    })
-                    .collect(),
-            )
-        };
-
-        let wire_req = wire::OpenAiChatRequest {
-            model,
-            messages,
-            tools,
-            temperature: request.temperature,
-            max_tokens: request.max_tokens,
-            stream: false,
-        };
-
-        let mut req_builder = self.client.post(&self.endpoint).json(&wire_req);
-
-        if let Some(ref key) = self.api_key {
-            req_builder = req_builder.header("Authorization", format!("Bearer {key}"));
-        }
-
-        for (k, v) in &self.custom_headers {
-            req_builder = req_builder.header(k, v);
-        }
-
-        let resp = req_builder.send().await?;
-
-        let status = resp.status();
-        if !status.is_success() {
-            let err_body = resp.text().await.unwrap_or_default();
-            return Err(GatewayError::ApiStatus {
-                status: status.as_u16(),
-                message: err_body,
-            });
-        }
-
+        let resp = self.send_request(request, false).await?;
         let wire_resp: wire::OpenAiChatResponse = resp.json().await?;
 
         let choice = wire_resp.choices.into_iter().next().ok_or_else(|| {
@@ -474,62 +485,7 @@ impl LlmProvider for OpenAiChatProvider {
     }
 
     async fn chat_stream(&self, request: &ChatRequest) -> Result<ChatChunkStream, GatewayError> {
-        let model = if !request.model.is_empty() {
-            &request.model
-        } else {
-            &self.default_model
-        };
-
-        let messages = self.map_messages_to_wire(&request.messages);
-
-        let tools = if request.tools.is_empty() {
-            None
-        } else {
-            Some(
-                request
-                    .tools
-                    .iter()
-                    .map(|t| wire::OpenAiToolWire {
-                        r#type: "function".to_string(),
-                        function: wire::OpenAiFunctionWire {
-                            name: t.name.clone(),
-                            description: t.description.clone(),
-                            parameters: t.parameters.clone(),
-                        },
-                    })
-                    .collect(),
-            )
-        };
-
-        let wire_req = wire::OpenAiChatRequest {
-            model,
-            messages,
-            tools,
-            temperature: request.temperature,
-            max_tokens: request.max_tokens,
-            stream: true,
-        };
-
-        let mut req_builder = self.client.post(&self.endpoint).json(&wire_req);
-
-        if let Some(ref key) = self.api_key {
-            req_builder = req_builder.header("Authorization", format!("Bearer {key}"));
-        }
-
-        for (k, v) in &self.custom_headers {
-            req_builder = req_builder.header(k, v);
-        }
-
-        let resp = req_builder.send().await?;
-
-        let status = resp.status();
-        if !status.is_success() {
-            let err_body = resp.text().await.unwrap_or_default();
-            return Err(GatewayError::ApiStatus {
-                status: status.as_u16(),
-                message: err_body,
-            });
-        }
+        let resp = self.send_request(request, true).await?;
 
         let (tx, rx) = tokio::sync::mpsc::channel(32);
         let mut byte_stream = resp.bytes_stream();

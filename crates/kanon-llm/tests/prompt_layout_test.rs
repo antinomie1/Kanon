@@ -766,10 +766,7 @@ async fn a_hook_cannot_promote_turn_context_into_system_instructions() {
 }
 
 #[tokio::test]
-async fn responses_complete_and_streamed_requests_share_the_entire_wire_prefix() {
-    let (addr, captured) =
-        spawn_stub("/v1/responses", json!({"status":"completed", "output":[]})).await;
-    let provider = OpenAiResponsesProvider::new("").with_base_url(format!("http://{addr}/v1"));
+async fn complete_and_streamed_requests_share_the_entire_wire_prefix() {
     let mut request = sample_request();
     request.messages.extend([
         ChatMessage::assistant_tool_calls(
@@ -788,14 +785,32 @@ async fn responses_complete_and_streamed_requests_share_the_entire_wire_prefix()
         Some("image/png".into()),
     )]);
     request.messages.push(image_message);
-    provider.chat(&request).await.unwrap();
-    // The fixture need not emit SSE: this assertion compares the submitted requests.
-    let _ = provider.chat_stream(&request).await.unwrap();
-    let mut bodies = captured.lock().unwrap().clone();
-    assert_eq!(bodies.len(), 2);
-    assert_eq!(
-        bodies[1].as_object_mut().unwrap().remove("stream"),
-        Some(json!(true))
-    );
-    assert_eq!(bodies[0], bodies[1]);
+    for responses in [false, true] {
+        let (path, reply) = if responses {
+            ("/v1/responses", json!({"status":"completed", "output":[]}))
+        } else {
+            (
+                "/v1/chat/completions",
+                json!({"choices":[{"index":0, "message":{"role":"assistant", "content":"ok"}, "finish_reason":"stop"}]}),
+            )
+        };
+        let (addr, captured) = spawn_stub(path, reply).await;
+        let base_url = format!("http://{addr}/v1");
+        let provider: Box<dyn LlmProvider> = if responses {
+            Box::new(OpenAiResponsesProvider::new("").with_base_url(base_url))
+        } else {
+            Box::new(OpenAiChatProvider::new(base_url, None, "test"))
+        };
+        provider.chat(&request).await.unwrap();
+        // The fixture need not emit SSE: this assertion compares the submitted requests.
+        let _ = provider.chat_stream(&request).await.unwrap();
+        let mut bodies = captured.lock().unwrap().clone();
+        assert_eq!(bodies.len(), 2);
+        assert_eq!(
+            bodies[1].as_object_mut().unwrap().remove("stream"),
+            Some(json!(true))
+        );
+        bodies[0].as_object_mut().unwrap().remove("stream");
+        assert_eq!(bodies[0], bodies[1]);
+    }
 }
