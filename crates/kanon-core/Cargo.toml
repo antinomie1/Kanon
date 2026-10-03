@@ -28,11 +28,11 @@ futures-util = { version = "0.3", default-features = false, features = ["std"] }
 sha2 = "0.11"
 semver = "1"
 resvg = "0.48"
+tempfile = "3.12"
 
 [target.'cfg(target_os = "macos")'.dependencies]
 sysinfo = { version = "0.33", default-features = false, features = ["system"] }
 
 [dev-dependencies]
-tempfile = "3.12"
 axum = "0.7"
 tokio = { version = "1.40", features = ["test-util"] }

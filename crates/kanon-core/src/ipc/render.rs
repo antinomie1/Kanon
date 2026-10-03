@@ -6,7 +6,8 @@
 //! [`RENDER_RETENTION`] are swept on each render: they only need to live until the message
 //! carrying them has been delivered.
 
-use std::path::{Path, PathBuf};
+use std::io::Write;
+use std::path::Path;
 use std::time::{Duration, SystemTime};
 
 use sha2::{Digest, Sha256};
@@ -94,9 +95,13 @@ impl CoreApiService {
 
 /// Writes through a temporary file so a concurrent reader never sees half a PNG.
 fn write_atomically(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
-    let temporary: PathBuf = path.with_extension(format!("png.{}.tmp", std::process::id()));
-    std::fs::write(&temporary, bytes)?;
-    std::fs::rename(&temporary, path)
+    // Each render owns its staging file, including concurrent renders of identical content.
+    // Keeping it beside the destination lets persist atomically replace the published PNG;
+    // dropping the temporary also removes it when writing or publishing fails.
+    let mut temporary = tempfile::NamedTempFile::new_in(path.parent().unwrap_or(Path::new(".")))?;
+    temporary.write_all(bytes)?;
+    temporary.persist(path).map_err(|err| err.error)?;
+    Ok(())
 }
 
 /// Removes rendered images older than [`RENDER_RETENTION`]; failures only leave files behind.

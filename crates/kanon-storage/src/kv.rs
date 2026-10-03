@@ -112,8 +112,8 @@ impl KvStore {
 
     /// Stores `value` under `key`, replacing any previous value and deadline.
     ///
-    /// `ttl` of `None` keeps the key until it is deleted; otherwise it expires after `ttl`
-    /// (rounded up to whole seconds).
+    /// `ttl` of `None` keeps the key until it is deleted; otherwise its deadline is rounded up
+    /// to a whole Unix second so the key never expires early. A zero TTL expires immediately.
     pub fn set(
         &self,
         plugin_id: &str,
@@ -126,8 +126,17 @@ impl KvStore {
             return Err(KvError::ValueTooLarge(value.len()));
         }
         let expires_at = ttl.map(|ttl| {
-            let secs = ttl.as_secs() + u64::from(ttl.subsec_nanos() > 0);
-            now_secs().saturating_add(i64::try_from(secs).unwrap_or(i64::MAX))
+            let now = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap_or_default();
+            // Round the complete deadline, not just the TTL: truncating the current clock
+            // would expire whole-second TTLs up to one second early. Saturation also keeps
+            // Duration::MAX from wrapping to an immediate expiry.
+            let deadline = now.saturating_add(ttl);
+            let secs = deadline
+                .as_secs()
+                .saturating_add(u64::from(!ttl.is_zero() && deadline.subsec_nanos() > 0));
+            i64::try_from(secs).unwrap_or(i64::MAX)
         });
         self.conn().execute(
             "INSERT INTO kv (plugin_id, key, value, expires_at) VALUES (?1, ?2, ?3, ?4)

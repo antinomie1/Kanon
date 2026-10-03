@@ -126,3 +126,51 @@ async fn plugins_get_a_png_in_their_own_directory() {
         .unwrap_err();
     assert_eq!(err.code(), Code::InvalidArgument);
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn concurrent_identical_renders_publish_one_complete_png() {
+    let dir = tempfile::tempdir().unwrap();
+    let service = CoreApiService::new(tokio::sync::mpsc::channel(1).0)
+        .with_plugin_data_dir(kanon_storage::PluginDataDir::new(dir.path()));
+    let svg = r##"<svg xmlns="http://www.w3.org/2000/svg" width="32" height="32"><rect width="32" height="32" fill="#ff0000"/></svg>"##;
+    let mut published = None;
+
+    for _ in 0..4 {
+        let barrier = std::sync::Arc::new(tokio::sync::Barrier::new(32));
+        let mut tasks = tokio::task::JoinSet::new();
+        for _ in 0..32 {
+            let service = service.clone();
+            let barrier = barrier.clone();
+            tasks.spawn(async move {
+                barrier.wait().await;
+                let image = service
+                    .render_image(Request::new(RenderImageRequest {
+                        plugin_id: "weather".to_string(),
+                        source: Some(Source::Svg(svg.to_string())),
+                        width: 0,
+                    }))
+                    .await
+                    .expect("concurrent render")
+                    .into_inner();
+                // Read while other requests may still be publishing the same destination.
+                let bytes = std::fs::read(&image.file_path).expect("published PNG");
+                assert_eq!(pixel(&bytes, 16, 16), (255, 0, 0, 255));
+                image.file_path
+            });
+        }
+        while let Some(result) = tasks.join_next().await {
+            let path = result.unwrap();
+            if let Some(published) = &published {
+                assert_eq!(&path, published);
+            } else {
+                published = Some(path);
+            }
+        }
+    }
+
+    let entries = std::fs::read_dir(dir.path().join("weather/render"))
+        .unwrap()
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap();
+    assert_eq!(entries.len(), 1, "no staging files remain");
+}
