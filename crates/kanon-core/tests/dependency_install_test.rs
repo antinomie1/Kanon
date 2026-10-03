@@ -118,15 +118,24 @@ async fn a_failed_install_reports_the_end_of_the_tools_output_and_is_retried() {
         &bin,
         "uv",
         r#"echo "uv $*" >> calls.log
+(head -c 1048576 /dev/zero | tr '\000' o; echo stdout-diagnostic) &
+head -c 1048576 /dev/zero | tr '\000' e >&2
 for i in $(seq 1 30); do echo "resolver line $i" >&2; done
+wait
 exit 3"#,
     );
     let plugin = python_plugin(root.path());
-    let installer = DependencyInstaller::new().with_search_path(vec![bin]);
+    let installer = DependencyInstaller::new()
+        .with_search_path(vec![bin.clone()])
+        .with_timeout(Duration::from_secs(10));
 
     let err = installer.prepare_python(&plugin).await.unwrap_err();
     assert!(err.contains("`uv sync --locked` failed"), "{err}");
     assert!(err.contains("resolver line 30"), "{err}");
+    assert!(
+        !err.contains("stdout-diagnostic"),
+        "stderr takes precedence: {err}"
+    );
     assert!(
         !err.contains("resolver line 5\n"),
         "only the tail is kept: {err}"
@@ -138,6 +147,21 @@ exit 3"#,
         2,
         "a failure is not remembered as installed"
     );
+
+    // A line-count limit alone cannot bound this single long stdout line; keep its final bytes.
+    tool(
+        &bin,
+        "uv",
+        r#"printf discarded-prefix
+head -c 1048576 /dev/zero | tr '\000' x
+printf final-stdout-diagnostic
+exit 4"#,
+    );
+    let err = installer.prepare_python(&plugin).await.unwrap_err();
+    assert!(err.contains("`uv sync --locked` failed"));
+    assert!(err.ends_with("final-stdout-diagnostic"));
+    assert!(!err.contains("discarded-prefix"));
+    assert!(err.len() <= 64 * 1024 + 200, "retained {} bytes", err.len());
 }
 
 #[tokio::test]
@@ -201,7 +225,11 @@ async fn a_hung_install_is_stopped_at_the_timeout() {
     let _turn = SERIAL.lock().await;
     let root = tempfile::tempdir().unwrap();
     let bin = root.path().join("bin");
-    tool(&bin, "uv", "sleep 30");
+    tool(
+        &bin,
+        "uv",
+        "echo partial-stdout; echo partial-stderr >&2; exec sleep 30",
+    );
     let plugin = python_plugin(root.path());
     let installer = DependencyInstaller::new()
         .with_search_path(vec![bin])

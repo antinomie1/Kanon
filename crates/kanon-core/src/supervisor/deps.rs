@@ -26,11 +26,16 @@ use std::process::Stdio;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime};
 
+use tokio::io::{AsyncRead, AsyncReadExt};
+
 /// Marker written into an environment after the tool finished successfully.
 const MARKER: &str = ".kanon-installed";
 
 /// Lines of tool output kept in a failure report.
 const OUTPUT_TAIL_LINES: usize = 20;
+
+/// Bytes retained per output pipe, including when a tool writes one unbounded line.
+const OUTPUT_TAIL_BYTES: usize = 64 * 1024;
 
 /// How long one install may take before it is killed.
 pub const DEFAULT_INSTALL_TIMEOUT: Duration = Duration::from_secs(600);
@@ -217,9 +222,32 @@ impl DependencyInstaller {
             // A timed-out install is dropped mid-wait; the child must die with it rather than
             // keep writing into the environment the next attempt will use.
             .kill_on_drop(true);
-        let output = match tokio::time::timeout(self.timeout, command.output()).await {
+        let mut child = command
+            .spawn()
+            .map_err(|err| format!("`{command_line}` could not be started: {err}"))?;
+        let stdout = child
+            .stdout
+            .take()
+            .ok_or_else(|| format!("`{command_line}` has no stdout pipe"))?;
+        let stderr = child
+            .stderr
+            .take()
+            .ok_or_else(|| format!("`{command_line}` has no stderr pipe"))?;
+        // Both pipes must keep draining while the child runs: retaining only a tail must not
+        // leave either pipe full and deadlock the installer. No detached readers outlive timeout.
+        let output = tokio::time::timeout(self.timeout, async {
+            tokio::try_join!(
+                child.wait(),
+                read_output_tail(stdout),
+                read_output_tail(stderr)
+            )
+        })
+        .await;
+        let (status, stdout, stderr) = match output {
             Ok(Ok(output)) => output,
-            Ok(Err(err)) => return Err(format!("`{command_line}` could not be started: {err}")),
+            Ok(Err(err)) => {
+                return Err(format!("`{command_line}` output or wait failed: {err}"));
+            }
             Err(_) => {
                 return Err(format!(
                     "`{command_line}` did not finish within {} s and was stopped",
@@ -227,16 +255,12 @@ impl DependencyInstaller {
                 ));
             }
         };
-        if !output.status.success() {
+        if !status.success() {
             // Tools print the reason on stderr; npm sometimes only on stdout.
-            let text = if output.stderr.is_empty() {
-                &output.stdout
-            } else {
-                &output.stderr
-            };
+            let text = if stderr.is_empty() { &stdout } else { &stderr };
             return Err(format!(
                 "`{command_line}` failed ({}):\n{}",
-                output.status,
+                status,
                 tail(&String::from_utf8_lossy(text))
             ));
         }
@@ -271,6 +295,21 @@ impl DependencyInstaller {
                 .find(|path| path.is_file()),
             None => super::find_binary_in_path(name),
         }
+    }
+}
+
+/// Drains a pipe to EOF while keeping only its final bounded byte window.
+async fn read_output_tail(mut stream: impl AsyncRead + Unpin) -> std::io::Result<Vec<u8>> {
+    let mut tail = Vec::with_capacity(OUTPUT_TAIL_BYTES);
+    let mut buffer = [0; 8192];
+    loop {
+        let read = stream.read(&mut buffer).await?;
+        if read == 0 {
+            return Ok(tail);
+        }
+        let discard = (tail.len() + read).saturating_sub(OUTPUT_TAIL_BYTES);
+        tail.drain(..discard);
+        tail.extend_from_slice(&buffer[..read]);
     }
 }
 
@@ -334,6 +373,12 @@ fn mark_installed(env: &Path) {
 
 /// The last lines of a tool's output.
 fn tail(text: &str) -> String {
-    let lines: Vec<&str> = text.trim_end().lines().collect();
-    lines[lines.len().saturating_sub(OUTPUT_TAIL_LINES)..].join("\n")
+    let mut lines: Vec<&str> = text
+        .trim_end()
+        .lines()
+        .rev()
+        .take(OUTPUT_TAIL_LINES)
+        .collect();
+    lines.reverse();
+    lines.join("\n")
 }
