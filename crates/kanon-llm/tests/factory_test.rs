@@ -240,3 +240,111 @@ fn a_reference_that_resolves_to_no_provider_yields_no_agent() {
         "a bare id is not guessed onto some endpoint"
     );
 }
+
+#[test]
+fn arbitrary_model_overrides_are_bounded_and_recent_models_are_reused() {
+    let (factory, provider, _memory, _sessions, _personas) = factory();
+    factory.install("node", provider, config("default-model"));
+    let hot = factory.agent_for_model(Some("hot-model")).unwrap();
+    let mut retained = Vec::new();
+
+    for index in 0..256 {
+        let agent = factory
+            .agent_for_model(Some(&format!("arbitrary-{index}")))
+            .unwrap();
+        retained.push(Arc::downgrade(&agent));
+        let reused = factory.agent_for_model(Some("hot-model")).unwrap();
+        assert!(
+            Arc::ptr_eq(&hot, &reused),
+            "recently used models stay cached"
+        );
+    }
+
+    assert!(
+        retained[0].upgrade().is_none(),
+        "old model agents are released"
+    );
+    assert!(retained.last().unwrap().upgrade().is_some());
+    assert_eq!(
+        retained
+            .iter()
+            .filter(|agent| agent.upgrade().is_some())
+            .count(),
+        63
+    );
+    let rebuilt = factory.agent_for_model(Some("arbitrary-0")).unwrap();
+    assert_eq!(rebuilt.config().default_model, "arbitrary-0");
+}
+
+/// Pauses caller-owned conversion so a concurrent lookup can observe the old configuration.
+struct PausingName {
+    entered: std::sync::mpsc::Sender<()>,
+    resume: std::sync::mpsc::Receiver<()>,
+}
+
+impl From<PausingName> for String {
+    fn from(name: PausingName) -> Self {
+        name.entered.send(()).unwrap();
+        name.resume
+            .recv_timeout(std::time::Duration::from_secs(5))
+            .unwrap();
+        "node".to_string()
+    }
+}
+
+#[test]
+fn an_override_cannot_cache_a_mixture_of_old_and_new_configuration() {
+    let (factory, _provider, _memory, _sessions, _personas) = factory();
+    let factory = Arc::new(factory);
+    let mut old = two_providers(Some("alpha/default"));
+    old.providers[0].temperature = Some(0.2);
+    factory.configure("node", old).unwrap();
+    let previous = factory.node_agent().unwrap();
+    let mut replacement = two_providers(Some("alpha/default"));
+    replacement.providers[0].temperature = Some(0.9);
+    let (entered_tx, entered_rx) = std::sync::mpsc::channel();
+    let (resume_tx, resume_rx) = std::sync::mpsc::channel();
+
+    let configuring = {
+        let factory = factory.clone();
+        std::thread::spawn(move || {
+            factory.configure(
+                PausingName {
+                    entered: entered_tx,
+                    resume: resume_rx,
+                },
+                replacement,
+            )
+        })
+    };
+    entered_rx
+        .recv_timeout(std::time::Duration::from_secs(5))
+        .unwrap();
+    let (looked_up_tx, looked_up_rx) = std::sync::mpsc::channel();
+    let lookup = {
+        let factory = factory.clone();
+        std::thread::spawn(move || {
+            let agent = factory.agent_for_model(Some("alpha/override")).unwrap();
+            looked_up_tx.send(()).unwrap();
+            agent
+        })
+    };
+
+    // Caller code runs before publication. This lookup must see the complete old state;
+    // the old implementation had already replaced the provider and mixed it with old tuning.
+    looked_up_rx
+        .recv_timeout(std::time::Duration::from_secs(5))
+        .unwrap();
+    let agent = lookup.join().unwrap();
+    resume_tx.send(()).unwrap();
+    configuring.join().unwrap().unwrap();
+    assert_eq!(agent.config().temperature, Some(0.2));
+    assert!(Arc::ptr_eq(agent.provider(), previous.provider()));
+    let cached = factory.agent_for_model(Some("alpha/override")).unwrap();
+    assert!(!Arc::ptr_eq(&agent, &cached));
+    assert_eq!(cached.config().temperature, Some(0.9));
+    assert!(Arc::ptr_eq(
+        cached.provider(),
+        factory.node_agent().unwrap().provider()
+    ));
+}

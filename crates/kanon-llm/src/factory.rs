@@ -15,8 +15,8 @@
 //! `<provider>/<model-id>` name and dropped wholesale whenever the directory changes, so an
 //! override can never outlive the credential it was built for.
 
-use std::collections::HashMap;
-use std::sync::{Arc, RwLock};
+use std::collections::VecDeque;
+use std::sync::{Arc, Mutex};
 
 use crate::agent::{Agent, AgentConfig, AgentHook, AgentTool};
 use crate::builtin::{AgentBuilder, BuiltinAgent};
@@ -54,6 +54,18 @@ struct DirectProvider {
     provider: Arc<dyn LlmProvider>,
 }
 
+/// Bounds retained overrides even when callers try arbitrary upstream model identifiers.
+const MAX_CACHED_OVERRIDES: usize = 64;
+
+/// Mutable routing state, held across both configuration publication and override construction.
+#[derive(Default)]
+struct FactoryState {
+    default_model: Option<String>,
+    direct: Option<DirectProvider>,
+    /// Least recently used first; a single bounded container needs no parallel ordering index.
+    overrides: VecDeque<(String, Arc<dyn Agent>)>,
+}
+
 /// Builds every agent the node runs, so they all share one memory, session manager, persona
 /// registry and trace bus.
 pub struct AgentFactory {
@@ -75,15 +87,9 @@ pub struct AgentFactory {
     providers: Arc<ProviderRegistry>,
     /// Per-model settings shared with the pipeline and the console.
     models: Arc<ModelCatalog>,
-    /// Canonical reference of the node's default model, when configured.
-    default_model: RwLock<Option<String>>,
-    /// Provider installed directly rather than through the directory, when any.
-    direct: RwLock<Option<DirectProvider>>,
-    /// Agents built for per-model overrides, keyed by canonical model reference.
-    ///
-    /// Bounded by the number of distinct models operators configure, and dropped wholesale when
-    /// the directory changes so an override can never outlive the provider it was built for.
-    overrides: RwLock<HashMap<String, Arc<dyn Agent>>>,
+    /// One lock orders directory updates with override reads and publication. It is never held
+    /// across model requests; constructing an agent only clones the shared runtime parts.
+    state: Mutex<FactoryState>,
 }
 
 impl std::fmt::Debug for AgentFactory {
@@ -117,9 +123,7 @@ impl AgentFactory {
             tools,
             providers: Arc::new(ProviderRegistry::new()),
             models: Arc::new(ModelCatalog::new()),
-            default_model: RwLock::new(None),
-            direct: RwLock::new(None),
-            overrides: RwLock::new(HashMap::new()),
+            state: Mutex::new(FactoryState::default()),
         }
     }
 
@@ -163,9 +167,10 @@ impl AgentFactory {
 
     /// Canonical reference of the node's default model, when configured.
     pub fn default_model(&self) -> Option<String> {
-        self.default_model
-            .read()
+        self.state
+            .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .default_model
             .clone()
     }
 
@@ -180,6 +185,8 @@ impl AgentFactory {
         name: impl Into<String>,
         runtime: ProviderRuntime,
     ) -> Result<(), String> {
+        // Generic conversions may execute caller code; finish them before taking routing locks.
+        let name = name.into();
         let default_model = runtime
             .default_model
             .as_deref()
@@ -188,42 +195,37 @@ impl AgentFactory {
             .map(str::to_string);
 
         let staged = ProviderRegistry::new();
-        staged.replace(runtime.providers.clone())?;
-        if let Some(model) = default_model.as_deref() {
-            staged.resolve(&ModelRef::parse(model))?;
-        }
+        staged.replace(runtime.providers)?;
+        let resolved = default_model
+            .as_deref()
+            .map(|model| staged.resolve(&ModelRef::parse(model)))
+            .transpose()?;
 
-        self.providers.replace(runtime.providers)?;
+        // Override lookups must finish before this publication begins, or an old lookup could
+        // refill the just-cleared cache with a client carrying the previous credentials.
+        let mut state = self
+            .state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        self.providers.replace_with(staged);
         self.models.replace(runtime.models);
-        *self
-            .direct
-            .write()
-            .unwrap_or_else(|poisoned| poisoned.into_inner()) = None;
-        *self
-            .default_model
-            .write()
-            .unwrap_or_else(|poisoned| poisoned.into_inner()) = default_model.clone();
+        state.direct = None;
+        state.default_model = default_model;
+        state.overrides.clear();
 
-        self.overrides
-            .write()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .clear();
-
-        let Some(default_model) = default_model else {
+        let Some(resolved) = resolved else {
             // No default model: the node has no conversational runtime, which is the same
             // reportable state as no provider at all.
             self.slot.set(None);
             return Ok(());
         };
 
-        let reference = ModelRef::parse(&default_model);
-        let resolved = self.providers.resolve(&reference)?;
         let spec = self.models.settings_for(&ModelRef::new(
             resolved.provider_name.clone(),
             resolved.model.clone(),
         ));
         let config = self.agent_config_for(&resolved.provider_name, &resolved.model, &spec);
-        let agent = Arc::new(self.build_agent_named(name.into(), resolved.provider, config));
+        let agent = Arc::new(self.build_agent_named(name, resolved.provider, config));
         self.slot.set(Some(agent));
         Ok(())
     }
@@ -238,45 +240,36 @@ impl AgentFactory {
         provider: Arc<dyn LlmProvider>,
         config: AgentConfig,
     ) -> Arc<dyn Agent> {
-        *self
-            .direct
-            .write()
-            .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(DirectProvider {
+        let name = name.into();
+        let mut state = self
+            .state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        state.direct = Some(DirectProvider {
             name: config
                 .provider
                 .clone()
                 .unwrap_or_else(|| "default".to_string()),
             provider: provider.clone(),
         });
-        *self
-            .default_model
-            .write()
-            .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(config.model_ref());
+        state.default_model = Some(config.model_ref());
 
-        let agent = Arc::new(self.build_agent_named(name.into(), provider, config));
-        self.overrides
-            .write()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .clear();
+        let agent = Arc::new(self.build_agent_named(name, provider, config));
+        state.overrides.clear();
         self.slot.set(Some(agent.clone()));
         agent
     }
 
     /// Clears the node's provider together with every derived override.
     pub fn clear(&self) {
-        self.overrides
-            .write()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .clear();
-        *self
-            .direct
-            .write()
-            .unwrap_or_else(|poisoned| poisoned.into_inner()) = None;
-        *self
-            .default_model
-            .write()
-            .unwrap_or_else(|poisoned| poisoned.into_inner()) = None;
-        let _ = self.providers.replace(Vec::new());
+        let mut state = self
+            .state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        state.overrides.clear();
+        state.direct = None;
+        state.default_model = None;
+        self.providers.replace_with(ProviderRegistry::new());
         self.models.replace(Vec::new());
         self.slot.set(None);
     }
@@ -301,6 +294,10 @@ impl AgentFactory {
 
     /// Agent that should serve a conversation for one parsed model reference.
     pub fn agent_for_reference(&self, reference: &ModelRef) -> Option<Arc<dyn Agent>> {
+        let mut state = self
+            .state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         let default_agent = self.slot.current()?;
         if reference.is_empty() {
             return Some(default_agent);
@@ -319,12 +316,7 @@ impl AgentFactory {
             Err(registry_error) => {
                 // No directory entry matched: fall back to a directly installed provider, which is
                 // how an embedded node (and the tests) hand over one client.
-                let Some(direct) = self
-                    .direct
-                    .read()
-                    .unwrap_or_else(|poisoned| poisoned.into_inner())
-                    .clone()
-                else {
+                let Some(direct) = state.direct.clone() else {
                     // Loud on purpose: an instance pinned to a reference that no longer resolves
                     // (a deleted provider, a bare model id) would otherwise go silent.
                     tracing::warn!(
@@ -358,13 +350,15 @@ impl AgentFactory {
             return Some(default_agent);
         }
 
-        if let Some(cached) = self
+        if let Some(index) = state
             .overrides
-            .read()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .get(&canonical)
+            .iter()
+            .position(|(key, _)| key == &canonical)
         {
-            return Some(cached.clone());
+            let cached = state.overrides.remove(index).expect("cached index exists");
+            let agent = cached.1.clone();
+            state.overrides.push_back(cached);
+            return Some(agent);
         }
 
         let model_reference = ModelRef::new(resolved.provider_name.clone(), resolved.model.clone());
@@ -380,10 +374,10 @@ impl AgentFactory {
         }
 
         let agent = Arc::new(self.build_agent(resolved.provider, config));
-        self.overrides
-            .write()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .insert(canonical, agent.clone());
+        if state.overrides.len() == MAX_CACHED_OVERRIDES {
+            state.overrides.pop_front();
+        }
+        state.overrides.push_back((canonical, agent.clone()));
         Some(agent)
     }
 

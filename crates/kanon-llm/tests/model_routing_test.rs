@@ -137,6 +137,60 @@ fn an_unsupported_protocol_is_rejected_when_the_directory_is_installed() {
 }
 
 #[test]
+fn concurrent_resolvers_share_the_published_client_after_each_replacement() {
+    use std::sync::{Arc, Barrier};
+
+    let registry = Arc::new(ProviderRegistry::new());
+    let mut previous = None;
+    for generation in 0..8 {
+        registry
+            .replace(vec![entry(
+                "endpoint",
+                &format!("http://127.0.0.1:9/{generation}"),
+            )])
+            .unwrap();
+        let barrier = Arc::new(Barrier::new(16));
+        let resolved = std::thread::scope(|scope| {
+            let mut lookups = Vec::new();
+            for _ in 0..16 {
+                let registry = registry.clone();
+                let barrier = barrier.clone();
+                lookups.push(scope.spawn(move || {
+                    barrier.wait();
+                    registry
+                        .resolve(&ModelRef::parse("endpoint/model"))
+                        .unwrap()
+                        .provider
+                }));
+            }
+            lookups
+                .into_iter()
+                .map(|lookup| lookup.join().unwrap())
+                .collect::<Vec<_>>()
+        });
+        for client in &resolved {
+            assert!(
+                Arc::ptr_eq(client, &resolved[0]),
+                "one client per published endpoint"
+            );
+        }
+        if let Some(previous) = previous {
+            assert!(
+                !Arc::ptr_eq(&previous, &resolved[0]),
+                "replacement drops the previous client"
+            );
+        }
+        previous = Some(resolved[0].clone());
+    }
+    registry.replace(Vec::new()).unwrap();
+    assert!(
+        registry
+            .resolve(&ModelRef::parse("endpoint/model"))
+            .is_err()
+    );
+}
+
+#[test]
 fn a_scheme_less_endpoint_is_rejected_before_it_is_used() {
     assert!(entry("bad", "api.example.com/v1").validate().is_err());
     assert!(

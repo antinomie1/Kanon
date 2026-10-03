@@ -21,7 +21,7 @@ use std::sync::{Arc, RwLock};
 
 use serde::{Deserialize, Serialize};
 
-use crate::gateway::{LlmProvider, build_provider, build_provider_with_reasoning_replay};
+use crate::gateway::{LlmProvider, build_provider_with_reasoning_replay};
 use crate::model::ModelRef;
 
 /// One named model-provider endpoint.
@@ -71,10 +71,15 @@ impl ProviderEntry {
 
     /// Validates the fields the registry and the HTTP client require.
     ///
-    /// The protocol is checked by constructing the client through [`build_provider`], the single
+    /// The protocol is checked by constructing the client through [`build_provider_with_reasoning_replay`], the single
     /// owner of the protocol switch, so an endpoint accepted here can never be rejected later when
     /// the registry builds its client.
     pub fn validate(&self) -> Result<(), String> {
+        self.build_client().map(|_| ())
+    }
+
+    /// Validates the declaration and retains the client that proved the protocol is supported.
+    fn build_client(&self) -> Result<Arc<dyn LlmProvider>, String> {
         if self.name.trim().is_empty() {
             return Err("provider name must not be empty".to_string());
         }
@@ -87,13 +92,13 @@ impl ProviderEntry {
                 self.name, self.base_url
             ));
         }
-        build_provider(
+        build_provider_with_reasoning_replay(
             &self.protocol,
             self.base_url.clone(),
             self.api_key.clone(),
             String::new(),
+            self.replay_reasoning,
         )
-        .map(|_| ())
         .map_err(|err| format!("provider '{}': {err}", self.name))
     }
 
@@ -134,13 +139,17 @@ impl std::fmt::Debug for ResolvedProvider {
     }
 }
 
-/// Directory of named provider endpoints with lazily built, cached clients.
+/// One declaration and its client, replaced together so credentials cannot become stale.
+struct RegisteredProvider {
+    entry: ProviderEntry,
+    client: Arc<dyn LlmProvider>,
+}
+
+/// Directory of named provider endpoints and their shared clients.
 #[derive(Default)]
 pub struct ProviderRegistry {
     /// Configured endpoints by name.
-    entries: RwLock<BTreeMap<String, ProviderEntry>>,
-    /// Built clients by provider name, invalidated whenever the directory is replaced.
-    clients: RwLock<BTreeMap<String, Arc<dyn LlmProvider>>>,
+    entries: RwLock<BTreeMap<String, RegisteredProvider>>,
 }
 
 impl std::fmt::Debug for ProviderRegistry {
@@ -175,17 +184,15 @@ impl ProviderRegistry {
     pub fn replace(&self, entries: Vec<ProviderEntry>) -> Result<(), String> {
         let mut map = BTreeMap::new();
         for entry in entries {
-            entry.validate()?;
             if map.contains_key(&entry.name) {
                 return Err(format!("provider '{}' is defined twice", entry.name));
             }
-            map.insert(entry.name.clone(), entry);
+            let client = entry.build_client()?;
+            map.insert(entry.name.clone(), RegisteredProvider { entry, client });
         }
 
-        self.clients
-            .write()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .clear();
+        // Validation already constructs every client. Publish those clients with their entries
+        // in one swap instead of lazily rebuilding and racing a separate cache invalidation.
         *self
             .entries
             .write()
@@ -193,9 +200,24 @@ impl ProviderRegistry {
         Ok(())
     }
 
+    /// Publishes an already validated directory without constructing its clients a second time.
+    pub(crate) fn replace_with(&self, staged: Self) {
+        let entries = staged
+            .entries
+            .into_inner()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        *self
+            .entries
+            .write()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = entries;
+    }
+
     /// Every configured endpoint, ordered by name.
     pub fn list(&self) -> Vec<ProviderEntry> {
-        self.entries().values().cloned().collect()
+        self.entries()
+            .values()
+            .map(|registered| registered.entry.clone())
+            .collect()
     }
 
     /// Configured endpoint names, ordered.
@@ -205,7 +227,9 @@ impl ProviderRegistry {
 
     /// Looks an endpoint up by name.
     pub fn get(&self, name: &str) -> Option<ProviderEntry> {
-        self.entries().get(name.trim()).cloned()
+        self.entries()
+            .get(name.trim())
+            .map(|registered| registered.entry.clone())
     }
 
     /// Whether the directory holds no endpoint.
@@ -225,54 +249,24 @@ impl ProviderRegistry {
             )
         })?;
 
-        if self.get(provider_name).is_none() {
-            return Err(format!(
+        let entries = self.entries();
+        let registered = entries.get(provider_name).ok_or_else(|| {
+            format!(
                 "model '{}' names provider '{provider_name}', which is not configured (configured: {})",
                 reference.canonical(),
-                self.names().join(", ")
-            ));
-        }
+                entries.keys().cloned().collect::<Vec<_>>().join(", ")
+            )
+        })?;
 
         Ok(ResolvedProvider {
             provider_name: provider_name.to_string(),
-            provider: self.client_for(provider_name)?,
+            provider: registered.client.clone(),
             model: reference.model().to_string(),
         })
     }
 
-    /// Builds (or returns the cached) client for one configured endpoint.
-    fn client_for(&self, name: &str) -> Result<Arc<dyn LlmProvider>, String> {
-        if let Some(cached) = self
-            .clients
-            .read()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .get(name)
-            .cloned()
-        {
-            return Ok(cached);
-        }
-
-        let entry = self
-            .get(name)
-            .ok_or_else(|| format!("provider '{name}' is not configured"))?;
-
-        let client = build_provider_with_reasoning_replay(
-            &entry.protocol,
-            entry.base_url.clone(),
-            entry.api_key.clone(),
-            String::new(),
-            entry.replay_reasoning,
-        )?;
-
-        self.clients
-            .write()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .insert(name.to_string(), client.clone());
-        Ok(client)
-    }
-
     /// Acquires the entries guard, recovering from poisoning for the documented reason.
-    fn entries(&self) -> std::sync::RwLockReadGuard<'_, BTreeMap<String, ProviderEntry>> {
+    fn entries(&self) -> std::sync::RwLockReadGuard<'_, BTreeMap<String, RegisteredProvider>> {
         self.entries
             .read()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
