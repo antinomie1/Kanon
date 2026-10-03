@@ -1,6 +1,35 @@
 //! Retired group readers must not accumulate after their observed lines leave the log.
 
 use kanon_core::pipeline::group_log::GroupLog;
+use std::time::Duration;
+
+#[tokio::test(start_paused = true)]
+async fn recording_reclaims_expired_groups_without_revisiting_them() {
+    let log = GroupLog::default();
+    let old_seq = log.record("retired-group", "speaker", "expired line");
+    log.mark_seen("retired-group", "retired-reader", old_seq);
+    tokio::time::advance(Duration::from_secs(29 * 60)).await;
+    let active_seq = log.record("active-group", "speaker", "recent line");
+    log.mark_seen("active-group", "active-reader", active_seq);
+    tokio::time::advance(Duration::from_secs(2 * 60)).await;
+
+    log.record("new-group", "speaker", "new line");
+    let retained = format!("{log:?}");
+    assert!(!retained.contains("retired-group"));
+    assert!(!retained.contains("retired-reader"));
+    assert!(log.unseen("active-group", "active-reader").is_empty());
+    assert_eq!(
+        log.unseen("active-group", "new-reader"),
+        vec![("speaker".into(), "recent line".into())]
+    );
+
+    let seq = log.record("retired-group", "speaker", "returned");
+    assert!(seq > old_seq);
+    assert_eq!(
+        log.unseen("retired-group", "retired-reader"),
+        vec![("speaker".into(), "returned".into())]
+    );
+}
 
 #[test]
 fn obsolete_cursors_are_reclaimed_without_replaying_seen_lines() {

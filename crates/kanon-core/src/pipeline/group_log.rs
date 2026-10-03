@@ -11,13 +11,17 @@
 
 use std::collections::{HashMap, VecDeque};
 use std::sync::Mutex;
-use std::time::{Duration, Instant};
+use std::time::Duration;
+use tokio::time::Instant;
 
 /// Lines kept per group.
 const CAPACITY: usize = 30;
 
 /// Lines older than this are no longer context worth sending.
 const MAX_AGE: Duration = Duration::from_secs(30 * 60);
+
+/// Amortizes cleanup across incoming messages without keeping a background task alive.
+const PRUNE_INTERVAL: Duration = Duration::from_secs(60);
 
 /// Characters kept of one line.
 const MAX_LINE_CHARS: usize = 200;
@@ -54,6 +58,7 @@ impl Channel {
 struct Inner {
     channels: HashMap<String, Channel>,
     next_seq: u64,
+    next_prune: Option<Instant>,
 }
 
 /// Recent group lines, keyed by `<platform>\u{1f}<channel>`.
@@ -66,12 +71,23 @@ impl GroupLog {
     /// Records a line and returns its sequence number.
     pub fn record(&self, channel: &str, speaker: &str, text: &str) -> u64 {
         let mut inner = self.inner.lock().unwrap_or_else(|p| p.into_inner());
+        let now = Instant::now();
+        if inner.next_prune.is_none_or(|deadline| now >= deadline) {
+            // A group may never be read again. Reclaim fully expired groups while recording
+            // new traffic, before they can accumulate indefinitely across channels.
+            inner.channels.retain(|_, log| {
+                log.entries
+                    .back()
+                    .is_some_and(|entry| now.duration_since(entry.at) <= MAX_AGE)
+            });
+            inner.next_prune = Some(now + PRUNE_INTERVAL);
+        }
         inner.next_seq += 1;
         let seq = inner.next_seq;
         let log = inner.channels.entry(channel.to_owned()).or_default();
         log.entries.push_back(Entry {
             seq,
-            at: Instant::now(),
+            at: now,
             speaker: speaker.to_owned(),
             text: text.trim().chars().take(MAX_LINE_CHARS).collect(),
         });
