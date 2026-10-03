@@ -7,5 +7,4 @@ license = "GPL-3.0-only"
 [dependencies]
 kanon-sdk = { path = "../../sdks/rust/kanon-sdk" }
 tokio = { version = "1.40", features = ["full"] }
-serde_json = "1.0"
 prost-types = "0.13"

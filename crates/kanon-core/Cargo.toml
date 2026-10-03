@@ -22,7 +22,6 @@ toml = "0.8"
 thiserror = "1.0"
 tracing = "0.1"
 libc = "0.2"
-tracing-subscriber = "0.3"
 bollard = { version = "0.20", default-features = false, features = ["pipe"] }
 regex = "1"
 futures-util = { version = "0.3", default-features = false, features = ["std"] }

@@ -18,11 +18,9 @@ base64 = "0.22"
 async-trait = "0.1"
 dashmap = "6.1"
 tokio-stream = "0.1"
-futures-core = "0.3"
 kanon-proto = { path = "../kanon-proto" }
 rusqlite = { version = "0.40.2", features = ["bundled"] }
 
 [dev-dependencies]
 axum = "0.7"
 tempfile = "3.12"
-
