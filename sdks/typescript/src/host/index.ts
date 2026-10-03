@@ -8,7 +8,9 @@
 import { ipcToken, serverAuth, prepareEndpoint } from "../sdk/ipc.js";
 import * as fs from "fs";
 import * as path from "path";
+import { pathToFileURL } from "node:url";
 import * as grpc from "@grpc/grpc-js";
+import { parse as parseToml } from "@iarna/toml";
 import {
   CoreHandle,
   Plugin,
@@ -90,8 +92,15 @@ function resolvePluginEntrypoint(targetPath: string): string {
 
   if (resolved.endsWith(".toml")) {
     const content = fs.readFileSync(resolved, "utf-8");
-    const entryMatch = content.match(/entrypoint\s*=\s*"([^"]+)"/);
-    const entrypoint = entryMatch ? entryMatch[1] : "index.js";
+    const manifest = parseToml(content);
+    const plugin = manifest.plugin;
+    const entrypoint =
+      plugin && typeof plugin === "object" && !Array.isArray(plugin) && "entrypoint" in plugin
+        ? plugin.entrypoint
+        : undefined;
+    if (typeof entrypoint !== "string" || entrypoint.trim() === "") {
+      throw new Error(`${resolved} must define a nonempty [plugin].entrypoint`);
+    }
     const dir = path.dirname(resolved);
     const candidate = path.join(dir, entrypoint);
     // If typescript source file was referenced (.ts), try dist equivalent or require ts directly
@@ -100,8 +109,10 @@ function resolvePluginEntrypoint(targetPath: string): string {
       if (fs.existsSync(jsCandidate)) {
         return jsCandidate;
       }
-      // If built under dist/
-      const distCandidate = path.join(dir, "../../dist/plugins", path.basename(dir), "index.js");
+      // The SDK workspace compiles plugins under dist/plugins, preserving their source paths.
+      const distCandidate = path.join(
+        dir, "../../dist/plugins", path.basename(dir), entrypoint.replace(/\.ts$/, ".js"),
+      );
       if (fs.existsSync(distCandidate)) {
         return distCandidate;
       }
@@ -137,7 +148,7 @@ async function loadPlugin(targetPath: string): Promise<Plugin> {
     throw new Error(`Plugin entrypoint not found: ${entrypoint}`);
   }
 
-  const imported = await import(`file://${entrypoint}`);
+  const imported = await import(pathToFileURL(entrypoint).href);
   let target: any = imported.default || imported;
   while (target && target.default && typeof target !== "function") {
     target = target.default;

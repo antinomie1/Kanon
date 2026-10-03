@@ -1,6 +1,7 @@
 """Out-of-process gRPC plugin host for Kanon Python SDK."""
 
 import asyncio
+import json
 import os
 import signal
 import sys
@@ -223,18 +224,6 @@ class KanonHost:
         watchdog: Optional[CoreWatchdog] = None
         plugin_loaded = False
         try:
-            # Start host gRPC server first so that Core can reach it during RegisterHost
-            server = grpc.aio.server(interceptors=[ServerAuth(ipc_token())] if os.name == "nt" or os.environ.get("KANON_IPC_TOKEN") else [])
-            pb_grpc.add_PluginHostServiceServicer_to_server(HostServiceImpl(self.plugin), server)
-            pb_grpc.add_MessagePipelineServiceServicer_to_server(PipelineServiceImpl(self.plugin), server)
-
-            port = server.add_insecure_port("127.0.0.1:0" if os.name == "nt" else f"unix:{self.socket_path}")
-            if not port:
-                raise RuntimeError("Failed to bind host IPC endpoint")
-            owner.publish(port)
-            await server.start()
-            print(f"Kanon Python Host running on {self.socket_path}", flush=True)
-
             core_stub: Optional[pb_grpc.BotApiServiceStub] = None
             core_handle: Optional[CoreHandle] = None
 
@@ -244,14 +233,8 @@ class KanonHost:
                         # Dial through the shared helper: it pins the valid HTTP/2 authority that
                         # Tonic's h2 server requires (see kanon_sdk.ipc for the full rationale).
                         core_channel = connect_core_channel(self.core_sock)
+                        await asyncio.wait_for(core_channel.channel_ready(), timeout=3.0)
                         core_stub = pb_grpc.BotApiServiceStub(core_channel)
-                        reg_req = pb.RegisterHostRequest(
-                            host_id=self.host_id,
-                            runtime="python",
-                            endpoint=str(self.socket_path),
-                            loaded_plugin_ids=[meta.id],
-                        )
-                        await core_stub.RegisterHost(reg_req, timeout=3.0)
                         core_handle = CoreHandle(core_stub, plugin_id=meta.id, host_id=self.host_id)
                     except Exception as exc:
                         if core_channel is not None:
@@ -284,11 +267,10 @@ class KanonHost:
             config: dict = {}
             config_path = self.data_dir / "config.json"
             if config_path.exists():
-                try:
-                    import json
-                    config = json.loads(config_path.read_text(encoding="utf-8"))
-                except Exception as e:
-                    print(f"[kanon-host] Failed to load config from {config_path}: {e}", file=sys.stderr, flush=True)
+                # A malformed saved configuration is a startup error, not an empty config.
+                config = json.loads(config_path.read_text(encoding="utf-8"))
+                if not isinstance(config, dict):
+                    raise ValueError(f"{config_path} must contain a JSON object")
 
             ctx = PluginContext(data_dir=self.data_dir, config=config, core=core_handle)
             # Set before on_load: plugins commonly override on_load without calling super(), and the
@@ -296,6 +278,38 @@ class KanonHost:
             self.plugin.context = ctx
             plugin_loaded = True
             await self.plugin.on_load(ctx)
+
+            # Binding is the readiness boundary used by the supervisor. Publish the endpoint
+            # only after on_load succeeds, so neither metadata nor pipeline handlers can expose
+            # a partially initialized plugin. The Core channel is already usable during on_load.
+            server = grpc.aio.server(interceptors=[ServerAuth(ipc_token())] if os.name == "nt" or os.environ.get("KANON_IPC_TOKEN") else [])
+            pb_grpc.add_PluginHostServiceServicer_to_server(HostServiceImpl(self.plugin), server)
+            pb_grpc.add_MessagePipelineServiceServicer_to_server(PipelineServiceImpl(self.plugin), server)
+
+            port = server.add_insecure_port("127.0.0.1:0" if os.name == "nt" else f"unix:{self.socket_path}")
+            if not port:
+                raise RuntimeError("Failed to bind host IPC endpoint")
+            owner.publish(port)
+            await server.start()
+            print(f"Kanon Python Host running on {self.socket_path}", flush=True)
+
+            # Register after serving: an independently launched host may be called back by
+            # RegisterHost before it returns. Supervised launches are acknowledged immediately.
+            if core_stub is not None:
+                try:
+                    response = await core_stub.RegisterHost(
+                        pb.RegisterHostRequest(
+                            host_id=self.host_id,
+                            runtime="python",
+                            endpoint=str(self.socket_path),
+                            loaded_plugin_ids=[meta.id],
+                        ),
+                        timeout=3.0,
+                    )
+                    if not response.success:
+                        raise RuntimeError(response.message)
+                except Exception as exc:
+                    print(f"[kanon-host] Failed to register with Core: {exc}", file=sys.stderr, flush=True)
 
             if shutdown_event is None:
                 stop_event = asyncio.Event()
