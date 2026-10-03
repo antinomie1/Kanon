@@ -16,7 +16,7 @@ pub struct SseEvent {
 /// Streaming line buffer and event assembler.
 #[derive(Debug, Default)]
 pub struct SseDecoder {
-    buffer: String,
+    buffer: Vec<u8>,
     current_event: Option<String>,
     current_data: Vec<String>,
 }
@@ -29,12 +29,13 @@ impl SseDecoder {
 
     /// Feeds a raw byte slice into the decoder, yielding any fully framed SSE events.
     pub fn decode(&mut self, chunk: &[u8]) -> Vec<SseEvent> {
-        let text = String::from_utf8_lossy(chunk);
-        self.buffer.push_str(&text);
+        self.buffer.extend_from_slice(chunk);
 
         let mut events = Vec::new();
-        while let Some(pos) = self.buffer.find('\n') {
-            let mut line = self.buffer[..pos].to_string();
+        while let Some(pos) = self.buffer.iter().position(|byte| *byte == b'\n') {
+            // Transport chunks can split a UTF-8 code point. Decode only complete lines so
+            // valid text is never replaced merely because its bytes arrived separately.
+            let mut line = String::from_utf8_lossy(&self.buffer[..pos]).into_owned();
             self.buffer.drain(..=pos);
 
             // Strip trailing carriage return if CRLF line ending was used

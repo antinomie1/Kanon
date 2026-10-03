@@ -39,6 +39,17 @@ struct Channel {
     cursors: HashMap<String, u64>,
 }
 
+impl Channel {
+    /// Drops readers whose cursor no longer distinguishes any retained entry from unseen data.
+    fn prune_cursors(&mut self) {
+        if let Some(first) = self.entries.front() {
+            // A returning reader with an older cursor sees every retained entry either way.
+            // Keeping its key forever would grow memory with every member of an active group.
+            self.cursors.retain(|_, seen| *seen >= first.seq);
+        }
+    }
+}
+
 #[derive(Debug, Default)]
 struct Inner {
     channels: HashMap<String, Channel>,
@@ -67,6 +78,7 @@ impl GroupLog {
         while log.entries.len() > CAPACITY {
             log.entries.pop_front();
         }
+        log.prune_cursors();
         seq
     }
 
@@ -88,6 +100,7 @@ impl GroupLog {
             inner.channels.remove(channel);
             return Vec::new();
         }
+        log.prune_cursors();
         let seen = log.cursors.get(session).copied().unwrap_or(0);
         log.entries
             .iter()
