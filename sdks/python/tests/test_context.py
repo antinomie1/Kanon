@@ -138,6 +138,19 @@ class TestIngestEventSegments(unittest.IsolatedAsyncioTestCase):
         self.assertIn("segments[1]", str(raised.exception))
         self.assertEqual(stub.requests, [], "the malformed event must not reach Core")
 
+    async def test_nonfinite_metadata_and_custom_payloads_are_rejected_before_rpc(self) -> None:
+        stub = CapturingStub()
+        handle = CoreHandle(stub)  # type: ignore[arg-type]
+        for number in (float("nan"), float("inf"), -float("inf")):
+            for payload in (
+                {"metadata": {"nested": [number]}},
+                {"segments": [{"custom": {"type_name": "sample", "payload": {"x": number}}}]},
+            ):
+                with self.subTest(number=number, payload=payload):
+                    with self.assertRaisesRegex(ValueError, "finite"):
+                        await handle.ingest_event("test", "channel", "sender", "text", **payload)
+        self.assertEqual(stub.requests, [])
+
 
 class TestReplyContext(unittest.IsolatedAsyncioTestCase):
     """Replies retain the original native event and propagate delivery failures."""

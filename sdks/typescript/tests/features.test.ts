@@ -247,6 +247,27 @@ test("runtime tools are announced and rolled back when the node refuses", async 
   await assert.rejects(plugin.removeTool("greet"), /declared with @Tool/);
 });
 
+test("non-finite tool results fail instead of becoming null", async () => {
+  const plugin = new Features();
+  plugin.context = {
+    dataDir: ".",
+    config: {},
+    core: { refreshMeta: async () => [plugin.id] } as any,
+  };
+  let number = 1.5;
+  await plugin.addTool("numeric-result", { args: {} }, () => ({ nested: [number] }));
+  for (number of [NaN, Infinity, -Infinity]) {
+    const response = await plugin.onCallTool(toolCall("numeric-result", {}));
+    assert.equal(response.success, false);
+    assert.match(response.error_message, /finite/);
+    assert.equal(response.structured_result, undefined);
+  }
+  number = 1.5;
+  const response = await plugin.onCallTool(toolCall("numeric-result", {}));
+  assert.equal(response.success, true);
+  assert.deepEqual(result(response), { nested: [1.5] });
+});
+
 test("the rewriter replaces or keeps the system prompt", async () => {
   const plugin = new Features();
   assert.deepEqual(
@@ -356,6 +377,28 @@ test("kv stores JSON in the plugin's namespace and reports foreign bytes", async
       await assert.rejects(plugin.kv.get("raw"), /'raw' is not JSON/);
       await assert.rejects(plugin.kv.set("x", 1, { ttl: 0 }), RangeError);
       await assert.rejects(plugin.kv.set("x", undefined), TypeError);
+
+      await plugin.kv.set("numeric", { nested: [1.5, null] });
+      const before = sets.length;
+      for (const number of [NaN, Infinity, -Infinity]) {
+        await assert.rejects(plugin.kv.set("numeric", { nested: [number] }), /finite/);
+        await assert.rejects(core.callPlatformApi("test", "action", { nested: [number] }), /finite/);
+      }
+      assert.equal(sets.length, before, "invalid numbers must not reach Core");
+      assert.deepEqual(await plugin.kv.get("numeric"), { nested: [1.5, null] });
+      for (const encoded of ["NaN", '{"nested":[Infinity]}', "-Infinity", "1e400"]) {
+        store.set("foreign", Buffer.from(encoded));
+        await assert.rejects(plugin.kv.get("foreign"), /'foreign' is not JSON/);
+      }
+
+      for (const ttl of [1.5, 0, -1, Number.MAX_SAFE_INTEGER + 1, 2 ** 63, 2 ** 64]) {
+        await assert.rejects(plugin.kv.set("numeric", 1, { ttl }), /ttl/);
+      }
+      assert.equal(sets.length, before, "invalid TTLs must not reach Core");
+      for (const ttl of [1, Number.MAX_SAFE_INTEGER, undefined]) {
+        await plugin.kv.set("numeric", 1, { ttl });
+        assert.equal(String(sets.at(-1).ttl_seconds), String(ttl ?? 0));
+      }
     },
   );
   assert.throws(() => new Features().kv, /standalone/);

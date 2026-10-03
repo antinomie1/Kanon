@@ -31,13 +31,13 @@ import traceback
 from dataclasses import dataclass
 from typing import Any, Callable, Dict, List, Optional, Sequence, Set, Union
 
-from google.protobuf.json_format import MessageToDict, ParseDict
+from google.protobuf.json_format import MessageToDict
 from google.protobuf.struct_pb2 import Struct
 
 from kanon_sdk.context import PluginContext, Replyable, to_segments
 from kanon_sdk.event import CommandEvent, Conversations, MessageEvent, _Session, _Turn, run_turn
 from kanon_sdk.kv import KV
-from kanon_sdk.proto import pb
+from kanon_sdk.proto import parse_dict, pb
 from kanon_sdk.schema import ToolSignature, infer_tool, restore_integers
 from kanon_sdk.web import HttpRequest, HttpResponse, to_http_response
 
@@ -667,7 +667,7 @@ class Plugin:
         for spec in self._tools.values():
             param_struct = Struct()
             if spec.parameters:
-                ParseDict(spec.parameters, param_struct)
+                parse_dict(spec.parameters, param_struct)
             tools.append(
                 pb.ToolMeta(
                     name=spec.name,
@@ -820,12 +820,12 @@ class Plugin:
 
         try:
             result = await _call(handler, parameters or {})
+            payload = Struct()
+            if result:
+                parse_dict(result, payload)
         except Exception as exc:
             return pb.PluginActionResponse(success=False, error_message=f"Action failed: {exc}")
 
-        payload = Struct()
-        if result:
-            ParseDict(result, payload)
         return pb.PluginActionResponse(success=True, error_message="", result=payload)
 
     async def on_call_tool(
@@ -848,6 +848,18 @@ class Plugin:
 
         try:
             result = await spec.call(args_dict, event)
+            if isinstance(result, pb.ToolCallResponse):
+                return result
+            if isinstance(result, bytes):
+                return pb.ToolCallResponse(call_id=req.call_id, success=True, raw_bytes=result)
+            result_struct = Struct()
+            if not isinstance(result, dict):
+                # JSON values keep their shape (a list stays a list); anything else becomes text.
+                plain = isinstance(result, (str, int, float, bool, list, tuple)) or result is None
+                result = {"result": list(result) if isinstance(result, tuple) else result}
+                if not plain:
+                    result = {"result": str(result["result"])}
+            parse_dict(result, result_struct)
         except Exception as exc:  # noqa: BLE001 - the model is told the tool failed
             return pb.ToolCallResponse(
                 call_id=req.call_id,
@@ -855,18 +867,6 @@ class Plugin:
                 error_message=f"{type(exc).__name__}: {exc}",
             )
 
-        if isinstance(result, pb.ToolCallResponse):
-            return result
-        if isinstance(result, bytes):
-            return pb.ToolCallResponse(call_id=req.call_id, success=True, raw_bytes=result)
-        result_struct = Struct()
-        if not isinstance(result, dict):
-            # JSON values keep their shape (a list stays a list); anything else becomes text.
-            plain = isinstance(result, (str, int, float, bool, list, tuple)) or result is None
-            result = {"result": list(result) if isinstance(result, tuple) else result}
-            if not plain:
-                result = {"result": str(result["result"])}
-        ParseDict(result, result_struct)
         return pb.ToolCallResponse(
             call_id=req.call_id,
             success=True,

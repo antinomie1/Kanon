@@ -17,6 +17,14 @@ export const MAX_VALUE_BYTES = 1024 * 1024;
 /** Issues one unary `BotApiService` call. */
 export type UnaryCall = (method: string, request: Record<string, any>) => Promise<any>;
 
+/** JSON's traversal checks nested numbers without silently converting them to null. */
+function finiteJsonValue(_key: string, value: unknown): unknown {
+  if (typeof value === "number" && !Number.isFinite(value)) {
+    throw new TypeError("JSON numbers must be finite");
+  }
+  return value;
+}
+
 /**
  * Reads and writes one plugin's keys in the node's KV store.
  *
@@ -55,7 +63,7 @@ export class KV {
       return fallback;
     }
     try {
-      return JSON.parse(Buffer.from(response.value ?? []).toString("utf8"));
+      return JSON.parse(Buffer.from(response.value ?? []).toString("utf8"), finiteJsonValue);
     } catch (err: any) {
       throw new Error(`KV value of '${key}' is not JSON: ${err?.message ?? err}`);
     }
@@ -65,18 +73,18 @@ export class KV {
    * Stores `value` (anything JSON can express) under `key`.
    *
    * @param key 1–256 bytes.
-   * @param options.ttl Seconds until the key expires; omit it to keep the key until it is
-   *   deleted. Setting a key again replaces both its value and its expiry.
-   * @throws TypeError if `value` cannot be encoded as JSON (`undefined`, a function, a cycle);
-   *   RangeError for a `ttl` that is not a positive whole number, or an encoded value over
+   * @param options.ttl Positive safe integer seconds until the key expires; omit it to keep
+   *   the key until it is deleted. Setting a key again replaces both its value and its expiry.
+   * @throws TypeError if `value` cannot be encoded as JSON (`undefined`, a function, a cycle,
+   *   a non-finite number); RangeError for a `ttl` that is not a positive safe integer, or a value over
    *   {@link MAX_VALUE_BYTES} (checked here so the mistake is reported before a round trip).
    */
   async set(key: string, value: unknown, options: { ttl?: number } = {}): Promise<void> {
     const { ttl } = options;
-    if (ttl !== undefined && !(Number.isInteger(ttl) && ttl > 0)) {
-      throw new RangeError(`ttl must be a positive number of seconds, got ${ttl}`);
+    if (ttl !== undefined && !(Number.isSafeInteger(ttl) && ttl > 0)) {
+      throw new RangeError(`ttl must be a positive safe integer number of seconds, got ${ttl}`);
     }
-    const json = JSON.stringify(value);
+    const json = JSON.stringify(value, finiteJsonValue);
     if (json === undefined) {
       throw new TypeError(`KV value of '${key}' cannot be encoded as JSON`);
     }

@@ -6,11 +6,11 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, AsyncIterator, Dict, List, Optional, Sequence, Tuple, Union
 
-from google.protobuf.json_format import MessageToDict, ParseDict
+from google.protobuf.json_format import MessageToDict
 from google.protobuf.struct_pb2 import Struct
 
 from kanon_sdk.kv import KV
-from kanon_sdk.proto import pb, pb_grpc
+from kanon_sdk.proto import parse_dict, pb, pb_grpc
 
 
 @dataclass
@@ -350,7 +350,7 @@ class CoreHandle:
                 the adapter offers no API, ``UNAVAILABLE`` when the platform refused the call.
         """
         request = pb.PlatformApiRequest(platform=platform, action=action)
-        ParseDict(params, request.params)
+        parse_dict(params, request.params)
         response = await self._stub.CallPlatformApi(request)
         if not response.HasField("result"):
             return None
@@ -632,22 +632,22 @@ class CoreHandle:
 
         # Convert the caller's mapping into a Struct up front, using the same
         # JSON mapping helper as Plugin.meta()/on_call_tool so payload conversion
-        # follows one rule across the SDK. ParseDict fails loudly on values that
+        # follows one rule across the SDK. Conversion fails loudly on values that
         # JSON cannot express, which is preferable to silently dropping fields.
         event_metadata: Optional[Struct] = None
         if metadata is not None:
             event_metadata = Struct()
-            ParseDict(metadata, event_metadata)
+            parse_dict(metadata, event_metadata)
 
         # Segments travel in proto-JSON shape so adapters can forward platform
-        # JSON-derived dicts directly. ParseDict is the same mapping helper used
+        # JSON-derived dicts directly. This is the same mapping helper used
         # for metadata, and it fails loudly on a malformed payload rather than
         # silently dropping a part of the user's message.
         event_segments: List[pb.MessageSegment] = []
         if segments is not None:
             for index, segment in enumerate(segments):
                 parsed_segment = pb.MessageSegment()
-                ParseDict(segment, parsed_segment)
+                parse_dict(segment, parsed_segment)
                 # An empty dict parses without error but leaves the `segment`
                 # oneof unset; such an entry has no content the model could
                 # render, so reject it with the index instead of forwarding a

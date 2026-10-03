@@ -237,6 +237,27 @@ class TestTools(unittest.IsolatedAsyncioTestCase):
         result = await Features().on_call_tool(tool_call("legacy", {"x": 2}))
         self.assertEqual(MessageToDict(result.structured_result), {"result": [2.0, 2.0]})
 
+    async def test_nonfinite_tool_results_are_failures_instead_of_null(self) -> None:
+        plugin = Features()
+        connected(plugin)
+        number = 1.5
+
+        async def numeric_result() -> dict:
+            """Returns a nested numeric result."""
+            return {"nested": [number]}
+
+        await plugin.add_tool(numeric_result)
+        for number in (float("nan"), float("inf"), -float("inf")):
+            with self.subTest(number=number):
+                response = await plugin.on_call_tool(tool_call("numeric_result", {}))
+                self.assertFalse(response.success)
+                self.assertIn("finite", response.error_message)
+                self.assertFalse(response.HasField("structured_result"))
+        number = 1.5
+        response = await plugin.on_call_tool(tool_call("numeric_result", {}))
+        self.assertTrue(response.success, response.error_message)
+        self.assertEqual(MessageToDict(response.structured_result), {"nested": [1.5]})
+
     async def test_runtime_tools_are_announced_and_rolled_back_when_the_node_refuses(self) -> None:
         plugin = Features()
         stub = connected(plugin)
@@ -325,6 +346,33 @@ class TestCoreCalls(unittest.IsolatedAsyncioTestCase):
     def test_kv_needs_a_node(self) -> None:
         with self.assertRaises(RuntimeError):
             Features().kv
+
+    async def test_kv_rejects_nonfinite_json_without_overwriting_values(self) -> None:
+        plugin = Features()
+        stub = connected(plugin)
+        await plugin.kv.set("value", {"nested": [1.5, None]})
+        before = len(stub.calls)
+        for number in (float("nan"), float("inf"), -float("inf")):
+            with self.subTest(number=number), self.assertRaises(ValueError):
+                await plugin.kv.set("value", {"nested": [number]})
+        self.assertEqual(len(stub.calls), before, "invalid values must not reach Core")
+        self.assertEqual(await plugin.kv.get("value"), {"nested": [1.5, None]})
+
+        for encoded in (b"NaN", b'{"nested":[Infinity]}', b"-Infinity", b"1e400"):
+            stub.kv["foreign"] = encoded
+            with self.subTest(encoded=encoded), self.assertRaisesRegex(ValueError, "'foreign'"):
+                await plugin.kv.get("foreign")
+
+    async def test_kv_ttl_obeys_signed_int64_wire_range(self) -> None:
+        plugin = Features()
+        stub = connected(plugin)
+        for ttl in (True, 1.5, 0, -1, 1 << 63, 1 << 64):
+            with self.subTest(ttl=ttl), self.assertRaisesRegex(ValueError, "ttl"):
+                await plugin.kv.set("value", 1, ttl=ttl)
+        self.assertEqual(stub.calls, [])
+        for ttl in (1, (1 << 63) - 1, None):
+            await plugin.kv.set("value", 1, ttl=ttl)
+            self.assertEqual(stub.calls[-1].ttl_seconds, ttl or 0)
 
     async def test_run_agent_sends_the_chat_and_returns_the_answer(self) -> None:
         plugin = Features()

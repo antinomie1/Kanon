@@ -11,6 +11,9 @@ export function toProtoValue(val: any): any {
   if (val === null || val === undefined) {
     return { nullValue: 0 };
   } else if (typeof val === "number") {
+    if (!Number.isFinite(val)) {
+      throw new TypeError("Struct numbers must be finite");
+    }
     return { numberValue: val };
   } else if (typeof val === "string") {
     return { stringValue: val };

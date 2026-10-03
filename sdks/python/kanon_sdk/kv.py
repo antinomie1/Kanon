@@ -11,12 +11,21 @@ that is not JSON is reported, never guessed at.
 """
 
 import json
+import math
 from typing import Any, List, Optional
 
 from kanon_sdk.proto import pb, pb_grpc
 
 #: Largest value the node accepts, in bytes of encoded JSON.
 MAX_VALUE_BYTES = 1024 * 1024
+
+
+def _finite_number(text: str) -> float:
+    """Reject non-JSON constants and numbers that overflow the SDK's float representation."""
+    number = float(text)
+    if not math.isfinite(number):
+        raise ValueError("JSON numbers must be finite")
+    return number
 
 
 class KV:
@@ -51,8 +60,12 @@ class KV:
         if not response.found:
             return default
         try:
-            return json.loads(response.value.decode("utf-8"))
-        except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+            return json.loads(
+                response.value.decode("utf-8"),
+                parse_constant=_finite_number,
+                parse_float=_finite_number,
+            )
+        except ValueError as exc:
             raise ValueError(f"KV value of {key!r} is not JSON: {exc}") from exc
 
     async def set(self, key: str, value: Any, *, ttl: Optional[int] = None) -> None:
@@ -61,18 +74,22 @@ class KV:
         Args:
             key: 1–256 bytes.
             value: The value; tuples become lists and dict keys must be strings, as in JSON.
-            ttl: Seconds until the key expires; ``None`` keeps it until it is deleted. Setting a
-                key again replaces both its value and its expiry.
+            ttl: Positive int64 seconds until the key expires; ``None`` keeps it until it is
+                deleted. Setting a key again replaces both its value and its expiry.
 
         Raises:
             TypeError: If ``value`` cannot be encoded as JSON.
-            ValueError: If ``ttl`` is not a positive whole number of seconds, or the encoded
-                value exceeds :data:`MAX_VALUE_BYTES` (checked here so the mistake is reported
-                before a round trip).
+            ValueError: If ``ttl`` is outside the positive int64 range, a JSON number is not
+                finite, or the encoded value exceeds :data:`MAX_VALUE_BYTES` (checked here so
+                the mistake is reported before a round trip).
         """
-        if ttl is not None and (isinstance(ttl, bool) or not isinstance(ttl, int) or ttl <= 0):
-            raise ValueError(f"ttl must be a positive number of seconds, got {ttl!r}")
-        encoded = json.dumps(value, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+        if ttl is not None and (
+            isinstance(ttl, bool) or not isinstance(ttl, int) or not 1 <= ttl <= (1 << 63) - 1
+        ):
+            raise ValueError(f"ttl must be a positive int64 number of seconds, got {ttl!r}")
+        encoded = json.dumps(
+            value, ensure_ascii=False, separators=(",", ":"), allow_nan=False
+        ).encode("utf-8")
         if len(encoded) > MAX_VALUE_BYTES:
             raise ValueError(
                 f"KV value of {key!r} is {len(encoded)} bytes; the limit is {MAX_VALUE_BYTES}"
