@@ -325,6 +325,40 @@ fn an_unreadable_event_falls_back_to_the_adapter_rendering() {
 }
 
 #[test]
+fn metadata_does_not_replace_a_raw_text_only_message() {
+    let mut event = event(Vec::new(), "  original body  ");
+    event.metadata = Some(string_struct(&[(
+        kanon_core::META_TIMESTAMP_TEXT,
+        "2026-10-04 12:30:00",
+    )]));
+    let policies = [
+        ContextPolicy {
+            include_channel_id: true,
+            ..Default::default()
+        },
+        ContextPolicy {
+            include_sender_id: true,
+            ..Default::default()
+        },
+        ContextPolicy {
+            include_timestamp: true,
+            ..Default::default()
+        },
+    ];
+    for policy in policies {
+        let content = build_user_message(&event, &caps(false), &policy)
+            .content
+            .unwrap();
+        assert!(content.starts_with('['), "metadata is missing: {content}");
+        assert!(
+            content.ends_with(&event.raw_text),
+            "metadata must not hide or rewrite the fallback body: {content}"
+        );
+        assert_eq!(content.matches("original body").count(), 1);
+    }
+}
+
+#[test]
 fn the_sender_id_and_time_are_included_only_when_the_policy_asks() {
     let mut event = event(
         vec![Segment::Text(TextSegment {

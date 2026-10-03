@@ -52,20 +52,22 @@ pub fn build_user_message(
     capabilities: &ModelCapabilities,
     context_policy: &ContextPolicy,
 ) -> ChatMessage {
+    // Metadata cannot count as message content: raw-text-only events still need their body.
+    let mut metadata = TextBuffer::default();
     let mut text = TextBuffer::default();
     let mut images: Vec<ContentPart> = Vec::new();
 
     if capabilities.text {
         if context_policy.include_channel_id && !event.channel_id.trim().is_empty() {
-            text.push(&format!("[群号: {}]", event.channel_id.trim()));
+            metadata.push(&format!("[群号: {}]", event.channel_id.trim()));
         }
         if context_policy.include_sender_id && !event.sender_id.trim().is_empty() {
-            text.push(&format!("[发送者: {}]", event.sender_id.trim()));
+            metadata.push(&format!("[发送者: {}]", event.sender_id.trim()));
         }
         if context_policy.include_timestamp
             && let Some(timestamp) = event_timestamp(event.metadata.as_ref())
         {
-            text.push(&format!("[时间: {timestamp}]"));
+            metadata.push(&format!("[时间: {timestamp}]"));
         }
         if let Some(line) = notice_line(event.metadata.as_ref()) {
             text.push(&line);
@@ -140,7 +142,7 @@ pub fn build_user_message(
         }
     }
 
-    let text = if !capabilities.text {
+    let mut text = if !capabilities.text {
         // An image-only endpoint must not receive a textual projection it would reject.
         String::new()
     } else if text.is_empty() {
@@ -150,6 +152,14 @@ pub fn build_user_message(
     } else {
         text.finish()
     };
+    let metadata = metadata.finish();
+    if !metadata.is_empty() {
+        text = if text.is_empty() {
+            metadata
+        } else {
+            format!("{metadata} {text}")
+        };
+    }
 
     if images.is_empty() {
         ChatMessage::user(text)
