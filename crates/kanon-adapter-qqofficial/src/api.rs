@@ -18,6 +18,19 @@ const UPLOAD_TIMEOUT: Duration = Duration::from_secs(120);
 /// QQ takes a single `url` / `file_data` upload of up to 20 MiB; bigger media needs the chunked
 /// upload (`upload_prepare` and its parts), which this adapter does not implement.
 pub const MAX_UPLOAD_BYTES: usize = 20 * 1024 * 1024;
+
+/// Rejects oversized input before copying, converting or encoding attachment bytes.
+pub(crate) fn validate_upload_size(size: usize) -> Result<(), String> {
+    if size > MAX_UPLOAD_BYTES {
+        return Err(format!(
+            "attachment is {:.1} MiB; one QQ upload holds at most {} MiB",
+            size as f64 / (1024.0 * 1024.0),
+            MAX_UPLOAD_BYTES >> 20
+        ));
+    }
+    Ok(())
+}
+
 /// A cached token is refreshed this long before QQ says it expires, so a request never races
 /// the expiry.
 const TOKEN_MARGIN: Duration = Duration::from_secs(60);
@@ -188,16 +201,9 @@ impl Api {
         }
         match source {
             MediaSource::Url(url) => body["url"] = json!(url),
-            // Checked here so an oversized attachment fails with its size, not with whatever QQ
-            // answers after receiving a 30 MiB request body.
-            MediaSource::Bytes(bytes) if bytes.len() > MAX_UPLOAD_BYTES => {
-                return Err(format!(
-                    "attachment is {:.1} MiB; one QQ upload holds at most {} MiB",
-                    bytes.len() as f64 / (1024.0 * 1024.0),
-                    MAX_UPLOAD_BYTES >> 20
-                ));
-            }
             MediaSource::Bytes(bytes) => {
+                // Keep the final check for converted voice and callers that use Api directly.
+                validate_upload_size(bytes.len())?;
                 body["file_data"] = json!(base64::engine::general_purpose::STANDARD.encode(bytes))
             }
         }

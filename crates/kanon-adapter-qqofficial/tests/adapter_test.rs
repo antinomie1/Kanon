@@ -538,15 +538,19 @@ async fn delivery_preserves_line_indentation() {
 }
 
 fn voice(source: audio_segment::Source) -> DeliverMessageRequest {
+    attachment(Segment::Audio(AudioSegment {
+        source: Some(source),
+        duration_seconds: None,
+    }))
+}
+
+fn attachment(segment: Segment) -> DeliverMessageRequest {
     DeliverMessageRequest {
         platform: "qqofficial".into(),
         channel_id: "c2c:U1".into(),
         event_id: "C1".into(),
         segments: vec![MessageSegment {
-            segment: Some(Segment::Audio(AudioSegment {
-                source: Some(source),
-                duration_seconds: None,
-            })),
+            segment: Some(segment),
         }],
         ..Default::default()
     }
@@ -556,24 +560,32 @@ fn voice(source: audio_segment::Source) -> DeliverMessageRequest {
 /// audio QQ cannot play is refused before any upload, and so is media over the upload limit.
 #[tokio::test]
 async fn voice_and_oversized_media_are_checked_before_upload() {
+    use std::io::Write;
+
     use base64::Engine;
+    use kanon_adapter_qqofficial::api::MAX_UPLOAD_BYTES;
 
     let (mock, mut accepted) = start_mock().await;
     let (adapter, _socket, _ingest) = connected(&mock, &mut accepted).await;
 
-    adapter
-        .deliver(voice(audio_segment::Source::Url(format!(
-            "http://{}/media/hello.mp3",
-            mock.addr
-        ))))
-        .await
-        .expect("voice delivery");
-    {
+    let path =
+        std::env::temp_dir().join(format!("kanon-qq-media-limit-{}.mp3", std::process::id()));
+    let mut file = std::fs::File::create_new(&path).unwrap();
+    file.write_all(MP3_FRAME).unwrap();
+    for source in [
+        audio_segment::Source::Url(format!("http://{}/media/hello.mp3", mock.addr)),
+        audio_segment::Source::FilePath(path.to_string_lossy().into_owned()),
+        audio_segment::Source::RawBytes(MP3_FRAME.to_vec()),
+    ] {
+        adapter
+            .deliver(voice(source))
+            .await
+            .expect("voice delivery");
         let calls = mock.calls.lock().unwrap();
         let (path, upload) = &calls[calls.len() - 2];
         assert_eq!(path, "/v2/users/U1/files");
         assert_eq!(upload["file_type"], 3);
-        assert!(upload.get("url").is_none(), "the adapter fetched the URL");
+        assert!(upload.get("url").is_none(), "voice uploads carry bytes");
         assert_eq!(
             upload["file_data"],
             base64::engine::general_purpose::STANDARD.encode(MP3_FRAME)
@@ -592,28 +604,40 @@ async fn voice_and_oversized_media_are_checked_before_upload() {
         "{opus}"
     );
 
-    let oversized = adapter
-        .deliver(DeliverMessageRequest {
-            platform: "qqofficial".into(),
-            channel_id: "c2c:U1".into(),
-            event_id: "C1".into(),
-            segments: vec![MessageSegment {
-                segment: Some(Segment::Image(ImageSegment {
-                    source: Some(image_segment::Source::RawBytes(vec![
-                        0;
-                        20 * 1024 * 1024 + 1
-                    ])),
+    // Truncating and extending leaves a sparse file of invalid audio. Both local and inline
+    // voice must fail their byte limit before decoding is attempted.
+    file.set_len(0).unwrap();
+    file.set_len((MAX_UPLOAD_BYTES + 1) as u64).unwrap();
+    drop(file);
+    for inline in [false, true] {
+        for is_voice in [false, true] {
+            let request = if is_voice {
+                voice(if inline {
+                    audio_segment::Source::RawBytes(vec![0; MAX_UPLOAD_BYTES + 1])
+                } else {
+                    audio_segment::Source::FilePath(path.to_string_lossy().into_owned())
+                })
+            } else {
+                attachment(Segment::Image(ImageSegment {
+                    source: Some(if inline {
+                        image_segment::Source::RawBytes(vec![0; MAX_UPLOAD_BYTES + 1])
+                    } else {
+                        image_segment::Source::FilePath(path.to_string_lossy().into_owned())
+                    }),
                     mime_type: Some("image/png".into()),
                     filename: None,
-                })),
-            }],
-            ..Default::default()
-        })
-        .await
-        .expect_err("over the upload limit");
-    assert!(
-        oversized.to_string().contains("at most 20 MiB"),
-        "{oversized}"
-    );
+                }))
+            };
+            let oversized = adapter
+                .deliver(request)
+                .await
+                .expect_err("over the upload limit");
+            assert!(
+                oversized.to_string().contains("at most 20 MiB"),
+                "inline={inline}, voice={is_voice}: {oversized}"
+            );
+        }
+    }
+    std::fs::remove_file(path).unwrap();
     assert_eq!(mock.calls.lock().unwrap().len(), uploads_before);
 }

@@ -30,6 +30,7 @@ use kanon_proto::v1::{
 };
 use serde::Serialize;
 use serde_json::{Value, json};
+use tokio::io::AsyncReadExt;
 use tokio::sync::Mutex;
 use tokio::task::JoinHandle;
 
@@ -631,13 +632,24 @@ impl QqOfficialAdapter {
     async fn media_source(&self, source: Option<Source<'_>>) -> Result<MediaSource, AdapterError> {
         match source {
             Some(Source::Url(url)) => Ok(MediaSource::Url(url.to_owned())),
-            Some(Source::Path(path)) => tokio::fs::read(path)
-                .await
-                .map(MediaSource::Bytes)
-                .map_err(|err| {
-                    self.delivery_error(format!("cannot read attachment {path}: {err}"))
-                }),
-            Some(Source::Bytes(bytes)) => Ok(MediaSource::Bytes(bytes.to_vec())),
+            Some(Source::Path(path)) => {
+                let failed =
+                    |err| self.delivery_error(format!("cannot read attachment {path}: {err}"));
+                let file = tokio::fs::File::open(path).await.map_err(failed)?;
+                let mut bytes = Vec::new();
+                // Read one extra byte to distinguish an exact-limit file from an oversized one.
+                // Limiting the reader also covers files that grow after opening or report no size.
+                file.take((api::MAX_UPLOAD_BYTES + 1) as u64)
+                    .read_to_end(&mut bytes)
+                    .await
+                    .map_err(failed)?;
+                api::validate_upload_size(bytes.len()).map_err(|err| self.delivery_error(err))?;
+                Ok(MediaSource::Bytes(bytes))
+            }
+            Some(Source::Bytes(bytes)) => {
+                api::validate_upload_size(bytes.len()).map_err(|err| self.delivery_error(err))?;
+                Ok(MediaSource::Bytes(bytes.to_vec()))
+            }
             None => Err(self.delivery_error("media segment has no source")),
         }
     }
@@ -652,16 +664,12 @@ impl QqOfficialAdapter {
         api: &Api,
         source: Option<Source<'_>>,
     ) -> Result<MediaSource, AdapterError> {
-        let audio = match source {
-            Some(Source::Url(url)) => api
-                .download(url, api::MAX_UPLOAD_BYTES)
+        let audio = match self.media_source(source).await? {
+            MediaSource::Url(url) => api
+                .download(&url, api::MAX_UPLOAD_BYTES)
                 .await
                 .map_err(|err| self.delivery_error(err))?,
-            Some(Source::Path(path)) => tokio::fs::read(path).await.map_err(|err| {
-                self.delivery_error(format!("cannot read attachment {path}: {err}"))
-            })?,
-            Some(Source::Bytes(bytes)) => bytes.to_vec(),
-            None => return Err(self.delivery_error("media segment has no source")),
+            MediaSource::Bytes(bytes) => bytes,
         };
         tokio::task::spawn_blocking(move || voice::playable(audio))
             .await
