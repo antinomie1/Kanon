@@ -396,11 +396,13 @@ impl LlmProvider for OpenAiResponsesProvider {
                     });
 
                     let parsed_args = match arguments {
-                        serde_json::Value::String(s) => {
-                            serde_json::from_str(&s).unwrap_or(serde_json::json!({}))
-                        }
+                        serde_json::Value::String(s) => serde_json::from_str(&s)?,
                         val @ serde_json::Value::Object(_) => val,
-                        _ => serde_json::json!({}),
+                        _ => {
+                            return Err(GatewayError::InvalidResponse(
+                                "function call arguments must be a JSON string or object".into(),
+                            ));
+                        }
                     };
 
                     tool_calls.push(ToolCall {

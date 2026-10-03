@@ -440,16 +440,16 @@ impl LlmProvider for OpenAiChatProvider {
             .unwrap_or_default()
             .into_iter()
             .map(|tc| {
-                let parsed_args = serde_json::from_str::<serde_json::Value>(&tc.function.arguments)
-                    .unwrap_or_else(|_| serde_json::Value::Object(Default::default()));
+                // Never execute a truncated call with fabricated empty arguments.
+                let parsed_args = serde_json::from_str(&tc.function.arguments)?;
 
-                ToolCall {
+                Ok(ToolCall {
                     id: tc.id,
                     name: tc.function.name,
                     arguments: parsed_args,
-                }
+                })
             })
-            .collect();
+            .collect::<Result<Vec<_>, GatewayError>>()?;
 
         let usage = wire_resp.usage.map(|u| TokenUsage {
             prompt_tokens: u.prompt_tokens,
