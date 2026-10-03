@@ -50,8 +50,9 @@ struct SqliteState {
 }
 
 impl SqliteMemory {
-    /// Default in-memory LRU cache capacity (10,000 active sessions).
-    pub const DEFAULT_CACHE_CAPACITY: usize = 10_000;
+    /// Retains a small working set of active conversations rather than every history read.
+    /// Larger read caches duplicate SQLite storage and make LRU touches increasingly expensive.
+    pub const DEFAULT_CACHE_CAPACITY: usize = 64;
 
     /// Opens or creates an SQLite-backed memory store at the specified filesystem path.
     pub fn open(path: impl AsRef<Path>) -> Result<Self, MemoryError> {
@@ -201,18 +202,9 @@ impl SqliteMemory {
         }
     }
 
-    /// Ensures a session is loaded from SQLite into the in-memory read cache.
-    fn ensure_session_cached(
-        state: &mut SqliteState,
-        session_key: &str,
-    ) -> Result<(), MemoryError> {
-        if state.cache.contains_key(session_key) {
-            return Ok(());
-        }
-
+    /// Decodes one complete history before exposing it to a reader or the optional cache.
+    fn load_snapshot(conn: &Connection, session_key: &str) -> Result<MemorySnapshot, MemoryError> {
         let (summary, loaded_messages) = {
-            let conn = &state.conn;
-
             // Query the summary of earlier compactions
             let mut session_stmt =
                 conn.prepare("SELECT summary FROM sessions WHERE session_key = ?1")?;
@@ -277,13 +269,10 @@ impl SqliteMemory {
             (summary, loaded_messages)
         };
 
-        // Publish only a fully decoded history. Corrupt rows must neither change the stored
-        // conversation nor leave a partial cache that would hide the error on the next read.
-        state.cache.insert(
-            session_key.to_string(),
-            SessionMemory::from_parts(summary, loaded_messages),
-        );
-        Ok(())
+        Ok(MemorySnapshot {
+            summary,
+            messages: loaded_messages,
+        })
     }
 }
 
@@ -380,7 +369,19 @@ impl Memory for SqliteMemory {
 
     async fn snapshot(&self, session_key: &str) -> Result<MemorySnapshot, MemoryError> {
         let mut state = self.state.lock().await;
-        Self::ensure_session_cached(&mut state, session_key)?;
+        if self.max_cached_sessions == 0 {
+            // Move decoded history directly to the caller when no read cache was requested.
+            return Self::load_snapshot(&state.conn, session_key);
+        }
+        if !state.cache.contains_key(session_key) {
+            // Publish only a fully decoded history so corrupt rows never leave a partial cache.
+            let MemorySnapshot { summary, messages } =
+                Self::load_snapshot(&state.conn, session_key)?;
+            state.cache.insert(
+                session_key.to_owned(),
+                SessionMemory::from_parts(summary, messages),
+            );
+        }
         let snapshot = state
             .cache
             .get(session_key)
