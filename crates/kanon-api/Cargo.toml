@@ -37,6 +37,5 @@ semver = "1"
 tokio-stream = "0.1"
 tower = { version = "0.5", features = ["util"] }
 tokio-tungstenite = "0.24"
-tempfile = "3.12"
 toml = "0.8"
 kanon-transport = { path = "../kanon-transport" }
