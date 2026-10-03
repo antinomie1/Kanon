@@ -113,17 +113,17 @@ async fn set_default_model(
     State(state): State<ApiState>,
     Json(payload): Json<SetDefaultModelRequest>,
 ) -> Result<Json<ModelsResponse>, ApiError> {
-    let mut settings = state.node_settings();
-    settings.default_model = payload
+    let model = payload
         .model
         .as_deref()
         .map(str::trim)
         .filter(|model| !model.is_empty())
         .map(|model| ModelRef::parse(model).canonical());
 
-    state
-        .apply_node_settings(settings)
-        .map_err(ApiError::BadRequest)?;
+    state.update_node_settings(|settings| {
+        settings.default_model = model;
+        Ok(())
+    })?;
     Ok(list_models(State(state)).await)
 }
 
@@ -152,19 +152,17 @@ async fn upsert_model(
     spec.source = ModelSettingsSource::Manual;
 
     let reference = spec.full_name();
-    let mut settings = state.node_settings();
-    match settings
-        .models
-        .iter_mut()
-        .find(|existing| existing.full_name() == reference)
-    {
-        Some(existing) => *existing = spec,
-        None => settings.models.push(spec),
-    }
-
-    state
-        .apply_node_settings(settings)
-        .map_err(ApiError::BadRequest)?;
+    state.update_node_settings(|settings| {
+        match settings
+            .models
+            .iter_mut()
+            .find(|existing| existing.full_name() == reference)
+        {
+            Some(existing) => *existing = spec,
+            None => settings.models.push(spec),
+        }
+        Ok(())
+    })?;
     Ok(list_models(State(state)).await)
 }
 
@@ -174,21 +172,16 @@ async fn delete_model(
     Json(payload): Json<DeleteModelRequest>,
 ) -> Result<Json<ModelsResponse>, ApiError> {
     let reference = ModelRef::parse(&payload.reference).canonical();
-    let mut settings = state.node_settings();
-    let before = settings.models.len();
-    settings.models.retain(|spec| spec.full_name() != reference);
-
-    if settings.models.len() == before {
-        // Deleting a missing entry is reported rather than silently accepted: the console would
-        // otherwise redraw an unchanged list and look like it worked.
-        return Err(ApiError::NotFound(format!(
-            "model '{reference}' is not in the catalog"
-        )));
-    }
-
-    state
-        .apply_node_settings(settings)
-        .map_err(ApiError::BadRequest)?;
+    state.update_node_settings(|settings| {
+        let before = settings.models.len();
+        settings.models.retain(|spec| spec.full_name() != reference);
+        if settings.models.len() == before {
+            return Err(ApiError::NotFound(format!(
+                "model '{reference}' is not in the catalog"
+            )));
+        }
+        Ok(())
+    })?;
     Ok(list_models(State(state)).await)
 }
 
@@ -220,12 +213,18 @@ async fn discover(
         }));
     }
 
-    let mut settings = state.node_settings();
-    let persisted = model_discovery::merge_discovered(&mut settings.models, &discovered);
-
-    state
-        .apply_node_settings(settings)
-        .map_err(ApiError::BadRequest)?;
+    let persisted = state.update_node_settings(|settings| {
+        // Discovery awaits the network; reject a stale result if its endpoint changed meanwhile.
+        if !settings.providers.iter().any(|current| current == &entry) {
+            return Err(ApiError::Conflict(
+                "Provider changed during model discovery; retry".into(),
+            ));
+        }
+        Ok(model_discovery::merge_discovered(
+            &mut settings.models,
+            &discovered,
+        ))
+    })?;
 
     Ok(Json(DiscoverModelsResponse {
         provider: provider_name,

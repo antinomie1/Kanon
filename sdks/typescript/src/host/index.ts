@@ -5,6 +5,7 @@
  * and MessagePipelineService over an IPC socket (Unix Domain Socket or Windows Loopback TCP).
  */
 
+import { ipcToken, serverAuth, prepareEndpoint } from "../sdk/ipc.js";
 import * as fs from "fs";
 import * as path from "path";
 import * as grpc from "@grpc/grpc-js";
@@ -57,20 +58,20 @@ async function connectCore(
 }
 
 /** Binds the host gRPC server, resolving once the IPC endpoint accepts connections. */
-function bindHostServer(server: grpc.Server, bindAddress: string): Promise<void> {
-  return new Promise<void>((resolve, reject) => {
+function bindHostServer(server: grpc.Server, bindAddress: string): Promise<number> {
+  return new Promise<number>((resolve, reject) => {
     server.bindAsync(
       bindAddress,
       // Local IPC (UDS, or loopback TCP) needs no transport security: on Unix the
       // run directory is created with 0700 permissions, so only the Core's user can
       // reach this socket. This mirrors the client credentials CoreHandle defaults to.
       grpc.ServerCredentials.createInsecure(),
-      (err: Error | null) => {
+      (err: Error | null, port: number) => {
         if (err) {
           reject(err);
           return;
         }
-        resolve();
+        resolve(port);
       },
     );
   });
@@ -225,11 +226,7 @@ async function main(): Promise<void> {
 
   // 3. Prepare IPC socket directory and clean up stale socket
   fs.mkdirSync(path.dirname(socketPath), { recursive: true });
-  if (fs.existsSync(socketPath)) {
-    try {
-      fs.unlinkSync(socketPath);
-    } catch (_) {}
-  }
+  await prepareEndpoint(socketPath);
 
   // 4. Load gRPC IDL definitions. The descriptor is memoized in the SDK and also
   //    backs the CoreHandle client, so host server and Core client always agree on
@@ -237,7 +234,7 @@ async function main(): Promise<void> {
   const kanonV1 = (loadKanonProto() as any).kanon.plugin.v1;
 
   // 5. Initialize gRPC server and register services
-  const server = new grpc.Server();
+  const server = new grpc.Server({ interceptors: process.platform === "win32" || !!process.env.KANON_IPC_TOKEN ? [serverAuth(ipcToken())] : [] });
 
   server.addService(kanonV1.PluginHostService.service, {
     Ping: (call: any, callback: any) => {
@@ -408,9 +405,12 @@ async function main(): Promise<void> {
   });
 
   // 6. Bind to IPC endpoint
-  const bindAddress = `unix:${socketPath}`;
+  const bindAddress = process.platform === "win32" ? "127.0.0.1:0" : `unix:${socketPath}`;
+  let endpointIdentity: fs.Stats;
   try {
-    await bindHostServer(server, bindAddress);
+    const port = await bindHostServer(server, bindAddress);
+    if (process.platform === "win32") fs.writeFileSync(socketPath, `127.0.0.1:${port}`, { flag: "wx" });
+    endpointIdentity = fs.lstatSync(socketPath);
     console.log(`Kanon TypeScript Host running on ${socketPath}`);
   } catch (err) {
     console.error(`Failed to bind socket ${bindAddress}:`, err);
@@ -448,9 +448,8 @@ async function main(): Promise<void> {
       // The host owns the shared channel, so it is closed here and nowhere else.
       coreHandle?.close();
       if (fs.existsSync(socketPath)) {
-        try {
-          fs.unlinkSync(socketPath);
-        } catch (_) {}
+        const current = fs.lstatSync(socketPath);
+        if (current.ino === endpointIdentity.ino && current.dev === endpointIdentity.dev) fs.unlinkSync(socketPath);
       }
       process.exit(exitCode);
     });

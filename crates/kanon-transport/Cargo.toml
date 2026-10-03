@@ -12,11 +12,13 @@ tower = { version = "0.4", default-features = false, features = ["util"] }
 futures-core = "0.3"
 hyper-util = { version = "0.1", features = ["tokio"] }
 constant_time_eq = "0.3"
+getrandom = "0.4"
 thiserror = "1.0"
 tracing = "0.1"
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
+socket2 = "0.6"
 
 [dev-dependencies]
 tempfile = "3.12"

@@ -244,6 +244,22 @@ async fn removing_a_persona_unbinds_sessions_but_is_refused_while_an_instance_us
 
     // An unused persona goes, and sessions bound to it fall back to the base assistant.
     state.sessions().set_persona("chat:1", "spare");
+    let writer = state.sessions().try_write("chat:1").unwrap();
+    let (status, body) = send_json(&app, Method::DELETE, "/api/v1/personas/spare", None).await;
+    assert_eq!(status, StatusCode::CONFLICT, "{body}");
+    assert!(state.personas().get("spare").is_some());
+    assert!(
+        store
+            .load()
+            .unwrap()
+            .iter()
+            .any(|persona| persona.id == "spare")
+    );
+    assert_eq!(
+        state.sessions().get_persona("chat:1").as_deref(),
+        Some("spare")
+    );
+    drop(writer);
     let (status, body) = send_json(&app, Method::DELETE, "/api/v1/personas/spare", None).await;
     assert_eq!(status, StatusCode::OK, "unexpected body: {body}");
     assert_eq!(ids(&body), vec!["assistant", "sre"]);

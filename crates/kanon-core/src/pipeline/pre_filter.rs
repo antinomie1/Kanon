@@ -87,8 +87,20 @@ impl PreFilterChain {
         let deadline = chain_start + PREFILTER_TOTAL_DEADLINE;
 
         for host in sorted_hosts {
+            let now = Instant::now();
+            if now >= deadline {
+                tracing::warn!(
+                    event_id = %current_event.event_id,
+                    elapsed_ms = chain_start.elapsed().as_millis(),
+                    "PreFilter total deadline (30ms) reached; short-circuiting remaining plugins"
+                );
+                break;
+            }
+
+            // Reserve only when there is time to call the host. The permit also releases
+            // a half-open recovery slot if the entire filter chain is cancelled.
             // Adaptive Circuit Breaker Check: Fast-skip if breaker is Open
-            if !host.circuit_breaker.allow_request() {
+            let Some(permit) = host.circuit_breaker.try_acquire() else {
                 tracing::warn!(
                     host_id = %host.host_id,
                     event_id = %current_event.event_id,
@@ -109,17 +121,7 @@ impl PreFilterChain {
                     });
                 }
                 continue;
-            }
-
-            let now = Instant::now();
-            if now >= deadline {
-                tracing::warn!(
-                    event_id = %current_event.event_id,
-                    elapsed_ms = chain_start.elapsed().as_millis(),
-                    "PreFilter total deadline (30ms) reached; short-circuiting remaining plugins"
-                );
-                break;
-            }
+            };
 
             let remaining_budget = deadline - now;
             let filter_start = Instant::now();
@@ -132,12 +134,11 @@ impl PreFilterChain {
             {
                 Ok(Ok(result)) => {
                     let filter_elapsed = filter_start.elapsed();
-                    host.circuit_breaker.record_success(filter_elapsed);
+                    permit.success(filter_elapsed);
                     result
                 }
                 Ok(Err(status)) => {
-                    host.circuit_breaker
-                        .record_failure(&format!("PreFilter gRPC error: {}", status.code()));
+                    permit.failure(&format!("PreFilter gRPC error: {}", status.code()));
                     tracing::error!(
                         host_id = %host.host_id,
                         event_id = %current_event.event_id,
@@ -147,8 +148,7 @@ impl PreFilterChain {
                     continue;
                 }
                 Err(_timeout_elapsed) => {
-                    host.circuit_breaker
-                        .record_failure("PreFilter execution timed out");
+                    permit.failure("PreFilter execution timed out");
                     tracing::warn!(
                         host_id = %host.host_id,
                         event_id = %current_event.event_id,

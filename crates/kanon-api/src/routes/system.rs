@@ -74,11 +74,10 @@ async fn put_bash_policy(
             .map_err(ApiError::Conflict)?,
         None => None,
     };
-    let mut settings = state.node_settings();
-    settings.bash_policy = policy;
-    state
-        .apply_node_settings(settings)
-        .map_err(ApiError::BadRequest)?;
+    state.update_node_settings(|settings| {
+        settings.bash_policy = policy;
+        Ok(())
+    })?;
     Ok(get_bash_policy(State(state)).await)
 }
 
@@ -216,11 +215,10 @@ async fn put_reply_policy(
     State(state): State<ApiState>,
     Json(policy): Json<ReplyPolicy>,
 ) -> Result<Json<ReplyPolicyResponse>, ApiError> {
-    let mut settings = state.node_settings();
-    settings.reply_policy = policy;
-    state
-        .apply_node_settings(settings)
-        .map_err(ApiError::BadRequest)?;
+    state.update_node_settings(|settings| {
+        settings.reply_policy = policy;
+        Ok(())
+    })?;
 
     tracing::info!(policy = %policy.describe(), "Node-wide reply policy updated");
     Ok(get_reply_policy(State(state)).await)
@@ -245,11 +243,10 @@ async fn put_context_policy(
     State(state): State<ApiState>,
     Json(policy): Json<ContextPolicy>,
 ) -> Result<Json<ContextPolicyResponse>, ApiError> {
-    let mut settings = state.node_settings();
-    settings.context_policy = policy;
-    state
-        .apply_node_settings(settings)
-        .map_err(ApiError::BadRequest)?;
+    state.update_node_settings(|settings| {
+        settings.context_policy = policy;
+        Ok(())
+    })?;
 
     tracing::info!(
         include_sender_id = policy.include_sender_id,
@@ -280,11 +277,10 @@ async fn put_event_policy(
     State(state): State<ApiState>,
     Json(policy): Json<EventPolicy>,
 ) -> Result<Json<EventPolicyResponse>, ApiError> {
-    let mut settings = state.node_settings();
-    settings.event_policy = policy;
-    state
-        .apply_node_settings(settings)
-        .map_err(ApiError::BadRequest)?;
+    state.update_node_settings(|settings| {
+        settings.event_policy = policy;
+        Ok(())
+    })?;
 
     tracing::info!(?policy, "Node-wide event policy updated");
     Ok(get_event_policy(State(state)).await)
@@ -313,11 +309,10 @@ async fn put_command_policy(
     Json(policy): Json<CommandPolicy>,
 ) -> Result<Json<CommandPolicyResponse>, ApiError> {
     let policy = policy.prepare().map_err(ApiError::BadRequest)?;
-    let mut settings = state.node_settings();
-    settings.command_policy = policy;
-    state
-        .apply_node_settings(settings)
-        .map_err(ApiError::BadRequest)?;
+    state.update_node_settings(|settings| {
+        settings.command_policy = policy;
+        Ok(())
+    })?;
 
     tracing::info!("Node-wide command policy updated");
     Ok(get_command_policy(State(state)).await)

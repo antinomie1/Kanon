@@ -197,6 +197,7 @@ description = "Greet from ts"
     body_bytes.extend_from_slice(format!("\r\n--{boundary}--\r\n").as_bytes());
 
     let req = axum::http::Request::builder()
+        .header("host", "localhost")
         .method(Method::POST)
         .uri("/api/v1/plugins/install")
         .header(
@@ -238,6 +239,7 @@ async fn upload_package(app: Router, package: Vec<u8>) -> axum::http::StatusCode
     body_bytes.extend_from_slice(&package);
     body_bytes.extend_from_slice(format!("\r\n--{boundary}--\r\n").as_bytes());
     let req = axum::http::Request::builder()
+        .header("host", "localhost")
         .method(Method::POST)
         .uri("/api/v1/plugins/install")
         .header(

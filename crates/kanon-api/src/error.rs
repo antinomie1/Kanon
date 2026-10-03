@@ -146,7 +146,12 @@ impl From<kanon_core::SupervisorError> for ApiError {
 
 impl From<kanon_llm::MemoryError> for ApiError {
     fn from(err: kanon_llm::MemoryError) -> Self {
-        ApiError::Internal(format!("Conversation memory failure: {err}"))
+        match err {
+            kanon_llm::MemoryError::Busy(session) => {
+                ApiError::Conflict(format!("Session '{session}' is busy"))
+            }
+            other => ApiError::Internal(format!("Conversation memory failure: {other}")),
+        }
     }
 }
 

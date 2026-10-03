@@ -75,7 +75,8 @@ def connect_core_channel(core_sock: Union[str, Path]) -> grpc.aio.Channel:
     # ``grpc.default_authority`` is the only knob that suppresses C-core's percent-encoded
     # authority: it overrides the pseudo-header verbatim for every RPC on the channel.
     return grpc.aio.insecure_channel(
-        f"unix:{core_sock}",
+        loopback_endpoint(core_sock) if os.name == "nt" else f"unix:{core_sock}",
+        interceptors=[_UnaryAuth(), _StreamAuth()] if os.name == "nt" or os.environ.get("KANON_IPC_TOKEN") else [],
         options=[("grpc.default_authority", CORE_AUTHORITY)],
     )
 
@@ -165,3 +166,118 @@ class CoreWatchdog:
                     if self._on_lost is not None:
                         self._on_lost(reason)
                     return
+
+
+def ipc_token() -> str:
+    """Reads the Windows host launch credential, rejecting missing or malformed secrets."""
+    token = os.environ.get("KANON_IPC_TOKEN", "")
+    if os.name == "nt" and (len(token) != 64 or any(c not in "0123456789abcdef" for c in token)):
+        raise ValueError("Windows IPC requires KANON_IPC_TOKEN with 32 random bytes")
+    return token
+
+
+def loopback_endpoint(path: Union[str, Path]) -> str:
+    """Resolves an address file without allowing remote hosts or DNS resolution."""
+    import ipaddress
+    address = Path(path).read_text().strip()
+    host, port = address.rsplit(":", 1)
+    if not ipaddress.ip_address(host.strip("[]")).is_loopback or not 0 < int(port) < 65536:
+        raise ValueError("IPC endpoint must use a nonzero loopback port")
+    return address
+
+
+def _authenticated_details(details: grpc.aio.ClientCallDetails) -> grpc.aio.ClientCallDetails:
+    return grpc.aio.ClientCallDetails(
+        details.method, details.timeout,
+        tuple(details.metadata or ()) + (("x-kanon-auth-token", ipc_token()),),
+        details.credentials, details.wait_for_ready,
+    )
+
+
+class _UnaryAuth(grpc.aio.UnaryUnaryClientInterceptor):
+    async def intercept_unary_unary(self, continuation, details, request):
+        return await continuation(_authenticated_details(details), request)
+
+
+class _StreamAuth(grpc.aio.UnaryStreamClientInterceptor):
+    async def intercept_unary_stream(self, continuation, details, request):
+        return await continuation(_authenticated_details(details), request)
+
+
+class ServerAuth(grpc.aio.ServerInterceptor):
+    """Checks every host RPC credential before invoking plugin code."""
+
+    def __init__(self, token: str):
+        self.token = token
+
+    async def intercept_service(self, continuation, details):
+        import hmac
+        supplied = dict(details.invocation_metadata).get("x-kanon-auth-token", "")
+        if len(self.token) == 64 and hmac.compare_digest(supplied, self.token):
+            return await continuation(details)
+
+        async def reject(request, context):
+            await context.abort(grpc.StatusCode.UNAUTHENTICATED, "Invalid or missing IPC token")
+
+        return grpc.unary_unary_rpc_method_handler(reject)
+
+
+class EndpointOwner:
+    """Keeps a stable file lock and removes only the endpoint created by this host."""
+
+    def __init__(self, path: Path):
+        import socket
+        import stat
+        self.path = path
+        self.identity = None
+        path.parent.mkdir(parents=True, exist_ok=True)
+        self.lock = open(str(path) + ".lock", "a+b")
+        try:
+            if os.name == "nt":
+                import msvcrt
+                self.lock.seek(0)
+                msvcrt.locking(self.lock.fileno(), msvcrt.LK_NBLCK, 1)
+            else:
+                import fcntl
+                fcntl.flock(self.lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            try:
+                previous = path.lstat()
+            except FileNotFoundError:
+                return
+            if stat.S_ISLNK(previous.st_mode) or (os.name != "nt" and not stat.S_ISSOCK(previous.st_mode)):
+                raise FileExistsError(f"IPC endpoint is not a socket: {path}")
+            probe = socket.socket(socket.AF_INET if os.name == "nt" else socket.AF_UNIX)
+            probe.settimeout(0.1)
+            try:
+                target = loopback_endpoint(path).rsplit(":", 1) if os.name == "nt" else str(path)
+                probe.connect((target[0], int(target[1])) if os.name == "nt" else target)
+            except ConnectionRefusedError:
+                current = path.lstat()
+                if (current.st_dev, current.st_ino) != (previous.st_dev, previous.st_ino):
+                    raise FileExistsError("IPC endpoint changed during stale check")
+                path.unlink()
+            else:
+                raise FileExistsError(f"IPC endpoint is active: {path}")
+            finally:
+                probe.close()
+        except BaseException:
+            self.lock.close()
+            raise
+
+    def publish(self, port: int) -> None:
+        """Records ownership only after bind; Windows writes an exclusive endpoint file."""
+        if os.name == "nt":
+            with self.path.open("x") as endpoint:
+                endpoint.write(f"127.0.0.1:{port}")
+        self.identity = self.path.lstat()
+
+    def close(self) -> None:
+        """Releases the owned endpoint while still holding its process lock."""
+        try:
+            current = self.path.lstat()
+            if self.identity is not None and (current.st_dev, current.st_ino) == (self.identity.st_dev, self.identity.st_ino):
+                self.path.unlink()
+        except FileNotFoundError:
+            pass
+        finally:
+            self.lock.close()

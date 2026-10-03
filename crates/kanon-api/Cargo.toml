@@ -30,6 +30,7 @@ tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt", "regist
 sysinfo = { version = "0.33", default-features = false, features = ["system"] }
 rust-embed = "8.12.0"
 mime_guess = "2.0.5"
+base64 = "0.22"
 tempfile = "3.12"
 semver = "1"
 

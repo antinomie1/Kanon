@@ -63,6 +63,15 @@ pub fn routes() -> Router<ApiState> {
         .route("/api/v1/plugins/:id/http", any(forward_http))
         .route("/api/v1/plugins/:id/http/", any(forward_http))
         .route("/api/v1/plugins/:id/http/*path", any(forward_http))
+        // Sandboxed documents send Origin: null. Credentialed requests keep Basic auth working
+        // while these CORS grants never apply to management routes.
+        .layer(
+            tower_http::cors::CorsLayer::new()
+                .allow_origin(HeaderValue::from_static("null"))
+                .allow_methods(tower_http::cors::AllowMethods::mirror_request())
+                .allow_headers(tower_http::cors::AllowHeaders::mirror_request())
+                .allow_credentials(true),
+        )
 }
 
 /// Serves one file of a plugin's `pages/` folder.

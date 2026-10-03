@@ -7,7 +7,7 @@
 //!   pipeline runs for an inbound message. It goes through
 //!   [`PipelineEngine::run_conversation_turn`], so subscribers hear `AGENT_BEGIN`/`AGENT_DONE`,
 //!   prompt rewriters take part, and `/stop` reaches it. Like every external writer it only
-//!   proceeds when it can take the session's lock at once (see [`super::turns::SessionLocks`]).
+//!   proceeds when it can take the session's lock at once (see [`kanon_llm::SessionManager`]).
 //! - **in a private session** (the default): a one-off agent with its own empty memory (see
 //!   [`kanon_llm::AgentFactory::private_agent`]), whose session vanishes with it. No plugin hook
 //!   runs, so a plugin calling `RunAgent` from its own hook cannot recurse into itself.
@@ -176,30 +176,31 @@ impl PipelineEngine {
 
         let result = match (&chat, run.in_conversation, &run.context) {
             (Some(chat), true, Some(event)) => {
+                let writing = factory
+                    .sessions()
+                    .try_write(&session_id)
+                    .map_err(|_| ConversationError::Busy(session_id.clone()))?;
                 // The instance decides the persona, as for the pipeline's own turns.
                 if let Some(persona_id) = chat.instance.effective_persona_id()
                     && let Some(sessions) = agent.session_manager()
                 {
                     sessions.set_persona(&session_id, persona_id);
                 }
-                let _writing = self
-                    .session_locks()
-                    .try_lock(&session_id)
-                    .ok_or_else(|| ConversationError::Busy(session_id.clone()))?;
-                self.run_conversation_turn(
-                    ConversationTurn {
-                        agent,
-                        instance: Some(&chat.instance),
-                        session_id: &session_id,
-                        event,
-                        hosts: &hosts,
-                        tool_hosts,
-                        bash_caller: None,
-                        options,
-                    },
-                    message,
-                )
-                .await
+                writing
+                    .scope(self.run_conversation_turn(
+                        ConversationTurn {
+                            agent,
+                            running: self.running_turns().begin(Some(chat.instance.id.clone())),
+                            session_id: &session_id,
+                            event,
+                            hosts: &hosts,
+                            tool_hosts,
+                            bash_caller: None,
+                            options,
+                        },
+                        message,
+                    ))
+                    .await
             }
             _ => {
                 // Registered under the chat's instance, so `/stop` there ends it too.

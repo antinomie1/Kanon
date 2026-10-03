@@ -56,7 +56,8 @@ pub mod prelude {
     pub use super::http;
     pub use super::plugin::*;
     pub use super::router::{
-        CommandSpec, ContextSlot, Event, Reply, Router, SystemPrompt, ToolSpec, TriggerSpec,
+        CommandSpec, ContextSlot, Event, IntoToolOutput, Reply, Router, SystemPrompt, ToolReply,
+        ToolSpec, TriggerSpec,
     };
     pub use super::segment::{self, IntoReply};
     pub use super::watchdog::{CoreWatchdogConfig, StopReason, watch_core};

@@ -238,12 +238,11 @@ impl PipelineEngine {
             .find(|conversation| conversation.session_id == session_id)
             .cloned()
             .ok_or_else(|| ConversationError::NotFound(session_id.to_string()))?;
-        let _writing = self
-            .session_locks()
-            .try_lock(session_id)
-            .ok_or_else(|| ConversationError::Busy(session_id.to_string()))?;
-        sessions
-            .delete_session(session_id)
+        let writing = sessions
+            .try_write(session_id)
+            .map_err(|_| ConversationError::Busy(session_id.to_string()))?;
+        writing
+            .scope(sessions.delete_session(session_id))
             .await
             .map_err(|err| ConversationError::Storage(err.to_string()))?;
         tracing::info!(
@@ -269,7 +268,7 @@ impl PipelineEngine {
     ///
     /// The messages must alternate user/assistant, start with a user message and end with an
     /// assistant one, so the history stays a sequence of complete turns. Refused while a turn
-    /// runs in that conversation (see [`super::turns::SessionLocks`]).
+    /// runs in that conversation (see [`kanon_llm::SessionManager`]).
     pub(crate) async fn append_to_conversation(
         &self,
         chat: &Chat,
@@ -298,10 +297,9 @@ impl PipelineEngine {
         let sessions = self.session_manager().ok_or(ConversationError::NoModel)?;
         let instance = self.live_instance(&chat.instance).await?;
         let session_id = instance.conversation_session_id(&chat.conversation);
-        let _writing = self
-            .session_locks()
-            .try_lock(&session_id)
-            .ok_or_else(|| ConversationError::Busy(session_id.clone()))?;
+        let _writing = sessions
+            .try_write(&session_id)
+            .map_err(|_| ConversationError::Busy(session_id.clone()))?;
         let turns = messages.len() / 2;
         sessions
             .memory()

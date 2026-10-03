@@ -546,7 +546,7 @@ async fn a_burst_of_turns_schedules_a_single_compaction() {
 }
 
 #[tokio::test]
-async fn messages_that_arrive_while_a_compaction_runs_survive_it() {
+async fn compaction_excludes_reset_and_turn_writes_until_its_summary_is_committed() {
     let gate = Arc::new(Notify::new());
     let provider = Arc::new(ScriptedProvider::gated(800, gate.clone()));
     let memory = Arc::new(InMemory::new());
@@ -556,11 +556,25 @@ async fn messages_that_arrive_while_a_compaction_runs_survive_it() {
     agent.run("s", "turn 2", &[]).await.unwrap(); // compaction starts, covering these four messages
     tokio::time::sleep(Duration::from_millis(50)).await;
 
-    // The conversation goes on while the summary is being written.
-    agent.run("s", "arrived meanwhile", &[]).await.unwrap();
+    // A reset cannot erase history while its old summary is still being produced. External
+    // turns fail busy, while the pipeline waits on this same writer before starting its turn.
+    assert!(matches!(
+        agent.run("s", "arrived meanwhile", &[]).await,
+        Err(kanon_llm::AgentError::Busy(_))
+    ));
+    let sessions = agent.session_manager().unwrap();
+    assert!(matches!(
+        sessions.reset_session("s").await,
+        Err(kanon_llm::MemoryError::Busy(_))
+    ));
 
     gate.notify_one();
     wait_for_summary(&memory, "s").await;
+    let writing = sessions.write("s").await;
+    writing
+        .scope(agent.run("s", "arrived meanwhile", &[]))
+        .await
+        .unwrap();
 
     let snapshot = memory.snapshot("s").await.unwrap();
     let kept: Vec<&str> = snapshot

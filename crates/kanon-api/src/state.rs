@@ -26,7 +26,7 @@ use kanon_llm::{
 };
 
 use crate::error::ApiError;
-use crate::llm_config::{NodeSettings, SystemConfigStore};
+use crate::llm_config::{NodeSettings, StartupConfig, SystemConfigStore};
 use crate::observability::Observability;
 use crate::plugin_config::PluginConfigStore;
 
@@ -38,6 +38,8 @@ pub struct ApiState {
 
 /// Owners shared across all requests.
 struct ApiStateInner {
+    /// Startup-only gateway access settings; never changed by a management request.
+    startup: StartupConfig,
     /// Instant the gateway process started, used for uptime reporting.
     started_at: Instant,
     /// Semantic version reported by the health and metrics endpoints.
@@ -86,7 +88,7 @@ struct ApiStateInner {
     /// In-memory view of the persisted model-routing settings.
     ///
     /// Kept alongside the store so a read (listing providers, resolving a model) never touches the
-    /// filesystem, while every write goes through [`ApiState::apply_node_settings`].
+    /// filesystem, while partial writes go through [`ApiState::update_node_settings`].
     node_settings: Arc<RwLock<NodeSettings>>,
     /// Milky platform adapter owned by this node, absent when the composition root registered none.
     ///
@@ -114,6 +116,11 @@ struct ApiStateInner {
 }
 
 impl ApiState {
+    /// Startup settings used to bind and protect the management gateway.
+    pub fn startup(&self) -> &StartupConfig {
+        &self.inner.startup
+    }
+
     /// Returns a fluent builder rooted at a supervisor instance.
     pub fn builder(supervisor: Arc<Supervisor>) -> ApiStateBuilder {
         ApiStateBuilder::new(supervisor)
@@ -285,9 +292,43 @@ impl ApiState {
     /// the directory, so a failed apply cannot leave the console describing a node that does not
     /// exist.
     pub fn apply_node_settings(&self, settings: NodeSettings) -> Result<(), String> {
+        let mut current = self
+            .inner
+            .node_settings
+            .write()
+            .map_err(|_| "Node settings lock is poisoned")?;
+        self.persist_node_settings(&settings)?;
+        *current = settings;
+        Ok(())
+    }
+
+    /// Changes current settings under one write lock, including persistence and publication.
+    ///
+    /// Management handlers must mutate inside this closure instead of saving a snapshot read
+    /// before the lock. Otherwise two independent form saves can silently undo one another.
+    /// Network discovery happens before this method and must recheck its inputs in the closure.
+    pub fn update_node_settings<T>(
+        &self,
+        change: impl FnOnce(&mut NodeSettings) -> Result<T, ApiError>,
+    ) -> Result<T, ApiError> {
+        let mut current = self
+            .inner
+            .node_settings
+            .write()
+            .map_err(|_| ApiError::Internal("Node settings lock is poisoned".into()))?;
+        let mut candidate = current.clone();
+        let result = change(&mut candidate)?;
+        self.persist_node_settings(&candidate)
+            .map_err(ApiError::BadRequest)?;
+        *current = candidate;
+        Ok(result)
+    }
+
+    /// Validates, persists and applies while the caller holds the settings write lock.
+    fn persist_node_settings(&self, settings: &NodeSettings) -> Result<(), String> {
         settings.validate()?;
 
-        self.inner.system_config.save_node_settings(&settings)?;
+        self.inner.system_config.save_node_settings(settings)?;
         self.inner.factory.configure(
             "kanon-core",
             ProviderRuntime {
@@ -303,11 +344,6 @@ impl ApiState {
             .command_policy
             .set(settings.command_policy.clone());
         self.inner.bash_policy.set(settings.bash_policy.clone());
-        *self
-            .inner
-            .node_settings
-            .write()
-            .unwrap_or_else(|poisoned| poisoned.into_inner()) = settings;
         Ok(())
     }
 
@@ -390,14 +426,24 @@ impl ApiState {
             return 0;
         }
 
-        let mut settings = self.node_settings();
-        let written = crate::model_discovery::merge_discovered(&mut settings.models, &discovered);
-        if written == 0 {
-            return 0;
-        }
-
-        match self.apply_node_settings(settings) {
-            Ok(()) => {
+        let update = self.update_node_settings(|settings| {
+            // A slow discovery must not resurrect a deleted provider or overwrite an edit made
+            // while its HTTP request was in flight.
+            if !settings.providers.iter().any(|current| current == &entry)
+                || settings.models.iter().any(|model| {
+                    model.provider == provider
+                        && model.source == kanon_llm::ModelSettingsSource::Manual
+                })
+            {
+                return Ok(0);
+            }
+            Ok(crate::model_discovery::merge_discovered(
+                &mut settings.models,
+                &discovered,
+            ))
+        });
+        match update {
+            Ok(written) => {
                 tracing::info!(
                     provider = %provider,
                     count = written,
@@ -487,6 +533,7 @@ impl ApiState {
 
 /// Fluent builder assembling [`ApiState`].
 pub struct ApiStateBuilder {
+    startup: StartupConfig,
     supervisor: Arc<Supervisor>,
     version: String,
     sessions: Option<Arc<SessionManager>>,
@@ -528,6 +575,7 @@ impl ApiStateBuilder {
     /// Creates a builder for the given supervisor.
     pub fn new(supervisor: Arc<Supervisor>) -> Self {
         Self {
+            startup: StartupConfig::default(),
             supervisor,
             version: env!("CARGO_PKG_VERSION").to_string(),
             sessions: None,
@@ -560,6 +608,12 @@ impl ApiStateBuilder {
     /// Overrides the version string reported by the gateway.
     pub fn with_version(mut self, version: impl Into<String>) -> Self {
         self.version = version.into();
+        self
+    }
+
+    /// Supplies the immutable startup configuration loaded by the composition root.
+    pub fn with_startup(mut self, startup: StartupConfig) -> Self {
+        self.startup = startup;
         self
     }
 
@@ -691,8 +745,8 @@ impl ApiStateBuilder {
 
     /// Seeds the node's model-routing settings.
     ///
-    /// The composition root loads them from `data/system.json` (falling back to the
-    /// `KANON_LLM_*` environment) and hands them over; the builder never reads the file itself so
+    /// The composition root loads them from `data/system.json` and hands them over;
+    /// the builder never reads the file itself so
     /// an embedded gateway or a test cannot accidentally adopt a real node's configuration.
     pub fn with_node_settings(mut self, settings: NodeSettings) -> Self {
         self.node_settings = Some(settings);
@@ -865,6 +919,7 @@ impl ApiStateBuilder {
 
         ApiState {
             inner: Arc::new(ApiStateInner {
+                startup: self.startup,
                 started_at: Instant::now(),
                 version: self.version,
                 supervisor: self.supervisor,

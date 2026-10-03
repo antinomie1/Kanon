@@ -9,8 +9,11 @@ use std::future::Future;
 use std::net::SocketAddr;
 
 use axum::Router;
+use axum::extract::{Request, State};
+use axum::http::{HeaderValue, Method, header};
+use axum::middleware::{self, Next};
+use base64::Engine;
 use tokio::net::TcpListener;
-use tower_http::cors::CorsLayer;
 use tower_http::trace::TraceLayer;
 
 use axum::http::Uri;
@@ -80,18 +83,118 @@ async fn static_or_not_found(uri: Uri) -> Response {
 
 /// Builds the complete management gateway router.
 ///
-/// CORS is permissive by design: the WebUI is a separately deployed frontend (static hosting,
-/// Docker Compose or Vercel) whose origin cannot be known ahead of time. Request tracing is
-/// delegated to `tower_http` so every management call appears in the structured log stream
-/// that `/ws/v1/logs` already broadcasts.
+/// Management calls require the console's origin. Plugin content has an opaque origin and
+/// may access only the plugin web surface; CORS is scoped to those routes. A configured token
+/// protects both the console document and API, using the browser's built-in HTTP authentication.
 pub fn app(state: ApiState) -> Router {
     Router::new()
         .merge(routes::api_router())
         .merge(ws::routes())
         .fallback(static_or_not_found)
+        .layer(middleware::from_fn_with_state(state.clone(), guard_access))
         .layer(TraceLayer::new_for_http())
-        .layer(CorsLayer::permissive())
         .with_state(state)
+}
+
+/// Enforces the browser trust boundary before handlers can observe a request.
+async fn guard_access(State(state): State<ApiState>, mut request: Request, next: Next) -> Response {
+    let denied = || {
+        ApiError::Unauthorized("Management access requires a trusted origin and host".into())
+            .into_response()
+    };
+    let Some(host) = request
+        .headers()
+        .get(header::HOST)
+        .and_then(|value| value.to_str().ok())
+    else {
+        return denied();
+    };
+    let Ok(authority) = host.parse::<axum::http::uri::Authority>() else {
+        return denied();
+    };
+    let token = state.startup().api_token.as_deref();
+    let hostname = authority
+        .host()
+        .trim_start_matches('[')
+        .trim_end_matches(']');
+    // A local listener alone does not stop DNS rebinding: reject attacker-controlled Host names
+    // before considering a same-origin request trusted. Remote deployments require a secret.
+    if token.is_none()
+        && hostname != "localhost"
+        && !hostname
+            .parse::<std::net::IpAddr>()
+            .is_ok_and(|ip| ip.is_loopback())
+    {
+        return denied();
+    }
+
+    let mut segments = request.uri().path().split('/');
+    let plugin_web = segments.next() == Some("")
+        && segments.next() == Some("api")
+        && segments.next() == Some("v1")
+        && segments.next() == Some("plugins")
+        && segments.next().is_some_and(|id| !id.is_empty())
+        && matches!(segments.next(), Some("pages" | "http"));
+    let origin = request.headers().get(header::ORIGIN);
+    if let Some(origin) = origin {
+        let trusted = origin.to_str().ok().is_some_and(|origin| {
+            if plugin_web && origin == "null" {
+                return true;
+            }
+            origin.parse::<Uri>().is_ok_and(|uri| {
+                matches!(uri.scheme_str(), Some("http" | "https"))
+                    && uri.authority().is_some_and(|value| value.as_str() == host)
+                    && uri.path() == "/"
+                    && uri.query().is_none()
+            })
+        });
+        if !trusted {
+            return denied();
+        }
+    } else if request
+        .headers()
+        .get("sec-fetch-site")
+        .is_some_and(|value| value == "cross-site")
+    {
+        return denied();
+    }
+
+    // Browser preflights never carry credentials. They only negotiate the narrow plugin CORS
+    // surface; the actual request still has to authenticate. Management preflights are denied.
+    let plugin_preflight = plugin_web
+        && request.method() == Method::OPTIONS
+        && request
+            .headers()
+            .contains_key(header::ACCESS_CONTROL_REQUEST_METHOD);
+    if let Some(token) = token {
+        let expected = format!(
+            "Basic {}",
+            base64::engine::general_purpose::STANDARD.encode(format!("kanon:{token}"))
+        );
+        let actual = request
+            .headers()
+            .get(header::AUTHORIZATION)
+            .map(|value| value.as_bytes())
+            .unwrap_or_default();
+        let authenticated = actual.len() == expected.len()
+            && actual
+                .iter()
+                .zip(expected.as_bytes())
+                .fold(0u8, |difference, (left, right)| difference | (left ^ right))
+                == 0;
+        if !plugin_preflight && !authenticated {
+            let mut response = ApiError::Unauthorized("Management credentials are required".into())
+                .into_response();
+            response.headers_mut().insert(
+                header::WWW_AUTHENTICATE,
+                HeaderValue::from_static("Basic realm=\"Kanon\", charset=\"UTF-8\""),
+            );
+            return response;
+        }
+        // The shared gateway credential must never be exposed to a plugin's HTTP handler.
+        request.headers_mut().remove(header::AUTHORIZATION);
+    }
+    next.run(request).await
 }
 
 /// Bound management gateway awaiting its serving future.
@@ -104,6 +207,21 @@ pub struct ApiServer {
 impl ApiServer {
     /// Binds the gateway to `addr` without starting to serve.
     pub async fn bind(addr: SocketAddr, state: ApiState) -> Result<Self, ApiError> {
+        if state
+            .startup()
+            .api_token
+            .as_ref()
+            .is_some_and(|token| token.trim().is_empty())
+        {
+            return Err(ApiError::BadRequest(
+                "startup.api_token must not be empty".into(),
+            ));
+        }
+        if !addr.ip().is_loopback() && state.startup().api_token.is_none() {
+            return Err(ApiError::BadRequest(
+                "A non-loopback API listener requires startup.api_token".into(),
+            ));
+        }
         let listener = TcpListener::bind(addr).await.map_err(|err| {
             ApiError::Internal(format!(
                 "Failed to bind management gateway on {addr}: {err}"

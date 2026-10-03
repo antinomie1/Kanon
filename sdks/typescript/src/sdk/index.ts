@@ -5,6 +5,7 @@
  * out-of-process Kanon plugins in TypeScript or JavaScript.
  */
 
+import { clientAuth, ipcToken, loopbackEndpoint } from "./ipc.js";
 import { randomUUID } from "node:crypto";
 import * as fs from "node:fs";
 import * as path from "node:path";
@@ -317,7 +318,7 @@ export class CoreHandle {
     this.unixSocketPath = target.startsWith("unix:")
       ? target.slice("unix:".length)
       : undefined;
-    this.client = new botApiService(target, credentials) as BotApiServiceClient;
+    this.client = new botApiService(target, credentials, { interceptors: process.platform === "win32" || !!process.env.KANON_IPC_TOKEN ? [clientAuth(ipcToken())] : [] }) as BotApiServiceClient;
   }
 
   /**
@@ -842,6 +843,7 @@ const HOST_PORT_TARGET = /^[A-Za-z0-9._-]+:\d+$/;
  * grpc-js targets are passed through so Windows loopback TCP endpoints keep working.
  */
 function normalizeCoreEndpoint(endpoint: string): string {
+  if (process.platform === "win32") return loopbackEndpoint(endpoint);
   if (SCHEMED_TARGET.test(endpoint) || HOST_PORT_TARGET.test(endpoint)) {
     return endpoint;
   }

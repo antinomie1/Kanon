@@ -279,6 +279,11 @@ impl BuiltinAgent {
         let session_id = session_id.to_string();
         let tools = tools.to_vec();
         tokio::spawn(async move {
+            // A queued compaction must never outlive a reset and restore its old summary.
+            let _writing = match agent.session_manager.as_ref() {
+                Some(sessions) => Some(sessions.write(&session_id).await),
+                None => None,
+            };
             if let Err(err) = agent.compact(&session_id, &tools).await {
                 tracing::warn!(
                     session_id = %session_id,
@@ -778,6 +783,11 @@ impl BuiltinAgent {
         user_input: &str,
         hosts: &[Arc<dyn ToolHost>],
     ) -> Result<ChatChunkStream, AgentError> {
+        let writing = self
+            .session_manager
+            .as_ref()
+            .map(|sessions| sessions.agent_write(session_id))
+            .transpose()?;
         // Enrich only the originating message; request hooks must not fabricate later turns.
         let mut message = ChatMessage::user(user_input);
         for hook in &self.hooks {
@@ -967,6 +977,8 @@ impl BuiltinAgent {
         let user_toks = crate::token::estimate_text_tokens(user_input);
 
         tokio::spawn(async move {
+            // The producer owns the writer through its final persistence, not the SSE body.
+            let _writing = writing;
             let mut inner = inner_stream;
             let mut response = ChatResponse::default();
             while let Some(chunk_res) = inner.next().await {
@@ -1062,6 +1074,11 @@ impl Agent for BuiltinAgent {
         hosts: &[Arc<dyn ToolHost>],
         options: TurnOptions,
     ) -> Result<AgentOutput, AgentError> {
+        let _writing = self
+            .session_manager
+            .as_ref()
+            .map(|sessions| sessions.agent_write(session_id))
+            .transpose()?;
         self.run_turn(session_id, message, hosts, options).await
     }
 
@@ -1085,6 +1102,11 @@ impl Agent for BuiltinAgent {
         session_id: &str,
         hosts: &[Arc<dyn ToolHost>],
     ) -> Result<bool, AgentError> {
+        let _writing = self
+            .session_manager
+            .as_ref()
+            .map(|sessions| sessions.agent_write(session_id))
+            .transpose()?;
         let tools = self.collect_tools(hosts);
         self.compact(session_id, &tools).await
     }
@@ -1163,6 +1185,7 @@ fn unanswered_tool_calls(history: &[ChatMessage]) -> Vec<String> {
 /// and would sit in every later request of the session.
 fn closing_note(err: &AgentError) -> String {
     let what = match err {
+        AgentError::Busy(_) => "failed because the session is busy".to_string(),
         AgentError::Stopped => "was stopped by the user before it finished".to_string(),
         AgentError::Gateway(GatewayError::Http(http)) if http.is_timeout() => {
             "failed: the model request timed out".to_string()

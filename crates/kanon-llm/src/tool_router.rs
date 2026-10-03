@@ -330,9 +330,11 @@ impl ToolRouter {
             Err(AgentError::Rpc(s)) => Err(ToolRouterError::Rpc(s)),
             Err(AgentError::ToolNotFound(name)) => Err(ToolRouterError::ToolNotFound(name)),
             Err(AgentError::Stopped) => Err(ToolRouterError::Stopped),
-            Err(AgentError::Memory(m)) | Err(AgentError::Compaction(m)) => Err(
-                ToolRouterError::Gateway(crate::error::GatewayError::InvalidResponse(m)),
-            ),
+            Err(AgentError::Busy(m))
+            | Err(AgentError::Memory(m))
+            | Err(AgentError::Compaction(m)) => Err(ToolRouterError::Gateway(
+                crate::error::GatewayError::InvalidResponse(m),
+            )),
         }
     }
 }

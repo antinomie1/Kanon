@@ -11,7 +11,7 @@ use async_trait::async_trait;
 use axum::Router;
 use axum::body::Body;
 use axum::http::{Method, Request, StatusCode, header};
-use kanon_api::{ApiState, default_agent_config};
+use kanon_api::{ApiState, SystemConfigStore, default_agent_config};
 use kanon_core::supervisor::Supervisor;
 use kanon_core::{AdapterError, EventIngress, PlatformAdapter, PluginManifest};
 use kanon_llm::{ChatRequest, ChatResponse, GatewayError, LlmProvider, TokenUsage};
@@ -161,6 +161,12 @@ pub async fn fixture_state(config_dir: PathBuf, with_agent: bool) -> ApiState {
     std::mem::forget(temp);
 
     let mut builder = ApiState::builder(supervisor)
+        .with_system_config(Arc::new(SystemConfigStore::new(
+            config_dir.join("system.json"),
+        )))
+        .with_persona_store(Arc::new(kanon_llm::PersonaStore::new(
+            config_dir.join("personas.json"),
+        )))
         .with_config_dir(config_dir.clone())
         .with_plugins_dir(config_dir.join("plugins"));
     if with_agent {
@@ -180,6 +186,12 @@ pub async fn empty_state(config_dir: PathBuf) -> ApiState {
     let supervisor = Arc::new(Supervisor::new(Some(temp.path().to_path_buf()), None));
     std::mem::forget(temp);
     ApiState::builder(supervisor)
+        .with_system_config(Arc::new(SystemConfigStore::new(
+            config_dir.join("system.json"),
+        )))
+        .with_persona_store(Arc::new(kanon_llm::PersonaStore::new(
+            config_dir.join("personas.json"),
+        )))
         .with_config_dir(config_dir)
         .build()
 }
@@ -193,12 +205,14 @@ pub async fn send_json(
 ) -> (StatusCode, Value) {
     let request = match body {
         Some(body) => Request::builder()
+            .header("host", "localhost")
             .method(method)
             .uri(uri)
             .header(header::CONTENT_TYPE, "application/json")
             .body(Body::from(body.to_string()))
             .expect("request build"),
         None => Request::builder()
+            .header("host", "localhost")
             .method(method)
             .uri(uri)
             .body(Body::empty())
@@ -218,6 +232,7 @@ pub async fn send_json(
 /// Issues a request and returns the status with the raw response body and content type.
 pub async fn send_raw(app: &Router, method: Method, uri: &str) -> (StatusCode, String, String) {
     let request = Request::builder()
+        .header("host", "localhost")
         .method(method)
         .uri(uri)
         .body(Body::empty())
@@ -248,6 +263,7 @@ pub async fn send_raw(app: &Router, method: Method, uri: &str) -> (StatusCode, S
 /// completions or Prometheus text exposition.
 pub async fn send_raw_json(app: &Router, uri: &str, body: Value) -> (StatusCode, String, String) {
     let request = Request::builder()
+        .header("host", "localhost")
         .method(Method::POST)
         .uri(uri)
         .header(header::CONTENT_TYPE, "application/json")
@@ -357,6 +373,12 @@ pub async fn adapter_state(
 
     let (ingest_tx, ingest_rx) = tokio::sync::mpsc::channel(capacity);
     let state = ApiState::builder(supervisor)
+        .with_system_config(Arc::new(SystemConfigStore::new(
+            config_dir.join("system.json"),
+        )))
+        .with_persona_store(Arc::new(kanon_llm::PersonaStore::new(
+            config_dir.join("personas.json"),
+        )))
         .with_config_dir(config_dir)
         .with_ingress(EventIngress::new(ingest_tx))
         .build();

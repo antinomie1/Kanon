@@ -203,6 +203,7 @@ async fn set_persona(
     Path(session_id): Path<String>,
     Json(body): Json<PersonaSwitchRequest>,
 ) -> Result<Json<PersonaSwitchResponse>, ApiError> {
+    let _writing = state.sessions().try_write(&session_id)?;
     let requested = body
         .persona_id
         .as_deref()

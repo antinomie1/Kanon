@@ -94,7 +94,6 @@ impl Connected for IpcStream {
 /// On Unix, access is protected by POSIX filesystem permissions (0700).
 #[derive(Clone)]
 pub struct AuthInterceptor {
-    #[allow(dead_code)]
     expected_token: String,
 }
 
@@ -109,32 +108,88 @@ impl AuthInterceptor {
 
 impl tonic::service::Interceptor for AuthInterceptor {
     fn call(&mut self, request: tonic::Request<()>) -> Result<tonic::Request<()>, tonic::Status> {
-        #[cfg(windows)]
-        {
-            let token_header = request
-                .metadata()
-                .get(AUTH_HEADER_KEY)
-                .and_then(|v| v.to_str().ok());
-
-            match token_header {
-                Some(token)
-                    if constant_time_eq::constant_time_eq(
+        // Unix callers without a token retain filesystem authentication; configured tokens
+        // are enforced on every platform so the same contract can be exercised in tests.
+        #[cfg(unix)]
+        if self.expected_token.is_empty() {
+            return Ok(request);
+        }
+        let token = request
+            .metadata()
+            .get(AUTH_HEADER_KEY)
+            .and_then(|v| v.to_str().ok());
+        match token {
+            Some(token)
+                if self.expected_token.len() == 64
+                    && constant_time_eq::constant_time_eq(
                         token.as_bytes(),
                         self.expected_token.as_bytes(),
                     ) =>
-                {
-                    Ok(request)
-                }
-                _ => Err(tonic::Status::unauthenticated(
-                    "Invalid or missing IPC authentication token",
-                )),
+            {
+                Ok(request)
             }
-        }
-
-        #[cfg(unix)]
-        {
-            // On Unix platforms, access control is enforced via filesystem permissions (e.g. 0700 mode on socket directory).
-            Ok(request)
+            _ => Err(tonic::Status::unauthenticated(
+                "Invalid or missing IPC authentication token",
+            )),
         }
     }
 }
+
+/// Generates a fresh 32-byte CSPRNG token encoded as lowercase hexadecimal metadata.
+pub fn generate_ipc_token() -> std::io::Result<String> {
+    let mut bytes = [0u8; 32];
+    getrandom::fill(&mut bytes).map_err(std::io::Error::other)?;
+    Ok(bytes.iter().map(|byte| format!("{byte:02x}")).collect())
+}
+
+/// Reads an endpoint file and rejects remote addresses before any connection is attempted.
+pub fn read_loopback_endpoint(path: &std::path::Path) -> std::io::Result<std::net::SocketAddr> {
+    let address: std::net::SocketAddr = std::fs::read_to_string(path)?
+        .trim()
+        .parse()
+        .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
+    if !address.ip().is_loopback() || address.port() == 0 {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "IPC endpoint must use a nonzero loopback port",
+        ));
+    }
+    Ok(address)
+}
+
+/// Attaches the startup credential to the first HEADERS frame of every RPC.
+#[derive(Clone, Default)]
+pub struct ClientAuthInterceptor(pub String);
+
+impl std::fmt::Debug for ClientAuthInterceptor {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // Generated clients include the interceptor in Debug output; never disclose credentials.
+        formatter.write_str("ClientAuthInterceptor(<redacted>)")
+    }
+}
+
+impl tonic::service::Interceptor for ClientAuthInterceptor {
+    fn call(
+        &mut self,
+        mut request: tonic::Request<()>,
+    ) -> Result<tonic::Request<()>, tonic::Status> {
+        if !self.0.is_empty() {
+            let token = self
+                .0
+                .parse()
+                .map_err(|_| tonic::Status::unauthenticated("invalid IPC token"))?;
+            request.metadata_mut().insert(AUTH_HEADER_KEY, token);
+        }
+        #[cfg(windows)]
+        if self.0.is_empty() {
+            return Err(tonic::Status::unauthenticated("missing IPC token"));
+        }
+        Ok(request)
+    }
+}
+
+/// Shared authenticated channel type used by core and host clients.
+pub type AuthenticatedChannel = tonic::service::interceptor::InterceptedService<
+    tonic::transport::Channel,
+    ClientAuthInterceptor,
+>;

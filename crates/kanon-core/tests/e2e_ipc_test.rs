@@ -44,7 +44,8 @@ async fn test_core_plugin_ipc_handshake_and_pipeline() {
     // 2. Start Core IPC Server on core.sock
     let (event_tx, mut event_rx) = mpsc::channel(DEFAULT_INGEST_QUEUE_CAPACITY);
     let core_api = CoreApiService::new(event_tx);
-    let core_server = CoreIpcServer::new(&core_sock, core_api);
+    let token = kanon_transport::generate_ipc_token().unwrap();
+    let core_server = CoreIpcServer::new(&core_sock, core_api).with_auth_token(token.clone());
 
     let (shutdown_tx, shutdown_rx) = oneshot::channel();
     let server_task = tokio::spawn(async move {
@@ -64,7 +65,8 @@ async fn test_core_plugin_ipc_handshake_and_pipeline() {
     );
 
     // 3. Initialize Supervisor with the isolated runtime directory
-    let supervisor = Supervisor::new(Some(run_dir.clone()), Some(core_sock.clone()));
+    let supervisor = Supervisor::new(Some(run_dir.clone()), Some(core_sock.clone()))
+        .with_ipc_token(token.clone());
 
     // 4. Spawn demo_rust_plugin sub-process through Supervisor
     let plugin_bin = find_demo_plugin_bin();
@@ -174,7 +176,26 @@ async fn test_core_plugin_ipc_handshake_and_pipeline() {
     let core_channel = connect_ipc(&core_sock)
         .await
         .expect("Failed to connect to core.sock");
-    let mut core_client = BotApiServiceClient::new(core_channel);
+    // Authentication must reject missing and wrong credentials on the actual core server.
+    let mut anonymous = BotApiServiceClient::new(core_channel.clone());
+    let error = anonymous
+        .ping(kanon_proto::v1::PingRequest::default())
+        .await
+        .unwrap_err();
+    assert_eq!(error.code(), tonic::Code::Unauthenticated);
+    let mut wrong = BotApiServiceClient::with_interceptor(
+        core_channel.clone(),
+        kanon_transport::ClientAuthInterceptor("00".repeat(32)),
+    );
+    let error = wrong
+        .ping(kanon_proto::v1::PingRequest::default())
+        .await
+        .unwrap_err();
+    assert_eq!(error.code(), tonic::Code::Unauthenticated);
+    let mut core_client = BotApiServiceClient::with_interceptor(
+        core_channel,
+        kanon_transport::ClientAuthInterceptor(token),
+    );
 
     let ingest_req = IngestEventRequest {
         platform: "test".to_string(),

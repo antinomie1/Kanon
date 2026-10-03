@@ -60,11 +60,9 @@ async fn set_default_agent(
     State(state): State<ApiState>,
     Json(payload): Json<SetDefaultAgentRequest>,
 ) -> Result<Json<AgentsResponse>, ApiError> {
-    let mut settings = state.node_settings();
-    settings.default_agent = payload.agent.trim().to_string();
-
-    state
-        .apply_node_settings(settings)
-        .map_err(ApiError::BadRequest)?;
+    state.update_node_settings(|settings| {
+        settings.default_agent = payload.agent.trim().to_string();
+        Ok(())
+    })?;
     Ok(list_agents(State(state)).await)
 }

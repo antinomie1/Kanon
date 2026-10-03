@@ -295,3 +295,54 @@ async fn handlers_can_pass_the_message_on_and_preparers_add_context() {
         .unwrap();
     assert_eq!(context, "[s1] u1 likes tea");
 }
+
+#[tokio::test]
+async fn tool_replies_carry_attachments_with_absolute_paths() {
+    let plugin = Router::new("test.media", "Media", "0.1.0").tool(
+        ToolSpec::new("draw"),
+        |_args, _event| async move {
+            Ok(ToolReply::new("drawn")
+                .file("out/chart.png", "image/png")
+                .url("https://example.org/a.mp3", "audio/mpeg"))
+        },
+    );
+    let response = plugin
+        .on_call_tool(ToolCallRequest {
+            call_id: "c1".into(),
+            tool_name: "draw".into(),
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+
+    assert!(response.success, "{}", response.error_message);
+    let Some(tool_call_response::Payload::StructuredResult(result)) = response.payload else {
+        panic!("expected a structured result");
+    };
+    // The model still reads only the value; the media travel beside it.
+    assert_eq!(
+        serde_json::Value::Object(kanon_sdk::json::from_struct(result)),
+        json!({ "result": "drawn" })
+    );
+    // The core reads the file from its own process, so a relative path must not reach it.
+    let expected = std::env::current_dir()
+        .unwrap()
+        .join("out/chart.png")
+        .to_string_lossy()
+        .into_owned();
+    assert_eq!(
+        response.attachments,
+        [
+            ToolAttachment {
+                mime_type: "image/png".into(),
+                file_path: Some(expected),
+                url: None,
+            },
+            ToolAttachment {
+                mime_type: "audio/mpeg".into(),
+                file_path: None,
+                url: Some("https://example.org/a.mp3".into()),
+            },
+        ]
+    );
+}

@@ -117,6 +117,10 @@ impl<P: Plugin> KanonHost<P> {
         self.plugin.write().await.on_load(&mut ctx).await?;
         tracing::info!(plugin_id = %plugin_id, socket = %self.socket_path.display(), "Plugin loaded successfully");
 
+        let auth = kanon_transport::AuthInterceptor::new(
+            std::env::var("KANON_IPC_TOKEN").unwrap_or_default(),
+        );
+
         // 3. Bind IPC Listener
         let listener = IpcListener::bind(&self.socket_path)?;
         let incoming = listener.incoming();
@@ -164,8 +168,14 @@ impl<P: Plugin> KanonHost<P> {
 
         // 6. Serve until the shutdown future above resolves.
         tonic::transport::Server::builder()
-            .add_service(PluginHostServiceServer::new(host_svc))
-            .add_service(MessagePipelineServiceServer::new(pipeline_svc))
+            .add_service(PluginHostServiceServer::with_interceptor(
+                host_svc,
+                auth.clone(),
+            ))
+            .add_service(MessagePipelineServiceServer::with_interceptor(
+                pipeline_svc,
+                auth,
+            ))
             .serve_with_incoming_shutdown(incoming, server_shutdown)
             .await?;
 
@@ -196,10 +206,6 @@ impl<P: Plugin> KanonHost<P> {
 
         // 7. Cleanup on shutdown
         self.plugin.write().await.on_unload().await?;
-        if self.socket_path.exists() {
-            let _ = std::fs::remove_file(&self.socket_path);
-            tracing::debug!(socket = %self.socket_path.display(), "Cleaned up host socket file");
-        }
 
         Ok(())
     }

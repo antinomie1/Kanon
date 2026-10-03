@@ -250,12 +250,25 @@ impl CoreApiService {
                 )));
             }
         }
-        store.remove(registry, &id).map_err(persona_status)?;
-        if let Some(sessions) = self
+        let sessions = self
             .engine
             .as_ref()
-            .and_then(|engine| engine.session_manager())
-        {
+            .and_then(|engine| engine.session_manager());
+        // Validate all writers before removing the persona, so Busy never leaves a half-delete.
+        let _writers = sessions
+            .as_ref()
+            .map(|sessions| {
+                sessions
+                    .list_sessions()
+                    .into_iter()
+                    .filter(|session| session.persona_id.as_deref() == Some(id.as_str()))
+                    .map(|session| sessions.try_write(&session.session_key))
+                    .collect::<Result<Vec<_>, _>>()
+            })
+            .transpose()
+            .map_err(|err| Status::failed_precondition(err.to_string()))?;
+        store.remove(registry, &id).map_err(persona_status)?;
+        if let Some(sessions) = sessions {
             sessions.unbind_persona(&id);
         }
         Ok(Response::new(DeletePersonaResponse { deleted: true }))

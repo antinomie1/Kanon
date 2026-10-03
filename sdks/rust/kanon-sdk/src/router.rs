@@ -32,6 +32,7 @@
 
 use std::collections::HashMap;
 use std::future::Future;
+use std::path::PathBuf;
 use std::pin::Pin;
 use std::sync::{Arc, RwLock};
 
@@ -41,7 +42,7 @@ use kanon_proto::v1::{
     DecorateReplyRequest, EventKind, EventNotification, HttpRequest, HttpResponse,
     LlmRequestHookRequest, LlmResponseEvent, MessageSegment, MessageSentEvent,
     PipelineEventRequest, PluginMeta, PreFilterResult, PrepareTurnRequest, ReplySource,
-    ToolCallRequest, ToolCallResponse, ToolMeta, TriggerMeta, event_notification,
+    ToolAttachment, ToolCallRequest, ToolCallResponse, ToolMeta, TriggerMeta, event_notification,
     tool_call_request, tool_call_response,
 };
 use schemars::JsonSchema;
@@ -64,8 +65,13 @@ type BoxFuture<T> = Pin<Box<dyn Future<Output = T> + Send + 'static>>;
 /// A stored command, trigger or subcommand handler.
 pub(crate) type CommandHandler =
     Arc<dyn Fn(CommandEvent) -> BoxFuture<PluginResult<Vec<MessageSegment>>> + Send + Sync>;
+/// A stored tool handler: the model's arguments and the message being answered in, the JSON
+/// result and the attachments out.
 type ToolHandler = Arc<
-    dyn Fn(serde_json::Value, Option<MessageEvent>) -> BoxFuture<PluginResult<serde_json::Value>>
+    dyn Fn(
+            serde_json::Value,
+            Option<MessageEvent>,
+        ) -> BoxFuture<PluginResult<(serde_json::Value, Vec<ToolAttachment>)>>
         + Send
         + Sync,
 >;
@@ -299,6 +305,107 @@ impl<A> ToolSpec<A> {
     }
 }
 
+/// A tool result that also hands media to the user: the `value` is what the model reads, the
+/// attachments (pictures, files) go out with the turn's reply. Return it from a tool handler in
+/// place of the plain value:
+///
+/// ```ignore
+/// router.tool(ToolSpec::typed::<ChartArgs>("chart"), |args, _event| async move {
+///     let path = draw_chart(&args)?;
+///     Ok(ToolReply::new("Chart drawn and sent to the user.").file(path, "image/png"))
+/// })
+/// ```
+///
+/// The core sends an attachment as the kind its MIME type names (image, voice, video, otherwise
+/// a file), keeps attachment paths out of what the model reads, and drops the attachments of a
+/// failed call.
+#[derive(Debug, Clone)]
+pub struct ToolReply<T = serde_json::Value> {
+    value: T,
+    attachments: Vec<Attachment>,
+}
+
+/// Where one attachment of a [`ToolReply`] is.
+#[derive(Debug, Clone)]
+enum Attachment {
+    File { path: PathBuf, mime_type: String },
+    Url { url: String, mime_type: String },
+}
+
+impl<T> ToolReply<T> {
+    /// The result `value`, with nothing attached yet.
+    pub fn new(value: T) -> Self {
+        Self {
+            value,
+            attachments: Vec::new(),
+        }
+    }
+
+    /// Attaches a local file the plugin wrote, e.g. a rendered picture in its data directory.
+    ///
+    /// A relative path is resolved against the plugin's working directory when the call
+    /// returns, because the core reads the file from a process of its own. The file must stay
+    /// in place until the reply is delivered.
+    pub fn file(mut self, path: impl Into<PathBuf>, mime_type: impl Into<String>) -> Self {
+        self.attachments.push(Attachment::File {
+            path: path.into(),
+            mime_type: mime_type.into(),
+        });
+        self
+    }
+
+    /// Attaches a remote resource the platform fetches itself.
+    pub fn url(mut self, url: impl Into<String>, mime_type: impl Into<String>) -> Self {
+        self.attachments.push(Attachment::Url {
+            url: url.into(),
+            mime_type: mime_type.into(),
+        });
+        self
+    }
+}
+
+/// What a tool handler may return: any serializable value, or a [`ToolReply`] that carries
+/// attachments as well.
+pub trait IntoToolOutput {
+    /// The JSON the model reads and the attachments delivered to the user.
+    fn into_tool_output(self) -> PluginResult<(serde_json::Value, Vec<ToolAttachment>)>;
+}
+
+impl<T: Serialize> IntoToolOutput for T {
+    fn into_tool_output(self) -> PluginResult<(serde_json::Value, Vec<ToolAttachment>)> {
+        Ok((serde_json::to_value(self)?, Vec::new()))
+    }
+}
+
+impl<T: Serialize> IntoToolOutput for ToolReply<T> {
+    fn into_tool_output(self) -> PluginResult<(serde_json::Value, Vec<ToolAttachment>)> {
+        let attachments = self
+            .attachments
+            .into_iter()
+            .map(|attachment| match attachment {
+                // Failing here fails the call, so the model learns the picture is missing
+                // instead of the reply silently going out without it.
+                Attachment::File { path, mime_type } => Ok(ToolAttachment {
+                    mime_type,
+                    file_path: Some(
+                        std::path::absolute(&path)
+                            .map_err(|err| format!("attachment path '{}': {err}", path.display()))?
+                            .to_string_lossy()
+                            .into_owned(),
+                    ),
+                    url: None,
+                }),
+                Attachment::Url { url, mime_type } => Ok(ToolAttachment {
+                    mime_type,
+                    file_path: None,
+                    url: Some(url),
+                }),
+            })
+            .collect::<Result<Vec<_>, String>>()?;
+        Ok((serde_json::to_value(self.value)?, attachments))
+    }
+}
+
 /// Deserializes typed tool arguments. Protobuf turned every number into a double on the way, so
 /// whole numbers become integers again first, or `{"days": 3}` could not fill a `u32`.
 fn parse_typed<A: DeserializeOwned>(value: serde_json::Value) -> Result<A, serde_json::Error> {
@@ -485,7 +592,7 @@ impl ContextSlot {
         A: Send + 'static,
         F: Fn(A, Option<MessageEvent>) -> Fut + Send + Sync + 'static,
         Fut: Future<Output = PluginResult<R>> + Send + 'static,
-        R: Serialize + 'static,
+        R: IntoToolOutput + 'static,
     {
         let name = spec.meta.name.clone();
         self.insert_tool(tool_entry(spec, handler))
@@ -664,8 +771,9 @@ impl Router {
     /// Declares a tool. The handler receives the model's arguments (a typed struct for
     /// [`ToolSpec::typed`], a JSON object for [`ToolSpec::new`]) and the message the model was
     /// answering (`None` outside a platform conversation), and returns anything serializable;
-    /// a result that is not a JSON object is wrapped as `{"result": value}`. An error is
-    /// reported to the model as a failed call.
+    /// a result that is not a JSON object is wrapped as `{"result": value}`. Wrap the value in a
+    /// [`ToolReply`] to send pictures or files to the user along with it. An error is reported
+    /// to the model as a failed call.
     ///
     /// # Panics
     /// If a tool with the same name was already declared.
@@ -674,7 +782,7 @@ impl Router {
         A: Send + 'static,
         F: Fn(A, Option<MessageEvent>) -> Fut + Send + Sync + 'static,
         Fut: Future<Output = PluginResult<R>> + Send + 'static,
-        R: Serialize + 'static,
+        R: IntoToolOutput + 'static,
     {
         if let Err(err) = self.context.insert_tool(tool_entry(spec, handler)) {
             panic!("{err}");
@@ -868,14 +976,14 @@ where
     A: Send + 'static,
     F: Fn(A, Option<MessageEvent>) -> Fut + Send + Sync + 'static,
     Fut: Future<Output = PluginResult<R>> + Send + 'static,
-    R: Serialize + 'static,
+    R: IntoToolOutput + 'static,
 {
     let name = spec.meta.name.clone();
     let parse = spec.parse;
     let handler: ToolHandler = Arc::new(move |args, event| match parse(args) {
         Ok(args) => {
             let future = handler(args, event);
-            Box::pin(async move { Ok(serde_json::to_value(future.await?)?) })
+            Box::pin(async move { future.await?.into_tool_output() })
         }
         // Worded for the model, which reads it and can retry with corrected arguments.
         Err(err) => {
@@ -986,12 +1094,13 @@ impl Plugin for Router {
         };
         let event = self.message(req.context);
         Ok(match handler(args, event).await {
-            Ok(value) => ToolCallResponse {
+            Ok((value, attachments)) => ToolCallResponse {
                 call_id: req.call_id,
                 success: true,
                 payload: Some(tool_call_response::Payload::StructuredResult(
                     result_struct(value),
                 )),
+                attachments,
                 ..Default::default()
             },
             // The model is told the tool failed and can explain or retry.

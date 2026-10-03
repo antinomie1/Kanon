@@ -705,6 +705,7 @@ pub struct CoreIpcServer {
     socket_path: PathBuf,
     /// Core API service implementation.
     service: CoreApiService,
+    auth_token: String,
 }
 
 impl CoreIpcServer {
@@ -713,7 +714,26 @@ impl CoreIpcServer {
         Self {
             socket_path: socket_path.into(),
             service,
+            auth_token: String::new(),
         }
+    }
+
+    /// Configures the node's per-process authentication credential.
+    pub fn with_auth_token(mut self, token: String) -> Self {
+        self.auth_token = token;
+        self
+    }
+
+    /// Binds before spawning the server task, surfacing endpoint conflicts during startup.
+    pub fn bind_listener(&self) -> std::io::Result<IpcListener> {
+        #[cfg(windows)]
+        if self.auth_token.len() != 64 {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "Windows IPC requires a 32-byte token",
+            ));
+        }
+        IpcListener::bind(&self.socket_path)
     }
 
     /// Creates a `CoreIpcServer` bound to the default socket path (`./run/core.sock`).
@@ -737,23 +757,27 @@ impl CoreIpcServer {
     where
         F: Future<Output = ()> + Send + 'static,
     {
-        let socket_path = self.socket_path.clone();
-        let listener = IpcListener::bind(&socket_path)?;
-        tracing::info!(socket = %socket_path.display(), "Core IPC server listening");
+        let listener = self.bind_listener()?;
+        self.run_with_listener(listener, shutdown_signal).await
+    }
 
-        let incoming = listener.incoming();
-        let service = BotApiServiceServer::new(self.service);
-
+    /// Serves a listener already bound by the composition root.
+    pub async fn run_with_listener<F>(
+        self,
+        listener: IpcListener,
+        shutdown_signal: F,
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>>
+    where
+        F: Future<Output = ()> + Send + 'static,
+    {
+        let service = BotApiServiceServer::with_interceptor(
+            self.service,
+            kanon_transport::AuthInterceptor::new(self.auth_token),
+        );
         tonic::transport::Server::builder()
             .add_service(service)
-            .serve_with_incoming_shutdown(incoming, shutdown_signal)
+            .serve_with_incoming_shutdown(listener.incoming(), shutdown_signal)
             .await?;
-
-        // Clean up socket file upon server exit.
-        if socket_path.exists() {
-            let _ = std::fs::remove_file(&socket_path);
-            tracing::debug!(socket = %socket_path.display(), "Cleaned up Core socket file");
-        }
 
         Ok(())
     }

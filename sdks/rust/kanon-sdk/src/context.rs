@@ -113,7 +113,7 @@ impl AsEvent for CommandEvent {
 /// request.
 #[derive(Debug, Clone)]
 pub struct CoreHandle {
-    client: BotApiServiceClient<Channel>,
+    client: BotApiServiceClient<kanon_transport::AuthenticatedChannel>,
     plugin_id: String,
     host_id: String,
 }
@@ -122,7 +122,12 @@ impl CoreHandle {
     /// Wraps an established core channel, without a plugin identity.
     pub fn new(channel: Channel) -> Self {
         Self {
-            client: BotApiServiceClient::new(channel),
+            client: BotApiServiceClient::with_interceptor(
+                channel,
+                kanon_transport::ClientAuthInterceptor(
+                    std::env::var("KANON_IPC_TOKEN").unwrap_or_default(),
+                ),
+            ),
             plugin_id: String::new(),
             host_id: String::new(),
         }
@@ -159,7 +164,7 @@ impl CoreHandle {
         Ok(self.plugin_id.clone())
     }
 
-    fn client(&self) -> BotApiServiceClient<Channel> {
+    fn client(&self) -> BotApiServiceClient<kanon_transport::AuthenticatedChannel> {
         self.client.clone()
     }
 

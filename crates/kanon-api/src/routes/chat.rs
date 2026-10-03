@@ -126,6 +126,7 @@ async fn completions(
     let agent = resolve_agent(&state, &request)?;
     MetricsRegistry::incr(&state.observability().metrics.chat_completions);
 
+    let writing = state.sessions().try_write(&session_id)?;
     apply_persona_override(&state, &session_id, request.persona_id.as_deref())?;
 
     // Plugin tools are aggregated from the live supervisor registry on every request so a
@@ -148,22 +149,27 @@ async fn completions(
     );
 
     if request.stream {
-        stream_completion(
-            state,
-            agent,
-            session_id,
-            request.message,
-            request.tools,
-            hosts,
-        )
-        .await
+        writing
+            .scope(stream_completion(
+                state,
+                agent,
+                session_id,
+                request.message,
+                request.tools,
+                hosts,
+            ))
+            .await
     } else {
-        let output = if request.tools {
-            agent.run(&session_id, &request.message, &hosts).await
-        } else {
-            agent.run_standalone(&session_id, &request.message).await
-        }
-        .map_err(map_agent_error)?;
+        let output = writing
+            .scope(async {
+                if request.tools {
+                    agent.run(&session_id, &request.message, &hosts).await
+                } else {
+                    agent.run_standalone(&session_id, &request.message).await
+                }
+            })
+            .await
+            .map_err(map_agent_error)?;
 
         Ok(Json(ChatCompletionResponse {
             session_id: session_id.clone(),
@@ -259,6 +265,7 @@ fn apply_persona_override(
 /// Maps agent failures onto management API errors.
 fn map_agent_error(err: AgentError) -> ApiError {
     match err {
+        AgentError::Busy(session) => ApiError::Conflict(format!("Session '{session}' is busy")),
         AgentError::Memory(message) => {
             ApiError::Internal(format!("Conversation memory failure: {message}"))
         }
@@ -319,19 +326,16 @@ fn resolve_agent(
         }
     }
 
-    if let Some(agent) = state.agent() {
-        // Console model keys may carry a provider prefix (`deepseek/deepseek-chat`); the agent
-        // only ever needs the model tag itself.
-        let model = request
-            .model
-            .as_deref()
-            .map(|raw| match raw.split_once('/') {
-                Some((_prov, actual)) if !actual.trim().is_empty() => actual.trim().to_string(),
-                _ => raw.trim().to_string(),
+    if state.agent().is_some() {
+        // Keep the provider prefix intact so overrides resolve to the selected endpoint. A bad
+        // reference is an error; falling back could send a conversation to another provider.
+        return state
+            .agent_for_model(request.model.as_deref())
+            .ok_or_else(|| {
+                ApiError::BadRequest(
+                    "Requested model does not resolve to a configured provider".into(),
+                )
             });
-        // A per-request model override never rebuilds memory, personas or hooks: the factory
-        // derives an agent that differs only by the model tag.
-        return Ok(state.agent_for_model(model.as_deref()).unwrap_or(agent));
     }
 
     Err(ApiError::Unavailable(

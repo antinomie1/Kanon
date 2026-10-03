@@ -11,7 +11,7 @@ import grpc
 from google.protobuf.json_format import MessageToDict
 
 from kanon_sdk.context import CoreHandle, PluginContext
-from kanon_sdk.ipc import CoreWatchdog, connect_core_channel
+from kanon_sdk.ipc import CoreWatchdog, connect_core_channel, EndpointOwner, ServerAuth, ipc_token
 from kanon_sdk.plugin import Plugin
 from kanon_sdk.proto import pb, pb_grpc
 
@@ -208,136 +208,129 @@ class KanonHost:
         meta = self.plugin.meta()
         self.data_dir.mkdir(parents=True, exist_ok=True)
 
-        # Clean up stale socket file if it exists
-        if self.socket_path.exists():
-            try:
-                self.socket_path.unlink()
-            except OSError:
-                pass
+        owner = EndpointOwner(self.socket_path)
 
-        self.socket_path.parent.mkdir(parents=True, exist_ok=True)
-
-        # Start host gRPC server first so that Core can reach it during RegisterHost
-        server = grpc.aio.server()
-        pb_grpc.add_PluginHostServiceServicer_to_server(HostServiceImpl(self.plugin), server)
-        pb_grpc.add_MessagePipelineServiceServicer_to_server(PipelineServiceImpl(self.plugin), server)
-
-        server.add_insecure_port(f"unix:{self.socket_path}")
-        await server.start()
-        print(f"Kanon Python Host running on {self.socket_path}", flush=True)
-
+        server: Optional[grpc.aio.Server] = None
         core_channel: Optional[grpc.aio.Channel] = None
-        core_stub: Optional[pb_grpc.BotApiServiceStub] = None
-        core_handle: Optional[CoreHandle] = None
         watchdog: Optional[CoreWatchdog] = None
+        plugin_loaded = False
+        try:
+            # Start host gRPC server first so that Core can reach it during RegisterHost
+            server = grpc.aio.server(interceptors=[ServerAuth(ipc_token())] if os.name == "nt" or os.environ.get("KANON_IPC_TOKEN") else [])
+            pb_grpc.add_PluginHostServiceServicer_to_server(HostServiceImpl(self.plugin), server)
+            pb_grpc.add_MessagePipelineServiceServicer_to_server(PipelineServiceImpl(self.plugin), server)
 
-        if self.core_sock:
-            if self.core_sock.exists():
-                try:
-                    # Dial through the shared helper: it pins the valid HTTP/2 authority that
-                    # Tonic's h2 server requires (see kanon_sdk.ipc for the full rationale).
-                    core_channel = connect_core_channel(self.core_sock)
-                    core_stub = pb_grpc.BotApiServiceStub(core_channel)
-                    reg_req = pb.RegisterHostRequest(
-                        host_id=self.host_id,
-                        runtime="python",
-                        endpoint=str(self.socket_path),
-                        loaded_plugin_ids=[meta.id],
-                    )
-                    await core_stub.RegisterHost(reg_req, timeout=3.0)
-                    core_handle = CoreHandle(core_stub, plugin_id=meta.id, host_id=self.host_id)
-                except Exception as exc:
-                    if core_channel is not None:
-                        try:
-                            await core_channel.close()
-                        except Exception:
-                            pass
-                    core_channel = None
+            port = server.add_insecure_port("127.0.0.1:0" if os.name == "nt" else f"unix:{self.socket_path}")
+            if not port:
+                raise RuntimeError("Failed to bind host IPC endpoint")
+            owner.publish(port)
+            await server.start()
+            print(f"Kanon Python Host running on {self.socket_path}", flush=True)
+
+            core_stub: Optional[pb_grpc.BotApiServiceStub] = None
+            core_handle: Optional[CoreHandle] = None
+
+            if self.core_sock:
+                if self.core_sock.exists():
+                    try:
+                        # Dial through the shared helper: it pins the valid HTTP/2 authority that
+                        # Tonic's h2 server requires (see kanon_sdk.ipc for the full rationale).
+                        core_channel = connect_core_channel(self.core_sock)
+                        core_stub = pb_grpc.BotApiServiceStub(core_channel)
+                        reg_req = pb.RegisterHostRequest(
+                            host_id=self.host_id,
+                            runtime="python",
+                            endpoint=str(self.socket_path),
+                            loaded_plugin_ids=[meta.id],
+                        )
+                        await core_stub.RegisterHost(reg_req, timeout=3.0)
+                        core_handle = CoreHandle(core_stub, plugin_id=meta.id, host_id=self.host_id)
+                    except Exception as exc:
+                        if core_channel is not None:
+                            try:
+                                await core_channel.close()
+                            except Exception:
+                                pass
+                        core_channel = None
+                        print(
+                            f"[kanon-host] Core at {self.core_sock} unreachable ({exc}); "
+                            "running in standalone mode with ctx.core = None",
+                            file=sys.stderr,
+                            flush=True,
+                        )
+                else:
                     print(
-                        f"[kanon-host] Core at {self.core_sock} unreachable ({exc}); "
+                        f"[kanon-host] KANON_CORE_SOCK points to missing socket {self.core_sock}; "
                         "running in standalone mode with ctx.core = None",
                         file=sys.stderr,
                         flush=True,
                     )
             else:
                 print(
-                    f"[kanon-host] KANON_CORE_SOCK points to missing socket {self.core_sock}; "
+                    "[kanon-host] KANON_CORE_SOCK is not set; "
                     "running in standalone mode with ctx.core = None",
                     file=sys.stderr,
                     flush=True,
                 )
-        else:
-            print(
-                "[kanon-host] KANON_CORE_SOCK is not set; "
-                "running in standalone mode with ctx.core = None",
-                file=sys.stderr,
-                flush=True,
-            )
 
-        config: dict = {}
-        config_path = self.data_dir / "config.json"
-        if config_path.exists():
-            try:
-                import json
-                config = json.loads(config_path.read_text(encoding="utf-8"))
-            except Exception as e:
-                print(f"[kanon-host] Failed to load config from {config_path}: {e}", file=sys.stderr, flush=True)
-
-        ctx = PluginContext(data_dir=self.data_dir, config=config, core=core_handle)
-        # Set before on_load: plugins commonly override on_load without calling super(), and the
-        # SDK's event objects reach Core through plugin.context.
-        self.plugin.context = ctx
-        await self.plugin.on_load(ctx)
-
-        if shutdown_event is None:
-            stop_event = asyncio.Event()
-
-            def handle_signal():
-                stop_event.set()
-
-            loop = asyncio.get_running_loop()
-            for sig in (signal.SIGINT, signal.SIGTERM):
+            config: dict = {}
+            config_path = self.data_dir / "config.json"
+            if config_path.exists():
                 try:
-                    loop.add_signal_handler(sig, handle_signal)
-                except (NotImplementedError, RuntimeError):
-                    pass
-        else:
-            # The caller owns the stop event; a lost core must be able to trigger it too.
-            stop_event = shutdown_event
+                    import json
+                    config = json.loads(config_path.read_text(encoding="utf-8"))
+                except Exception as e:
+                    print(f"[kanon-host] Failed to load config from {config_path}: {e}", file=sys.stderr, flush=True)
 
-        # A host whose core is gone must not keep serving its platform: otherwise it becomes a
-        # ghost bot that double-handles messages once a new core starts. See CoreWatchdog.
-        if core_stub is not None:
-            def _core_lost(reason: str) -> None:
-                print(f"[kanon-host] {reason}", flush=True)
-                stop_event.set()
+            ctx = PluginContext(data_dir=self.data_dir, config=config, core=core_handle)
+            # Set before on_load: plugins commonly override on_load without calling super(), and the
+            # SDK's event objects reach Core through plugin.context.
+            self.plugin.context = ctx
+            plugin_loaded = True
+            await self.plugin.on_load(ctx)
 
-            watchdog = CoreWatchdog(core_stub, pb, on_lost=_core_lost)
-            watchdog.start()
+            if shutdown_event is None:
+                stop_event = asyncio.Event()
 
-        await stop_event.wait()
+                def handle_signal():
+                    stop_event.set()
 
-        if watchdog is not None:
-            await watchdog.stop()
+                loop = asyncio.get_running_loop()
+                for sig in (signal.SIGINT, signal.SIGTERM):
+                    try:
+                        loop.add_signal_handler(sig, handle_signal)
+                    except (NotImplementedError, RuntimeError):
+                        pass
+            else:
+                # The caller owns the stop event; a lost core must be able to trigger it too.
+                stop_event = shutdown_event
 
-        # Graceful shutdown, every step bounded.
-        #
-        # A plugin's own teardown can block indefinitely: closing a platform WebSocket may wait
-        # for a close handshake that never arrives. That is precisely the situation this host must
-        # survive — the core is already gone, and a host stuck in teardown keeps its platform
-        # connection open, so the next core double-serves every message. Each step therefore has
-        # a deadline and the process exits regardless of whether it completed.
-        await _bounded("plugin teardown", self.plugin.on_unload(), SHUTDOWN_STEP_TIMEOUT)
-        await _bounded("gRPC server stop", server.stop(grace=1.0), SHUTDOWN_STEP_TIMEOUT)
-        if core_channel is not None:
-            # Closed last, after on_unload() has had the chance to stop adapter tasks that may
-            # still hold the shared handle for an in-flight ingest call.
-            await _bounded("core channel close", core_channel.close(), SHUTDOWN_STEP_TIMEOUT)
-        if self.socket_path.exists():
+            # A host whose core is gone must not keep serving its platform: otherwise it becomes a
+            # ghost bot that double-handles messages once a new core starts. See CoreWatchdog.
+            if core_stub is not None:
+                def _core_lost(reason: str) -> None:
+                    print(f"[kanon-host] {reason}", flush=True)
+                    stop_event.set()
+
+                watchdog = CoreWatchdog(core_stub, pb, on_lost=_core_lost)
+                watchdog.start()
+
+            await stop_event.wait()
+
+        finally:
+            # Keep endpoint ownership until the server has stopped, including startup errors
+            # and cancellation. Otherwise another host could publish over a live listener.
             try:
-                self.socket_path.unlink()
-            except OSError:
-                pass
+                if watchdog is not None:
+                    await watchdog.stop()
+                if plugin_loaded:
+                    await _bounded("plugin teardown", self.plugin.on_unload(), SHUTDOWN_STEP_TIMEOUT)
+                if server is not None:
+                    await _bounded("gRPC server stop", server.stop(grace=1.0), SHUTDOWN_STEP_TIMEOUT)
+                if core_channel is not None:
+                    await _bounded("core channel close", core_channel.close(), SHUTDOWN_STEP_TIMEOUT)
+            finally:
+                owner.close()
         print("[kanon-host] shutdown complete", flush=True)
 
 

@@ -8,14 +8,14 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use kanon_core::instance::{InstanceDraft, InstanceRegistry};
-use kanon_core::pipeline::PipelineEngine;
+use kanon_core::pipeline::{PipelineEngine, PipelineResult};
 use kanon_core::supervisor::Supervisor;
 use kanon_core::{CommandPolicy, CommandPolicyStore};
 use kanon_llm::BuiltinAgent;
 use kanon_llm::gateway::types::{ChatRequest, ChatResponse};
 use kanon_llm::memory::{InMemory, Memory};
 use kanon_llm::tool_router::ToolRouter;
-use kanon_llm::{GatewayError, LlmProvider};
+use kanon_llm::{GatewayError, LlmProvider, SessionManager};
 use kanon_proto::v1::message_segment::Segment;
 use kanon_proto::v1::{DeliverMessageRequest, IngestEventRequest, PipelineEventRequest};
 use tokio::sync::{Notify, mpsc};
@@ -174,4 +174,171 @@ async fn an_admins_stop_ends_the_running_turn_and_the_chat_goes_on() {
         "{texts:?}"
     );
     assert_eq!(texts[3], Some("done"));
+}
+
+/// A turn waiting for a compaction or console writer is canceled before it touches memory.
+#[tokio::test]
+async fn stop_cancels_a_turn_waiting_for_the_session_writer() {
+    let dir = tempfile::tempdir().unwrap();
+    let registry = Arc::new(InstanceRegistry::in_memory());
+    let instance = registry
+        .create(InstanceDraft {
+            name: "waiting-writer".into(),
+            enabled: true,
+            adapters: vec![PLATFORM.into()],
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+    let memory = Arc::new(InMemory::new());
+    let sessions = Arc::new(SessionManager::new(memory.clone()));
+    let agent = Arc::new(
+        BuiltinAgent::builder(
+            "waiting-writer",
+            Arc::new(Stuck {
+                waiting: Arc::new(Notify::new()),
+            }),
+        )
+        .session_manager(sessions.clone())
+        .build(),
+    );
+    let engine = PipelineEngine::new(Arc::new(Supervisor::new(
+        Some(dir.path().to_path_buf()),
+        None,
+    )))
+    .with_instances(registry)
+    .with_tool_router(Arc::new(ToolRouter::from_arc(agent)))
+    .with_command_policy(Arc::new(CommandPolicyStore::new(CommandPolicy {
+        admins: vec![format!("{PLATFORM}:admin")],
+        ..Default::default()
+    })));
+    let session_id = instance.conversation_session_id("conversation:user");
+    let writer = sessions.try_write(&session_id).unwrap();
+    let mut turn =
+        Box::pin(engine.process_event(message("waiting", "user", "work").event.unwrap()));
+    // With no plugins or media, the writer is the first pending operation. Poll directly so
+    // the stop command runs after registration without depending on sleeps or task scheduling.
+    let polled = std::future::poll_fn(|cx| {
+        std::task::Poll::Ready(std::future::Future::poll(turn.as_mut(), cx))
+    })
+    .await;
+    assert!(polled.is_pending());
+    let stopped = engine
+        .process_event(message("stop", "admin", "/stop").event.unwrap())
+        .await;
+    let PipelineResult::BuiltinReplied { replies, .. } = stopped else {
+        panic!("expected a stop acknowledgement");
+    };
+    assert!(matches!(
+        &replies[0].segment,
+        Some(Segment::Text(text)) if text.content == "已停止 1 个正在运行的任务。"
+    ));
+    // Make both the writer and stop signal ready: cancellation must win this boundary too.
+    drop(writer);
+    assert!(matches!(
+        tokio::time::timeout(Duration::from_secs(2), turn)
+            .await
+            .expect("the stopped turn does not enter the stuck model"),
+        PipelineResult::Passed(_)
+    ));
+    assert!(memory.get_messages(&session_id).is_empty());
+    assert!(sessions.try_write(&session_id).is_ok());
+    assert!(matches!(
+        engine
+            .process_event(message("next", "user", "hello").event.unwrap())
+            .await,
+        PipelineResult::LlmReplied { .. }
+    ));
+}
+
+/// Saturated lanes keep bounded read-ahead and still admit an administrator's stop command.
+#[tokio::test]
+async fn stop_bypasses_a_full_waiting_queue_and_concurrency_is_bounded() {
+    let dir = tempfile::tempdir().unwrap();
+    let supervisor = Arc::new(Supervisor::new(Some(dir.path().to_path_buf()), None));
+    let (delivered_tx, mut delivered) = mpsc::channel(8);
+    supervisor
+        .adapters()
+        .register(common::ChannelAdapter::shared(PLATFORM, delivered_tx))
+        .await
+        .unwrap();
+    let registry = Arc::new(InstanceRegistry::in_memory());
+    registry
+        .create(InstanceDraft {
+            name: "bounded".into(),
+            enabled: true,
+            adapters: vec![PLATFORM.into()],
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+    let waiting = Arc::new(Notify::new());
+    let agent = Arc::new(
+        BuiltinAgent::builder(
+            "bounded",
+            Arc::new(Stuck {
+                waiting: waiting.clone(),
+            }),
+        )
+        .build(),
+    );
+    let engine = Arc::new(
+        PipelineEngine::new(supervisor)
+            .with_instances(registry)
+            .with_tool_router(Arc::new(ToolRouter::from_arc(agent)))
+            .with_dead_letter(Arc::new(kanon_core::pipeline::DeadLetterWriter::new(
+                dir.path().join("dead_letter"),
+            )))
+            .with_command_policy(Arc::new(CommandPolicyStore::new(CommandPolicy {
+                admins: vec![format!("{PLATFORM}:admin")],
+                ..Default::default()
+            }))),
+    );
+    let (tx, rx) = mpsc::channel(2);
+    let worker = engine.clone().start_worker(rx);
+    let dispatcher = engine.clone().start_outbound_dispatcher();
+    let limit = kanon_core::pipeline::engine::MAX_CONCURRENT_CHATS;
+    for index in 0..limit {
+        tx.send(message(
+            &format!("active-{index}"),
+            &format!("user-{index}"),
+            "work",
+        ))
+        .await
+        .unwrap();
+        tokio::time::timeout(Duration::from_secs(2), waiting.notified())
+            .await
+            .unwrap();
+    }
+    // Two wait; two are explicitly dead-lettered. No extra provider call may start.
+    for index in 0..4 {
+        tx.send(message(
+            &format!("queued-{index}"),
+            &format!("queued-{index}"),
+            "work",
+        ))
+        .await
+        .unwrap();
+    }
+    tx.send(message("stop", "admin", "/stop")).await.unwrap();
+    assert_eq!(
+        next_text(&mut delivered).await,
+        format!("已停止 {limit} 个正在运行的任务。")
+    );
+    let mut ids = Vec::new();
+    for file in std::fs::read_dir(dir.path().join("dead_letter")).unwrap() {
+        for line in std::fs::read_to_string(file.unwrap().path())
+            .unwrap()
+            .lines()
+        {
+            let record: kanon_core::pipeline::DeadLetterRecord =
+                serde_json::from_str(line).unwrap();
+            assert!(record.reason.contains("waiting queue is full"));
+            ids.push(record.event_id);
+        }
+    }
+    assert_eq!(ids, ["queued-2", "queued-3"]);
+    worker.abort();
+    assert!(worker.await.unwrap_err().is_cancelled());
+    engine.drain(tokio::spawn(async {}), dispatcher).await;
 }

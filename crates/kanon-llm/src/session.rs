@@ -11,7 +11,7 @@
 //!   binding, counters, status) is written through to the store on every change.
 
 use std::collections::HashMap;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, Weak};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use dashmap::DashMap;
@@ -241,6 +241,29 @@ pub struct SessionOverview {
     pub last_active_at: u64,
 }
 
+tokio::task_local! {
+    /// The writer explicitly delegated by a caller to its agent invocation.
+    static SESSION_WRITER: std::cell::RefCell<Option<SessionWriteGuard>>;
+}
+
+/// Exclusive ownership of one session's writes, transferable to a streaming producer.
+#[derive(Clone)]
+pub struct SessionWriteGuard {
+    guard: Arc<tokio::sync::OwnedMutexGuard<()>>,
+}
+
+impl SessionWriteGuard {
+    /// Runs an agent invocation under this already acquired writer.
+    ///
+    /// Tokio tasks do not inherit this scope: background producers must retain their own clone
+    /// until their final memory write, even if the response consumer disconnects.
+    pub async fn scope<F: std::future::Future>(&self, future: F) -> F::Output {
+        SESSION_WRITER
+            .scope(std::cell::RefCell::new(Some(self.clone())), future)
+            .await
+    }
+}
+
 /// Comprehensive session lifecycle and state manager.
 ///
 /// Wraps an underlying [`Memory`] store and maintains concurrent, lock-sharded
@@ -254,6 +277,8 @@ pub struct SessionManager {
     default_scope: SessionScope,
     /// Durable copy of `metadata`, when the node keeps sessions across restarts.
     store: Option<Arc<dyn SessionStore>>,
+    /// Weak entries avoid retaining a mutex for every historical session.
+    writers: Mutex<HashMap<String, Weak<tokio::sync::Mutex<()>>>>,
 }
 
 impl SessionManager {
@@ -264,7 +289,58 @@ impl SessionManager {
             metadata: DashMap::new(),
             default_scope: SessionScope::ChannelUser,
             store: None,
+            writers: Mutex::new(HashMap::new()),
         }
+    }
+
+    fn writer(&self, session_id: &str) -> Arc<tokio::sync::Mutex<()>> {
+        let mut writers = self
+            .writers
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let Some(writer) = writers.get(session_id).and_then(Weak::upgrade) {
+            return writer;
+        }
+        writers.retain(|_, writer| writer.strong_count() > 0);
+        let writer = Arc::new(tokio::sync::Mutex::new(()));
+        writers.insert(session_id.to_string(), Arc::downgrade(&writer));
+        writer
+    }
+
+    /// Immediately acquires the session writer; external mutations must never queue behind a turn.
+    pub fn try_write(&self, session_id: &str) -> Result<SessionWriteGuard, MemoryError> {
+        self.writer(session_id)
+            .try_lock_owned()
+            .map(|guard| SessionWriteGuard {
+                guard: Arc::new(guard),
+            })
+            .map_err(|_| MemoryError::Busy(session_id.to_string()))
+    }
+
+    /// Waits for a prior writer, for ordered inbound turns and background compaction only.
+    pub async fn write(&self, session_id: &str) -> SessionWriteGuard {
+        SessionWriteGuard {
+            guard: Arc::new(self.writer(session_id).lock_owned().await),
+        }
+    }
+
+    /// Acquires an agent writer or accepts the writer explicitly delegated by its caller.
+    pub fn agent_write(&self, session_id: &str) -> Result<SessionWriteGuard, MemoryError> {
+        let writer = self.writer(session_id);
+        if let Ok(Some(guard)) = SESSION_WRITER.try_with(|guard| {
+            let mut delegated = guard.borrow_mut();
+            if delegated.as_ref().is_some_and(|guard| {
+                Arc::ptr_eq(tokio::sync::OwnedMutexGuard::mutex(&guard.guard), &writer)
+            }) {
+                // Delegation is consumed once: nested tools must acquire their own writer.
+                delegated.take()
+            } else {
+                None
+            }
+        }) {
+            return Ok(guard);
+        }
+        self.try_write(session_id)
     }
 
     /// Makes the manager durable: every stored session is loaded now, and every later change is
@@ -482,6 +558,7 @@ impl SessionManager {
     /// Clears the session history in memory, resets turn count and tokens,
     /// while preserving configured persona and session variables.
     pub async fn reset_session(&self, session_key: &str) -> Result<(), MemoryError> {
+        let _writing = self.agent_write(session_key)?;
         self.memory.clear(session_key).await?;
 
         self.update_existing(session_key, |meta| {
@@ -598,6 +675,7 @@ impl SessionManager {
     /// gap. History goes first; if removing the record then fails, the record is kept on disk
     /// and in memory alike and the error is returned, so a retry finishes the job.
     pub async fn delete_session(&self, session_key: &str) -> Result<(), MemoryError> {
+        let _writing = self.agent_write(session_key)?;
         self.memory.clear(session_key).await?;
         if let Some(store) = &self.store {
             store.delete(session_key)?;

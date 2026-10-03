@@ -11,6 +11,7 @@
 //! The queue is deliberately bounded: when a platform cannot keep up, the overflow is reported as
 //! an explicit `OutboundFailed` stage instead of growing memory without limit.
 
+use futures_util::{StreamExt, future::BoxFuture, stream::FuturesUnordered};
 use std::collections::{HashMap, VecDeque};
 use std::sync::Arc;
 use tokio::sync::{Mutex, RwLock, mpsc, oneshot, watch};
@@ -48,6 +49,9 @@ use crate::supervisor::circuit_breaker::{CircuitBreaker, CircuitState};
 use crate::supervisor::{AdapterRoute, Supervisor};
 use crate::toggle::{PLUGIN_SECTION, ToggleStore};
 
+/// Maximum independently running inbound chats; queued work remains bounded by ingest capacity.
+pub const MAX_CONCURRENT_CHATS: usize = 16;
+
 /// Default depth of the outbound delivery queue.
 ///
 /// Sized so that a slow platform absorbs a burst of replies without dropping any, while keeping
@@ -60,7 +64,7 @@ pub const DEFAULT_OUTBOUND_QUEUE_CAPACITY: usize = 1024;
 /// concurrency isolation so one slow platform never starves others.
 pub const DEFAULT_PLATFORM_QUEUE_CAPACITY: usize = 64;
 
-/// How long the event being processed when shutdown starts may take to finish.
+/// Aggregate grace for every event already running when shutdown starts.
 ///
 /// Container runtimes kill a process shortly after asking it to stop (Docker waits 10 s by
 /// default), so this grace and [`SHUTDOWN_DELIVERY_GRACE`] together stay below that budget.
@@ -75,7 +79,7 @@ pub const SHUTDOWN_DELIVERY_GRACE: std::time::Duration = std::time::Duration::fr
 enum ShutdownPhase {
     /// Normal operation.
     Running,
-    /// The ingest queue is closed; the worker records queued events and finishes the current one.
+    /// The ingest queue is closed; the worker records queued events and finishes active lanes.
     DrainingInbound,
     /// The outbound queue is closed; replies are delivered until the deadline, then recorded.
     DrainingOutbound(tokio::time::Instant),
@@ -343,7 +347,7 @@ pub const INFO_COMMAND: &str = "info";
 /// Name of the built-in command that stops the running model turns of an instance.
 ///
 /// A turn can keep the bot busy for minutes (a model calling tools over and over, a hung
-/// provider), and the worker answers events one at a time, so everything else waits behind it.
+/// provider), while its chat lane holds later messages until the turn finishes.
 /// `/stop` is therefore taken out of the queue while a turn runs (see
 /// [`PipelineEngine::run_worker_loop`]) and handled at once. It acts on every chat of the
 /// instance, so only administrators may use it unless the command policy says otherwise.
@@ -622,8 +626,8 @@ fn reply_sample(event_id: &str) -> f32 {
 pub(crate) struct ConversationTurn<'a> {
     /// The agent answering the turn.
     pub(crate) agent: Arc<dyn kanon_llm::Agent>,
-    /// The instance answering, when the pipeline has instances.
-    pub(crate) instance: Option<&'a crate::instance::BotInstance>,
+    /// Registration created before waiting for the session writer, so `/stop` reaches that wait.
+    pub(crate) running: super::turns::TurnGuard<'a>,
     /// The conversation's session.
     pub(crate) session_id: &'a str,
     /// The inbound message the turn answers.
@@ -680,8 +684,6 @@ pub struct PipelineEngine {
     captures: CaptureRegistry,
     /// Model turns in progress, which `/stop` can end.
     turns: super::turns::RunningTurns,
-    /// One lock per conversation session, held by whoever writes it (see [`super::turns`]).
-    session_locks: super::turns::SessionLocks,
     /// MCP servers contributing tools alongside plugin hosts.
     mcp: Option<Arc<McpPool>>,
     /// Optional lifecycle observer used by the management control plane for tracing.
@@ -720,7 +722,6 @@ impl PipelineEngine {
             triggers: TriggerMatcher::default(),
             captures: CaptureRegistry::default(),
             turns: Default::default(),
-            session_locks: Default::default(),
             mcp: None,
             observer: None,
             dead_letter: Arc::new(DeadLetterWriter::default()),
@@ -766,11 +767,6 @@ impl PipelineEngine {
     /// The factory building per-instance agents, when one is attached.
     pub fn agent_factory(&self) -> Option<&Arc<AgentFactory>> {
         self.agent_factory.as_ref()
-    }
-
-    /// Locks serializing the writers of each conversation session.
-    pub(crate) fn session_locks(&self) -> &super::turns::SessionLocks {
-        &self.session_locks
     }
 
     /// The model turns running now, which `/stop` reaches.
@@ -966,7 +962,7 @@ impl PipelineEngine {
         // Plugin hosts and MCP servers are both tool sources; the router sees one slice.
         let mut active: Vec<Arc<dyn kanon_llm::tool_router::ToolHost>> = Vec::new();
         for host in hosts {
-            if host.circuit_breaker.allow_request() {
+            if host.circuit_breaker.is_available() {
                 active.push(Arc::clone(host) as Arc<dyn kanon_llm::tool_router::ToolHost>);
             } else {
                 tracing::warn!(
@@ -1032,7 +1028,7 @@ impl PipelineEngine {
     ) -> Result<kanon_llm::ToolRouterOutput, kanon_llm::ToolRouterError> {
         let ConversationTurn {
             agent,
-            instance,
+            running,
             session_id,
             event,
             hosts,
@@ -1048,10 +1044,6 @@ impl PipelineEngine {
                 session_id: session_id.to_string(),
             }),
         );
-        // Registered for exactly as long as the turn runs, so `/stop` reaches it and only it.
-        let running = self
-            .turns
-            .begin(instance.map(|instance| instance.id.clone()));
         let router = ToolRouter::from_arc(agent);
         let result = super::agent_hook::with_turn(
             event.clone(),
@@ -1202,7 +1194,9 @@ impl PipelineEngine {
         let channel_id = request.channel_id.clone();
         let segment_count = request.segments.len();
 
-        if !breaker.allow_request() {
+        // Keep the reservation alive across delivery so cancellation cannot strand the
+        // platform's sole half-open recovery probe.
+        let Some(permit) = breaker.try_acquire() else {
             let reason = "platform circuit breaker open".to_string();
             tracing::warn!(
                 platform = %platform,
@@ -1226,7 +1220,7 @@ impl PipelineEngine {
                 message_id: String::new(),
                 error_message: reason,
             };
-        }
+        };
 
         let start = std::time::Instant::now();
         match self.deliver_outbound(request.clone()).await {
@@ -1236,7 +1230,7 @@ impl PipelineEngine {
                     message_id: outcome.message_id.clone(),
                     error_message: String::new(),
                 };
-                breaker.record_success(start.elapsed());
+                permit.success(start.elapsed());
                 self.emit_message_sent(&request, &outcome.message_id).await;
                 tracing::info!(
                     platform = %outcome.platform,
@@ -1255,7 +1249,7 @@ impl PipelineEngine {
             }
             Err(err) => {
                 let reason = err.to_string();
-                breaker.record_failure(&reason);
+                permit.failure(&reason);
                 tracing::warn!(
                     platform = %platform,
                     channel_id = %channel_id,
@@ -2196,6 +2190,20 @@ impl PipelineEngine {
                 });
             }
 
+            // Register before waiting: a console stream or background compaction can own the
+            // writer, and /stop must cancel this lane rather than leave a delayed turn behind.
+            let running = self
+                .turns
+                .begin(instance.as_ref().map(|instance| instance.id.clone()));
+            let signal = running.signal();
+            let writing = match agent.session_manager() {
+                Some(sessions) => Some(tokio::select! {
+                    biased;
+                    () = signal.stopped() => return PipelineResult::Passed(filtered_event),
+                    writing = sessions.write(&session_id) => writing,
+                }),
+                None => None,
+            };
             // The instance decides the persona; sessions without one keep whatever the console
             // (or the default catalog) assigned to them.
             if let Some(instance) = instance.as_ref()
@@ -2228,23 +2236,24 @@ impl PipelineEngine {
             // The turn writes its messages as it goes; holding the session's lock keeps a plugin
             // from deleting the conversation or appending to it in between. Plugins only ever
             // try the lock, so a tool call of this very turn cannot deadlock on it.
-            let _writing = self.session_locks.lock(&session_id).await;
-            match self
-                .run_conversation_turn(
-                    ConversationTurn {
-                        agent,
-                        instance: instance.as_ref(),
-                        session_id: &session_id,
-                        event: &filtered_event,
-                        hosts: &hosts,
-                        tool_hosts,
-                        bash_caller,
-                        options: kanon_llm::TurnOptions::default(),
-                    },
-                    user_message,
-                )
-                .await
-            {
+            let turn = self.run_conversation_turn(
+                ConversationTurn {
+                    agent,
+                    running,
+                    session_id: &session_id,
+                    event: &filtered_event,
+                    hosts: &hosts,
+                    tool_hosts,
+                    bash_caller,
+                    options: kanon_llm::TurnOptions::default(),
+                },
+                user_message,
+            );
+            let result = match writing {
+                Some(writing) => writing.scope(turn).await,
+                None => turn.await,
+            };
+            match result {
                 Ok(output) => {
                     // Reasoning already has its own channel and parsed tool calls were removed by
                     // the agent. Delimiters or tool markup left in answer text are literal
@@ -2995,80 +3004,99 @@ impl PipelineEngine {
     /// # Shutdown
     /// When [`PipelineEngine::drain`] starts, the ingest queue is closed (producers get an
     /// explicit `Closed` error), every event still queued is written to the dead-letter log
-    /// without being started, and the event in progress gets [`SHUTDOWN_EVENT_GRACE`] to finish
+    /// without being started, and all active events share [`SHUTDOWN_EVENT_GRACE`] to finish
     /// before it is recorded as well. Nothing the node acknowledged disappears silently.
     ///
-    /// # Stopping
-    /// Events are answered one at a time, so a long turn holds back every other conversation.
-    /// While an event is in progress the worker keeps reading the queue: a `/stop` it finds is
-    /// handled at once, everything else waits its turn in arrival order.
+    /// # Scheduling
+    /// Each chat runs in arrival order, including commands that change its current session.
+    /// Distinct chats have bounded concurrency. `/stop` bypasses waiting chat lanes so it can
+    /// interrupt the turn it addresses. Read-ahead is bounded by the ingest queue capacity;
+    /// excess accepted events go to dead letter so a full queue cannot trap a later `/stop`.
     pub async fn run_worker_loop(&self, mut event_receiver: mpsc::Receiver<IngestEventRequest>) {
-        tracing::info!("Pipeline worker loop started");
         let mut phase = self.shutdown.subscribe();
         let draining = |p| p != ShutdownPhase::Running;
-        // Events read from the queue while an earlier one was being processed, in arrival order.
-        // Reading ahead is what lets `/stop` reach a running turn; it is capped at the queue's own
-        // capacity so the ingest high-watermark still pushes back on adapters.
-        let mut waiting: VecDeque<IngestEventRequest> = VecDeque::new();
+        let mut waiting: VecDeque<(String, IngestEventRequest)> = VecDeque::new();
+        let mut active = HashMap::<String, Option<PipelineEventRequest>>::new();
+        let mut running: FuturesUnordered<BoxFuture<'_, String>> = FuturesUnordered::new();
         let read_ahead = event_receiver.max_capacity();
         let mut queue_open = true;
 
         loop {
-            let req = match waiting.pop_front() {
-                Some(req) if !draining(*phase.borrow()) => req,
-                Some(req) => {
-                    waiting.push_front(req);
+            if draining(*phase.borrow()) {
+                break;
+            }
+            // A lane key excludes the generation: /new and /switch must finish before the next
+            // event resolves the live session. Removing only eligible entries preserves FIFO
+            // within a lane while allowing a different chat past a blocked one.
+            while running.len() < MAX_CONCURRENT_CHATS {
+                let Some(index) = waiting
+                    .iter()
+                    .position(|(key, _)| !active.contains_key(key))
+                else {
                     break;
-                }
-                None => tokio::select! {
-                    biased;
-                    _ = wait_for_phase(&mut phase, draining) => break,
-                    req = event_receiver.recv() => match req {
-                        Some(req) => req,
-                        None => break,
-                    },
-                },
-            };
-
-            let in_flight = req.event.clone();
-            let handled = self.handle_ingested(req);
-            tokio::pin!(handled);
-            loop {
-                tokio::select! {
-                    biased;
-                    () = &mut handled => break,
-                    _ = wait_for_phase(&mut phase, draining) => {
-                        // Queued events are recorded before waiting on the current one, so a slow
-                        // model cannot use up the time the process has left.
-                        self.spill_queued_events(&mut waiting, &mut event_receiver).await;
-                        if tokio::time::timeout(SHUTDOWN_EVENT_GRACE, handled).await.is_err()
-                            && let Some(event) = in_flight
-                        {
-                            self.dead_letter_event(
-                                &event,
-                                "node shut down while the event was being processed; its reply may be missing",
-                            )
-                            .await;
+                };
+                let (key, req) = waiting.remove(index).expect("eligible queued chat");
+                active.insert(key.clone(), req.event.clone());
+                running.push(Box::pin(async move {
+                    self.handle_ingested(req).await;
+                    key
+                }));
+            }
+            if !queue_open && waiting.is_empty() && running.is_empty() {
+                break;
+            }
+            tokio::select! {
+                biased;
+                _ = wait_for_phase(&mut phase, draining) => break,
+                Some(key) = running.next(), if !running.is_empty() => { active.remove(&key); }
+                req = event_receiver.recv(), if queue_open => {
+                    match req {
+                        Some(req) if is_stop_request(&req) => self.handle_ingested(req).await,
+                        Some(req) if waiting.len() >= read_ahead => {
+                            // Continue inspecting ingress for /stop even when chat lanes are full.
+                            // Accepted overload is recorded explicitly instead of growing an
+                            // unbounded staging queue or trapping stop behind a hung model.
+                            if let Some(event) = req.event {
+                                self.dead_letter_event(&event, "inbound chat waiting queue is full").await;
+                            }
                         }
-                        tracing::info!("Pipeline worker loop terminated");
-                        return;
-                    }
-                    req = event_receiver.recv(), if queue_open && waiting.len() < read_ahead => {
-                        match req {
-                            // Handled now, out of order: in line it would wait for the very turn
-                            // it is meant to stop. The pipeline still checks the instance and the
-                            // sender's permission before stopping anything.
-                            Some(req) if is_stop_request(&req) => self.handle_ingested(req).await,
-                            Some(req) => waiting.push_back(req),
-                            None => queue_open = false,
+                        Some(req) => {
+                            let key = match req.event.as_ref() {
+                                Some(event) => match self.resolve_chat(event).await {
+                                    Ok(chat) => format!("{}:{}", chat.instance.id, chat.conversation),
+                                    Err(_) => conversation_key(event, false),
+                                },
+                                None => String::new(),
+                            };
+                            waiting.push_back((key, req));
                         }
+                        None => queue_open = false,
                     }
                 }
             }
         }
 
+        // All running lanes share one deadline; N hung providers never multiply shutdown grace.
+        let deadline = tokio::time::Instant::now() + SHUTDOWN_EVENT_GRACE;
         self.spill_queued_events(&mut waiting, &mut event_receiver)
             .await;
+        while !running.is_empty() {
+            match tokio::time::timeout_at(deadline, running.next()).await {
+                Ok(Some(key)) => {
+                    active.remove(&key);
+                }
+                _ => break,
+            }
+        }
+        // Drop futures before recording their events so no canceled lane can append a late reply.
+        drop(running);
+        for event in active.into_values().flatten() {
+            self.dead_letter_event(
+                &event,
+                "node shut down while the event was being processed; its reply may be missing",
+            )
+            .await;
+        }
         tracing::info!("Pipeline worker loop terminated");
     }
 
@@ -3076,11 +3104,11 @@ impl PipelineEngine {
     /// those already read ahead, then those still queued, so the log keeps arrival order.
     async fn spill_queued_events(
         &self,
-        waiting: &mut VecDeque<IngestEventRequest>,
+        waiting: &mut VecDeque<(String, IngestEventRequest)>,
         event_receiver: &mut mpsc::Receiver<IngestEventRequest>,
     ) {
         event_receiver.close();
-        for req in waiting.drain(..) {
+        for (_, req) in waiting.drain(..) {
             if let Some(event) = req.event {
                 self.dead_letter_event(&event, "node shut down before the event was processed")
                     .await;
@@ -3373,7 +3401,7 @@ impl PipelineEngine {
     /// Shuts the pipeline down without losing anything it already accepted.
     ///
     /// Inbound first: the worker closes the ingest queue, records queued events and gets
-    /// [`SHUTDOWN_EVENT_GRACE`] for the event in progress, whose replies still reach the outbound
+    /// one shared [`SHUTDOWN_EVENT_GRACE`] for active events, whose replies still reach the outbound
     /// queue. Then outbound: queued replies are delivered for up to [`SHUTDOWN_DELIVERY_GRACE`] and
     /// the rest are recorded. Adapters and plugin hosts must stay up until this returns, because
     /// the final deliveries go through them.

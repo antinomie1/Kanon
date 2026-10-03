@@ -49,7 +49,13 @@ fn install_pages_plugin(state: &ApiState) -> PathBuf {
 async fn get(app: &Router, uri: &str) -> (StatusCode, axum::http::HeaderMap, String) {
     let response = app
         .clone()
-        .oneshot(Request::builder().uri(uri).body(Body::empty()).unwrap())
+        .oneshot(
+            Request::builder()
+                .header("host", "localhost")
+                .uri(uri)
+                .body(Body::empty())
+                .unwrap(),
+        )
         .await
         .unwrap();
     let status = response.status();
@@ -332,7 +338,10 @@ async fn send(
     headers: &[(&str, &str)],
     body: Vec<u8>,
 ) -> (StatusCode, axum::http::HeaderMap, Value, Vec<u8>) {
-    let mut builder = Request::builder().method(method).uri(uri);
+    let mut builder = Request::builder()
+        .header("host", "localhost")
+        .method(method)
+        .uri(uri);
     for (name, value) in headers {
         builder = builder.header(*name, *value);
     }
@@ -505,4 +514,87 @@ async fn http_forwarding_refuses_oversized_bodies() {
     .await;
     assert_eq!(status, StatusCode::PAYLOAD_TOO_LARGE);
     assert_eq!(error_code(&body), "payload_too_large");
+}
+
+/// Opaque plugin pages can call plugin routes remotely without learning the gateway credential.
+#[tokio::test]
+async fn authenticated_opaque_plugin_requests_keep_credentials_at_the_gateway() {
+    use base64::Engine;
+
+    let dir = tempfile::tempdir().unwrap();
+    let supervisor = Arc::new(kanon_core::supervisor::Supervisor::new(
+        Some(dir.path().join("run")),
+        None,
+    ));
+    let state = ApiState::builder(supervisor)
+        .with_config_dir(dir.path().join("data"))
+        .with_startup(kanon_api::StartupConfig {
+            api_token: Some("secret".into()),
+            ..Default::default()
+        })
+        .build();
+    register_web_host(&state, dir.path()).await;
+    let app = app(state);
+    let path = format!("/api/v1/plugins/{WEB_PLUGIN}/http/echo");
+    let (status, headers, _, _) = send(
+        &app,
+        Method::OPTIONS,
+        &path,
+        &[
+            ("origin", "null"),
+            ("access-control-request-method", "POST"),
+            ("access-control-request-headers", "content-type"),
+        ],
+        vec![],
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(headers[header::ACCESS_CONTROL_ALLOW_ORIGIN], "null");
+    assert_eq!(headers[header::ACCESS_CONTROL_ALLOW_CREDENTIALS], "true");
+    assert_eq!(
+        send(&app, Method::POST, &path, &[("origin", "null")], vec![])
+            .await
+            .0,
+        StatusCode::UNAUTHORIZED
+    );
+
+    let authorization = format!(
+        "Basic {}",
+        base64::engine::general_purpose::STANDARD.encode("kanon:secret")
+    );
+    let (status, headers, echo, _) = send(
+        &app,
+        Method::POST,
+        &path,
+        &[
+            ("origin", "null"),
+            ("authorization", authorization.as_str()),
+        ],
+        vec![],
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{echo}");
+    assert_eq!(headers[header::ACCESS_CONTROL_ALLOW_ORIGIN], "null");
+    assert_eq!(headers[header::ACCESS_CONTROL_ALLOW_CREDENTIALS], "true");
+    assert!(
+        !echo["headers"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|name| name == "authorization")
+    );
+
+    let (status, headers, _, _) = send(
+        &app,
+        Method::OPTIONS,
+        "/api/v1/providers",
+        &[
+            ("origin", "null"),
+            ("access-control-request-method", "POST"),
+        ],
+        vec![],
+    )
+    .await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+    assert!(!headers.contains_key(header::ACCESS_CONTROL_ALLOW_ORIGIN));
 }

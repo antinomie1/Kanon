@@ -75,10 +75,17 @@ guild replies stay in one text message to avoid a burst above the channel rate l
 
 | Key | Default | Purpose |
 | :--- | :--- | :--- |
-| `api_addr` | `127.0.0.1:8080` | management gateway bind address (loopback only) |
+| `api_addr` | `127.0.0.1:8080` | management gateway bind address; non-loopback addresses require `api_token` |
+| `api_token` | unset | HTTP Basic password for user `kanon`, protecting the console, API and WebSocket |
 | `log` | `info` | `tracing` filter directives |
 | `run_dir` | platform runtime dir | where IPC sockets (`core.sock`, `host_<id>.sock`) are created |
 | `typescript_runtime` | `bun`, then `node`, from `PATH` | interpreter for TypeScript plugins |
+
+For remote access, set `startup.api_token` to a strong secret and serve the console and API through
+the same HTTPS origin. The browser uses its native authentication prompt (username `kanon`). Reverse
+proxies must preserve the original `Host`; cross-origin management requests are rejected. Without a
+token, only loopback hosts are accepted. Plugin sandbox pages can access the plugin web routes with
+`fetch(url, { credentials: 'include' })`; their opaque origin cannot access management routes.
 
 At runtime the node reads plugins from `./plugins`, keeps operator state in `./data/`, and creates its
 IPC sockets under the platform runtime directory (`$XDG_RUNTIME_DIR/kanon/run/` on Linux). The state

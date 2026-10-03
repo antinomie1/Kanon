@@ -325,7 +325,7 @@ async def guess(self, event: CommandEvent) -> None:
 - 每次接管只覆盖**一条**消息；想继续对话就再调用一次 `wait_next`。
 - 宿主重启时挂起的处理函数会丢失；之后到达的续接消息会以 `continuation = true` 重新调用该命令的处理函数，处理函数可据此给出提示。
 
-原理：核心逐条串行处理消息，绝不阻塞等待插件。SDK 把处理函数放在独立任务里运行，当前 RPC 只等到处理函数的下一个“让出点”（结束或 `wait_next`）就返回，并在响应中携带 `capture_seconds`；续接消息到达时 SDK 再唤醒挂起的处理函数。不使用 SDK 时，也可以直接在 `CommandExecuteResponse` 中设置 `capture_seconds`，自己处理 `continuation`。
+原理：核心在同一聊天内按到达顺序处理消息，不同聊天可以并发，绝不占着当前消息等待插件收到下一条消息。SDK 把处理函数放在独立任务里运行，当前 RPC 只等到处理函数的下一个“让出点”（结束或 `wait_next`）就返回，并在响应中携带 `capture_seconds`；续接消息到达时 SDK 再唤醒挂起的处理函数。不使用 SDK 时，也可以直接在 `CommandExecuteResponse` 中设置 `capture_seconds`，自己处理 `continuation`。
 
 ### 5.6 交给模型：`pass_to_model`
 
@@ -432,6 +432,7 @@ router.tool(
 - `Option<T>` 与 `#[serde(default)]` 字段不是必填；枚举、嵌套结构体、`Vec`、`HashMap` 都会展开成提供商普遍接受的简单 Schema。
 - 参数无法解析为该结构体（缺字段、类型不符）时，处理函数不会运行，模型收到指明问题的失败调用；整数字段可以正常接收（SDK 会把 protobuf 的双精度整数还原）。
 - `ToolSpec::new(name).parameters(json!({..}))` 手写 Schema，处理函数收到 `serde_json::Value`。返回值为任意可序列化的值，非对象包装为 `{"result": ...}`。
+- 工具画了图或生成了文件时，返回 `ToolReply::new(结果).file(路径, "image/png")`（远程资源用 `.url(地址, MIME)`）：模型只读到结果，附件随本轮回复发给用户，按 MIME 类型以图片、语音、视频或文件发送，路径不会进入模型上下文；调用失败时附件一并丢弃。相对路径按插件工作目录解析，文件要保留到回复发出。
 
 **运行时增删工具**：工具集合需要随配置或状态变化时（例如登录后才开放的工具），用 `add_tool` / `remove_tool`：
 
@@ -710,7 +711,7 @@ TypeScript 中方法名为驼峰（`imageUrl`、`mentionAll`）。`file_path` �
 页面运行在沙盒中（`Content-Security-Policy: sandbox`，内嵌框架也不授予 `allow-same-origin`）：可以运行脚本、提交表单、弹窗和下载，但拿不到控制台的源，读不到它的存储，也不能以控制台身份调用管理接口。页面需要的数据由插件自己的 HTTP 路由提供，用相对路径访问即可：
 
 ```js
-const stats = await fetch('../http/stats').then((r) => r.json());
+const stats = await fetch('../http/stats', { credentials: 'include' }).then((r) => r.json());
 ```
 
 ### 11.3 HTTP 路由

@@ -274,6 +274,15 @@ async fn delete_persona(
         )));
     }
 
+    // Acquire every affected writer before deleting the catalog entry. A busy turn must not
+    // lose its persona halfway through a tool loop, and a rejection must leave the catalog intact.
+    let _writers = state
+        .sessions()
+        .list_sessions()
+        .into_iter()
+        .filter(|session| session.persona_id.as_deref() == Some(id.as_str()))
+        .map(|session| state.sessions().try_write(&session.session_key))
+        .collect::<Result<Vec<_>, _>>()?;
     state
         .persona_store()
         .remove(state.personas(), &id)

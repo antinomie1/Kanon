@@ -403,7 +403,7 @@ async fn editing_a_provider_without_a_key_keeps_the_stored_credential() {
         Some(json!({
             "name": "local",
             "protocol": "openai",
-            "base_url": "http://127.0.0.1:9/v2",
+            "base_url": "http://127.0.0.1:9/v1",
             "temperature": 0.4
         })),
     )
@@ -411,7 +411,7 @@ async fn editing_a_provider_without_a_key_keeps_the_stored_credential() {
     assert_eq!(status, StatusCode::OK, "unexpected body: {body}");
     assert_eq!(
         body["providers"][0]["base_url"],
-        json!("http://127.0.0.1:9/v2")
+        json!("http://127.0.0.1:9/v1")
     );
     assert_eq!(body["providers"][0]["api_key_configured"], json!(true));
 
@@ -422,7 +422,7 @@ async fn editing_a_provider_without_a_key_keeps_the_stored_credential() {
         Some(json!({
             "name": "local",
             "protocol": "openai",
-            "base_url": "http://127.0.0.1:9/v2",
+            "base_url": "http://127.0.0.1:9/v1",
             "clear_api_key": true
         })),
     )
@@ -660,4 +660,111 @@ async fn reasoning_replay_setting_is_persisted_and_omission_preserves_it() {
             expected
         );
     }
+}
+
+/// URL edits must not leak a stored credential through probing or automatic discovery.
+#[tokio::test]
+async fn changed_endpoint_requires_an_explicit_credential_decision() {
+    let config_dir = tempfile::tempdir().unwrap();
+    let state = provider_state(config_dir.path().to_path_buf()).await;
+    let app = kanon_api::app(state.clone());
+    add_provider(&app, "local").await;
+    let (target, captured) = spawn_openai_stub().await;
+
+    for path in ["/api/v1/providers/test", "/api/v1/providers"] {
+        let (status, body) = common::send_json(
+            &app,
+            Method::POST,
+            path,
+            Some(json!({
+                "provider": "local", "name": "local", "protocol": "openai",
+                "base_url": target, "model": "probe"
+            })),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{path}: {body}");
+    }
+    assert!(captured.lock().unwrap().is_empty());
+    assert_eq!(
+        state.node_settings().providers[0].base_url,
+        "http://127.0.0.1:9/v1"
+    );
+
+    let (status, body) = common::send_json(
+        &app,
+        Method::POST,
+        "/api/v1/providers/test",
+        Some(json!({
+            "provider": "local", "base_url": target, "model": "probe", "api_key": "sk-new"
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(
+        captured.lock().unwrap()[0].0["authorization"],
+        "Bearer sk-new"
+    );
+
+    let (status, body) = common::send_json(
+        &app,
+        Method::POST,
+        "/api/v1/providers",
+        Some(json!({
+            "name": "local", "protocol": "openai", "base_url": target, "clear_api_key": true
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert!(!state.node_settings().providers[0].has_api_key());
+}
+
+/// Identical upstream model names on different endpoints must stay distinguishable.
+#[tokio::test]
+async fn chat_override_selects_its_provider_and_rejects_unresolved_references() {
+    let config_dir = tempfile::tempdir().unwrap();
+    let state = provider_state(config_dir.path().to_path_buf()).await;
+    let app = kanon_api::app(state);
+    let (first_url, first) = spawn_openai_stub().await;
+    let (second_url, second) = spawn_openai_stub().await;
+    for (name, url) in [("first", first_url), ("second", second_url)] {
+        let (status, body) = common::send_json(
+            &app,
+            Method::POST,
+            "/api/v1/providers",
+            Some(json!({
+                "name": name, "protocol": "openai", "base_url": url
+            })),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+    }
+    assert_eq!(
+        set_default(&app, json!("first/shared-model")).await.0,
+        StatusCode::OK
+    );
+    let (status, body) = common::send_json(
+        &app,
+        Method::POST,
+        "/api/v1/chat/completions",
+        Some(json!({
+            "session_id": "selected-provider", "message": "ping", "model": "second/shared-model"
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert!(first.lock().unwrap().is_empty());
+    assert_eq!(second.lock().unwrap()[0].1["model"], "shared-model");
+
+    let (status, body) = common::send_json(
+        &app,
+        Method::POST,
+        "/api/v1/chat/completions",
+        Some(json!({
+            "session_id": "unknown-provider", "message": "ping", "model": "missing/shared-model"
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    assert!(first.lock().unwrap().is_empty());
+    assert_eq!(second.lock().unwrap().len(), 1);
 }

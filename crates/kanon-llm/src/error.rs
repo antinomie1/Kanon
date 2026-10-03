@@ -59,6 +59,9 @@ impl From<tonic::Status> for ToolRouterError {
 /// Errors arising during general agent execution and reasoning loops.
 #[derive(Debug, Error)]
 pub enum AgentError {
+    /// Another turn or mutation owns the session writer.
+    #[error("session '{0}' is busy")]
+    Busy(String),
     /// Failure originating from the underlying model gateway.
     #[error("Agent LLM gateway failure: {0}")]
     Gateway(#[from] GatewayError),
@@ -104,6 +107,9 @@ impl From<ToolRouterError> for AgentError {
 /// Errors arising during conversation memory operations.
 #[derive(Debug, Error)]
 pub enum MemoryError {
+    /// Another turn or mutation owns the session writer.
+    #[error("session '{0}' is busy")]
+    Busy(String),
     /// Embedded SQLite database failure.
     #[error("SQLite memory error: {0}")]
     Sqlite(#[from] rusqlite::Error),
@@ -119,6 +125,9 @@ pub enum MemoryError {
 
 impl From<MemoryError> for AgentError {
     fn from(err: MemoryError) -> Self {
-        Self::Memory(err.to_string())
+        match err {
+            MemoryError::Busy(session) => Self::Busy(session),
+            other => Self::Memory(other.to_string()),
+        }
     }
 }

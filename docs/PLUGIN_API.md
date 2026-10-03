@@ -109,7 +109,7 @@ Supervisor 启动宿主时注入的**启动契约**（插件不得把其他环�
 | `structured_args` / `raw_bytes` | 双模载荷：JSON 参数走 `Struct`，二进制走 `bytes` |
 | `context` | 触发本次调用的入站消息；控制台聊天等非平台会话中缺省 |
 | `structured_result` / `raw_bytes` | 返回值 |
-| `attachments` | 工具产出的富媒体，核心会附到出站消息上：按 `mime_type` 发送为图片、语音（`audio/*`）、视频或文件（其余类型），文件名即 `file_path` 的文件名；目标适配器不支持的类型会被替换为一行说明 |
+| `attachments` | 工具产出的富媒体，核心会附到出站消息上：按 `mime_type` 发送为图片、语音（`audio/*`）、视频或文件（其余类型），文件名即 `file_path` 的文件名；`file_path` 须为绝对路径（核心在自己的进程里读取）且在回复发出前保留；目标适配器不支持的类型会被替换为一行说明。Rust SDK 中工具返回 `ToolReply` 即可附带 |
 
 `success = false` 时模型会看到一次失败的工具调用。
 

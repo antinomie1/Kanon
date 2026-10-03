@@ -164,6 +164,24 @@ impl CircuitBreaker {
         Self::new(CircuitBreakerConfig::for_platform())
     }
 
+    /// Reports eligibility without reserving a recovery probe (safe for tool discovery).
+    pub fn is_available(&self) -> bool {
+        let guard = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+        match guard.state {
+            CircuitState::Closed => true,
+            CircuitState::Open => guard.last_state_change.elapsed() >= self.config.cooldown_period,
+            CircuitState::HalfOpen => guard.half_open_in_flight < self.config.max_half_open_probes,
+        }
+    }
+
+    /// Reserves a request whose cancellation is recorded if the RPC future is dropped.
+    pub fn try_acquire(&self) -> Option<RequestPermit<'_>> {
+        self.allow_request().then(|| RequestPermit {
+            breaker: self,
+            completed: false,
+        })
+    }
+
     /// Evaluates whether an outbound request to this target should be permitted.
     ///
     /// - If `Closed`: returns `true`.
@@ -406,5 +424,36 @@ impl CircuitBreaker {
     /// Returns a snapshot reference to the active configuration parameters.
     pub fn config(&self) -> &CircuitBreakerConfig {
         &self.config
+    }
+}
+
+/// An in-flight RPC reservation; dropping a cancelled future releases its recovery slot.
+pub struct RequestPermit<'a> {
+    breaker: &'a CircuitBreaker,
+    completed: bool,
+}
+
+impl RequestPermit<'_> {
+    /// Completes this reservation with a successful response.
+    pub fn success(mut self, rtt: Duration) {
+        self.completed = true;
+        self.breaker.record_success(rtt);
+    }
+
+    /// Completes this reservation with an explicit RPC failure.
+    pub fn failure(mut self, reason: &str) {
+        self.completed = true;
+        self.breaker.record_failure(reason);
+    }
+}
+
+impl Drop for RequestPermit<'_> {
+    fn drop(&mut self) {
+        if !self.completed {
+            // A caller timeout drops the RPC before a status arrives. Treat that as failure,
+            // otherwise the sole half-open slot would remain reserved forever.
+            self.breaker
+                .record_failure("RPC cancelled before completion");
+        }
     }
 }

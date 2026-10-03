@@ -276,3 +276,38 @@ async fn chat_stream_with_reasoning_yields_reasoning_and_delta() {
         "body missing done event: {body}"
     );
 }
+
+/// Every console write uses the same writer as a running pipeline or streaming producer.
+#[tokio::test]
+async fn busy_session_rejects_chat_reset_and_persona_without_mutation() {
+    let dir = tempfile::tempdir().unwrap();
+    let state = fixture_state(dir.path().to_path_buf(), true).await;
+    state.sessions().get_or_create("busy");
+    let writing = state.sessions().try_write("busy").unwrap();
+    let app = app(state.clone());
+    for (path, body) in [
+        (
+            "/api/v1/chat/completions",
+            json!({"session_id":"busy","message":"hello"}),
+        ),
+        (
+            "/api/v1/chat/completions",
+            json!({"session_id":"busy","message":"hello","stream":true}),
+        ),
+        ("/api/v1/sessions/busy/reset", json!({})),
+        ("/api/v1/sessions/busy/persona", json!({"persona_id":null})),
+    ] {
+        let (status, response) = send_json(&app, Method::POST, path, Some(body)).await;
+        assert_eq!(status, 409, "{path}: {response}");
+    }
+    assert_eq!(state.sessions().get_metadata("busy").unwrap().turn_count, 0);
+    drop(writing);
+    let (status, body) = send_json(
+        &app,
+        Method::POST,
+        "/api/v1/chat/completions",
+        Some(json!({"session_id":"busy","message":"hello"})),
+    )
+    .await;
+    assert_eq!(status, 200, "{body}");
+}

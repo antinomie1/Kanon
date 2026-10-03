@@ -74,9 +74,11 @@ async fn main() -> StartupResult<()> {
     // --- Core microkernel & supervisor ------------------------------------------------
     let (event_tx, event_rx) = mpsc::channel(DEFAULT_INGEST_QUEUE_CAPACITY);
     let ingress = EventIngress::new(event_tx);
+    let ipc_token = kanon_transport::generate_ipc_token()?;
     // The supervisor owns the socket layout: `core.sock` lives in the run directory it resolves.
     let supervisor = Arc::new(
         Supervisor::new(startup.run_dir.clone(), None)
+            .with_ipc_token(ipc_token.clone())
             .with_typescript_runtime(startup.typescript_runtime.clone())
             .with_dependency_installer(
                 startup
@@ -170,10 +172,8 @@ async fn main() -> StartupResult<()> {
     // the pipeline worker and the IPC service, so a provider configured later through the console
     // is observed by all three without a restart.
     //
-    // Bootstrap order: providers saved by the console win over the environment, because the console
-    // is how an operator changes the node after it started. The settings are validated and applied
-    // by the builder itself, so a bootstrapped directory and a console-configured one are applied
-    // through exactly the same path.
+    // The builder validates and applies persisted settings through the same path used by console
+    // updates, keeping startup and runtime model routing consistent.
     let node_settings = bootstrap_node_settings()?;
     // Bash enforces the command policy's administrator list — the serving instance's own, or the
     // node's; the API state publishes console edits into these same stores, and the pipeline
@@ -220,6 +220,7 @@ async fn main() -> StartupResult<()> {
     );
 
     let state = ApiState::builder(supervisor.clone())
+        .with_startup(startup.clone())
         .with_sessions(sessions)
         .with_personas(personas)
         .with_persona_store(persona_store.clone())
@@ -264,7 +265,7 @@ async fn main() -> StartupResult<()> {
             "LLM provider configured for conversational pipeline and sandbox chat"
         ),
         None => tracing::warn!(
-            "No LLM provider is configured (data/system.json and KANON_LLM_BASE_URL are both empty); \
+            "No default model is configured in data/system.json; \
              chat completions and conversational LLM routing are disabled"
         ),
     }
@@ -309,7 +310,15 @@ async fn main() -> StartupResult<()> {
         .with_engine(engine.clone())
         .with_personas(state.personas().clone(), persona_store)
         .with_kv(kv);
-    let ipc_server = CoreIpcServer::new(socket_path.clone(), service);
+    let ipc_server = CoreIpcServer::new(socket_path, service).with_auth_token(ipc_token);
+    // Binding must succeed before any plugin starts; an existing path is not evidence that our
+    // server owns it, and spawning first would hide listener failures inside a background task.
+    let ipc_listener = ipc_server.bind_listener()?;
+
+    // Bind the management endpoint before launching plugins: address or access-configuration
+    // errors must fail startup before any child process begins serving traffic.
+    let api_server = ApiServer::bind(startup.api_addr, state.clone()).await?;
+    let bound_addr = api_server.local_addr();
 
     // --- Graceful shutdown channels ---------------------------------------------------
     let (core_shutdown_tx, core_shutdown_rx) = oneshot::channel();
@@ -318,19 +327,11 @@ async fn main() -> StartupResult<()> {
     // Start Core IPC server FIRST so that spawned plugin hosts can connect to core.sock immediately
     let core_task = tokio::spawn(async move {
         ipc_server
-            .run(async move {
+            .run_with_listener(ipc_listener, async move {
                 let _ = core_shutdown_rx.await;
             })
             .await
     });
-
-    // Wait briefly for Core socket to become active before spawning plugin processes
-    for _ in 0..50 {
-        if socket_path.exists() {
-            break;
-        }
-        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
-    }
 
     // Ensure ./plugins and ./data/plugins directories exist
     if let Err(err) = std::fs::create_dir_all("./plugins") {
@@ -374,9 +375,6 @@ async fn main() -> StartupResult<()> {
     for (platform, error) in supervisor.adapters().start_all(ingress.clone()).await {
         tracing::error!(platform = %platform, error = %error, "Adapter failed to start");
     }
-
-    let api_server = ApiServer::bind(startup.api_addr, state).await?;
-    let bound_addr = api_server.local_addr();
 
     let api_task = tokio::spawn(async move {
         api_server

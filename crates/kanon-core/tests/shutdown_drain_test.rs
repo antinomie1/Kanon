@@ -147,3 +147,35 @@ async fn undelivered_replies_are_dead_lettered_on_shutdown() {
             .is_err()
     );
 }
+
+#[tokio::test]
+async fn cancelled_delivery_releases_half_open_probe() {
+    use kanon_core::supervisor::{CircuitBreaker, CircuitBreakerConfig};
+    use std::future::Future;
+    use std::task::Poll;
+    use std::time::Duration;
+
+    let dir = tempfile::tempdir().unwrap();
+    let engine = engine(dir.path()).await;
+    let breaker = CircuitBreaker::new(CircuitBreakerConfig {
+        cooldown_period: Duration::ZERO,
+        ..CircuitBreakerConfig::for_platform()
+    });
+    breaker.trip("recovering platform");
+    let mut call = Box::pin(engine.dispatch_outbound_request_with_breaker(
+        DeliverMessageRequest {
+            platform: "hanging_im".to_string(),
+            ..Default::default()
+        },
+        &breaker,
+    ));
+    // Poll into the hanging adapter, then cancel the caller while the probe is held.
+    std::future::poll_fn(|cx| {
+        assert!(call.as_mut().poll(cx).is_pending());
+        Poll::Ready(())
+    })
+    .await;
+    assert!(!breaker.is_available());
+    drop(call);
+    assert!(breaker.try_acquire().is_some());
+}

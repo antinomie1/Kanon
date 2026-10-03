@@ -28,8 +28,10 @@
 //! still carry `default_provider` and the single-endpoint `llm` section; both are read (the latter
 //! is migrated into a named provider) and never written back.
 
+use std::io::Write;
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
+use std::sync::Mutex;
 
 use kanon_adapter_milky::MilkyConfig;
 use kanon_adapter_onebot::OneBotConfig;
@@ -40,6 +42,11 @@ use serde::{Deserialize, Serialize};
 
 /// Default location of the node's system configuration, relative to the node working directory.
 pub const DEFAULT_SYSTEM_CONFIG: &str = "./data/system.json";
+
+// Stores opened separately by startup and adapter code still write the same document. Hold one
+// process-wide writer lock over the complete read/modify/replace operation, not just the rename.
+// Config writes are infrequent; a path-indexed lock registry would add ownership complexity here.
+static SYSTEM_CONFIG_WRITER: Mutex<()> = Mutex::new(());
 
 /// One pre-configured provider template offered by the console.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -232,6 +239,9 @@ pub struct LlmProviderConfig {
 pub struct StartupConfig {
     /// Management gateway bind address; loopback by default so it is never exposed by accident.
     pub api_addr: SocketAddr,
+    /// Optional management password (HTTP Basic user `kanon`), required for non-loopback binds.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub api_token: Option<String>,
     /// `tracing` filter directive, such as `info` or `kanon_core=debug,info`.
     pub log: String,
     /// Directory for the IPC sockets. When unset, the platform runtime directory is used
@@ -252,6 +262,7 @@ impl Default for StartupConfig {
     fn default() -> Self {
         Self {
             api_addr: SocketAddr::from(([127, 0, 0, 1], 8080)),
+            api_token: None,
             log: "info".to_string(),
             run_dir: None,
             typescript_runtime: None,
@@ -467,6 +478,9 @@ impl SystemConfigStore {
 
     /// Saves OneBot settings without changing other system configuration sections.
     pub fn save_onebot(&self, config: &OneBotConfig) -> Result<(), String> {
+        let _writing = SYSTEM_CONFIG_WRITER
+            .lock()
+            .map_err(|_| "System config writer lock is poisoned")?;
         let mut document = self.read_document()?.unwrap_or_default();
         document.onebot = Some(config.clone());
         self.write_document(&document)
@@ -481,6 +495,9 @@ impl SystemConfigStore {
 
     /// Saves QQ Official settings, preserving every other section.
     pub fn save_qqofficial(&self, config: &QqOfficialConfig) -> Result<(), String> {
+        let _writing = SYSTEM_CONFIG_WRITER
+            .lock()
+            .map_err(|_| "System config writer lock is poisoned")?;
         let mut document = self.read_document()?.unwrap_or_default();
         document.qqofficial = Some(config.clone());
         self.write_document(&document)
@@ -493,6 +510,9 @@ impl SystemConfigStore {
 
     /// Persists the Milky adapter configuration, preserving every other section.
     pub fn save_milky(&self, config: &MilkyConfig) -> Result<(), String> {
+        let _writing = SYSTEM_CONFIG_WRITER
+            .lock()
+            .map_err(|_| "System config writer lock is poisoned")?;
         let mut document = self.read_document()?.unwrap_or_default();
         document.milky = Some(config.clone());
         self.write_document(&document)
@@ -565,6 +585,9 @@ impl SystemConfigStore {
     /// truncated document that would fail the next startup. Legacy sections are dropped here:
     /// after one save the document holds exactly the current shape.
     pub fn save_node_settings(&self, settings: &NodeSettings) -> Result<(), String> {
+        let _writing = SYSTEM_CONFIG_WRITER
+            .lock()
+            .map_err(|_| "System config writer lock is poisoned")?;
         let mut document = self.read_document()?.unwrap_or_default();
 
         document.providers = Some(settings.providers.clone());
@@ -606,25 +629,22 @@ impl SystemConfigStore {
         let payload = serde_json::to_string_pretty(document)
             .map_err(|err| format!("Failed to serialize system config: {err}"))?;
 
-        let temp_path = self.path.with_extension("json.tmp");
-        std::fs::write(&temp_path, payload)
-            .map_err(|err| format!("Failed to write {}: {err}", temp_path.display()))?;
-
-        // The document holds a provider credential: restrict it to the node's own user before it
-        // becomes visible under its final name.
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            std::fs::set_permissions(&temp_path, std::fs::Permissions::from_mode(0o600))
-                .map_err(|err| format!("Failed to restrict {}: {err}", temp_path.display()))?;
-        }
-
-        std::fs::rename(&temp_path, &self.path).map_err(|err| {
-            format!(
-                "Failed to move {} into place at {}: {err}",
-                temp_path.display(),
-                self.path.display()
-            )
-        })
+        let parent = self
+            .path
+            .parent()
+            .filter(|path| !path.as_os_str().is_empty())
+            .unwrap_or_else(|| Path::new("."));
+        // NamedTempFile creates an exclusive, owner-only file on Unix. Credentials are never
+        // written to a shared name or exposed with default permissions before a later chmod.
+        let mut temporary = tempfile::NamedTempFile::new_in(parent)
+            .map_err(|err| format!("Failed to create system config temporary file: {err}"))?;
+        temporary
+            .write_all(payload.as_bytes())
+            .and_then(|()| temporary.as_file().sync_all())
+            .map_err(|err| format!("Failed to write system config: {err}"))?;
+        temporary
+            .persist(&self.path)
+            .map_err(|err| format!("Failed to replace {}: {err}", self.path.display()))?;
+        Ok(())
     }
 }

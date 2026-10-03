@@ -146,12 +146,14 @@ async fn send(
 ) -> (StatusCode, Value) {
     let request = match body {
         Some(body) => axum::http::Request::builder()
+            .header("host", "localhost")
             .method(method)
             .uri(uri)
             .header(axum::http::header::CONTENT_TYPE, "application/json")
             .body(axum::body::Body::from(body.to_string()))
             .expect("request"),
         None => axum::http::Request::builder()
+            .header("host", "localhost")
             .method(method)
             .uri(uri)
             .body(axum::body::Body::empty())
@@ -294,6 +296,7 @@ async fn a_zip_upload_installs_the_wrapped_skill_directory() {
     body.extend_from_slice(format!("\r\n--{boundary}--\r\n").as_bytes());
 
     let request = axum::http::Request::builder()
+        .header("host", "localhost")
         .method(Method::POST)
         .uri("/api/v1/skills")
         .header(
@@ -348,6 +351,7 @@ async fn a_zip_upload_rejects_an_archive_without_a_skill() {
     body.extend_from_slice(format!("\r\n--{boundary}--\r\n").as_bytes());
 
     let request = axum::http::Request::builder()
+        .header("host", "localhost")
         .method(Method::POST)
         .uri("/api/v1/skills")
         .header(

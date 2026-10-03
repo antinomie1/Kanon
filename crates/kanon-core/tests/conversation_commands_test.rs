@@ -103,6 +103,9 @@ async fn start(dir: &Path) -> Node {
     let supervisor = Arc::new(Supervisor::new(Some(dir.join("run")), None));
     let engine = Arc::new(
         PipelineEngine::new(supervisor)
+            .with_dead_letter(Arc::new(kanon_core::pipeline::DeadLetterWriter::new(
+                dir.join("dead_letter"),
+            )))
             .with_tool_router(Arc::new(ToolRouter::from_arc(agent)))
             .with_instances(registry.clone())
             .with_command_policy(Arc::new(CommandPolicyStore::new(CommandPolicy::default()))),
@@ -492,6 +495,17 @@ async fn plugins_manage_the_operators_personas_through_the_shared_store() {
         .expect("deselect the persona");
     let session = format!("{}0", node.chat);
     node.sessions.set_persona(&session, "pirate");
+    let writer = node.sessions.try_write(&session).unwrap();
+    let busy = service
+        .delete_persona(Request::new(DeletePersonaRequest {
+            id: "pirate".into(),
+        }))
+        .await
+        .unwrap_err();
+    assert_eq!(busy.code(), Code::FailedPrecondition);
+    assert!(node.personas.get("pirate").is_some());
+    assert!(!node.persona_store.load().unwrap().is_empty());
+    drop(writer);
     let deleted = service
         .delete_persona(Request::new(DeletePersonaRequest {
             id: "pirate".to_string(),
@@ -514,4 +528,108 @@ async fn plugins_manage_the_operators_personas_through_the_shared_store() {
         .expect("deleting a missing persona is not an error")
         .into_inner();
     assert!(!again.deleted);
+}
+
+/// A hung model blocks only its chat; reset/rotation commands in that chat stay ordered.
+#[tokio::test]
+async fn worker_runs_distinct_chats_and_keeps_generation_changes_in_order() {
+    let dir = tempfile::tempdir().unwrap();
+    let node = start(dir.path()).await;
+    let (tx, rx) = tokio::sync::mpsc::channel(16);
+    let worker = node.engine.clone().start_worker(rx);
+    let send = |event| kanon_proto::v1::IngestEventRequest {
+        platform: "qq".into(),
+        event: Some(event),
+    };
+    tx.send(send(event("hung", "work"))).await.unwrap();
+    tokio::time::timeout(Duration::from_secs(2), node.model.working.notified())
+        .await
+        .unwrap();
+    // This mutation cannot jump ahead of the busy turn in its chat.
+    tx.send(send(event("rotate-blocked", "/new")))
+        .await
+        .unwrap();
+    for (id, text) in [
+        ("b1", "first"),
+        ("new", "/new"),
+        ("b2", "second"),
+        ("switch", "/switch 1"),
+        ("b3", "third"),
+    ] {
+        let mut other = event(id, text);
+        other.sender_id = "user:2".into();
+        tx.send(send(other)).await.unwrap();
+    }
+    tokio::time::timeout(Duration::from_secs(2), async {
+        loop {
+            if node.model.requests.lock().unwrap().len() == 3 {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("other chat finishes while first model is hung");
+    let requests = node.model.requests.lock().unwrap().clone();
+    let texts = |index: usize| {
+        requests[index]
+            .iter()
+            .filter(|m| m.role != Role::System)
+            .filter_map(|m| m.content.clone())
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(texts(0), ["first"]);
+    assert_eq!(texts(1), ["second"]);
+    assert_eq!(texts(2), ["first", "reply 1", "third"]);
+    assert!(
+        current_session(&node).await.ends_with("#0"),
+        "queued /new has not run"
+    );
+    worker.abort();
+    assert!(worker.await.unwrap_err().is_cancelled());
+}
+
+/// Concurrent hung turns share one shutdown grace rather than adding one timeout per chat.
+#[tokio::test]
+async fn worker_shutdown_has_one_deadline_for_all_running_chats() {
+    let dir = tempfile::tempdir().unwrap();
+    let node = start(dir.path()).await;
+    let (tx, rx) = tokio::sync::mpsc::channel(8);
+    let worker = node.engine.clone().start_worker(rx);
+    for sender in ["user:1", "user:2", "user:3"] {
+        let mut message = event(sender, "work");
+        message.sender_id = sender.into();
+        tx.send(kanon_proto::v1::IngestEventRequest {
+            platform: "qq".into(),
+            event: Some(message),
+        })
+        .await
+        .unwrap();
+        tokio::time::timeout(Duration::from_secs(2), node.model.working.notified())
+            .await
+            .unwrap();
+    }
+    tx.send(kanon_proto::v1::IngestEventRequest {
+        platform: "qq".into(),
+        event: Some(event("queued", "later")),
+    })
+    .await
+    .unwrap();
+    tokio::time::timeout(Duration::from_secs(7), node.engine.drain(worker, None))
+        .await
+        .expect("all three turns drain within a single five-second grace");
+    assert!(tx.send(Default::default()).await.is_err());
+    let mut ids = Vec::new();
+    for file in std::fs::read_dir(dir.path().join("dead_letter")).unwrap() {
+        for line in std::fs::read_to_string(file.unwrap().path())
+            .unwrap()
+            .lines()
+        {
+            let record: kanon_core::pipeline::DeadLetterRecord =
+                serde_json::from_str(line).unwrap();
+            ids.push(record.event_id);
+        }
+    }
+    ids.sort();
+    assert_eq!(ids, ["queued", "user:1", "user:2", "user:3"]);
 }

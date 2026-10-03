@@ -137,9 +137,9 @@ pub struct ManagedHost {
     /// requests, so serializing them behind a lock would only add head-of-line blocking — and a
     /// deadlock when a command handler on this host waits for a reply delivered by an adapter
     /// living on the same host.
-    host_client: PluginHostServiceClient<Channel>,
+    host_client: PluginHostServiceClient<kanon_transport::AuthenticatedChannel>,
     /// Client for event and message dispatching (`MessagePipelineService`), cloned per call.
-    pipeline_client: MessagePipelineServiceClient<Channel>,
+    pipeline_client: MessagePipelineServiceClient<kanon_transport::AuthenticatedChannel>,
     /// Metadata reported by the host: obtained during the handshake and refreshed after every
     /// accepted configuration reload, so a plugin may offer different commands or tools depending
     /// on how the operator configured it.
@@ -187,8 +187,14 @@ impl ManagedHost {
             host_id,
             socket_path,
             child: Mutex::new(None),
-            host_client: PluginHostServiceClient::new(channel.clone()),
-            pipeline_client: MessagePipelineServiceClient::new(channel),
+            host_client: PluginHostServiceClient::with_interceptor(
+                channel.clone(),
+                kanon_transport::ClientAuthInterceptor::default(),
+            ),
+            pipeline_client: MessagePipelineServiceClient::with_interceptor(
+                channel,
+                kanon_transport::ClientAuthInterceptor::default(),
+            ),
             meta: std::sync::RwLock::new(meta),
             priority,
             launch_spec: None,
@@ -417,7 +423,7 @@ impl ManagedHost {
         &self,
         req: ToolCallRequest,
     ) -> Result<ToolCallResponse, tonic::Status> {
-        if !self.circuit_breaker.allow_request() {
+        let Some(permit) = self.circuit_breaker.try_acquire() else {
             tracing::warn!(
                 host_id = %self.host_id,
                 tool_name = %req.tool_name,
@@ -427,18 +433,17 @@ impl ManagedHost {
                 "Circuit breaker is OPEN for host '{}'",
                 self.host_id
             )));
-        }
+        };
 
         let start = std::time::Instant::now();
         let mut client = self.pipeline_client.clone();
         match client.on_call_tool(req).await {
             Ok(response) => {
-                self.circuit_breaker.record_success(start.elapsed());
+                permit.success(start.elapsed());
                 Ok(response.into_inner())
             }
             Err(status) => {
-                self.circuit_breaker
-                    .record_failure(&format!("Tool call gRPC error: {}", status.code()));
+                permit.failure(&format!("Tool call gRPC error: {}", status.code()));
                 Err(status)
             }
         }
@@ -454,7 +459,7 @@ impl ManagedHost {
         &self,
         req: kanon_proto::v1::PluginActionRequest,
     ) -> Result<kanon_proto::v1::PluginActionResponse, tonic::Status> {
-        if !self.circuit_breaker.allow_request() {
+        let Some(permit) = self.circuit_breaker.try_acquire() else {
             tracing::warn!(
                 host_id = %self.host_id,
                 action = %req.action,
@@ -464,18 +469,17 @@ impl ManagedHost {
                 "Circuit breaker is OPEN for host '{}'",
                 self.host_id
             )));
-        }
+        };
 
         let start = std::time::Instant::now();
         let mut client = self.host_client.clone();
         match client.invoke_action(req).await {
             Ok(response) => {
-                self.circuit_breaker.record_success(start.elapsed());
+                permit.success(start.elapsed());
                 Ok(response.into_inner())
             }
             Err(status) => {
-                self.circuit_breaker
-                    .record_failure(&format!("Management action gRPC error: {}", status.code()));
+                permit.failure(&format!("Management action gRPC error: {}", status.code()));
                 Err(status)
             }
         }
@@ -638,6 +642,7 @@ pub struct Supervisor {
     run_dir: PathBuf,
     /// Path to the Kanon Core IPC server socket (`core.sock`).
     core_sock_path: PathBuf,
+    ipc_token: String,
     /// Registry of active managed plugin host instances.
     hosts: Arc<RwLock<HashMap<String, Arc<ManagedHost>>>>,
     /// Registry of in-process platform adapters.
@@ -835,6 +840,7 @@ impl Supervisor {
         Self {
             run_dir,
             core_sock_path,
+            ipc_token: String::new(),
             hosts: Arc::new(RwLock::new(HashMap::new())),
             adapters: Arc::new(AdapterRegistry::new()),
             config_versions: Arc::new(RwLock::new(HashMap::new())),
@@ -843,6 +849,12 @@ impl Supervisor {
             dependencies: None,
             launching: Arc::new(std::sync::Mutex::new(HashSet::new())),
         }
+    }
+
+    /// Shares the node's per-process Windows IPC authentication credential.
+    pub fn with_ipc_token(mut self, token: String) -> Self {
+        self.ipc_token = token;
+        self
     }
 
     /// Uses `runtime` (a `bun` or `node` binary) for TypeScript plugins instead of the `PATH`
@@ -1060,11 +1072,6 @@ impl Supervisor {
         let _launching = LaunchGuard::new(&self.launching, host_id);
         let socket_path = host_socket_path(host_id, Some(&self.run_dir));
 
-        // Clean up stale socket file if it exists prior to launching child.
-        if socket_path.exists() {
-            let _ = std::fs::remove_file(&socket_path);
-        }
-
         tracing::info!(
             host_id = %host_id,
             priority = priority,
@@ -1078,14 +1085,16 @@ impl Supervisor {
             .env("KANON_HOST_ID", host_id)
             .env("KANON_HOST_SOCK", &socket_path)
             .env("KANON_CORE_SOCK", &self.core_sock_path)
+            .env("KANON_IPC_TOKEN", &self.ipc_token)
             .kill_on_drop(true);
 
         let mut child = cmd.spawn()?;
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
 
         // Wait for child process to bind the socket and become ready.
         // We poll every 50ms with a 5-second deadline.
         let channel = match self
-            .wait_for_readiness(&mut child, host_id, &socket_path, Duration::from_secs(5))
+            .wait_for_readiness(&mut child, host_id, &socket_path, deadline)
             .await
         {
             Ok(ch) => ch,
@@ -1099,19 +1108,37 @@ impl Supervisor {
         };
 
         // Create gRPC clients for handshake and future message pipeline calls.
-        let mut host_client = PluginHostServiceClient::new(channel.clone());
-        let pipeline_client = MessagePipelineServiceClient::new(channel);
+        let mut host_client = PluginHostServiceClient::with_interceptor(
+            channel.clone(),
+            kanon_transport::ClientAuthInterceptor(self.ipc_token.clone()),
+        );
+        let pipeline_client = MessagePipelineServiceClient::with_interceptor(
+            channel,
+            kanon_transport::ClientAuthInterceptor(self.ipc_token.clone()),
+        );
 
         // Perform initial GetPluginMeta handshake to verify contract compatibility
         // and discover static command/tool definitions.
         tracing::debug!(host_id = %host_id, "Conducting GetPluginMeta handshake");
-        let meta_response = host_client
-            .get_plugin_meta(GetPluginMetaRequest {})
-            .await
-            .map_err(|status| {
-                tracing::error!(host_id = %host_id, error = %status, "Handshake failed");
-                SupervisorError::from(status)
-            })?;
+        let meta_response = match tokio::time::timeout_at(
+            deadline,
+            host_client.get_plugin_meta(GetPluginMetaRequest {}),
+        )
+        .await
+        {
+            Ok(Ok(response)) => response,
+            outcome => {
+                // The same deadline includes HTTP/2 readiness and metadata. Reap the failed
+                // child before returning so neither a hung RPC nor retries leak processes.
+                let _ = child.start_kill();
+                let _ = child.wait().await;
+                return Err(match outcome {
+                    Ok(Err(status)) => SupervisorError::from(status),
+                    Err(_) => SupervisorError::Timeout(host_id.to_string()),
+                    Ok(Ok(_)) => unreachable!(),
+                });
+            }
+        };
 
         let plugins = meta_response.into_inner().plugins;
         tracing::info!(
@@ -1557,7 +1584,10 @@ impl Supervisor {
 
         let socket_path = PathBuf::from(endpoint);
         let channel = connect_ipc(&socket_path).await?;
-        let mut host_client = PluginHostServiceClient::new(channel.clone());
+        let mut host_client = PluginHostServiceClient::with_interceptor(
+            channel.clone(),
+            kanon_transport::ClientAuthInterceptor(self.ipc_token.clone()),
+        );
 
         // Attempt initial GetPluginMeta handshake over the established channel.
         let plugins = match host_client.get_plugin_meta(GetPluginMetaRequest {}).await {
@@ -1589,13 +1619,19 @@ impl Supervisor {
             }
         };
 
-        let managed_host = Arc::new(ManagedHost::new(
+        let mut managed_host = ManagedHost::new(
             host_id.to_string(),
             socket_path,
-            channel,
+            channel.clone(),
             plugins,
             500,
-        ));
+        );
+        managed_host.host_client = host_client;
+        managed_host.pipeline_client = MessagePipelineServiceClient::with_interceptor(
+            channel,
+            kanon_transport::ClientAuthInterceptor(self.ipc_token.clone()),
+        );
+        let managed_host = Arc::new(managed_host);
 
         self.hosts
             .write()
@@ -1809,10 +1845,6 @@ impl Supervisor {
                     "Host had no child handle (externally registered); it stops via its own core-liveness watchdog"
                 );
             }
-            if host.socket_path.exists() {
-                let _ = std::fs::remove_file(&host.socket_path);
-                tracing::debug!(socket = %host.socket_path.display(), "Removed host socket");
-            }
             Ok(())
         } else {
             Err(SupervisorError::HostNotFound(host_id.to_string()))
@@ -1834,14 +1866,14 @@ impl Supervisor {
         child: &mut Child,
         host_id: &str,
         socket_path: &Path,
-        timeout: Duration,
+        deadline: tokio::time::Instant,
     ) -> Result<Channel, SupervisorError> {
         let start = std::time::Instant::now();
         let interval = Duration::from_millis(50);
 
-        while start.elapsed() < timeout {
+        while tokio::time::Instant::now() < deadline {
             // First verify that the child process has not exited unexpectedly.
-            if let Ok(Some(status)) = child.try_wait() {
+            if let Some(status) = child.try_wait()? {
                 return Err(SupervisorError::PrematureExit {
                     host_id: host_id.to_string(),
                     status: status.to_string(),
@@ -1850,8 +1882,8 @@ impl Supervisor {
 
             // Attempt to establish a test connection to the host socket.
             if socket_path.exists() {
-                match connect_ipc(socket_path).await {
-                    Ok(channel) => {
+                match tokio::time::timeout_at(deadline, connect_ipc(socket_path)).await {
+                    Ok(Ok(channel)) => {
                         tracing::debug!(
                             host_id = %host_id,
                             elapsed_ms = start.elapsed().as_millis(),
@@ -1859,9 +1891,10 @@ impl Supervisor {
                         );
                         return Ok(channel);
                     }
-                    Err(_) => {
+                    Ok(Err(_)) => {
                         // Socket file exists but listener is not yet ready to accept connections.
                     }
+                    Err(_) => return Err(SupervisorError::Timeout(host_id.to_string())),
                 }
             }
 
@@ -1869,15 +1902,6 @@ impl Supervisor {
         }
 
         Err(SupervisorError::Timeout(host_id.to_string()))
-    }
-}
-
-impl Drop for Supervisor {
-    fn drop(&mut self) {
-        // As a safeguard against leftover socket files on unexpected drops:
-        if self.core_sock_path.exists() {
-            let _ = std::fs::remove_file(&self.core_sock_path);
-        }
     }
 }
 

@@ -33,6 +33,12 @@ pub async fn connect_unix(path: impl Into<PathBuf>) -> Result<Channel, tonic::tr
 pub async fn connect_tcp(addr: std::net::SocketAddr) -> Result<Channel, tonic::transport::Error> {
     Endpoint::try_from(format!("http://{addr}"))?
         .connect_with_connector(service_fn(move |_: Uri| async move {
+            if !addr.ip().is_loopback() {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidInput,
+                    "IPC must use loopback",
+                ));
+            }
             let stream = tokio::net::TcpStream::connect(addr).await?;
             Ok::<_, std::io::Error>(hyper_util::rt::TokioIo::new(IpcStream::new(stream)))
         }))
@@ -49,13 +55,17 @@ pub async fn connect_ipc(path: impl Into<PathBuf>) -> Result<Channel, tonic::tra
     }
     #[cfg(windows)]
     {
+        // Resolve on every reconnect and reject non-loopback files before dialing.
         let path = path.into();
-        let addr_str = std::fs::read_to_string(&path).map_err(|e| {
-            tonic::transport::Error::from(std::io::Error::new(std::io::ErrorKind::NotFound, e))
-        })?;
-        let addr: std::net::SocketAddr = addr_str.trim().parse().map_err(|e| {
-            tonic::transport::Error::from(std::io::Error::new(std::io::ErrorKind::InvalidInput, e))
-        })?;
-        connect_tcp(addr).await
+        Endpoint::try_from("http://localhost")?
+            .connect_with_connector(service_fn(move |_: Uri| {
+                let path = path.clone();
+                async move {
+                    let addr = crate::read_loopback_endpoint(&path)?;
+                    let stream = tokio::net::TcpStream::connect(addr).await?;
+                    Ok::<_, std::io::Error>(hyper_util::rt::TokioIo::new(IpcStream::new(stream)))
+                }
+            }))
+            .await
     }
 }

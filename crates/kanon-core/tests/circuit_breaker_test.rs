@@ -400,3 +400,61 @@ async fn test_circuit_breaker_half_open_limits_concurrent_probes() {
     assert_eq!(cb.state(), CircuitState::Closed);
     assert!(cb.allow_request(), "Normal traffic admitted after recovery");
 }
+
+#[test]
+fn discovery_does_not_consume_recovery_and_cancelled_probe_reopens() {
+    let breaker = CircuitBreaker::new(CircuitBreakerConfig {
+        failure_threshold: 1,
+        cooldown_period: Duration::ZERO,
+        half_open_success_threshold: 1,
+        max_half_open_probes: 1,
+        ..CircuitBreakerConfig::default()
+    });
+    breaker.record_failure("trip");
+    for _ in 0..10 {
+        assert!(breaker.is_available());
+    }
+    let probe = breaker
+        .try_acquire()
+        .expect("discovery must leave the probe available");
+    assert!(!breaker.is_available());
+    assert!(breaker.try_acquire().is_none());
+    drop(probe);
+    let retry = breaker
+        .try_acquire()
+        .expect("cancellation must release the slot");
+    retry.success(Duration::from_millis(1));
+    assert_eq!(breaker.state(), CircuitState::Closed);
+}
+
+#[tokio::test]
+async fn cancelled_prefilter_releases_half_open_probe() {
+    use std::future::Future;
+    use std::task::Poll;
+
+    let host = create_test_host(
+        "cancelled_prefilter",
+        100,
+        CircuitBreakerConfig {
+            cooldown_period: Duration::ZERO,
+            ..CircuitBreakerConfig::default()
+        },
+    );
+    host.circuit_breaker.trip("recovering host");
+    let hosts = [host.clone()];
+    let mut call = Box::pin(PreFilterChain::execute_with_observer(
+        PipelineEventRequest::default(),
+        &hosts,
+        None,
+    ));
+    // The lazy channel cannot finish its connection on this first poll. Drop the
+    // whole chain while its recovery probe is reserved, before the RPC timeout.
+    std::future::poll_fn(|cx| {
+        assert!(call.as_mut().poll(cx).is_pending());
+        Poll::Ready(())
+    })
+    .await;
+    assert!(!host.circuit_breaker.is_available());
+    drop(call);
+    assert!(host.circuit_breaker.try_acquire().is_some());
+}

@@ -11,8 +11,8 @@
 //! with it.
 //!
 //! # One authoritative store, one apply path
-//! Every mutation loads the current [`NodeSettings`], changes it, and hands the result to
-//! `ApiState::apply_node_settings`, which validates, persists and publishes in that order. Keeping
+//! Every mutation updates the current settings through `ApiState::update_node_settings`, which
+//! serializes edits, validates, persists and publishes in that order. Keeping
 //! a single apply path is what guarantees the console can never describe a directory the running
 //! node does not have.
 
@@ -266,42 +266,40 @@ async fn upsert_provider(
         ));
     }
 
-    let mut settings = state.node_settings();
-    let existing = settings
-        .providers
-        .iter()
-        .find(|entry| entry.name == name)
-        .cloned();
-
-    // An omitted credential keeps the stored one, which is what lets the console edit a URL
-    // without forcing the operator to retype a secret it never received.
-    let api_key = if payload.clear_api_key {
-        None
-    } else {
-        payload
-            .api_key
-            .filter(|key| !key.trim().is_empty())
-            .or_else(|| existing.as_ref().and_then(|entry| entry.api_key.clone()))
-    };
-
-    let entry = ProviderEntry {
-        name: name.clone(),
-        protocol: payload.protocol.trim().to_lowercase(),
-        base_url: payload.base_url.trim().to_string(),
-        api_key,
-        temperature: payload.temperature,
-        max_tokens: payload.max_tokens,
-        replay_reasoning: payload
-            .replay_reasoning
-            .unwrap_or_else(|| existing.as_ref().is_none_or(|entry| entry.replay_reasoning)),
-    };
-
-    settings.providers.retain(|entry| entry.name != name);
-    settings.providers.push(entry);
-
-    state
-        .apply_node_settings(settings)
-        .map_err(ApiError::BadRequest)?;
+    state.update_node_settings(|settings| {
+        let existing = settings.providers.iter().find(|entry| entry.name == name);
+        let base_url = payload.base_url.trim().to_string();
+        let explicit_key = payload.api_key.filter(|key| !key.trim().is_empty());
+        // Credentials belong to an exact endpoint. Editing its URL must never silently send a
+        // stored secret to a new destination, including automatic model discovery after saving.
+        if !payload.clear_api_key
+            && explicit_key.is_none()
+            && existing.is_some_and(|entry| entry.has_api_key() && entry.base_url != base_url)
+        {
+            return Err(ApiError::BadRequest(
+                "Changing base_url requires an explicit api_key or clear_api_key".into(),
+            ));
+        }
+        let api_key = if payload.clear_api_key {
+            None
+        } else {
+            explicit_key.or_else(|| existing.and_then(|entry| entry.api_key.clone()))
+        };
+        let entry = ProviderEntry {
+            name: name.clone(),
+            protocol: payload.protocol.trim().to_lowercase(),
+            base_url,
+            api_key,
+            temperature: payload.temperature,
+            max_tokens: payload.max_tokens,
+            replay_reasoning: payload
+                .replay_reasoning
+                .unwrap_or_else(|| existing.is_none_or(|entry| entry.replay_reasoning)),
+        };
+        settings.providers.retain(|entry| entry.name != name);
+        settings.providers.push(entry);
+        Ok(())
+    })?;
 
     // Fill the model catalog from the endpoint's own listing so the operator gets the provider's
     // models (and their context windows and modalities) without a second manual step. Failures are
@@ -316,33 +314,32 @@ async fn delete_provider(
     Json(payload): Json<DeleteProviderRequest>,
 ) -> Result<Json<ProvidersCatalogResponse>, ApiError> {
     let name = payload.name.trim().to_string();
-    let mut settings = state.node_settings();
-    let before = settings.providers.len();
-    settings.providers.retain(|entry| entry.name != name);
+    state.update_node_settings(|settings| {
+        let before = settings.providers.len();
+        settings.providers.retain(|entry| entry.name != name);
 
-    if settings.providers.len() == before {
-        return Err(ApiError::NotFound(format!(
-            "provider '{name}' is not configured"
-        )));
-    }
+        if settings.providers.len() == before {
+            return Err(ApiError::NotFound(format!(
+                "provider '{name}' is not configured"
+            )));
+        }
 
-    // Models belong to the endpoint that serves them: keeping them would leave references to a
-    // credential that no longer exists.
-    settings.models.retain(|spec| spec.provider != name);
+        // Models belong to the endpoint that serves them: keeping them would leave references to a
+        // credential that no longer exists.
+        settings.models.retain(|spec| spec.provider != name);
 
-    // The global default cannot outlive the endpoint that serves it. The node then has no default
-    // model, which the console reports as such rather than silently picking another one.
-    let serves_default = settings
-        .default_model
-        .as_deref()
-        .is_some_and(|model| ModelRef::parse(model).provider() == Some(name.as_str()));
-    if serves_default {
-        settings.default_model = None;
-    }
+        // The global default cannot outlive the endpoint that serves it. The node then has no default
+        // model, which the console reports as such rather than silently picking another one.
+        let serves_default = settings
+            .default_model
+            .as_deref()
+            .is_some_and(|model| ModelRef::parse(model).provider() == Some(name.as_str()));
+        if serves_default {
+            settings.default_model = None;
+        }
 
-    state
-        .apply_node_settings(settings)
-        .map_err(ApiError::BadRequest)?;
+        Ok(())
+    })?;
     list_providers(State(state)).await
 }
 
@@ -382,15 +379,21 @@ async fn test_provider(
                     .map(|spec| spec.model.clone()),
             );
 
+            let base_url = non_blank(payload.base_url)
+                .map(|url| url.trim().to_string())
+                .unwrap_or_else(|| entry.base_url.clone());
+            let explicit_key = non_blank(payload.api_key);
+            if base_url != entry.base_url && entry.has_api_key() && explicit_key.is_none() {
+                return Err(ApiError::BadRequest(
+                    "Testing a changed base_url requires an explicit api_key".into(),
+                ));
+            }
             (
                 non_blank(payload.protocol)
                     .map(|protocol| protocol.trim().to_lowercase())
                     .unwrap_or(entry.protocol),
-                non_blank(payload.base_url)
-                    .map(|url| url.trim().to_string())
-                    .unwrap_or(entry.base_url),
-                // A typed key wins; otherwise the stored one is used without ever leaving the node.
-                non_blank(payload.api_key).or(entry.api_key),
+                base_url,
+                explicit_key.or(entry.api_key),
                 candidates,
             )
         }
