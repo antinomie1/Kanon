@@ -222,12 +222,13 @@ async fn set_persona(
 
     let persona = state
         .personas()
-        .get(persona_id)
-        .ok_or_else(|| ApiError::NotFound(format!("Persona '{persona_id}' is not registered")))?;
-
-    // The binding itself creates and persists a missing session after persona validation, so a
-    // rejected persona or failed write cannot leave behind an empty session record.
-    state.sessions().set_persona(&session_id, persona_id)?;
+        .with_persona(persona_id, |persona| {
+            // Keep the persona readable until the durable binding is published, so a concurrent
+            // deletion must see this session instead of leaving it bound to a missing persona.
+            state.sessions().set_persona(&session_id, persona_id)?;
+            Ok::<_, kanon_llm::error::MemoryError>(persona.clone())
+        })
+        .ok_or_else(|| ApiError::NotFound(format!("Persona '{persona_id}' is not registered")))??;
 
     state
         .observability()

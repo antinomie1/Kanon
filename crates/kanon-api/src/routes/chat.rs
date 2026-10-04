@@ -254,13 +254,12 @@ fn apply_persona_override(
         return Ok(());
     };
 
-    if state.personas().get(persona_id).is_none() {
-        return Err(ApiError::NotFound(format!(
-            "Persona '{persona_id}' is not registered"
-        )));
-    }
-
-    state.sessions().set_persona(session_id, persona_id)?;
+    state
+        .personas()
+        .with_persona(persona_id, |_| {
+            state.sessions().set_persona(session_id, persona_id)
+        })
+        .ok_or_else(|| ApiError::NotFound(format!("Persona '{persona_id}' is not registered")))??;
     Ok(())
 }
 

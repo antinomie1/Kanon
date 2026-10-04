@@ -96,12 +96,15 @@ async fn harness(draft: InstanceDraft) -> (Arc<PipelineEngine>, PathBuf) {
             }))),
     );
     registry
-        .create(InstanceDraft {
-            name: "Bash Bot".into(),
-            enabled: true,
-            adapters: vec!["qq".into()],
-            ..draft
-        })
+        .create(
+            InstanceDraft {
+                name: "Bash Bot".into(),
+                enabled: true,
+                adapters: vec!["qq".into()],
+                ..draft
+            },
+            None,
+        )
         .await
         .unwrap();
     (engine, dir)

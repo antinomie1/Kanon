@@ -116,6 +116,7 @@ fn map_change_error(err: PersonaChangeError) -> ApiError {
         PersonaChangeError::Persona(err) => map_error(err),
         PersonaChangeError::InstanceOwned(_) => ApiError::Conflict(err.to_string()),
         PersonaChangeError::Storage(message) => ApiError::Internal(message),
+        PersonaChangeError::Session(error) => error.into(),
     }
 }
 
@@ -246,7 +247,7 @@ async fn update_persona(
 
     state
         .persona_store()
-        .upsert(state.personas(), persona)
+        .update(state.personas(), persona)
         .map_err(map_change_error)?;
 
     tracing::info!(persona_id = %id, "Persona updated through the control plane");
@@ -268,30 +269,23 @@ async fn delete_persona(
         .ok_or_else(|| map_error(PersonaError::NotFound(id.clone())))?;
     require_custom(&existing)?;
 
-    let users = state.instances().instances_using_persona(&id).await;
-    if !users.is_empty() {
-        return Err(ApiError::Conflict(format!(
-            "persona '{id}' is used by instance(s) {}; pick another persona there first",
-            users.join(", ")
-        )));
-    }
-
-    // Acquire every affected writer before deleting the catalog entry. A busy turn must not
-    // lose its persona halfway through a tool loop, and a rejection must leave the catalog intact.
-    let _writers = state
-        .sessions()
-        .list_sessions()
-        .into_iter()
-        .filter(|session| session.persona_id.as_deref() == Some(id.as_str()))
-        .map(|session| state.sessions().try_write(&session.session_key))
-        .collect::<Result<Vec<_>, _>>()?;
     state
-        .persona_store()
-        .remove(state.personas(), &id)
-        .map_err(map_change_error)?;
-    let unbound = state.sessions().unbind_persona(&id);
+        .instances()
+        .with_persona_users(&id, |users| {
+            if !users.is_empty() {
+                return Err(ApiError::Conflict(format!(
+                    "persona '{id}' is used by instance(s) {}; pick another persona there first",
+                    users.join(", ")
+                )));
+            }
+            state
+                .persona_store()
+                .remove(state.personas(), &id, Some(state.sessions()))
+                .map_err(map_change_error)
+        })
+        .await?;
 
-    tracing::info!(persona_id = %id, unbound_sessions = unbound, "Persona removed through the control plane");
+    tracing::info!(persona_id = %id, "Persona removed through the control plane");
     Ok(Json(catalog(&state).await))
 }
 

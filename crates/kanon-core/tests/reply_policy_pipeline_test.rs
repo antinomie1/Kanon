@@ -160,20 +160,23 @@ fn event(event_id: &str, text: &str, kind: &str, mentioned: bool) -> PipelineEve
 /// Creates an enabled instance claiming the fixture platform.
 async fn instance(registry: &InstanceRegistry, policy: Option<ReplyPolicy>) -> String {
     registry
-        .create(InstanceDraft {
-            name: "Policy Bot".to_string(),
-            enabled: true,
-            adapters: vec!["policy".to_string()],
-            persona_id: None,
-            system_prompt: None,
-            model: None,
-            reply_policy: policy,
-            context_policy: None,
-            plugins: Default::default(),
-            skills: Default::default(),
-            mcp: Default::default(),
-            ..Default::default()
-        })
+        .create(
+            InstanceDraft {
+                name: "Policy Bot".to_string(),
+                enabled: true,
+                adapters: vec!["policy".to_string()],
+                persona_id: None,
+                system_prompt: None,
+                model: None,
+                reply_policy: policy,
+                context_policy: None,
+                plugins: Default::default(),
+                skills: Default::default(),
+                mcp: Default::default(),
+                ..Default::default()
+            },
+            None,
+        )
         .await
         .expect("create instance")
         .id
@@ -636,20 +639,23 @@ async fn instance_with_context(
     context_policy: Option<kanon_core::ContextPolicy>,
 ) -> String {
     registry
-        .create(InstanceDraft {
-            name: "Context Bot".to_string(),
-            enabled: true,
-            adapters: vec!["policy".to_string()],
-            persona_id: None,
-            system_prompt: None,
-            model: None,
-            reply_policy: None,
-            context_policy,
-            plugins: Default::default(),
-            skills: Default::default(),
-            mcp: Default::default(),
-            ..Default::default()
-        })
+        .create(
+            InstanceDraft {
+                name: "Context Bot".to_string(),
+                enabled: true,
+                adapters: vec!["policy".to_string()],
+                persona_id: None,
+                system_prompt: None,
+                model: None,
+                reply_policy: None,
+                context_policy,
+                plugins: Default::default(),
+                skills: Default::default(),
+                mcp: Default::default(),
+                ..Default::default()
+            },
+            None,
+        )
         .await
         .expect("create instance")
         .id

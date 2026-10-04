@@ -509,21 +509,37 @@ impl SessionManager {
             .and_then(|m| m.persona_id.clone())
     }
 
-    /// Clears the persona binding of every session that uses `persona_id`, returning how many
-    /// sessions were unbound.
+    /// Durably clears every binding to `persona_id`, returning how many sessions were unbound.
     ///
-    /// Called when a persona is deleted: those sessions fall back to the base assistant instead of
-    /// pointing at a persona that no longer exists.
-    pub fn unbind_persona(&self, persona_id: &str) -> usize {
+    /// The caller must prevent new bindings to this persona while this runs. All affected writers
+    /// are acquired without waiting before changing anything. If a later save fails, earlier
+    /// unbindings remain committed; the caller must retain the persona and report the failure.
+    pub fn unbind_persona(&self, persona_id: &str) -> Result<usize, MemoryError> {
+        let keys: Vec<String> = self
+            .list_sessions()
+            .into_iter()
+            .filter(|entry| entry.persona_id.as_deref() == Some(persona_id))
+            .map(|entry| entry.session_key)
+            .collect();
+        let _writers = keys
+            .iter()
+            .map(|key| self.try_write(key))
+            .collect::<Result<Vec<_>, _>>()?;
         let mut unbound = 0;
-        for mut entry in self.metadata.iter_mut() {
-            if entry.persona_id.as_deref() == Some(persona_id) {
-                entry.persona_id = None;
-                self.persist(&entry);
+        for key in keys {
+            if let Some(mut entry) = self.metadata.get_mut(&key)
+                && entry.persona_id.as_deref() == Some(persona_id)
+            {
+                let mut candidate = entry.clone();
+                candidate.persona_id = None;
+                if let Some(store) = &self.store {
+                    store.save(&candidate)?;
+                }
+                *entry = candidate;
                 unbound += 1;
             }
         }
-        unbound
+        Ok(unbound)
     }
 
     /// Removes a session's persona binding after persistence succeeds; missing sessions are a no-op.

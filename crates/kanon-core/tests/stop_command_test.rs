@@ -85,12 +85,15 @@ async fn an_admins_stop_ends_the_running_turn_and_the_chat_goes_on() {
         .expect("register adapter");
     let registry = Arc::new(InstanceRegistry::in_memory());
     let instance = registry
-        .create(InstanceDraft {
-            name: "stop-test".to_string(),
-            enabled: true,
-            adapters: vec![PLATFORM.to_string()],
-            ..Default::default()
-        })
+        .create(
+            InstanceDraft {
+                name: "stop-test".to_string(),
+                enabled: true,
+                adapters: vec![PLATFORM.to_string()],
+                ..Default::default()
+            },
+            None,
+        )
         .await
         .expect("create instance");
     let waiting = Arc::new(Notify::new());
@@ -182,12 +185,15 @@ async fn stop_cancels_a_turn_waiting_for_the_session_writer() {
     let dir = tempfile::tempdir().unwrap();
     let registry = Arc::new(InstanceRegistry::in_memory());
     let instance = registry
-        .create(InstanceDraft {
-            name: "waiting-writer".into(),
-            enabled: true,
-            adapters: vec![PLATFORM.into()],
-            ..Default::default()
-        })
+        .create(
+            InstanceDraft {
+                name: "waiting-writer".into(),
+                enabled: true,
+                adapters: vec![PLATFORM.into()],
+                ..Default::default()
+            },
+            None,
+        )
         .await
         .unwrap();
     let memory = Arc::new(InMemory::new());
@@ -264,12 +270,15 @@ async fn stop_bypasses_a_full_waiting_queue_and_concurrency_is_bounded() {
         .unwrap();
     let registry = Arc::new(InstanceRegistry::in_memory());
     registry
-        .create(InstanceDraft {
-            name: "bounded".into(),
-            enabled: true,
-            adapters: vec![PLATFORM.into()],
-            ..Default::default()
-        })
+        .create(
+            InstanceDraft {
+                name: "bounded".into(),
+                enabled: true,
+                adapters: vec![PLATFORM.into()],
+                ..Default::default()
+            },
+            None,
+        )
         .await
         .unwrap();
     let waiting = Arc::new(Notify::new());

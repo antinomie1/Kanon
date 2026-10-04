@@ -48,11 +48,14 @@ async fn failed_writes_leave_live_state_unchanged() {
         .expect("open instances");
     std::fs::create_dir(&instances_path).expect("block instances file");
     instances
-        .create(InstanceDraft {
-            name: "Bot".to_string(),
-            enabled: true,
-            ..Default::default()
-        })
+        .create(
+            InstanceDraft {
+                name: "Bot".to_string(),
+                enabled: true,
+                ..Default::default()
+            },
+            None,
+        )
         .await
         .expect_err("instance write must fail");
     assert!(instances.is_empty().await);

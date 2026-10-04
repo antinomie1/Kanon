@@ -418,12 +418,15 @@ impl Sandbox {
                 .map_err(|err| setup("instance catalog", &err))?,
         );
         instances
-            .create(InstanceDraft {
-                name: "Sandbox".to_string(),
-                enabled: true,
-                adapters: vec![PLATFORM.to_string()],
-                ..InstanceDraft::default()
-            })
+            .create(
+                InstanceDraft {
+                    name: "Sandbox".to_string(),
+                    enabled: true,
+                    adapters: vec![PLATFORM.to_string()],
+                    ..InstanceDraft::default()
+                },
+                Some(&personas),
+            )
             .await
             .map_err(|err| setup("sandbox instance", &err))?;
         let model = Arc::new(MockModel::default());

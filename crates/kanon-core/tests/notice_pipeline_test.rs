@@ -57,20 +57,23 @@ async fn harness(
 
     let registry = Arc::new(InstanceRegistry::in_memory());
     registry
-        .create(InstanceDraft {
-            name: "Notice Bot".to_string(),
-            enabled: true,
-            adapters: vec!["qq".to_string()],
-            persona_id: None,
-            system_prompt: None,
-            model: None,
-            reply_policy: None,
-            context_policy: None,
-            plugins: Default::default(),
-            skills: Default::default(),
-            mcp: Default::default(),
-            ..Default::default()
-        })
+        .create(
+            InstanceDraft {
+                name: "Notice Bot".to_string(),
+                enabled: true,
+                adapters: vec!["qq".to_string()],
+                persona_id: None,
+                system_prompt: None,
+                model: None,
+                reply_policy: None,
+                context_policy: None,
+                plugins: Default::default(),
+                skills: Default::default(),
+                mcp: Default::default(),
+                ..Default::default()
+            },
+            None,
+        )
         .await
         .expect("create instance");
 

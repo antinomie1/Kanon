@@ -94,12 +94,15 @@ async fn harness(
 
     let registry = Arc::new(InstanceRegistry::in_memory());
     registry
-        .create(InstanceDraft {
-            name: "Access Bot".to_string(),
-            enabled: true,
-            adapters: vec!["qq".to_string()],
-            ..Default::default()
-        })
+        .create(
+            InstanceDraft {
+                name: "Access Bot".to_string(),
+                enabled: true,
+                adapters: vec!["qq".to_string()],
+                ..Default::default()
+            },
+            None,
+        )
         .await
         .expect("create instance");
     let memory: Arc<dyn Memory> = Arc::new(InMemory::new());

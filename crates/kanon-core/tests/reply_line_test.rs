@@ -129,16 +129,19 @@ async fn delivered_lines(
         .expect("register adapter");
     let registry = Arc::new(InstanceRegistry::in_memory());
     let instance = registry
-        .create(InstanceDraft {
-            name: "line-test".to_string(),
-            enabled: true,
-            adapters: vec!["line-test".to_string()],
-            reply_policy: instance_split.map(|split_lines| ReplyPolicy {
-                split_lines,
+        .create(
+            InstanceDraft {
+                name: "line-test".to_string(),
+                enabled: true,
+                adapters: vec!["line-test".to_string()],
+                reply_policy: instance_split.map(|split_lines| ReplyPolicy {
+                    split_lines,
+                    ..Default::default()
+                }),
                 ..Default::default()
-            }),
-            ..Default::default()
-        })
+            },
+            None,
+        )
         .await
         .expect("create instance");
     let memory: Arc<dyn Memory> = Arc::new(InMemory::new());
@@ -254,14 +257,17 @@ async fn legacy_policies_default_off_and_instance_setting_survives_restart() {
     let path = dir.path().join("instances.json");
     let registry = InstanceRegistry::open(&path).await.expect("open catalog");
     let instance = registry
-        .create(InstanceDraft {
-            name: "saved-line-test".to_string(),
-            reply_policy: Some(ReplyPolicy {
-                split_lines: true,
+        .create(
+            InstanceDraft {
+                name: "saved-line-test".to_string(),
+                reply_policy: Some(ReplyPolicy {
+                    split_lines: true,
+                    ..Default::default()
+                }),
                 ..Default::default()
-            }),
-            ..Default::default()
-        })
+            },
+            None,
+        )
         .await
         .expect("create instance");
     drop(registry);
@@ -369,12 +375,15 @@ async fn batch_engine(
 ) -> Arc<PipelineEngine> {
     let registry = Arc::new(InstanceRegistry::in_memory());
     registry
-        .create(InstanceDraft {
-            name: "line-test".to_string(),
-            adapters: vec!["line-test".to_string()],
-            enabled: true,
-            ..Default::default()
-        })
+        .create(
+            InstanceDraft {
+                name: "line-test".to_string(),
+                adapters: vec!["line-test".to_string()],
+                enabled: true,
+                ..Default::default()
+            },
+            None,
+        )
         .await
         .expect("create instance");
     let agent = Arc::new(

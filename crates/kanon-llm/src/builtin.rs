@@ -1010,6 +1010,10 @@ impl Agent for BuiltinAgent {
         self.session_manager.as_ref()
     }
 
+    fn persona_registry(&self) -> Option<&Arc<crate::prompt::PersonaRegistry>> {
+        self.persona_registry.as_ref()
+    }
+
     async fn run_message_with(
         &self,
         session_id: &str,

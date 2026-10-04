@@ -213,6 +213,36 @@ impl PersonaRegistry {
         self.personas.get(id).map(|p| p.clone())
     }
 
+    /// Runs a synchronous operation while the selected persona cannot be changed or removed.
+    ///
+    /// Bindings must be published before releasing this guard: deletion then either sees the
+    /// binding or finishes first and makes this lookup fail. The callback must not access this
+    /// registry again, because another identifier may occupy the same DashMap shard.
+    pub fn with_persona<T>(&self, id: &str, operation: impl FnOnce(&Persona) -> T) -> Option<T> {
+        self.personas.get(id).map(|persona| operation(&persona))
+    }
+
+    /// Removes one entry only after its owner's synchronous preparation succeeds.
+    ///
+    /// The callback owns an exclusive shard guard and must not re-enter this registry. Catalog
+    /// snapshots must be prepared before calling this method; no guard crosses an await point.
+    pub(crate) fn remove_after<E: From<PersonaError>>(
+        &self,
+        id: &str,
+        prepare: impl FnOnce(&Persona) -> Result<(), E>,
+    ) -> Result<Persona, E> {
+        use dashmap::mapref::entry::Entry;
+
+        let Entry::Occupied(entry) = self.personas.entry(id.to_string()) else {
+            return Err(PersonaError::NotFound(id.to_string()).into());
+        };
+        if entry.get().kind == PersonaKind::Builtin {
+            return Err(PersonaError::ReadOnly(id.to_string()).into());
+        }
+        prepare(entry.get())?;
+        Ok(entry.remove())
+    }
+
     /// The base assistant, which is always present.
     pub fn base(&self) -> Persona {
         self.get(BASE_PERSONA_ID).unwrap_or_else(Persona::base)

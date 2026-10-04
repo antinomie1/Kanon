@@ -279,3 +279,62 @@ async fn rejected_persona_changes_preserve_live_and_durable_bindings() {
         assert_eq!(restored.get_persona("existing").as_deref(), persona);
     }
 }
+
+#[tokio::test]
+async fn failed_persona_deletion_reports_the_failure_and_can_be_retried() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = Arc::new(RefusingStore::default());
+    let sessions = Arc::new(
+        SessionManager::new(Arc::new(InMemory::new()))
+            .with_store(store.clone())
+            .unwrap(),
+    );
+    let personas = Arc::new(kanon_llm::PersonaStore::new(
+        dir.path().join("personas.json"),
+    ));
+    let supervisor = Arc::new(kanon_core::supervisor::Supervisor::new(
+        Some(dir.path().join("run")),
+        None,
+    ));
+    let state = ApiState::builder(supervisor)
+        .with_sessions(sessions.clone())
+        .with_persona_store(personas.clone())
+        .build();
+    personas
+        .create(
+            state.personas(),
+            kanon_llm::Persona::custom("pirate", "Pirate", "", "Arr.").unwrap(),
+        )
+        .unwrap();
+    sessions.set_persona("s", "pirate").unwrap();
+    let app = kanon_api::app(state.clone());
+
+    store.reject.store(true, Ordering::SeqCst);
+    let (status, body) = send_json(&app, Method::DELETE, "/api/v1/personas/pirate", None).await;
+    assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR, "{body}");
+    assert!(state.personas().get("pirate").is_some());
+    assert_eq!(personas.load().unwrap()[0].id, "pirate");
+    assert_eq!(sessions.get_persona("s").as_deref(), Some("pirate"));
+    assert_eq!(
+        store.rows.lock().unwrap()["s"].persona_id.as_deref(),
+        Some("pirate")
+    );
+
+    // A later JSON failure leaves already committed unbindings in place and keeps the persona.
+    store.reject.store(false, Ordering::SeqCst);
+    let saved = dir.path().join("saved.json");
+    std::fs::rename(personas.path(), &saved).unwrap();
+    std::fs::create_dir(personas.path()).unwrap();
+    let (status, body) = send_json(&app, Method::DELETE, "/api/v1/personas/pirate", None).await;
+    assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR, "{body}");
+    assert!(state.personas().get("pirate").is_some());
+    assert!(sessions.get_persona("s").is_none());
+    assert!(store.rows.lock().unwrap()["s"].persona_id.is_none());
+
+    std::fs::remove_dir(personas.path()).unwrap();
+    std::fs::rename(saved, personas.path()).unwrap();
+    let (status, body) = send_json(&app, Method::DELETE, "/api/v1/personas/pirate", None).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert!(state.personas().get("pirate").is_none());
+    assert!(personas.load().unwrap().is_empty());
+}

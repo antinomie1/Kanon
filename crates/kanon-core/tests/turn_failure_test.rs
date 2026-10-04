@@ -80,12 +80,15 @@ async fn a_failed_turn_is_reported_once_to_whoever_asked_and_never_retried() {
         .expect("register adapter");
     let registry = Arc::new(InstanceRegistry::in_memory());
     registry
-        .create(InstanceDraft {
-            name: "failure-test".to_string(),
-            enabled: true,
-            adapters: vec![PLATFORM.to_string()],
-            ..Default::default()
-        })
+        .create(
+            InstanceDraft {
+                name: "failure-test".to_string(),
+                enabled: true,
+                adapters: vec![PLATFORM.to_string()],
+                ..Default::default()
+            },
+            None,
+        )
         .await
         .expect("create instance");
     let provider = Arc::new(Rejecting::default());

@@ -28,7 +28,7 @@ async fn create_persists_and_reloads_from_disk() {
     assert!(registry.is_empty().await);
 
     let created = registry
-        .create(draft("黑猪AI", true, &["qqofficial"]))
+        .create(draft("黑猪AI", true, &["qqofficial"]), None)
         .await
         .expect("create instance");
     assert!(created.enabled);
@@ -39,7 +39,7 @@ async fn create_persists_and_reloads_from_disk() {
 
     // A second instance gets a distinct identifier.
     let second = registry
-        .create(draft("Weather Bot", false, &[]))
+        .create(draft("Weather Bot", false, &[]), None)
         .await
         .expect("create second instance");
     assert_eq!(second.id, "weather-bot");
@@ -55,12 +55,12 @@ async fn enabled_instances_cannot_share_an_adapter() {
     let registry = InstanceRegistry::default(); // in-memory: no disk writes in tests
 
     registry
-        .create(draft("first", true, &["qqofficial"]))
+        .create(draft("first", true, &["qqofficial"]), None)
         .await
         .expect("first instance");
 
     let conflict = registry
-        .create(draft("second", true, &["qqofficial"]))
+        .create(draft("second", true, &["qqofficial"]), None)
         .await
         .expect_err("second enabled instance must not claim the same adapter");
     match conflict {
@@ -73,14 +73,14 @@ async fn enabled_instances_cannot_share_an_adapter() {
 
     // A disabled instance does not collide, because it serves nothing...
     let disabled = registry
-        .create(draft("third", false, &["qqofficial"]))
+        .create(draft("third", false, &["qqofficial"]), None)
         .await
         .expect("disabled instance may reuse the adapter");
     assert!(!disabled.enabled);
 
     // ...until it is enabled, which must then be rejected.
     let err = registry
-        .update(&disabled.id, draft("third", true, &["qqofficial"]))
+        .update(&disabled.id, draft("third", true, &["qqofficial"]), None)
         .await
         .expect_err("enabling a conflicting instance must fail");
     assert!(matches!(err, InstanceError::Conflict { .. }));
@@ -91,7 +91,7 @@ async fn resolve_by_platform_only_returns_enabled_owners() {
     let registry = InstanceRegistry::default();
 
     let disabled = registry
-        .create(draft("sleeping", false, &["qqofficial"]))
+        .create(draft("sleeping", false, &["qqofficial"]), None)
         .await
         .expect("create disabled instance");
 
@@ -105,7 +105,7 @@ async fn resolve_by_platform_only_returns_enabled_owners() {
     );
 
     registry
-        .update(&disabled.id, draft("sleeping", true, &["qqofficial"]))
+        .update(&disabled.id, draft("sleeping", true, &["qqofficial"]), None)
         .await
         .expect("enable instance");
 
@@ -158,7 +158,7 @@ async fn ambiguous_ownership_is_reported_instead_of_guessed() {
 async fn new_command_rotates_only_its_conversation_and_keeps_history() {
     let registry = InstanceRegistry::default();
     let instance = registry
-        .create(draft("bot", true, &["qqofficial"]))
+        .create(draft("bot", true, &["qqofficial"]), None)
         .await
         .expect("create instance");
 
@@ -201,7 +201,7 @@ fn other_session(instance: &BotInstance, conversation: &str) -> String {
 async fn update_preserves_session_history_and_validates_input() {
     let registry = InstanceRegistry::default();
     let instance = registry
-        .create(draft("bot", true, &["qqofficial"]))
+        .create(draft("bot", true, &["qqofficial"]), None)
         .await
         .expect("create");
 
@@ -227,6 +227,7 @@ async fn update_preserves_session_history_and_validates_input() {
                 mcp: Default::default(),
                 ..Default::default()
             },
+            None,
         )
         .await
         .expect("update");
@@ -242,13 +243,13 @@ async fn update_preserves_session_history_and_validates_input() {
     );
 
     let blank = registry
-        .update(&instance.id, draft("   ", true, &[]))
+        .update(&instance.id, draft("   ", true, &[]), None)
         .await
         .expect_err("blank name must be rejected");
     assert!(matches!(blank, InstanceError::Invalid(_)));
 
     let missing = registry
-        .update("nope", draft("x", true, &[]))
+        .update("nope", draft("x", true, &[]), None)
         .await
         .expect_err("unknown instance must be rejected");
     assert!(matches!(missing, InstanceError::NotFound(_)));
@@ -274,7 +275,10 @@ async fn instance_policies_survive_a_restart() {
         include_timestamp: true,
         ..Default::default()
     });
-    registry.create(submitted).await.expect("create instance");
+    registry
+        .create(submitted, None)
+        .await
+        .expect("create instance");
 
     // Both policies are part of the instance record, so a restart applies them immediately instead
     // of waiting for a console visit.
@@ -302,13 +306,13 @@ async fn an_unknown_agent_is_refused_on_save_and_on_load() {
 
     let mut builtin = draft("Agent Bot", true, &["qqofficial"]);
     builtin.agent = Some(" builtin ".to_string());
-    let stored = registry.create(builtin).await.expect("builtin agent");
+    let stored = registry.create(builtin, None).await.expect("builtin agent");
     assert_eq!(stored.agent.as_deref(), Some("builtin"));
 
     let mut unknown = draft("Other Bot", false, &[]);
     unknown.agent = Some("dify".to_string());
     let err = registry
-        .create(unknown)
+        .create(unknown, None)
         .await
         .expect_err("an agent the node cannot run must be refused");
     assert!(

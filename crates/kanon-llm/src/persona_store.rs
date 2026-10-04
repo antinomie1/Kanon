@@ -18,7 +18,9 @@ use std::sync::Mutex;
 
 use serde::{Deserialize, Serialize};
 
+use crate::error::MemoryError;
 use crate::prompt::{Persona, PersonaError, PersonaKind, PersonaRegistry};
+use crate::session::SessionManager;
 
 /// Default location of the persona document, relative to the node working directory.
 pub const DEFAULT_PERSONA_FILE: &str = "./data/personas.json";
@@ -55,9 +57,12 @@ pub enum PersonaChangeError {
         "persona '{0}' is generated from a bot instance's own prompt; edit it on that instance"
     )]
     InstanceOwned(String),
-    /// `data/personas.json` could not be written; nothing changed.
+    /// The catalog is unchanged after a JSON write failure; session unbindings may already persist.
     #[error("{0}")]
     Storage(String),
+    /// A bound session is busy or could not be durably unbound; the persona remains registered.
+    #[error(transparent)]
+    Session(#[from] MemoryError),
 }
 
 /// File-backed store of the operator's personas.
@@ -178,6 +183,20 @@ impl PersonaStore {
         self.upsert_locked(registry, persona)
     }
 
+    /// Replaces an existing custom persona without recreating one deleted by another writer.
+    pub fn update(
+        &self,
+        registry: &PersonaRegistry,
+        persona: Persona,
+    ) -> Result<(), PersonaChangeError> {
+        let _change = self.lock();
+        if registry.get(&persona.id).is_none() {
+            return Err(PersonaError::NotFound(persona.id).into());
+        }
+        self.upsert_locked(registry, persona)?;
+        Ok(())
+    }
+
     /// Writes a persona while the caller holds the change lock.
     fn upsert_locked(
         &self,
@@ -209,28 +228,35 @@ impl PersonaStore {
 
     /// Removes an operator-defined persona and returns it.
     ///
-    /// Whether anything still uses the persona is the caller's question (bot instances live
-    /// outside this crate); sessions bound to it are the caller's to unbind afterwards.
+    /// The caller keeps instance references locked against changes. Bound sessions are unbound
+    /// durably before the catalog is removed; `None` is for standalone catalogs without sessions.
+    /// If unbinding or the JSON write fails, the persona remains, but any earlier successful
+    /// unbindings remain committed. JSON and SQLite do not share a transaction; retry is safe.
     pub fn remove(
         &self,
         registry: &PersonaRegistry,
         id: &str,
+        sessions: Option<&SessionManager>,
     ) -> Result<Persona, PersonaChangeError> {
         let _change = self.lock();
-        match registry.get(id).map(|existing| existing.kind) {
-            None => return Err(PersonaError::NotFound(id.to_string()).into()),
-            Some(PersonaKind::Custom) => {}
-            Some(PersonaKind::Builtin) => return Err(PersonaError::ReadOnly(id.to_string()).into()),
-            Some(PersonaKind::Instance) => {
-                return Err(PersonaChangeError::InstanceOwned(id.to_string()));
-            }
-        }
+        // Snapshot before taking the target's exclusive shard: listing under that guard would
+        // re-enter DashMap. The changes mutex keeps other custom catalog writes serialized.
         let remaining: Vec<Persona> = custom_personas(registry)
             .into_iter()
             .filter(|persona| persona.id != id)
             .collect();
-        self.save(&remaining).map_err(PersonaChangeError::Storage)?;
-        Ok(registry.remove(id)?)
+        registry.remove_after(id, |persona| {
+            if persona.kind == PersonaKind::Instance {
+                return Err(PersonaChangeError::InstanceOwned(id.to_string()));
+            }
+            // Lock order is instance catalog -> store changes -> persona shard -> session
+            // writers (try only) -> metadata -> storage. Setters may already own a session
+            // writer before looking up the persona, so waiting for a writer here would deadlock.
+            if let Some(sessions) = sessions {
+                sessions.unbind_persona(id)?;
+            }
+            self.save(&remaining).map_err(PersonaChangeError::Storage)
+        })
     }
 
     /// Holds the change lock. A poisoned lock only means an earlier change panicked; the file

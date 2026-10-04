@@ -135,20 +135,23 @@ fn event(platform: &str, event_id: &str, text: &str) -> PipelineEventRequest {
 /// Creates an instance in the catalog.
 async fn instance(registry: &InstanceRegistry, enabled: bool, adapters: &[&str]) -> String {
     registry
-        .create(InstanceDraft {
-            name: "Test Bot".to_string(),
-            enabled,
-            adapters: adapters.iter().map(|a| (*a).to_string()).collect(),
-            persona_id: None,
-            system_prompt: None,
-            model: None,
-            reply_policy: None,
-            context_policy: None,
-            plugins: Default::default(),
-            skills: Default::default(),
-            mcp: Default::default(),
-            ..Default::default()
-        })
+        .create(
+            InstanceDraft {
+                name: "Test Bot".to_string(),
+                enabled,
+                adapters: adapters.iter().map(|a| (*a).to_string()).collect(),
+                persona_id: None,
+                system_prompt: None,
+                model: None,
+                reply_policy: None,
+                context_policy: None,
+                plugins: Default::default(),
+                skills: Default::default(),
+                mcp: Default::default(),
+                ..Default::default()
+            },
+            None,
+        )
         .await
         .expect("create instance")
         .id
@@ -289,23 +292,26 @@ async fn a_plugin_disabled_for_an_instance_is_removed_before_pre_filter() {
     const PLUGIN_ID: &str = "org.kanon.plugin.noisy";
     let registry = Arc::new(InstanceRegistry::default());
     registry
-        .create(InstanceDraft {
-            name: "Policy Bot".to_string(),
-            enabled: true,
-            adapters: vec!["qqofficial".to_string()],
-            persona_id: None,
-            system_prompt: None,
-            model: None,
-            reply_policy: None,
-            context_policy: None,
-            plugins: std::collections::HashMap::from([(
-                PLUGIN_ID.to_string(),
-                ItemPolicy::Disable,
-            )]),
-            skills: Default::default(),
-            mcp: Default::default(),
-            ..Default::default()
-        })
+        .create(
+            InstanceDraft {
+                name: "Policy Bot".to_string(),
+                enabled: true,
+                adapters: vec!["qqofficial".to_string()],
+                persona_id: None,
+                system_prompt: None,
+                model: None,
+                reply_policy: None,
+                context_policy: None,
+                plugins: std::collections::HashMap::from([(
+                    PLUGIN_ID.to_string(),
+                    ItemPolicy::Disable,
+                )]),
+                skills: Default::default(),
+                mcp: Default::default(),
+                ..Default::default()
+            },
+            None,
+        )
         .await
         .expect("create instance");
 

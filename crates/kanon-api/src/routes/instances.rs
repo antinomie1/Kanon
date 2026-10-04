@@ -17,7 +17,7 @@ use axum::extract::{Path, State};
 use axum::routing::{get, put};
 use serde::{Deserialize, Serialize};
 
-use kanon_core::instance::{InstanceDraft, InstanceError, sync_instance_personas};
+use kanon_core::instance::{InstanceDraft, InstanceError};
 use kanon_core::{
     AdapterDescriptor, BashScope, BotInstance, CommandPolicy, ContextPolicy, ReplyPolicy,
 };
@@ -271,24 +271,6 @@ fn map_error(err: InstanceError) -> ApiError {
     }
 }
 
-/// Rejects a persona that the node does not know, so the console cannot store a typo.
-fn validate_persona(state: &ApiState, draft: &InstanceDraft) -> Result<(), ApiError> {
-    if let Some(persona_id) = draft.persona_id.as_deref()
-        && state.personas().get(persona_id).is_none()
-    {
-        return Err(ApiError::BadRequest(format!(
-            "persona '{persona_id}' does not exist on this node"
-        )));
-    }
-    Ok(())
-}
-
-/// Publishes instance prompts as personas so the existing prompt pipeline applies them.
-async fn publish_personas(state: &ApiState) {
-    let instances = state.instances().list().await;
-    sync_instance_personas(&instances, state.personas());
-}
-
 /// Handler for `GET /api/v1/instances`.
 async fn list_instances(State(state): State<ApiState>) -> Json<InstancesResponse> {
     let instances = state.instances().list().await;
@@ -316,10 +298,11 @@ async fn create_instance(
     Json(payload): Json<InstanceRequest>,
 ) -> Result<Json<InstanceMutationResponse>, ApiError> {
     let draft: InstanceDraft = payload.into();
-    validate_persona(&state, &draft)?;
-
-    let instance = state.instances().create(draft).await.map_err(map_error)?;
-    publish_personas(&state).await;
+    let instance = state
+        .instances()
+        .create(draft, Some(state.personas()))
+        .await
+        .map_err(map_error)?;
 
     tracing::info!(
         instance_id = %instance.id,
@@ -342,14 +325,11 @@ async fn update_instance(
     Json(payload): Json<InstanceRequest>,
 ) -> Result<Json<InstanceMutationResponse>, ApiError> {
     let draft: InstanceDraft = payload.into();
-    validate_persona(&state, &draft)?;
-
     let instance = state
         .instances()
-        .update(&id, draft)
+        .update(&id, draft, Some(state.personas()))
         .await
         .map_err(map_error)?;
-    publish_personas(&state).await;
 
     tracing::info!(
         instance_id = %instance.id,
@@ -371,8 +351,11 @@ async fn delete_instance(
     State(state): State<ApiState>,
     Path(id): Path<String>,
 ) -> Result<Json<InstanceMutationResponse>, ApiError> {
-    state.instances().delete(&id).await.map_err(map_error)?;
-    publish_personas(&state).await;
+    state
+        .instances()
+        .delete(&id, Some(state.personas()))
+        .await
+        .map_err(map_error)?;
 
     tracing::info!(instance_id = %id, "Bot instance deleted");
 

@@ -98,7 +98,7 @@ async fn every_kind_of_change_is_written_through() {
             .unwrap();
 
         // Deleting a persona unbinds every session using it; clearing removes one binding.
-        assert_eq!(sessions.unbind_persona("pirate"), 2);
+        assert_eq!(sessions.unbind_persona("pirate").unwrap(), 2);
         sessions.set_persona("a", "kept").unwrap();
         sessions.clear_persona("a").unwrap();
         // A reset zeroes the counters but keeps the persona and variables.
@@ -387,7 +387,7 @@ fn every_metadata_mutator_keeps_disk_commits_in_memory_order() {
                 "update" => sessions.set_variable(key, "first", "kept"),
                 "close" => sessions.close_session(key),
                 "unbind" => {
-                    sessions.unbind_persona("old");
+                    sessions.unbind_persona("old").unwrap();
                 }
                 "sweep" => {
                     sessions.sweep_idle_sessions(Duration::ZERO);

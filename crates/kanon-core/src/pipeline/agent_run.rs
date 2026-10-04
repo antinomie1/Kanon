@@ -184,8 +184,16 @@ impl PipelineEngine {
                 if let Some(persona_id) = chat.instance.effective_persona_id()
                     && let Some(sessions) = agent.session_manager()
                 {
-                    sessions
-                        .set_persona(&session_id, persona_id)
+                    factory
+                        .personas()
+                        .with_persona(&persona_id, |_| {
+                            sessions.set_persona(&session_id, &persona_id)
+                        })
+                        .ok_or_else(|| {
+                            ConversationError::Invalid(format!(
+                                "persona '{persona_id}' no longer exists"
+                            ))
+                        })?
                         .map_err(|error| ConversationError::Storage(error.to_string()))?;
                 }
                 writing

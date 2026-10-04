@@ -289,12 +289,15 @@ async fn start(dir: &Path) -> Node {
             .expect("instance catalog"),
     );
     let instance = registry
-        .create(InstanceDraft {
-            name: "Test Bot".to_string(),
-            enabled: true,
-            adapters: vec!["qq".to_string()],
-            ..InstanceDraft::default()
-        })
+        .create(
+            InstanceDraft {
+                name: "Test Bot".to_string(),
+                enabled: true,
+                adapters: vec!["qq".to_string()],
+                ..InstanceDraft::default()
+            },
+            None,
+        )
         .await
         .expect("instance");
     let personas = Arc::new(

@@ -458,7 +458,7 @@ async fn deleting_a_persona_unbinds_the_sessions_that_use_it() {
     session_mgr.set_persona("s2", "coder").unwrap();
     session_mgr.set_persona("s3", "other").unwrap();
 
-    assert_eq!(session_mgr.unbind_persona("coder"), 2);
+    assert_eq!(session_mgr.unbind_persona("coder").unwrap(), 2);
     assert!(session_mgr.get_persona("s1").is_none());
     assert!(session_mgr.get_persona("s2").is_none());
     assert_eq!(session_mgr.get_persona("s3").as_deref(), Some("other"));

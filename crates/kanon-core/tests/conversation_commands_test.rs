@@ -80,12 +80,15 @@ async fn start(dir: &Path) -> Node {
             .expect("instance catalog"),
     );
     let instance = registry
-        .create(InstanceDraft {
-            name: "Test Bot".to_string(),
-            enabled: true,
-            adapters: vec!["qq".to_string()],
-            ..InstanceDraft::default()
-        })
+        .create(
+            InstanceDraft {
+                name: "Test Bot".to_string(),
+                enabled: true,
+                adapters: vec!["qq".to_string()],
+                ..InstanceDraft::default()
+            },
+            None,
+        )
         .await
         .expect("instance");
     let persona_store = Arc::new(PersonaStore::new(dir.join("personas.json")));
@@ -470,6 +473,7 @@ async fn plugins_manage_the_operators_personas_through_the_shared_store() {
                 persona_id: Some("pirate".to_string()),
                 ..InstanceDraft::default()
             },
+            None,
         )
         .await
         .expect("select the persona");
@@ -490,6 +494,7 @@ async fn plugins_manage_the_operators_personas_through_the_shared_store() {
                 adapters: vec!["qq".to_string()],
                 ..InstanceDraft::default()
             },
+            None,
         )
         .await
         .expect("deselect the persona");
@@ -528,6 +533,33 @@ async fn plugins_manage_the_operators_personas_through_the_shared_store() {
         .expect("deleting a missing persona is not an error")
         .into_inner();
     assert!(!again.deleted);
+
+    // A catalog-backed embedded agent must reject a stale instance selection too, even though
+    // it has no AgentFactory. Seed the stale snapshot through the standalone catalog interface.
+    node.registry
+        .update(
+            &instance.id,
+            InstanceDraft {
+                name: instance.name,
+                enabled: true,
+                adapters: vec!["qq".to_string()],
+                persona_id: Some("pirate".to_string()),
+                ..InstanceDraft::default()
+            },
+            None,
+        )
+        .await
+        .unwrap();
+    let result = node
+        .engine
+        .process_event(event("stale-persona", "hello"))
+        .await;
+    assert!(
+        matches!(&result, PipelineResult::LlmFailed { error, .. } if error.contains("no longer exists")),
+        "{result:?}"
+    );
+    assert!(node.sessions.get_persona(&session).is_none());
+    assert!(node.model.requests.lock().unwrap().is_empty());
 }
 
 /// A hung model blocks only its chat; reset/rotation commands in that chat stay ordered.

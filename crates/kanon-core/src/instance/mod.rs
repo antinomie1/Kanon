@@ -508,18 +508,26 @@ impl InstanceRegistry {
         self.instances.read().await.is_empty()
     }
 
-    /// Creates an instance and returns the stored record.
-    pub async fn create(&self, draft: InstanceDraft) -> Result<BotInstance, InstanceError> {
+    /// Creates an instance, validating and publishing personas under the instance write lock.
+    ///
+    /// `None` keeps standalone in-memory catalogs independent of a node persona registry.
+    pub async fn create(
+        &self,
+        draft: InstanceDraft,
+        personas: Option<&PersonaRegistry>,
+    ) -> Result<BotInstance, InstanceError> {
         let mut instances = self.instances.write().await;
 
         let name = normalize_name(&draft.name)?;
         let id = unique_id(&instances, &name);
         let candidate = build_instance(id, name, draft)?;
 
+        Self::validate_persona(&candidate, personas)?;
         Self::validate_claims(&instances, &candidate)?;
         let mut next = instances.clone();
         next.insert(candidate.id.clone(), candidate.clone());
         self.commit(&mut instances, next)?;
+        Self::publish_personas(&instances, personas);
 
         Ok(candidate)
     }
@@ -529,6 +537,7 @@ impl InstanceRegistry {
         &self,
         id: &str,
         draft: InstanceDraft,
+        personas: Option<&PersonaRegistry>,
     ) -> Result<BotInstance, InstanceError> {
         let mut instances = self.instances.write().await;
 
@@ -544,22 +553,30 @@ impl InstanceRegistry {
             .map(|existing| existing.session_generations.clone())
             .unwrap_or_default();
 
+        Self::validate_persona(&candidate, personas)?;
         Self::validate_claims(&instances, &candidate)?;
         let mut next = instances.clone();
         next.insert(candidate.id.clone(), candidate.clone());
         self.commit(&mut instances, next)?;
+        Self::publish_personas(&instances, personas);
 
         Ok(candidate)
     }
 
     /// Deletes an instance.
-    pub async fn delete(&self, id: &str) -> Result<(), InstanceError> {
+    pub async fn delete(
+        &self,
+        id: &str,
+        personas: Option<&PersonaRegistry>,
+    ) -> Result<(), InstanceError> {
         let mut instances = self.instances.write().await;
         let mut next = instances.clone();
         if next.remove(id).is_none() {
             return Err(InstanceError::NotFound(id.to_string()));
         }
-        self.commit(&mut instances, next)
+        self.commit(&mut instances, next)?;
+        Self::publish_personas(&instances, personas);
+        Ok(())
     }
 
     /// Resolves the enabled instance that serves `platform`.
@@ -595,16 +612,54 @@ impl InstanceRegistry {
     /// A persona in use cannot be deleted: those instances would silently start answering with
     /// different instructions.
     pub async fn instances_using_persona(&self, persona_id: &str) -> Vec<String> {
-        let mut users: Vec<String> = self
-            .instances
-            .read()
-            .await
+        self.with_persona_users(persona_id, |users| users).await
+    }
+
+    /// Checks references and runs a synchronous operation while instance writes remain excluded.
+    ///
+    /// Persona deletion uses this boundary so a create/update cannot validate a persona before
+    /// deletion and publish its reference afterwards. The callback must not re-enter this catalog.
+    pub async fn with_persona_users<T>(
+        &self,
+        persona_id: &str,
+        operation: impl FnOnce(Vec<String>) -> T,
+    ) -> T {
+        let instances = self.instances.read().await;
+        let mut users: Vec<String> = instances
             .values()
             .filter(|instance| instance.persona_id.as_deref() == Some(persona_id))
             .map(|instance| instance.id.clone())
             .collect();
         users.sort();
-        users
+        let result = operation(users);
+        drop(instances);
+        result
+    }
+
+    /// Checks the live persona catalog only after taking the instance write lock.
+    fn validate_persona(
+        candidate: &BotInstance,
+        personas: Option<&PersonaRegistry>,
+    ) -> Result<(), InstanceError> {
+        if let Some(personas) = personas
+            && let Some(id) = candidate.persona_id.as_deref()
+            && personas.get(id).is_none()
+        {
+            return Err(InstanceError::Invalid(format!(
+                "persona '{id}' does not exist on this node"
+            )));
+        }
+        Ok(())
+    }
+
+    /// Publishes the exact committed snapshot before another catalog writer can overtake it.
+    fn publish_personas(
+        instances: &HashMap<String, BotInstance>,
+        personas: Option<&PersonaRegistry>,
+    ) {
+        if let Some(personas) = personas {
+            sync_instance_personas(&instances.values().cloned().collect::<Vec<_>>(), personas);
+        }
     }
 
     /// Makes `generation` the current session of one conversation and returns its identifier.

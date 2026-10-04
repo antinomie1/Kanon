@@ -48,6 +48,10 @@ fn persona_status(err: PersonaChangeError) -> Status {
         PersonaChangeError::Persona(PersonaError::ReadOnly(_))
         | PersonaChangeError::InstanceOwned(_) => Status::failed_precondition(err.to_string()),
         PersonaChangeError::Storage(_) => Status::internal(err.to_string()),
+        PersonaChangeError::Session(kanon_llm::error::MemoryError::Busy(_)) => {
+            Status::failed_precondition(err.to_string())
+        }
+        PersonaChangeError::Session(_) => Status::internal(err.to_string()),
     }
 }
 
@@ -241,36 +245,30 @@ impl CoreApiService {
         if registry.get(&id).is_none() {
             return Ok(Response::new(DeletePersonaResponse { deleted: false }));
         }
-        if let Some(instances) = self.engine.as_ref().and_then(|engine| engine.instances()) {
-            let users = instances.instances_using_persona(&id).await;
+        let sessions = self
+            .engine
+            .as_ref()
+            .and_then(|engine| engine.session_manager());
+        let remove = |users: Vec<String>| {
             if !users.is_empty() {
                 return Err(Status::failed_precondition(format!(
                     "persona '{id}' is used by instance(s) {}",
                     users.join(", ")
                 )));
             }
-        }
-        let sessions = self
-            .engine
-            .as_ref()
-            .and_then(|engine| engine.session_manager());
-        // Validate all writers before removing the persona, so Busy never leaves a half-delete.
-        let _writers = sessions
-            .as_ref()
-            .map(|sessions| {
-                sessions
-                    .list_sessions()
-                    .into_iter()
-                    .filter(|session| session.persona_id.as_deref() == Some(id.as_str()))
-                    .map(|session| sessions.try_write(&session.session_key))
-                    .collect::<Result<Vec<_>, _>>()
-            })
-            .transpose()
-            .map_err(|err| Status::failed_precondition(err.to_string()))?;
-        store.remove(registry, &id).map_err(persona_status)?;
-        if let Some(sessions) = sessions {
-            sessions.unbind_persona(&id);
-        }
-        Ok(Response::new(DeletePersonaResponse { deleted: true }))
+            match store.remove(registry, &id, sessions.as_deref()) {
+                Ok(_) => Ok(true),
+                // Another delete may have completed while this request acquired the instance lock.
+                Err(PersonaChangeError::Persona(PersonaError::NotFound(_))) => Ok(false),
+                Err(error) => Err(persona_status(error)),
+            }
+        };
+        let deleted =
+            if let Some(instances) = self.engine.as_ref().and_then(|engine| engine.instances()) {
+                instances.with_persona_users(&id, remove).await?
+            } else {
+                remove(Vec::new())?
+            };
+        Ok(Response::new(DeletePersonaResponse { deleted }))
     }
 }

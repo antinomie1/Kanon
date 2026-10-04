@@ -173,21 +173,24 @@ async fn instance_with_policy(
     adapter: &str,
 ) -> String {
     registry
-        .create(InstanceDraft {
-            name: format!("MCP Bot {adapter}"),
-            enabled: true,
-            // One enabled instance per adapter: the catalog refuses an adapter claimed twice.
-            adapters: vec![adapter.to_string()],
-            persona_id: None,
-            system_prompt: None,
-            model: None,
-            reply_policy: None,
-            context_policy: None,
-            plugins: Default::default(),
-            skills: Default::default(),
-            mcp: HashMap::from([(server_id.to_string(), policy)]),
-            ..Default::default()
-        })
+        .create(
+            InstanceDraft {
+                name: format!("MCP Bot {adapter}"),
+                enabled: true,
+                // One enabled instance per adapter: the catalog refuses an adapter claimed twice.
+                adapters: vec![adapter.to_string()],
+                persona_id: None,
+                system_prompt: None,
+                model: None,
+                reply_policy: None,
+                context_policy: None,
+                plugins: Default::default(),
+                skills: Default::default(),
+                mcp: HashMap::from([(server_id.to_string(), policy)]),
+                ..Default::default()
+            },
+            None,
+        )
         .await
         .expect("create instance")
         .id

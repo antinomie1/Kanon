@@ -51,14 +51,17 @@ async fn harness(scope: SessionScope, observe: bool) -> (Arc<PipelineEngine>, Re
 
     let registry = Arc::new(InstanceRegistry::in_memory());
     registry
-        .create(InstanceDraft {
-            name: "Group Bot".to_string(),
-            enabled: true,
-            adapters: vec!["qq".to_string()],
-            session_scope: scope,
-            observe_group: observe,
-            ..Default::default()
-        })
+        .create(
+            InstanceDraft {
+                name: "Group Bot".to_string(),
+                enabled: true,
+                adapters: vec!["qq".to_string()],
+                session_scope: scope,
+                observe_group: observe,
+                ..Default::default()
+            },
+            None,
+        )
         .await
         .expect("create instance");
 

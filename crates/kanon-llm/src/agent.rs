@@ -84,6 +84,11 @@ pub trait Agent: Send + Sync {
         None
     }
 
+    /// Persona catalog used by this agent, including embedded agents built without a factory.
+    fn persona_registry(&self) -> Option<&Arc<crate::prompt::PersonaRegistry>> {
+        None
+    }
+
     /// Answers one turn whose message the caller built, with per-turn settings.
     ///
     /// The settings change only this turn; an agent that cannot honour one must fail the turn

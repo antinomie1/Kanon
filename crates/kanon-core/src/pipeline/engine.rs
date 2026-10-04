@@ -2229,7 +2229,25 @@ impl PipelineEngine {
                 && let Some(persona_id) = instance.effective_persona_id()
                 && let Some(sessions) = agent.session_manager()
             {
-                if let Err(error) = sessions.set_persona(&session_id, persona_id) {
+                let personas = self
+                    .agent_factory()
+                    .map(|factory| factory.personas())
+                    .or_else(|| agent.persona_registry());
+                let binding = if let Some(personas) = personas {
+                    personas
+                        .with_persona(&persona_id, |_| {
+                            sessions.set_persona(&session_id, &persona_id)
+                        })
+                        .unwrap_or_else(|| {
+                            Err(kanon_llm::error::MemoryError::Backend(format!(
+                                "persona '{persona_id}' no longer exists"
+                            )))
+                        })
+                } else {
+                    // Embedded pipelines may own standalone sessions without a persona catalog.
+                    sessions.set_persona(&session_id, persona_id)
+                };
+                if let Err(error) = binding {
                     tracing::error!(session_id = %session_id, %error, "Failed to persist the instance persona");
                     // Do not send a turn with the previous persona when the instance requested
                     // another one. Unsolicited group turns keep the usual quiet failure policy.

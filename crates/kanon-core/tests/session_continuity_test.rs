@@ -145,7 +145,12 @@ async fn a_restarted_node_continues_the_conversation_it_was_having() {
 
     let (session, id) = {
         let node = start(dir.path()).await;
-        let id = node.registry.create(draft("Test Bot")).await.unwrap().id;
+        let id = node
+            .registry
+            .create(draft("Test Bot"), None)
+            .await
+            .unwrap()
+            .id;
 
         say(&node, "e1", "first").await;
         say(&node, "e2", "second").await;
@@ -197,7 +202,12 @@ async fn a_restarted_node_continues_the_conversation_it_was_having() {
 async fn editing_an_instance_does_not_reset_its_conversations() {
     let dir = tempfile::tempdir().expect("dir");
     let node = start(dir.path()).await;
-    let id = node.registry.create(draft("Test Bot")).await.unwrap().id;
+    let id = node
+        .registry
+        .create(draft("Test Bot"), None)
+        .await
+        .unwrap()
+        .id;
 
     say(&node, "e1", "first").await;
 
@@ -205,7 +215,7 @@ async fn editing_an_instance_does_not_reset_its_conversations() {
     let mut edited = draft("Renamed Bot");
     edited.adapters.push("other-platform".to_string());
     edited.reply_policy = Some(kanon_core::ReplyPolicy::new(kanon_core::ReplyMode::Always));
-    node.registry.update(&id, edited).await.unwrap();
+    node.registry.update(&id, edited, None).await.unwrap();
 
     let shown = say(&node, "e2", "second").await;
     assert_eq!(
