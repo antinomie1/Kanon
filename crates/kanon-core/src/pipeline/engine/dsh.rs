@@ -13,16 +13,18 @@ impl PipelineEngine {
         &self.dsh_bridge
     }
 
-    pub(super) async fn run_dsh_turn(
+    pub(crate) async fn run_dsh_turn(
         &self,
         client: Arc<kanon_llm::dsh::DshClient>,
         running: &crate::pipeline::turns::TurnGuard<'_>,
         session_id: &str,
-        event: &PipelineEventRequest,
+        event: Option<&PipelineEventRequest>,
         hosts: &[Arc<crate::supervisor::ManagedHost>],
         tool_hosts: Vec<Arc<dyn kanon_llm::tool_router::ToolHost>>,
         caller: Option<crate::BashCaller>,
         options: TurnOptions,
+        native_model: Option<&str>,
+        ephemeral: bool,
         mut message: ChatMessage,
     ) -> Result<ToolRouterOutput, ToolRouterError> {
         if options.persona.is_some() || options.max_iterations.is_some() {
@@ -43,8 +45,8 @@ impl PipelineEngine {
         let signal = running.signal();
         crate::instance::with_tool_instance(
             running.instance(),
-            crate::pipeline::agent_hook::with_turn(
-                event.clone(),
+            crate::pipeline::agent_hook::with_optional_turn(
+                event.cloned(),
                 hosts.to_vec(),
                 crate::with_bash_caller(caller.clone(), async {
                     for hook in factory.hooks() {
@@ -70,7 +72,7 @@ impl PipelineEngine {
                 factory: factory.clone(),
                 tools,
                 instructions,
-                event: event.clone(),
+                event: event.cloned(),
                 hosts: hosts.to_vec(),
                 caller,
                 signal: signal.clone(),
@@ -82,6 +84,14 @@ impl PipelineEngine {
         // submitted. There is no fallback to an unscoped DSH tool environment.
         let prepare = async {
             client.create_session(session_id, None).await?;
+            if let Some(reference) = native_model {
+                let (provider, model) = reference.split_once('/').ok_or_else(|| {
+                    kanon_llm::dsh::DshError::Config("DSH model requires provider/model".into())
+                })?;
+                client
+                    .select_model(session_id, provider, model, None)
+                    .await?;
+            }
             let ready: serde_json::Value = client
                 .call(
                     "kanon/prepare",
@@ -102,8 +112,15 @@ impl PipelineEngine {
             () = signal.stopped() => return Err(AgentError::Stopped),
             result = prepare => result.map_err(AgentError::Dsh)?,
         }
-        let mut output =
-            kanon_llm::dsh::run_message(&client, session_id, &request_id, message, &signal).await?;
+        let mut output = kanon_llm::dsh::run_message(
+            &client,
+            session_id,
+            &request_id,
+            message,
+            &signal,
+            ephemeral,
+        )
+        .await?;
         guard.finish(&mut output).await;
         Ok(output)
     }

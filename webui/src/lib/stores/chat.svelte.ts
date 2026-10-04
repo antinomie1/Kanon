@@ -1,5 +1,7 @@
 import { ApiError, api } from '../api/client';
 import { streamChatCompletion } from '../api/sse';
+import { dshConsoleTarget, dshHistory } from '../dsh-history';
+import type { DshSession } from '../types';
 
 /** One message of the test chat. */
 export interface ChatTurn {
@@ -14,6 +16,9 @@ export interface ChatTurn {
 
 /** Everything one message needs besides its text; resolved by the page from the chosen target. */
 export interface SendOptions {
+  /** Selected backend and trusted instance policy, resolved by the page. */
+  agent: string;
+  instanceId?: string;
   /** Persona to apply to the session before this turn. */
   personaId: string;
   /** Canonical `<provider>/<model>` reference; `undefined` lets the node use its default. */
@@ -41,6 +46,9 @@ class ChatStore {
   private nextId = 1;
   /** A failed or cancelled reset must be retried even when its failed turn remains visible. */
   private needsReset = true;
+  /** A new remote identity starts a new DSH conversation without deleting its old journal. */
+  private remoteId = '';
+  private backend = '';
 
   /** Session the node keeps this conversation in. */
   get sessionId(): string {
@@ -55,6 +63,7 @@ class ChatStore {
     this.model = '';
     this.turns = [];
     this.needsReset = true;
+    this.remoteId = '';
   }
 
   /** Starts over; the node forgets the conversation when the next message is sent. */
@@ -62,6 +71,7 @@ class ChatStore {
     this.stop();
     this.turns = [];
     this.needsReset = true;
+    this.remoteId = '';
   }
 
   stop() {
@@ -70,9 +80,41 @@ class ChatStore {
     this.streaming = false;
   }
 
+  /** Backend changes start a separate conversation and clear incompatible model choices. */
+  useAgent(agent: string) {
+    if (this.backend === agent) return;
+    this.clear();
+    this.model = '';
+    this.backend = agent;
+  }
+
+  /** Resumes a remote console conversation from DSH's authoritative recent journal. */
+  async resumeDsh(session: DshSession) {
+    const target = dshConsoleTarget(session.sessionId);
+    if (target === null) throw new Error('This DSH session belongs to platform traffic');
+    const snapshot = await api.getDshSession(session.sessionId);
+    const history = dshHistory(snapshot.records);
+    this.useAgent('dsh');
+    this.choose(target);
+    this.stop();
+    this.remoteId = session.sessionId;
+    const next = session.projections?.values.modelSelection?.next;
+    this.model = next ? `${next.provider}/${next.model}` : '';
+    this.turns = history.map(message => ({
+      id: this.nextId++, role: message.role, content: message.text,
+      reasoning: message.reasoning, error: null,
+    }));
+  }
+
   async send(text: string, options: SendOptions) {
     if (this.streaming) return;
-    const sessionId = this.sessionId;
+    if (this.backend !== options.agent) {
+      this.useAgent(options.agent);
+    }
+    if (options.agent === 'dsh' && !this.remoteId) {
+      this.remoteId = `kanon-console-${crypto.randomUUID()}-${encodeURIComponent(this.target)}`;
+    }
+    const sessionId = options.agent === 'dsh' ? this.remoteId : this.sessionId;
     const tools = this.tools;
     this.turns.push(
       {
@@ -97,7 +139,7 @@ class ChatStore {
     this.controller = controller;
 
     try {
-      if (this.needsReset) {
+      if (this.needsReset && options.agent !== 'dsh') {
         try {
           await api.resetSession(sessionId, controller.signal);
         } catch (e) {
@@ -111,9 +153,11 @@ class ChatStore {
       await streamChatCompletion(
         {
           session_id: sessionId,
+          agent: options.agent,
+          instance_id: options.instanceId,
           message: text,
           model: options.model,
-          persona_id: options.personaId,
+          persona_id: options.agent === 'dsh' ? undefined : options.personaId,
           tools,
         },
         {
@@ -128,6 +172,16 @@ class ChatStore {
         },
         controller.signal,
       );
+      if (options.agent === 'dsh' && !controller.signal.aborted && !reply.error) {
+        // The remote journal owns history and compaction. Reload its current display surface
+        // instead of pretending that the console's prior transcript remains authoritative.
+        const snapshot = await api.getDshSession(sessionId);
+        if (controller.signal.aborted) return;
+        this.turns = dshHistory(snapshot.records).map(message => ({
+          id: this.nextId++, role: message.role, content: message.text,
+          reasoning: message.reasoning, error: null,
+        }));
+      }
     } catch (e) {
       if (!controller.signal.aborted) {
         reply.error = e instanceof Error ? e.message : String(e);

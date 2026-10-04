@@ -37,6 +37,8 @@ use crate::plugin_config::PluginConfigStore;
 #[derive(Clone)]
 pub struct ApiState {
     inner: Arc<ApiStateInner>,
+    /// The running engine, attached after composing the shared factory and policy stores.
+    pipeline: Option<Arc<kanon_core::pipeline::PipelineEngine>>,
 }
 
 /// Owners shared across all requests.
@@ -119,6 +121,17 @@ struct ApiStateInner {
 }
 
 impl ApiState {
+    /// Attaches the existing engine so console turns use its admission and tool scope.
+    pub fn with_pipeline(mut self, pipeline: Arc<kanon_core::pipeline::PipelineEngine>) -> Self {
+        self.pipeline = Some(pipeline);
+        self
+    }
+
+    /// The running engine, absent in gateways that only expose management resources.
+    pub fn pipeline(&self) -> Option<&Arc<kanon_core::pipeline::PipelineEngine>> {
+        self.pipeline.as_ref()
+    }
+
     /// Startup settings used to bind and protect the management gateway.
     pub fn startup(&self) -> &StartupConfig {
         &self.inner.startup

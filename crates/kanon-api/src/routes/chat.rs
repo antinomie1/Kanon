@@ -41,6 +41,9 @@ pub struct ChatCompletionRequest {
     /// Conversation backend; omitted requests inherit the node default.
     #[serde(default)]
     pub agent: Option<String>,
+    /// Optional instance whose backend and tool permissions the console should exercise.
+    #[serde(default)]
+    pub instance_id: Option<String>,
     /// Session key to run the turn against (opaque, provided by the caller).
     pub session_id: String,
     /// User message text.
@@ -129,7 +132,30 @@ async fn completions(
         ));
     }
 
-    let selected = state.agent_factory().agent_id(request.agent.as_deref());
+    let instance = match request.instance_id.as_deref() {
+        Some(id) => Some(
+            state
+                .instances()
+                .get(id)
+                .await
+                .ok_or_else(|| ApiError::NotFound(format!("Instance '{id}' does not exist")))?,
+        ),
+        None => None,
+    };
+    let selected = state.agent_factory().agent_id(match &instance {
+        Some(instance) => instance.agent.as_deref(),
+        None => request.agent.as_deref(),
+    });
+    if instance.is_some()
+        && request
+            .agent
+            .as_ref()
+            .is_some_and(|agent| agent != &selected)
+    {
+        return Err(ApiError::BadRequest(
+            "Agent must match the selected instance".into(),
+        ));
+    }
     kanon_llm::check_agent_id(&selected).map_err(ApiError::BadRequest)?;
     #[cfg(feature = "dsh")]
     if let Some(client) = state

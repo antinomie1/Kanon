@@ -69,6 +69,19 @@ pub async fn with_turn<F: Future>(
     crate::supervisor::with_tool_event(event, TURN.scope(scope, turn)).await
 }
 
+/// Restores an admitted context, or leaves console/private hooks outside a plugin turn.
+#[cfg(feature = "dsh")]
+pub(crate) async fn with_optional_turn<F: Future>(
+    event: Option<PipelineEventRequest>,
+    hosts: Vec<Arc<ManagedHost>>,
+    turn: F,
+) -> F::Output {
+    match event {
+        Some(event) => with_turn(event, hosts, turn).await,
+        None => turn.await,
+    }
+}
+
 /// The agent hook that brings plugins into a turn; see the module documentation.
 #[derive(Default)]
 pub struct PluginAgentHook {

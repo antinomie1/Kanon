@@ -76,7 +76,7 @@ impl AgentBridgeService for AgentBridge {
         };
         let execution = crate::instance::with_tool_instance(
             turn.instance.clone(),
-            crate::pipeline::agent_hook::with_turn(
+            crate::pipeline::agent_hook::with_optional_turn(
                 turn.event.clone(),
                 turn.hosts.clone(),
                 crate::with_bash_caller(

@@ -414,6 +414,7 @@ impl ApiStateBuilder {
             .unwrap_or_else(|| PathBuf::from("./plugins"));
 
         Ok(ApiState {
+            pipeline: None,
             inner: Arc::new(ApiStateInner {
                 startup: self.startup,
                 started_at: Instant::now(),

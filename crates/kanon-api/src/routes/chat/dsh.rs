@@ -10,7 +10,6 @@ pub(super) async fn completion(
     request: ChatCompletionRequest,
 ) -> Result<Response, ApiError> {
     if request.persona_id.is_some()
-        || request.model.is_some()
         || request.protocol.is_some()
         || request.base_url.is_some()
         || request.api_key.is_some()
@@ -20,27 +19,27 @@ pub(super) async fn completion(
         ));
     }
     let session_id = request.session_id.trim().to_string();
-    let writing = state.sessions().try_write(&session_id)?;
+    let engine = state.pipeline().cloned().ok_or_else(|| {
+        ApiError::Unavailable("DSH console requires the running core pipeline".into())
+    })?;
     MetricsRegistry::incr(&state.observability().metrics.chat_completions);
     let stream = request.stream;
     let turn = async move {
-        let _writing = writing;
-        client
-            .create_session(&session_id, None)
-            .await
-            .map_err(|error| ApiError::Upstream(error.to_string()))?;
-        let output = client
-            .run_turn(
+        let output = engine
+            .run_dsh_console(
+                client,
+                request.instance_id.as_deref(),
                 &session_id,
-                &DshClient::request_id(),
-                vec![json!({"type": "text", "text": request.message})],
-                std::future::pending(),
+                request.message,
+                request.tools,
+                request.model.as_deref(),
             )
             .await
-            .map_err(|error| ApiError::Upstream(error.to_string()))?;
+            .map_err(map_agent_error)?;
         Ok::<_, ApiError>(json!({
             "agent": "dsh", "session_id": session_id, "content": output.content,
-            "turn": output.turn, "through_seq": output.through_seq,
+            "executed_tools": output.executed_tools.into_iter().map(ToolCallView::from).collect::<Vec<_>>(),
+            "finish_reason": "completed", "persona_id": null,
         }))
     };
     if !stream {

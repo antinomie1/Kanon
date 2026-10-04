@@ -16,6 +16,7 @@ import PlaygroundView from './lib/components/views/PlaygroundView.svelte';
 import SessionsView from './lib/components/views/SessionsView.svelte';
 import SettingsView from './lib/components/views/SettingsView.svelte';
 import { t } from './lib/stores/i18n.svelte';
+import { agentsStore } from './lib/stores/agents.svelte';
 import { instancesStore } from './lib/stores/instances.svelte';
 import { modelsStore } from './lib/stores/models.svelte';
 import { nodeStore } from './lib/stores/node.svelte';
@@ -33,6 +34,7 @@ const fullHeight = $derived(
 // loaded once here and its connection state is re-polled while the tab is visible.
 $effect(() => {
   void instancesStore.load();
+  void agentsStore.load();
   void modelsStore.load();
   const timer = window.setInterval(() => {
     if (document.visibilityState === 'visible') {

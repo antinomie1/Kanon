@@ -29,7 +29,7 @@ pub(crate) struct BridgeTurn {
     pub(crate) factory: Arc<AgentFactory>,
     pub(crate) tools: TurnTools,
     pub(crate) instructions: String,
-    pub(crate) event: PipelineEventRequest,
+    pub(crate) event: Option<PipelineEventRequest>,
     pub(crate) hosts: Vec<Arc<ManagedHost>>,
     pub(crate) caller: Option<crate::BashCaller>,
     pub(crate) signal: StopSignal,

@@ -8,6 +8,8 @@ import { modelsStore } from '../../stores/models.svelte';
 import { personasStore } from '../../stores/personas.svelte';
 import { router } from '../../stores/router.svelte';
 import { toasts } from '../../stores/toast.svelte';
+import { agentsStore } from '../../stores/agents.svelte';
+import DshModelPicker from '../settings/DshModelPicker.svelte';
 import Button from '../ui/Button.svelte';
 import PageHead from '../ui/PageHead.svelte';
 import Select from '../ui/Select.svelte';
@@ -24,6 +26,7 @@ import Switch from '../ui/Switch.svelte';
 let draft = $state('');
 let scroller = $state<HTMLDivElement>();
 let composer = $state<HTMLTextAreaElement>();
+let dshAvailable = $state(false);
 /** Whether the view follows new text; off once the reader scrolls up to read something. */
 let stick = true;
 
@@ -44,9 +47,15 @@ const speaker = $derived(
 );
 
 /** Model used when the picker is left on its first entry. */
-const inheritedModel = $derived(instance?.model ?? modelsStore.defaultModel);
+const agent = $derived(persona ? 'builtin' : instance?.agent ?? agentsStore.defaultAgent);
+const isDsh = $derived(agent === 'dsh');
+const inheritedModel = $derived(isDsh ? null : instance?.model ?? modelsStore.defaultModel);
 const model = $derived(chat.model || inheritedModel || undefined);
-const canChat = $derived(Boolean(modelsStore.defaultModel && model));
+const canChat = $derived(Boolean(agent && (isDsh ? dshAvailable : modelsStore.defaultModel && model)));
+
+$effect(() => {
+  if (agent) untrack(() => chat.useAgent(agent));
+});
 
 /**
  * Persona sent with every message. An instance's own prompt is published by the node as the
@@ -118,7 +127,7 @@ async function send() {
   stick = true;
   await tick();
   fit();
-  await chat.send(text, { personaId, model });
+  await chat.send(text, { personaId, model, agent: agent!, instanceId: instance?.id });
 }
 
 function onKeydown(e: KeyboardEvent) {
@@ -170,6 +179,9 @@ function split(turn: ChatTurn): { reasoning: string; content: string } {
   </div>
   <div class="min-w-0 flex-1 basis-[220px]">
     <label class="label" for="chat-model">{t('chat.model')}</label>
+    {#if isDsh}
+      <DshModelPicker bind:value={chat.model} bind:available={dshAvailable} disabled={chat.streaming} />
+    {:else}
     <Select id="chat-model" bind:value={chat.model}>
       <option value="">
         {inheritedModel
@@ -186,6 +198,7 @@ function split(turn: ChatTurn): { reasoning: string; content: string } {
         </optgroup>
       {/each}
     </Select>
+    {/if}
   </div>
   <span class="flex h-[42px] items-center gap-2.5 text-[14px] font-medium whitespace-nowrap">
     <Switch
@@ -260,7 +273,7 @@ function split(turn: ChatTurn): { reasoning: string; content: string } {
     }}
   >
     <div class="mx-auto flex max-w-[760px] flex-col gap-2.5">
-      {#if !canChat}
+      {#if !canChat && !isDsh}
         <div class="notice notice-warn items-center">
           <span class="min-w-0 flex-1">{t('chat.no_model')}</span>
           <Button type="button" size="sm" onclick={() => router.navigate('models')}>

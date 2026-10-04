@@ -116,6 +116,8 @@ export interface TraceRecord {
 
 // Chat Sandbox types
 export interface ChatCompletionRequest {
+  agent?: string;
+  instance_id?: string;
   session_id: string;
   message: string;
   model?: string;
@@ -136,9 +138,11 @@ export interface ExecutedTool {
 }
 
 export interface ChatCompletionResponse {
+  agent?: string;
   session_id: string;
   content: string;
-  turns: number;
+  /** Builtin iteration count; DSH exposes its own journal and turn metadata instead. */
+  turns?: number;
   finish_reason?: string;
   executed_tools: ExecutedTool[];
 }

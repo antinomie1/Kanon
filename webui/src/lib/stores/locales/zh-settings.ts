@@ -1,5 +1,17 @@
 /** zh settings and shared platform translations. */
 export default {
+    'dsh.continue': '继续对话',
+    'dsh.sessions_hint': '历史、模型和会话设置由 deepseek-harness 管理。',
+    'dsh.no_sessions': '还没有 DSH 会话。',
+    'dsh.archive': '归档',
+    'dsh.archive_hint': 'DSH 将停止并归档此会话，历史仍可在 DSH 中恢复。',
+    'dsh.history': '历史与设置',
+    'dsh.running': '运行中',
+    'dsh.title': '会话标题',
+    'dsh.earlier': '加载更早的消息',
+    'dsh.image': '消息图片',
+    'dsh.tool': '工具',
+    'dsh.session_model': '使用 DSH 会话设置',
     // Settings
     'settings.theme': '主题',
     'settings.theme_system': '跟随系统',

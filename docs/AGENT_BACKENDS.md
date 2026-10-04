@@ -83,9 +83,12 @@ plugin shares DSH peer dependencies with its host instead of instantiating a sec
 
 ## Remaining integration work
 
-1. Complete backend-aware console session/model views and private plugin agent runs, including
-   remote settings and tool policy semantics. Console DSH chat currently uses the standalone
-   native path; its instance-specific tool lifecycle still needs integration.
+1. Verify console and private runs against a complete native SessionController deployment,
+   including durable restart, archive/restore, attachment history and concurrent writes.
+   Console and private runs now reuse the core bridge and instance tool selector. Private runs
+   suppress plugin hooks, permit tool-less execution and native model references, and archive
+   their native journal after completion or cancellation. DSH owns step limits; unsupported
+   per-request limits fail explicitly. No builtin provider is substituted.
 2. Verify shared group participation end to end with an isolated native DSH runtime and platform
    adapter under concurrent arrivals and interruptions, then improve fresh-message handling and quoting. Audit native complete
    prompt overrides and plugin request/response observation so no hook silently loses its effect.
@@ -139,3 +142,15 @@ plugin shares DSH peer dependencies with its host instead of instantiating a sec
   builtin-only session comparison. Both backends now share one session-routing helper.
 - The latest existing policy/instance suites pass 31 tests. Default and all-feature workspace
   checks are clean; the bridge plugin builds and typechecks. Repository test counts are unchanged.
+
+- Console/private integration: the existing API chat/agent routes and core plugin-agent suites
+  pass 19 tests. A temporary Rust/native-loop probe also covers console tool permissions,
+  tool-less turns, private instructions, native model-selection requests and session archival.
+  Its protocol shim does not establish complete native persistence coverage. Default and
+  all-feature checks and WebUI type checking/build are clean apart from the existing bundle-size
+  advisory. No test functions were added, and all source files remain below 1000 lines.
+- The console lists DSH's own sessions, pages native history at one immutable cursor, selects
+  native models, changes titles, stops work and archives restorable journals. DSH console
+  conversations can be resumed from that list. Their IDs carry only a routing target; no model,
+  memory, context or settings are persisted in builtin SessionStore. Human history excludes
+  model-only replacement copies, following DSH's native transcript convention.

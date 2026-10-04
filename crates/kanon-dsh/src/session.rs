@@ -232,6 +232,10 @@ impl DshClient {
     /// Retires a session using DSH's native archive operation; the remote journal remains restorable.
     pub async fn archive_session(&self, session_id: &str) -> Result<Value, DshError> {
         let _writing = self.writers.claim(session_id)?;
+        self.archive_owned_session(session_id).await
+    }
+
+    async fn archive_owned_session(&self, session_id: &str) -> Result<Value, DshError> {
         self.stop_session(session_id).await?;
         self.call(
             "workspace/archiveSession",
@@ -251,6 +255,20 @@ impl DshClient {
         request_id: &str,
         content: Vec<Value>,
         stop: impl Future<Output = ()> + Send,
+    ) -> Result<DshTurnOutput, DshError> {
+        self.run_scoped_turn(session_id, request_id, content, stop, false)
+            .await
+    }
+
+    /// Runs an admitted turn and optionally archives its private journal before releasing it.
+    /// Retirement belongs to the bounded owner, so a disconnected caller cannot skip cleanup.
+    pub async fn run_scoped_turn(
+        &self,
+        session_id: &str,
+        request_id: &str,
+        content: Vec<Value>,
+        stop: impl Future<Output = ()> + Send,
+        ephemeral: bool,
     ) -> Result<DshTurnOutput, DshError> {
         validate_id(session_id)?;
         validate_id(request_id)?;
@@ -273,11 +291,38 @@ impl DshClient {
         // Its reservation remains held through cancellation, so new prompts cannot race cleanup.
         let mut task = tokio::spawn(async move {
             let _writing = writing;
-            client
+            let result = client
                 .run_owned_turn(&session_id, &request_id, content, async {
                     let _ = cancel_rx.await;
                 })
+                .await;
+            if ephemeral {
+                let retirement = tokio::time::timeout(
+                    client.config.request_timeout(),
+                    client.archive_owned_session(&session_id),
+                )
                 .await
+                .unwrap_or(Err(DshError::Timeout("private session archive")));
+                if let Err(error) = retirement {
+                    tracing::warn!(session_id, error = %error, "Private DSH session archive failed");
+                    return Err(DshError::Transport(format!(
+                        "private DSH session '{session_id}' could not be archived: {error}; turn result: {}",
+                        result
+                            .as_ref()
+                            .err()
+                            .map(ToString::to_string)
+                            .unwrap_or_else(|| "completed".into()),
+                    )));
+                }
+            }
+            // The owner may outlive its caller. Cleanup failures must remain observable even
+            // when no HTTP response or plugin RPC remains to receive this result.
+            if let Err(error) = &result
+                && !matches!(error, DshError::Stopped)
+            {
+                tracing::warn!(session_id, error = %error, "DSH turn owner failed");
+            }
+            result
         });
         tokio::select! {
             biased;

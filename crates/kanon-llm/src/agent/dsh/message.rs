@@ -12,6 +12,7 @@ pub async fn run_message(
     request_id: &str,
     message: ChatMessage,
     stop: &StopSignal,
+    ephemeral: bool,
 ) -> Result<ToolRouterOutput, AgentError> {
     if message.role != Role::User || message.tool_calls.is_some() {
         return Err(AgentError::InvalidRequest(
@@ -41,12 +42,8 @@ pub async fn run_message(
     if stop.is_stopped() {
         return Err(AgentError::Stopped);
     }
-    client
-        .create_session(session_id, None)
-        .await
-        .map_err(AgentError::Dsh)?;
     let output = client
-        .run_turn(session_id, request_id, content, stop.stopped())
+        .run_scoped_turn(session_id, request_id, content, stop.stopped(), ephemeral)
         .await
         .map_err(|error| match error {
             DshError::Stopped => AgentError::Stopped,

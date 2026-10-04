@@ -15,6 +15,8 @@
 mod agent_commands;
 mod commands;
 #[cfg(feature = "dsh")]
+mod console;
+#[cfg(feature = "dsh")]
 mod dsh;
 mod inbound;
 mod message;
@@ -654,11 +656,13 @@ impl PipelineEngine {
                             client,
                             running,
                             session_id,
-                            event,
+                            Some(event),
                             hosts,
                             tool_hosts,
                             bash_caller,
                             options,
+                            None,
+                            false,
                             message,
                         )
                         .await;

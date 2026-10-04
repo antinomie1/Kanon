@@ -30,8 +30,33 @@ export interface DshSession {
 
 /** A native journal window; older windows must use the same cursor. */
 export interface DshSnapshot {
+  header: { id: string };
   cursor: number;
-  records: Array<{ type: string; event: { seq: number; type: string; data: unknown } }>;
+  records: DshRecord[];
   hasMore: boolean;
   projections: unknown;
+}
+
+/** Native journal entries are displayed at an immutable remote cursor. */
+export interface DshRecord {
+  type: string;
+  event: {
+    seq: number;
+    type: string;
+    data: Record<string, unknown>;
+    surfaceOp?: 'append' | { op: 'replace'; startSeq: number; endSeq: number };
+  };
+}
+
+/** Earlier native history window, read from the same snapshot cut. */
+export interface DshPage {
+  records: DshRecord[];
+  hasMore: boolean;
+}
+
+/** DSH's own model catalog; no builtin provider or capability conversion is applied. */
+export interface DshModels {
+  default: { provider: string; model: string };
+  groups: Array<{ id: string; name: string; models: Array<{ id: string; name: string }> }>;
+  failures: Array<{ id: string; name: string; message: string }>;
 }

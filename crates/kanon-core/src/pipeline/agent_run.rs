@@ -8,9 +8,9 @@
 //!   [`PipelineEngine::run_conversation_turn`], so subscribers hear `AGENT_BEGIN`/`AGENT_DONE`,
 //!   prompt rewriters take part, and `/stop` reaches it. Like every external writer it only
 //!   proceeds when it can take the session's lock at once (see [`kanon_llm::SessionManager`]).
-//! - **in a private session** (the default): a one-off agent with its own empty memory (see
-//!   [`kanon_llm::AgentFactory::private_agent`]), whose session vanishes with it. No plugin hook
-//!   runs, so a plugin calling `RunAgent` from its own hook cannot recurse into itself.
+//! - **in a private session** (the default): builtin uses one-off empty memory; DSH uses a native
+//!   journal archived by its bounded turn owner. No plugin hook runs, so a plugin calling
+//!   `RunAgent` from its own hook cannot recurse into itself.
 //!
 //! Either way the run never executes Bash: a plugin names the chat by a message it holds, and a
 //! sender identity it could have written itself must not unlock a shell.
@@ -45,7 +45,8 @@ pub struct AgentRun {
     pub in_conversation: bool,
     /// Instructions replacing the persona of a private run; ignored in a conversation.
     pub instructions: Option<String>,
-    /// `<provider>/<model-id>` to answer with; `None` uses the instance's model, else the node's.
+    /// `<provider>/<model-id>` to answer with. DSH private runs resolve this in DSH's catalog;
+    /// conversation runs use the native session choice and reject per-run model overrides.
     pub model: Option<String>,
     /// Whether the model is offered tools at all.
     pub use_tools: bool,
@@ -127,13 +128,10 @@ impl PipelineEngine {
             .ok_or_else(unknown_model)?;
         #[cfg(feature = "dsh")]
         if matches!(&backend, kanon_llm::ConversationBackend::Dsh(_))
-            && (!run.in_conversation
-                || run.model.is_some()
-                || run.max_steps.is_some()
-                || !run.use_tools)
+            && (run.max_steps.is_some() || (run.in_conversation && run.model.is_some()))
         {
             return Err(AgentRunError::Invalid(
-                "DSH RunAgent requires an existing chat and native tool policy; model and step settings belong to DSH".into(),
+                "DSH owns step limits; select a conversation model through its native session settings".into(),
             ));
         }
 
@@ -144,16 +142,23 @@ impl PipelineEngine {
                     .session_for_backend(&chat.conversation, &backend);
                 (backend, session_id)
             }
-            _ => {
-                let agent = factory
-                    .private_agent(model.as_deref(), run.instructions.clone())
-                    .ok_or_else(unknown_model)?;
-                let n = PRIVATE_RUNS.fetch_add(1, Ordering::Relaxed);
-                (
-                    kanon_llm::ConversationBackend::Builtin(agent),
-                    format!("plugin:{}:{n}", run.plugin_id),
-                )
-            }
+            _ => match backend {
+                #[cfg(feature = "dsh")]
+                kanon_llm::ConversationBackend::Dsh(client) => (
+                    kanon_llm::ConversationBackend::Dsh(client),
+                    format!("kanon-private-{}", kanon_llm::dsh::DshClient::request_id()),
+                ),
+                kanon_llm::ConversationBackend::Builtin(_) => {
+                    let agent = factory
+                        .private_agent(model.as_deref(), run.instructions.clone())
+                        .ok_or_else(unknown_model)?;
+                    let n = PRIVATE_RUNS.fetch_add(1, Ordering::Relaxed);
+                    (
+                        kanon_llm::ConversationBackend::Builtin(agent),
+                        format!("plugin:{}:{n}", run.plugin_id),
+                    )
+                }
+            },
         };
 
         if let Some(builtin) = agent.builtin() {
@@ -197,6 +202,11 @@ impl PipelineEngine {
         let options = TurnOptions {
             max_iterations: run.max_steps,
             without_tools: !run.use_tools,
+            instructions: if !run.in_conversation && agent.builtin().is_none() {
+                run.instructions.clone()
+            } else {
+                None
+            },
             ..TurnOptions::default()
         };
 
@@ -227,21 +237,36 @@ impl PipelineEngine {
                 let running = self
                     .running_turns()
                     .begin(instance.map(|instance| instance.id.clone()));
-                let builtin = agent
-                    .builtin()
-                    .ok_or_else(|| {
-                        AgentRunError::Invalid("private execution requires builtin".into())
-                    })?
-                    .clone();
-                let router = ToolRouter::from_arc(builtin);
-                let turn = kanon_llm::with_stop_signal(
-                    running.signal(),
-                    router.execute_message_with(&session_id, message, &tool_hosts, options),
-                );
-                match run.context.clone() {
-                    // Tools still learn which chat they serve; no plugin hook runs.
-                    Some(event) => crate::supervisor::with_tool_event(event, turn).await,
-                    None => turn.await,
+                match agent {
+                    #[cfg(feature = "dsh")]
+                    kanon_llm::ConversationBackend::Dsh(client) => {
+                        self.run_dsh_turn(
+                            client,
+                            &running,
+                            &session_id,
+                            run.context.as_ref(),
+                            &[],
+                            tool_hosts,
+                            None,
+                            options,
+                            run.model.as_deref(),
+                            true,
+                            message,
+                        )
+                        .await
+                    }
+                    kanon_llm::ConversationBackend::Builtin(builtin) => {
+                        let router = ToolRouter::from_arc(builtin);
+                        let turn = kanon_llm::with_stop_signal(
+                            running.signal(),
+                            router.execute_message_with(&session_id, message, &tool_hosts, options),
+                        );
+                        match run.context.clone() {
+                            // Tools still learn which chat they serve; no plugin hook runs.
+                            Some(event) => crate::supervisor::with_tool_event(event, turn).await,
+                            None => turn.await,
+                        }
+                    }
                 }
             }
         };

@@ -1,5 +1,17 @@
 /** en settings and shared platform translations. */
 export default {
+    'dsh.continue': 'Continue chat',
+    'dsh.sessions_hint': 'History, models and session settings are managed by deepseek-harness.',
+    'dsh.no_sessions': 'No DSH sessions yet.',
+    'dsh.archive': 'Archive',
+    'dsh.archive_hint': 'DSH will stop and archive this session. Its history remains restorable in DSH.',
+    'dsh.history': 'History and settings',
+    'dsh.running': 'Running',
+    'dsh.title': 'Session title',
+    'dsh.earlier': 'Load earlier messages',
+    'dsh.image': 'Message image',
+    'dsh.tool': 'Tool',
+    'dsh.session_model': 'Use DSH session settings',
     // Settings
     'settings.theme': 'Theme',
     'settings.theme_system': 'Match system',

@@ -318,6 +318,7 @@ async fn main() -> StartupResult<()> {
     );
     let pipeline_worker = engine.clone().start_worker(event_rx);
     let outbound_dispatcher = engine.clone().start_outbound_dispatcher();
+    let state = state.with_pipeline(engine.clone());
 
     let service = CoreApiService::new(ingress.clone())
         .with_supervisor(supervisor.clone())
