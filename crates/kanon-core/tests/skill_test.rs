@@ -210,11 +210,14 @@ async fn the_catalog_hook_injects_descriptions_into_an_instance_session() {
         instance_with_policy(&registry, "alpha", ItemPolicy::Inherit, "qqofficial").await;
 
     let hook = SkillCatalogHook::new(store.clone(), toggles.clone(), registry.clone());
+    let tools =
+        vec![ReadSkillTool::new(store.clone(), toggles.clone(), registry.clone()).definition()];
     let mut injected = "You are a bot".to_string();
 
     hook.on_system_prompt(
         &format!("instance:{instance_id}:group:1:user:1#0"),
         &mut injected,
+        &tools,
     )
     .await
     .expect("hook");
@@ -226,6 +229,16 @@ async fn the_catalog_hook_injects_descriptions_into_an_instance_session() {
         "only the description may enter the prompt"
     );
 
+    let mut without_tools = "You are a bot".to_string();
+    hook.on_system_prompt(
+        &format!("instance:{instance_id}:group:1:user:1#0"),
+        &mut without_tools,
+        &[],
+    )
+    .await
+    .expect("hook without tools");
+    assert_eq!(without_tools, "You are a bot");
+
     // The global switch removes it from the catalog entirely.
     toggles
         .set_enabled(SKILL_SECTION, "alpha", false)
@@ -235,6 +248,7 @@ async fn the_catalog_hook_injects_descriptions_into_an_instance_session() {
     hook.on_system_prompt(
         &format!("instance:{instance_id}:group:1:user:1#0"),
         &mut disabled,
+        &tools,
     )
     .await
     .expect("hook");
@@ -323,6 +337,11 @@ async fn the_skill_catalog_reaches_the_model_alongside_the_persona() {
     .memory(memory)
     .session_manager(sessions)
     .persona_registry(personas)
+    .tool(ReadSkillTool::new(
+        store.clone(),
+        toggles.clone(),
+        registry.clone(),
+    ))
     .hook(SkillCatalogHook::new(store, toggles, registry))
     .model("test-model")
     .build();

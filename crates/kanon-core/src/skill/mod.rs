@@ -526,7 +526,13 @@ impl kanon_llm::agent::AgentHook for SkillCatalogHook {
         &self,
         session_id: &str,
         prompt: &mut String,
+        tools: &[ToolDefinition],
     ) -> Result<(), kanon_llm::AgentError> {
+        // A catalog that asks a tool-less model to call read_skill creates impossible requests
+        // and wastes its context window. Use the same snapshot as advertisement and dispatch.
+        if !tools.iter().any(|tool| tool.name == "read_skill") {
+            return Ok(());
+        }
         let instance_id = crate::instance::BotInstance::instance_id_from_session(session_id);
         let allowed =
             allowed_skills(&self.store, &self.toggles, &self.instances, instance_id).await;

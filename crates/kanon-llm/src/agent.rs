@@ -381,10 +381,12 @@ pub trait AgentHook: Send + Sync {
     /// Persona instructions are already present; skills and plugin rules append or rewrite them.
     /// The turn owns the result through every tool round. Runtime data belongs in the user
     /// message, while per-request observation or mutation stays in [`Self::on_llm_request`].
+    /// `tools` is the turn's enabled tool snapshot, so instructions never require unavailable tools.
     async fn on_system_prompt(
         &self,
         _session_id: &str,
         _prompt: &mut String,
+        _tools: &[ToolDefinition],
     ) -> Result<(), AgentError> {
         Ok(())
     }

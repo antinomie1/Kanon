@@ -40,6 +40,7 @@ impl AgentHook for ChangingPrefix {
         &self,
         _session: &str,
         prompt: &mut String,
+        _tools: &[ToolDefinition],
     ) -> Result<(), kanon_llm::AgentError> {
         self.preparations.fetch_add(1, Ordering::SeqCst);
         let suffix = if self.changed.load(Ordering::SeqCst) {
@@ -1056,6 +1057,18 @@ struct AddToolDefinition;
 
 #[async_trait]
 impl AgentHook for AddToolDefinition {
+    async fn on_system_prompt(
+        &self,
+        _: &str,
+        prompt: &mut String,
+        tools: &[ToolDefinition],
+    ) -> Result<(), kanon_llm::AgentError> {
+        if !tools.is_empty() {
+            prompt.push_str("\n\nUse the available tools.");
+        }
+        Ok(())
+    }
+
     async fn on_llm_request(
         &self,
         _: &str,

@@ -324,6 +324,8 @@ async fn start(dir: &Path) -> Node {
 
     let model = Arc::new(Model::default());
     let rewriter = Arc::new(PluginAgentHook::new());
+    let skills = Arc::new(SkillStore::new(dir.join("skills")));
+    let toggles = Arc::new(ToggleStore::in_memory());
     let factory = Arc::new(AgentFactory::new(
         "test",
         Arc::new(AgentSlot::new()),
@@ -332,13 +334,17 @@ async fn start(dir: &Path) -> Node {
         personas,
         vec![
             Arc::new(SkillCatalogHook::new(
-                Arc::new(SkillStore::new(dir.join("skills"))),
-                Arc::new(ToggleStore::in_memory()),
+                skills.clone(),
+                toggles.clone(),
                 registry.clone(),
             )),
             rewriter.clone(),
         ],
-        Vec::new(),
+        vec![Arc::new(kanon_core::ReadSkillTool::new(
+            skills,
+            toggles,
+            registry.clone(),
+        ))],
     ));
     factory.install(
         "test",
@@ -536,7 +542,7 @@ async fn skill_edits_and_rewrite_cache_eviction_do_not_change_an_active_turn() {
             event(&format!("other-{index}"), "another chat"),
             hosts.clone(),
             node.rewriter
-                .on_system_prompt(&format!("other:{index}"), &mut prompt),
+                .on_system_prompt(&format!("other:{index}"), &mut prompt, &[]),
         )
         .await
         .unwrap();
@@ -857,7 +863,11 @@ async fn a_plugin_adds_and_removes_tools_at_runtime() {
 
     *node.plugin.metas.lock().unwrap() = vec![plugin_meta(&["lookup", "extra"])];
     say(&node, "e1", "hi").await;
-    assert_eq!(tools_offered(&node), ["lookup"], "not before the refresh");
+    assert_eq!(
+        tools_offered(&node),
+        ["lookup", "read_skill"],
+        "not before the refresh"
+    );
 
     let refreshed = node
         .api
@@ -869,7 +879,7 @@ async fn a_plugin_adds_and_removes_tools_at_runtime() {
         .into_inner();
     assert_eq!(refreshed.plugin_ids, [PLUGIN]);
     say(&node, "e2", "hi").await;
-    assert_eq!(tools_offered(&node), ["extra", "lookup"]);
+    assert_eq!(tools_offered(&node), ["extra", "lookup", "read_skill"]);
 
     // A host that stops declaring its plugin keeps what it had.
     *node.plugin.metas.lock().unwrap() = Vec::new();
@@ -882,7 +892,7 @@ async fn a_plugin_adds_and_removes_tools_at_runtime() {
         .unwrap_err();
     assert_eq!(err.code(), Code::FailedPrecondition);
     say(&node, "e3", "hi").await;
-    assert_eq!(tools_offered(&node), ["extra", "lookup"]);
+    assert_eq!(tools_offered(&node), ["extra", "lookup", "read_skill"]);
 
     let err = node
         .api

@@ -152,6 +152,7 @@ impl AgentHook for PluginAgentHook {
         &self,
         session_id: &str,
         prompt: &mut String,
+        _tools: &[kanon_llm::ToolDefinition],
     ) -> Result<(), AgentError> {
         let base = prompt.clone();
         let base_hash = hash(&base);

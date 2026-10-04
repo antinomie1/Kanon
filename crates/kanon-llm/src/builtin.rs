@@ -133,8 +133,15 @@ impl BuiltinAgent {
     }
 
     /// Merges native and plugin/MCP tools; final normalization follows the request hooks.
-    fn collect_tools(&self, hosts: &[Arc<dyn ToolHost>]) -> Result<TurnTools, AgentError> {
+    fn collect_tools(
+        &self,
+        hosts: &[Arc<dyn ToolHost>],
+        without_tools: bool,
+    ) -> Result<TurnTools, AgentError> {
         let mut tools = TurnTools::default();
+        if !self.config.tool_calling || without_tools {
+            return Ok(tools);
+        }
         for (index, native) in self.tools.iter().enumerate() {
             let definition = native.definition();
             tools
@@ -202,6 +209,7 @@ impl BuiltinAgent {
         &self,
         session_id: &str,
         persona: Option<&Persona>,
+        tools: &[ToolDefinition],
     ) -> Result<String, AgentError> {
         let mut parts = Vec::new();
         if let Some(persona) = persona {
@@ -212,7 +220,8 @@ impl BuiltinAgent {
         }
         let mut prompt = crate::layout::system_text(&parts);
         for hook in &self.hooks {
-            hook.on_system_prompt(session_id, &mut prompt).await?;
+            hook.on_system_prompt(session_id, &mut prompt, tools)
+                .await?;
         }
         Ok(prompt)
     }
@@ -348,7 +357,8 @@ impl BuiltinAgent {
         }
         let covered = snapshot.messages.len();
         let system_prompt = if prepared_prefix.is_none() {
-            self.prepare_system_prompt(session_id, persona).await?
+            self.prepare_system_prompt(session_id, persona, tools.unwrap_or_default())
+                .await?
         } else {
             String::new()
         };
@@ -504,8 +514,8 @@ impl BuiltinAgent {
     /// Answers one turn: records the user message, then runs the reasoning and tool loop.
     ///
     /// # Flow:
-    /// 1. Lets hooks enrich the user message, then records it in memory (without its media);
-    /// 2. Aggregates tools from native registered tools and plugin hosts;
+    /// 1. Snapshots enabled tools and prepares matching static instructions;
+    /// 2. Lets hooks enrich the user message, then records it in memory (without its media);
     /// 3. Runs the reasoning loop until the model emits final text or the iteration ceiling is hit,
     ///    invoking hooks around requests, tool authorizations and completions;
     /// 4. Dispatches tool calls (in-process for native tools, gRPC IPC for plugin tools);
@@ -522,8 +532,9 @@ impl BuiltinAgent {
         mut options: TurnOptions,
     ) -> Result<AgentOutput, AgentError> {
         options.persona = self.resolve_persona(session_id, options.persona)?;
+        let tools = self.collect_tools(hosts, options.without_tools)?;
         let system_prompt = self
-            .prepare_system_prompt(session_id, options.persona.as_ref())
+            .prepare_system_prompt(session_id, options.persona.as_ref(), &tools.definitions)
             .await?;
         let media = self.start_turn(session_id, message).await?;
 
@@ -531,7 +542,15 @@ impl BuiltinAgent {
         // conversation the provider accepts, and one that does not ask the model to redo the work
         // that just failed.
         match self
-            .answer(session_id, media, hosts, options, &system_prompt, None)
+            .answer(
+                session_id,
+                media,
+                hosts,
+                options,
+                &system_prompt,
+                tools,
+                None,
+            )
             .await
         {
             Ok(output) => Ok(output),
@@ -586,16 +605,13 @@ impl BuiltinAgent {
         hosts: &[Arc<dyn ToolHost>],
         options: TurnOptions,
         system_prompt: &str,
+        tools: TurnTools,
         stream: Option<&tokio::sync::mpsc::Sender<Result<ChatChunk, AgentError>>>,
     ) -> Result<AgentOutput, AgentError> {
         // Model capability and per-turn policy share one execution boundary. The same decision
         // controls advertisement and dispatch, including calls introduced by middleware.
         let tools_enabled = self.config.tool_calling && !options.without_tools;
-        let tools = if tools_enabled {
-            self.collect_tools(hosts)?
-        } else {
-            TurnTools::default()
-        };
+
         let max_iterations = options.max_iterations.unwrap_or(self.config.max_iterations);
 
         let mut executed_tools = Vec::new();
@@ -1174,8 +1190,9 @@ impl BuiltinAgent {
             persona: self.resolve_persona(session_id, None)?,
             ..TurnOptions::default()
         };
+        let tools = self.collect_tools(hosts, options.without_tools)?;
         let system_prompt = self
-            .prepare_system_prompt(session_id, options.persona.as_ref())
+            .prepare_system_prompt(session_id, options.persona.as_ref(), &tools.definitions)
             .await?;
         let media = self
             .start_turn(session_id, ChatMessage::user(user_input))
@@ -1195,6 +1212,7 @@ impl BuiltinAgent {
                 &hosts,
                 options,
                 &system_prompt,
+                tools,
                 Some(&tx),
             );
             let result = match stop {
@@ -1280,11 +1298,7 @@ impl Agent for BuiltinAgent {
             .transpose()?;
         let persona = self.resolve_persona(session_id, options.persona)?;
         let tools_enabled = self.config.tool_calling && !options.without_tools;
-        let tools = if tools_enabled {
-            self.collect_tools(hosts)?
-        } else {
-            TurnTools::default()
-        };
+        let tools = self.collect_tools(hosts, options.without_tools)?;
         self.compact(
             session_id,
             tools_enabled.then_some(tools.definitions.as_slice()),
