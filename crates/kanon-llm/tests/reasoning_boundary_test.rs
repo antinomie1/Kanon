@@ -814,6 +814,9 @@ async fn responses_refusal_deltas_are_visible_and_persisted_once() {
             answer.push_str(&chunk.delta_text);
             reasoning.push_str(chunk.reasoning_text.as_deref().unwrap_or_default());
             finished += usize::from(chunk.is_finished);
+            if chunk.is_finished {
+                assert_eq!(chunk.finish_reason.as_deref(), Some("refusal"));
+            }
         }
         assert_eq!(answer, "synthetic refusal");
         assert_eq!(reasoning, "private");
@@ -826,7 +829,7 @@ async fn responses_refusal_deltas_are_visible_and_persisted_once() {
 }
 
 #[tokio::test]
-async fn responses_refusal_content_is_retained_in_non_streaming_replies() {
+async fn responses_refusal_remains_visible_and_cannot_replace_history() {
     let url = server(Router::new().route("/v1/responses", post(|| async {
         Json(json!({"output":[{"type":"message","role":"assistant","content":[{"type":"refusal","refusal":"synthetic refusal"}]}],"status":"completed"}))
     }))).await;
@@ -843,10 +846,20 @@ async fn responses_refusal_content_is_retained_in_non_streaming_replies() {
         .await
         .unwrap();
     assert_eq!(output.content, "synthetic refusal");
+    assert_eq!(output.finish_reason.as_deref(), Some("refusal"));
     let messages = Memory::get_messages(memory.as_ref(), "s").await.unwrap();
     assert_eq!(messages.len(), 2);
     assert_eq!(messages[1].content.as_deref(), Some("synthetic refusal"));
     assert!(messages[1].reasoning_content.is_none());
+
+    // A Responses refusal has status=completed on the wire. That status alone must not let
+    // manual or background compaction replace the conversation with the refusal text.
+    agent.run_standalone("s", "another question").await.unwrap();
+    let before = memory.snapshot("s").await.unwrap();
+    let error = agent.compact_session("s", &[]).await.unwrap_err();
+    assert!(matches!(error, kanon_llm::AgentError::Compaction(_)));
+    assert!(error.to_string().contains("refusal"));
+    assert_eq!(memory.snapshot("s").await.unwrap(), before);
 }
 
 #[tokio::test]

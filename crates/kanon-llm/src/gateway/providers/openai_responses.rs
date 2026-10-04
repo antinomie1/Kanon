@@ -387,15 +387,19 @@ impl LlmProvider for OpenAiResponsesProvider {
         // 4. Translate output items (messages & function calls)
         let mut final_content = String::new();
         let mut tool_calls = Vec::new();
+        let mut refused = false;
 
         for item in wire_resp.output {
             match item {
                 wire::ResponsesOutputWire::Message { content, .. } => {
                     for part in content {
                         match part {
-                            wire::ResponsesOutputContentPart::OutputText { text }
-                            | wire::ResponsesOutputContentPart::Refusal { refusal: text } => {
+                            wire::ResponsesOutputContentPart::OutputText { text } => {
                                 final_content.push_str(&text);
+                            }
+                            wire::ResponsesOutputContentPart::Refusal { refusal } => {
+                                final_content.push_str(&refusal);
+                                refused = true;
                             }
                             wire::ResponsesOutputContentPart::Other => {}
                         }
@@ -428,7 +432,11 @@ impl LlmProvider for OpenAiResponsesProvider {
             }
         }
 
-        let finish_reason = if !tool_calls.is_empty() {
+        // A completed transport response can still refuse the task. Keep the visible answer,
+        // but never let compaction mistake that refusal for a summary and discard history.
+        let finish_reason = if refused {
+            Some("refusal".to_string())
+        } else if !tool_calls.is_empty() {
             Some("tool_calls".to_string())
         } else {
             wire_resp.status
@@ -470,6 +478,7 @@ impl LlmProvider for OpenAiResponsesProvider {
         tokio::spawn(async move {
             let mut decoder = SseDecoder::new();
             let mut calls = std::collections::BTreeMap::<usize, super::PendingToolCall>::new();
+            let mut finish_reason = "completed";
 
             while let Some(chunk_res) = byte_stream.next().await {
                 let chunk = match chunk_res {
@@ -482,7 +491,7 @@ impl LlmProvider for OpenAiResponsesProvider {
                 for event in decoder.decode(&chunk) {
                     if event.data.trim() == "[DONE]" {
                         let _ = tx
-                            .send(super::finish_tool_calls(calls, Some("completed".into())))
+                            .send(super::finish_tool_calls(calls, Some(finish_reason.into())))
                             .await;
                         return;
                     }
@@ -494,6 +503,12 @@ impl LlmProvider for OpenAiResponsesProvider {
                         }
                     };
                     let event_type = event.event.as_deref().or_else(|| value["type"].as_str());
+                    if matches!(
+                        event_type,
+                        Some("response.refusal.delta" | "response.refusal.done")
+                    ) {
+                        finish_reason = "refusal";
+                    }
                     match event_type {
                         Some("response.output_item.added" | "response.output_item.done")
                             if value["item"]["type"] == "function_call" =>
@@ -568,7 +583,7 @@ impl LlmProvider for OpenAiResponsesProvider {
                         }
                         Some("response.completed" | "response.done") => {
                             let _ = tx
-                                .send(super::finish_tool_calls(calls, Some("completed".into())))
+                                .send(super::finish_tool_calls(calls, Some(finish_reason.into())))
                                 .await;
                             return;
                         }
