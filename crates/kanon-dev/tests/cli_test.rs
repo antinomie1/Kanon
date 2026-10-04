@@ -129,6 +129,30 @@ fn test_plugin_scaffold_typescript() {
     assert!(index_ts.contains("export default class MyTsPluginPlugin extends Plugin"));
     assert!(index_ts.contains("@Command"));
     assert!(index_ts.contains("@Tool"));
+
+    // Both spellings accepted by the node must ship the same code and dependency inputs.
+    std::fs::write(out_dir.join("package-lock.json"), "{}\n").unwrap();
+    for runtime in ["typescript", "ts"] {
+        std::fs::write(
+            out_dir.join("plugin.toml"),
+            plugin_toml.replace(
+                "runtime = \"typescript\"",
+                &format!("runtime = \"{runtime}\""),
+            ),
+        )
+        .unwrap();
+        let report = pack_plugin(&out_dir, Some(&tmp.path().join("dist"))).unwrap();
+        assert_eq!(
+            archive_names(&report.bundle_path),
+            [
+                "index.ts",
+                "package-lock.json",
+                "package.json",
+                "plugin.toml"
+            ],
+            "runtime {runtime} must package its scripts, declaration and lockfile"
+        );
+    }
 }
 
 #[test]
@@ -338,6 +362,22 @@ fn test_plugin_pack_bundle_and_sha256() {
     names.sort();
     assert_eq!(names, expected);
     assert_eq!(pack_report.files, expected);
+
+    // A subprocess sets its own working directory without racing other tests in this process.
+    let output = std::process::Command::new(env!("CARGO_BIN_EXE_kanon-dev"))
+        .args(["pack", "plugin.toml"])
+        .current_dir(&plugin_dir)
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "packing a bare manifest failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(
+        archive_names(&plugin_dir.join("org.kanon.plugin.pack_test.kpk")),
+        expected
+    );
 }
 
 #[test]

@@ -62,6 +62,13 @@ impl LintReport {
 
 /// Resolves the absolute path to `plugin.toml` from a given file or directory path.
 pub fn find_manifest_path(path: &Path) -> Result<(PathBuf, PathBuf), LintError> {
+    // A bare filename has an empty parent. Keep downstream scans and build working directories
+    // anchored to the caller's directory without resolving a plugin's symlinks.
+    let absolute = std::path::absolute(path).map_err(|source| LintError::Io {
+        path: path.to_path_buf(),
+        source,
+    })?;
+    let path = absolute.as_path();
     if path.is_file() {
         let parent = path
             .parent()

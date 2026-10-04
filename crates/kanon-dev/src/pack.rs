@@ -313,7 +313,7 @@ fn collect_files(
 fn is_packaged(relative: &Path, runtime: &str) -> bool {
     let (dependency_files, script_extensions): (&[&str], &[&str]) = match runtime {
         "python" => (&["pyproject.toml", "uv.lock"], &["py"]),
-        "typescript" => (
+        "typescript" | "ts" => (
             &["package.json", "bun.lock", "bun.lockb", "package-lock.json"],
             &["ts", "mts", "cts", "js", "mjs", "cjs"],
         ),
