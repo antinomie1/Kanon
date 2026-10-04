@@ -761,7 +761,7 @@ impl PipelineEngine {
             }
             let turn = self.run_conversation_turn(
                 ConversationTurn {
-                    agent: agent.clone(),
+                    agent: kanon_llm::ConversationBackend::Builtin(agent.clone()),
                     running: &running,
                     session_id: &session_id,
                     event: &latest,

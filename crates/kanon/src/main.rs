@@ -251,14 +251,22 @@ async fn main() -> StartupResult<()> {
             Arc::new(PluginAgentHook::new()),
         ])
         .with_bash_tool(bash_tool)
-        .build();
+        .try_build()?;
 
     instances
-        .validate_models(state.agent_factory().providers())
+        .validate_models(
+            state.agent_factory().providers(),
+            &state.node_settings().default_agent,
+        )
         .await
         .map_err(|err| format!("Failed to validate instance model references: {err}"))?;
 
     // Publish instance prompts as personas before the first message can arrive.
+    #[cfg(feature = "dsh")]
+    for instance in instances.list().await {
+        state.agent_factory().dsh_for(instance.agent.as_deref())?;
+    }
+
     restore_instance_personas(&instances.list().await, state.personas(), state.sessions())
         .map_err(|err| {
             format!("Failed to restore instance personas and session bindings: {err}")

@@ -36,6 +36,11 @@ pub type ToolRouterError = AgentError;
 /// Errors arising during general agent execution and reasoning loops.
 #[derive(Debug, Error)]
 pub enum AgentError {
+    /// A selected external agent failed; this never authorizes a builtin retry.
+    #[cfg(feature = "dsh")]
+    #[error(transparent)]
+    Dsh(crate::dsh::DshError),
+
     /// The request configuration or conversation layout cannot be sent to the model.
     #[error("Invalid model request: {0}")]
     InvalidRequest(String),

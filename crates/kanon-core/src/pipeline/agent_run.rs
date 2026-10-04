@@ -103,7 +103,6 @@ impl PipelineEngine {
         }
         let factory = self
             .agent_factory()
-            .filter(|factory| factory.node_agent().is_some())
             .ok_or(ConversationError::NoModel)?
             .clone();
 
@@ -119,33 +118,62 @@ impl PipelineEngine {
             .filter(|model| !model.trim().is_empty())
             .or_else(|| instance.and_then(|instance| instance.model.clone()));
         let unknown_model = || AgentRunError::UnknownModel(model.clone().unwrap_or_default());
+        let backend = factory
+            .conversation_backend(
+                instance.and_then(|instance| instance.agent.as_deref()),
+                model.as_deref(),
+            )
+            .map_err(AgentRunError::Invalid)?
+            .ok_or_else(unknown_model)?;
+        #[cfg(feature = "dsh")]
+        if matches!(&backend, kanon_llm::ConversationBackend::Dsh(_))
+            && (!run.in_conversation
+                || run.model.is_some()
+                || run.max_steps.is_some()
+                || !run.use_tools)
+        {
+            return Err(AgentRunError::Invalid(
+                "DSH RunAgent requires an existing chat and native tool policy; model and step settings belong to DSH".into(),
+            ));
+        }
 
         let (agent, session_id) = match (&chat, run.in_conversation) {
             (Some(chat), true) => {
-                let agent = factory
-                    .agent_for_model(model.as_deref())
-                    .ok_or_else(unknown_model)?;
                 let session_id = chat.instance.conversation_session_id(&chat.conversation);
-                (agent, session_id)
+                #[cfg(feature = "dsh")]
+                let session_id = if matches!(&backend, kanon_llm::ConversationBackend::Dsh(_)) {
+                    chat.instance.dsh_session_id_at(
+                        &chat.conversation,
+                        chat.instance.dsh_session_generation(&chat.conversation),
+                    )
+                } else {
+                    session_id
+                };
+                (backend, session_id)
             }
             _ => {
                 let agent = factory
                     .private_agent(model.as_deref(), run.instructions.clone())
                     .ok_or_else(unknown_model)?;
                 let n = PRIVATE_RUNS.fetch_add(1, Ordering::Relaxed);
-                (agent, format!("plugin:{}:{n}", run.plugin_id))
+                (
+                    kanon_llm::ConversationBackend::Builtin(agent),
+                    format!("plugin:{}:{n}", run.plugin_id),
+                )
             }
         };
 
-        let capabilities = factory
-            .models()
-            .settings_for(&ModelRef::parse(&agent.config().model_ref()))
-            .capabilities;
-        if !run.images.is_empty() && !capabilities.vision {
-            return Err(AgentRunError::Invalid(format!(
-                "model '{}' is not set up to accept images",
-                agent.config().model_ref()
-            )));
+        if let Some(builtin) = agent.builtin() {
+            let capabilities = factory
+                .models()
+                .settings_for(&ModelRef::parse(&builtin.config().model_ref()))
+                .capabilities;
+            if !run.images.is_empty() && !capabilities.vision {
+                return Err(AgentRunError::Invalid(format!(
+                    "model '{}' is not set up to accept images",
+                    builtin.config().model_ref()
+                )));
+            }
         }
         let mut message = if run.images.is_empty() {
             ChatMessage::user(run.prompt)
@@ -164,7 +192,11 @@ impl PipelineEngine {
             .as_ref()
             .map(|event| event.event_id.clone())
             .unwrap_or_default();
-        let tool_hosts = if run.use_tools && agent.config().tool_calling {
+        let tool_hosts = if run.use_tools
+            && agent
+                .builtin()
+                .is_some_and(|agent| agent.config().tool_calling)
+        {
             self.tool_hosts(&hosts, instance, &event_id).await
         } else {
             Vec::new()
@@ -202,7 +234,13 @@ impl PipelineEngine {
                 let running = self
                     .running_turns()
                     .begin(instance.map(|instance| instance.id.clone()));
-                let router = ToolRouter::from_arc(agent);
+                let builtin = agent
+                    .builtin()
+                    .ok_or_else(|| {
+                        AgentRunError::Invalid("private execution requires builtin".into())
+                    })?
+                    .clone();
+                let router = ToolRouter::from_arc(builtin);
                 let turn = kanon_llm::with_stop_signal(
                     running.signal(),
                     router.execute_message_with(&session_id, message, &tool_hosts, options),

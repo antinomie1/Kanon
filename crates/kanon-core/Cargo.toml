@@ -5,6 +5,10 @@ edition = "2024"
 license = "GPL-3.0-only"
 description = "Microkernel engine, pipeline router, and process supervisor for Kanon"
 
+[features]
+default = []
+dsh = ["kanon-llm/dsh"]
+
 [dependencies]
 kanon-proto = { path = "../kanon-proto" }
 kanon-transport = { path = "../kanon-transport" }

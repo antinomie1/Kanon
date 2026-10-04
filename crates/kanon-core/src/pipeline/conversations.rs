@@ -11,6 +11,9 @@
 //! from an inbound message exactly as when the model answers it, so a plugin and the model never
 //! disagree about which conversation is meant.
 
+#[cfg(feature = "dsh")]
+mod dsh;
+
 use std::sync::Arc;
 
 use kanon_llm::{ChatMessage, Role, SessionManager};
@@ -43,6 +46,10 @@ pub struct ConversationInfo {
 /// Why a conversation operation failed.
 #[derive(Debug, thiserror::Error)]
 pub enum ConversationError {
+    /// The selected remote agent rejected or failed the operation.
+    #[cfg(feature = "dsh")]
+    #[error(transparent)]
+    Dsh(#[from] kanon_llm::dsh::DshError),
     /// No enabled instance answers on the platform, so no conversation exists there.
     #[error("no enabled bot instance claims platform '{0}'")]
     NoInstance(String),
@@ -139,10 +146,16 @@ impl PipelineEngine {
         &self,
         chat: &Chat,
     ) -> Result<Vec<ConversationInfo>, ConversationError> {
-        let sessions = self.session_manager().ok_or(ConversationError::NoModel)?;
         // The live record, not the copy resolved with the event: an earlier step of the same
         // command may just have changed the current generation.
         let instance = self.live_instance(&chat.instance).await?;
+        #[cfg(feature = "dsh")]
+        if let Some(client) = self.dsh_for(Some(&instance))? {
+            return self
+                .dsh_conversations(&instance, &chat.conversation, &client)
+                .await;
+        }
+        let sessions = self.session_manager().ok_or(ConversationError::NoModel)?;
         let prefix = instance.conversation_session_prefix(&chat.conversation);
         let current = instance.session_generation(&chat.conversation);
 
@@ -200,7 +213,8 @@ impl PipelineEngine {
             .map(|conversation| conversation.generation)
             .max()
             .unwrap_or(0)
-            + 1;
+            .checked_add(1)
+            .ok_or_else(|| ConversationError::Invalid("conversation generation overflow".into()))?;
         Ok(self.select_generation(chat, next).await?)
     }
 
@@ -241,10 +255,21 @@ impl PipelineEngine {
         let writing = sessions
             .try_write(session_id)
             .map_err(|_| ConversationError::Busy(session_id.to_string()))?;
-        writing
-            .scope(sessions.delete_session(session_id))
-            .await
-            .map_err(|err| ConversationError::Storage(err.to_string()))?;
+        #[cfg(feature = "dsh")]
+        let remote = self.dsh_for(Some(&chat.instance))?;
+        #[cfg(feature = "dsh")]
+        if let Some(client) = &remote {
+            // Archive is DSH's restorable retirement operation. No builtin history is touched.
+            client.archive_session(session_id).await?;
+        }
+        #[cfg(not(feature = "dsh"))]
+        let remote: Option<()> = None;
+        if remote.is_none() {
+            writing
+                .scope(sessions.delete_session(session_id))
+                .await
+                .map_err(|err| ConversationError::Storage(err.to_string()))?;
+        }
         tracing::info!(
             instance_id = %chat.instance.id,
             session_id = %session_id,
@@ -274,6 +299,13 @@ impl PipelineEngine {
         chat: &Chat,
         messages: Vec<ChatMessage>,
     ) -> Result<String, ConversationError> {
+        #[cfg(feature = "dsh")]
+        if self.dsh_for(Some(&chat.instance))?.is_some() {
+            return Err(ConversationError::Invalid(
+                "DSH owns its journal and does not support importing completed builtin turns"
+                    .into(),
+            ));
+        }
         if messages.is_empty() {
             return Err(ConversationError::Invalid(
                 "at least one user/assistant pair is required".to_string(),
@@ -332,6 +364,23 @@ impl PipelineEngine {
         let registry = self
             .instances()
             .ok_or_else(|| ConversationError::NoInstance(String::new()))?;
+        #[cfg(feature = "dsh")]
+        if let Some(client) = self.dsh_for(Some(&chat.instance))? {
+            let id = chat
+                .instance
+                .dsh_session_id_at(&chat.conversation, generation);
+            // Remote creation precedes local publication. A disk failure leaves a recoverable
+            // remote session rather than a routing pointer to a session that never existed.
+            client.create_session(&id, None).await?;
+            registry
+                .select_session(
+                    &chat.instance.id,
+                    &BotInstance::dsh_routing_key(&chat.conversation),
+                    generation,
+                )
+                .await?;
+            return Ok(id);
+        }
         Ok(registry
             .select_session(&chat.instance.id, &chat.conversation, generation)
             .await?)

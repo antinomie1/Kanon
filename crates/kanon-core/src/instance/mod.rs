@@ -20,7 +20,11 @@
 //! Instances are persisted as one JSON document (`data/instances.json`) so the node comes back
 //! with the same bots after a restart.
 
+#[cfg(feature = "dsh")]
+mod dsh;
+mod runtime;
 mod validation;
+pub use runtime::InstanceRuntime;
 use validation::*;
 mod persistence;
 use std::collections::HashMap;
@@ -620,7 +624,7 @@ impl InstanceRegistry {
     pub async fn create(
         &self,
         draft: InstanceDraft,
-        runtime: Option<(&PersonaRegistry, &SessionManager, &ProviderRegistry)>,
+        runtime: Option<InstanceRuntime<'_>>,
     ) -> Result<BotInstance, InstanceError> {
         let mut instances = self.instances.write().await;
 
@@ -628,8 +632,18 @@ impl InstanceRegistry {
         let id = unique_id(&instances, &name);
         let candidate = build_instance(id, name, draft)?;
 
-        Self::validate_persona(&candidate, runtime.map(|(personas, _, _)| personas))?;
-        Self::validate_model(&candidate, runtime.map(|(_, _, providers)| providers))?;
+        Self::validate_persona(
+            &candidate,
+            runtime
+                .filter(|runtime| runtime.builtin(&candidate))
+                .map(|runtime| runtime.personas),
+        )?;
+        Self::validate_model(
+            &candidate,
+            runtime
+                .filter(|runtime| runtime.builtin(&candidate))
+                .map(|runtime| runtime.providers),
+        )?;
         Self::validate_claims(&instances, &candidate)?;
         let mut next = instances.clone();
         next.insert(candidate.id.clone(), candidate.clone());
@@ -643,7 +657,7 @@ impl InstanceRegistry {
         &self,
         id: &str,
         draft: InstanceDraft,
-        runtime: Option<(&PersonaRegistry, &SessionManager, &ProviderRegistry)>,
+        runtime: Option<InstanceRuntime<'_>>,
     ) -> Result<BotInstance, InstanceError> {
         let mut instances = self.instances.write().await;
 
@@ -668,8 +682,18 @@ impl InstanceRegistry {
             .map(|existing| existing.session_generations.clone())
             .unwrap_or_default();
 
-        Self::validate_persona(&candidate, runtime.map(|(personas, _, _)| personas))?;
-        Self::validate_model(&candidate, runtime.map(|(_, _, providers)| providers))?;
+        Self::validate_persona(
+            &candidate,
+            runtime
+                .filter(|runtime| runtime.builtin(&candidate))
+                .map(|runtime| runtime.personas),
+        )?;
+        Self::validate_model(
+            &candidate,
+            runtime
+                .filter(|runtime| runtime.builtin(&candidate))
+                .map(|runtime| runtime.providers),
+        )?;
         Self::validate_claims(&instances, &candidate)?;
         let mut next = instances.clone();
         next.insert(candidate.id.clone(), candidate.clone());
@@ -682,7 +706,7 @@ impl InstanceRegistry {
     pub async fn delete(
         &self,
         id: &str,
-        runtime: Option<(&PersonaRegistry, &SessionManager, &ProviderRegistry)>,
+        runtime: Option<InstanceRuntime<'_>>,
     ) -> Result<(), InstanceError> {
         let mut instances = self.instances.write().await;
         let mut next = instances.clone();
@@ -774,47 +798,6 @@ impl InstanceRegistry {
         result
     }
 
-    /// Validates restored references against the configured endpoints before serving messages.
-    pub async fn validate_models(&self, providers: &ProviderRegistry) -> Result<(), InstanceError> {
-        for instance in self.instances.read().await.values() {
-            Self::validate_model(instance, Some(providers))?;
-        }
-        Ok(())
-    }
-
-    /// Checks model ownership under the same instance guard that protects its publication.
-    fn validate_model(
-        candidate: &BotInstance,
-        providers: Option<&ProviderRegistry>,
-    ) -> Result<(), InstanceError> {
-        if let Some(providers) = providers
-            && let Some(model) = candidate.model.as_deref()
-        {
-            providers
-                .resolve(&kanon_llm::ModelRef::parse(model))
-                .map_err(|error| {
-                    InstanceError::Invalid(format!("instance '{}': {error}", candidate.id))
-                })?;
-        }
-        Ok(())
-    }
-
-    /// Checks the live persona catalog only after taking the instance write lock.
-    fn validate_persona(
-        candidate: &BotInstance,
-        personas: Option<&PersonaRegistry>,
-    ) -> Result<(), InstanceError> {
-        if let Some(personas) = personas
-            && let Some(id) = candidate.persona_id.as_deref()
-            && personas.get(id).is_none()
-        {
-            return Err(InstanceError::Invalid(format!(
-                "persona '{id}' does not exist on this node"
-            )));
-        }
-        Ok(())
-    }
-
     /// Commits one instance mutation together with its generated persona's lifecycle.
     ///
     /// Lock order is instance write lock -> generated persona shard -> session writers (try only)
@@ -825,9 +808,12 @@ impl InstanceRegistry {
         live: &mut HashMap<String, BotInstance>,
         next: HashMap<String, BotInstance>,
         id: &str,
-        runtime: Option<(&PersonaRegistry, &SessionManager, &ProviderRegistry)>,
+        runtime: Option<InstanceRuntime<'_>>,
     ) -> Result<(), InstanceError> {
-        let Some((personas, sessions, _)) = runtime else {
+        let Some(InstanceRuntime {
+            personas, sessions, ..
+        }) = runtime
+        else {
             return self.commit(live, next);
         };
         let previous = live.get(id).and_then(generated_persona);

@@ -82,10 +82,21 @@ export default {
     'context.none': 'No extras',
     'agents.title': 'Default agent',
     'agents.hint':
-      'The engine that answers for every bot that does not pick its own. Only the built-in agent exists for now; agents provided by plugins will be listed here.',
+      "The agent used by instances without their own selection. Available backends depend on this node’s build.",
     'agents.builtin': 'Built-in agent',
     'agents.builtin_hint':
       "Kanon's own loop: the chosen model, plugin and MCP tools, personas and conversation memory.",
+    "agents.dsh_hint": "DSH owns settings, models, sessions, memory and context for instances that select it.",
+    "agents.dsh_url": "DSH address",
+    "agents.dsh_cookie": "Cookie file on the node (optional)",
+    "agents.dsh_load": "Read DSH settings",
+    "agents.dsh_open": "Open DSH",
+    "agents.dsh_namespace": "Settings section",
+    "agents.dsh_current": "Current settings (secrets hidden)",
+    "agents.dsh_patch": "Changes as a JSON object",
+    "agents.dsh_patch_hint": "Only supplied fields change. Concurrent edits are rejected; reload before retrying.",
+    "agents.dsh_patch_object": "Enter a JSON object.",
+    "agents.dsh_owned": "This instance uses DSH. Configure its models, persona, memory and context in the Agent settings or DSH.",
     'context.title': 'What the model is told',
     'context.hint':
       "What the node adds to the prompt besides the message itself. Ids and time are off by default: ids are personal data and the time isn't something the user said. Merged forwards are expanded by default.",

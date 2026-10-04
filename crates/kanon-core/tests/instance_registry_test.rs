@@ -41,13 +41,29 @@ async fn startup_restores_generated_personas_without_guessing_binding_ownership(
     let mut owner = draft("Owner", false, &[]);
     owner.system_prompt = Some("owned prompt".into());
     instances
-        .create(owner, Some((&personas, &sessions, &providers)))
+        .create(
+            owner,
+            Some(kanon_core::InstanceRuntime {
+                personas: &personas,
+                sessions: &sessions,
+                providers: &providers,
+                default_agent: "builtin",
+            }),
+        )
         .await
         .unwrap();
     let mut reader = draft("Reader", false, &[]);
     reader.persona_id = Some("instance:owner".into());
     instances
-        .create(reader, Some((&personas, &sessions, &providers)))
+        .create(
+            reader,
+            Some(kanon_core::InstanceRuntime {
+                personas: &personas,
+                sessions: &sessions,
+                providers: &providers,
+                default_agent: "builtin",
+            }),
+        )
         .await
         .unwrap();
     for (key, persona) in [
@@ -532,9 +548,17 @@ async fn direct_model_changes_require_a_provider_and_preserve_the_previous_choic
         .with_model_users("endpoint", |users| assert_eq!(users, [instance.id.clone()]))
         .await;
     let restored = InstanceRegistry::open(&path).await.unwrap();
-    restored.validate_models(&providers).await.unwrap();
+    restored
+        .validate_models(&providers, "builtin")
+        .await
+        .unwrap();
     providers.replace(Vec::new()).unwrap();
-    assert!(restored.validate_models(&providers).await.is_err());
+    assert!(
+        restored
+            .validate_models(&providers, "builtin")
+            .await
+            .is_err()
+    );
     assert!(
         registry
             .set_model(&instance.id, None, Some(&providers))
@@ -586,7 +610,12 @@ async fn provider_deletion_prevents_queued_instance_mutations_from_publishing_st
         }
     });
     entered_rx.await.unwrap();
-    let runtime = Some((&personas, &sessions, providers.as_ref()));
+    let runtime = Some(kanon_core::InstanceRuntime {
+        personas: &personas,
+        sessions: &sessions,
+        providers: providers.as_ref(),
+        default_agent: "builtin",
+    });
     let mut configured = draft("Bot", false, &[]);
     configured.model = Some("endpoint/model".into());
     let create = registry.create(configured.clone(), runtime);

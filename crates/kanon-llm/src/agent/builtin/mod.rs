@@ -320,6 +320,8 @@ fn unanswered_tool_calls(history: &[ChatMessage]) -> Vec<String> {
 /// and would sit in every later request of the session.
 fn closing_note(err: &AgentError) -> String {
     let what = match err {
+        #[cfg(feature = "dsh")]
+        AgentError::Dsh(_) => "failed: external agent failed".to_string(),
         AgentError::Busy(_) => "failed because the session is busy".to_string(),
         AgentError::Stopped => "was stopped by the user before it finished".to_string(),
         AgentError::Gateway(GatewayError::Http(http)) if http.is_timeout() => {

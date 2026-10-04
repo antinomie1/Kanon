@@ -24,6 +24,8 @@ use crate::pipeline::conversations::{Chat, ConversationError};
 /// Maps a conversation failure onto the status the protocol documents for it.
 pub(super) fn conversation_status(err: ConversationError) -> Status {
     match err {
+        #[cfg(feature = "dsh")]
+        ConversationError::Dsh(_) => Status::unavailable(err.to_string()),
         ConversationError::NoInstance(_) | ConversationError::NotFound(_) => {
             Status::not_found(err.to_string())
         }

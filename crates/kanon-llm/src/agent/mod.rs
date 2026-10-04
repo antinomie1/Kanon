@@ -1,10 +1,9 @@
 //! The agent: what answers a conversation turn.
 //!
-//! The pipeline, the console chat and the plugin gateway never drive a model directly; they hand a
-//! turn to an [`Agent`] and act on its [`AgentOutput`]. The node runs one implementation,
-//! [`crate::BuiltinAgent`] (Kanon's own tool loop over [`LlmProvider`]), but the trait is the seam
-//! where another engine (an external agent SDK, for instance) can take its place without the
-//! pipeline changing: everything the pipeline needs from an agent is declared here.
+//! [`crate::ConversationBackend`] selects the complete runtime before model routing. The
+//! local [`Agent`] contract serves [`crate::BuiltinAgent`] and embedded model loops; it exposes
+//! their provider and memory. The optional DSH adapter delegates to `kanon-dsh` instead of
+//! fabricating a builtin provider or memory implementation for a remote-owned conversation.
 //!
 //! The module also holds the types every agent shares: its configuration ([`AgentConfig`]), its
 //! result ([`AgentOutput`]), native in-process tools ([`AgentTool`]) and lifecycle hooks
@@ -30,11 +29,17 @@ pub const BUILTIN_AGENT: &str = "builtin";
 
 /// Identifiers of the agents an operator may select, node-wide or for one bot instance.
 ///
-/// The built-in agent is the only one today, so a selection can only name the agent that already
-/// answers every turn and nothing downstream dispatches on it yet. Agents provided by plugins are
-/// meant to join this list; the dispatch belongs in [`crate::AgentFactory`] once they do.
+/// The external DSH runtime is selectable only in builds that explicitly include its feature.
+/// Backend selection is independent of the built-in model provider directory.
 pub fn selectable_agents() -> &'static [&'static str] {
-    &[BUILTIN_AGENT]
+    #[cfg(feature = "dsh")]
+    {
+        &[BUILTIN_AGENT, "dsh"]
+    }
+    #[cfg(not(feature = "dsh"))]
+    {
+        &[BUILTIN_AGENT]
+    }
 }
 
 /// Checks that `id` names a selectable agent.
@@ -474,3 +479,9 @@ impl ToolHost for NoopHost {
         ))
     }
 }
+
+/// Kanon's builtin agent runtime.
+pub mod builtin;
+/// Optional deepseek-harness agent runtime.
+#[cfg(feature = "dsh")]
+pub mod dsh;

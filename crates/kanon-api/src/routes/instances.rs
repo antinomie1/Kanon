@@ -321,16 +321,30 @@ async fn create_instance(
     State(state): State<ApiState>,
     Json(payload): Json<InstanceRequest>,
 ) -> Result<Json<InstanceMutationResponse>, ApiError> {
+    let node_settings = state.node_settings();
+    let selected_agent = payload
+        .agent
+        .as_deref()
+        .map(str::trim)
+        .filter(|id| !id.is_empty());
+    kanon_llm::check_agent_id(&state.agent_factory().agent_id(selected_agent))
+        .map_err(ApiError::BadRequest)?;
+    #[cfg(feature = "dsh")]
+    state
+        .agent_factory()
+        .dsh_for(selected_agent)
+        .map_err(ApiError::Unavailable)?;
     let draft: InstanceDraft = payload.into();
     let instance = state
         .instances()
         .create(
             draft,
-            Some((
-                state.personas(),
-                state.sessions(),
-                state.agent_factory().providers(),
-            )),
+            Some(kanon_core::InstanceRuntime {
+                personas: state.personas(),
+                sessions: state.sessions(),
+                providers: state.agent_factory().providers(),
+                default_agent: &node_settings.default_agent,
+            }),
         )
         .await
         .map_err(map_error)?;
@@ -355,17 +369,31 @@ async fn update_instance(
     Path(id): Path<String>,
     Json(payload): Json<InstanceRequest>,
 ) -> Result<Json<InstanceMutationResponse>, ApiError> {
+    let node_settings = state.node_settings();
+    let selected_agent = payload
+        .agent
+        .as_deref()
+        .map(str::trim)
+        .filter(|id| !id.is_empty());
+    kanon_llm::check_agent_id(&state.agent_factory().agent_id(selected_agent))
+        .map_err(ApiError::BadRequest)?;
+    #[cfg(feature = "dsh")]
+    state
+        .agent_factory()
+        .dsh_for(selected_agent)
+        .map_err(ApiError::Unavailable)?;
     let draft: InstanceDraft = payload.into();
     let instance = state
         .instances()
         .update(
             &id,
             draft,
-            Some((
-                state.personas(),
-                state.sessions(),
-                state.agent_factory().providers(),
-            )),
+            Some(kanon_core::InstanceRuntime {
+                personas: state.personas(),
+                sessions: state.sessions(),
+                providers: state.agent_factory().providers(),
+                default_agent: &node_settings.default_agent,
+            }),
         )
         .await
         .map_err(map_error)?;
@@ -390,15 +418,17 @@ async fn delete_instance(
     State(state): State<ApiState>,
     Path(id): Path<String>,
 ) -> Result<Json<InstanceMutationResponse>, ApiError> {
+    let node_settings = state.node_settings();
     state
         .instances()
         .delete(
             &id,
-            Some((
-                state.personas(),
-                state.sessions(),
-                state.agent_factory().providers(),
-            )),
+            Some(kanon_core::InstanceRuntime {
+                personas: state.personas(),
+                sessions: state.sessions(),
+                providers: state.agent_factory().providers(),
+                default_agent: &node_settings.default_agent,
+            }),
         )
         .await
         .map_err(map_error)?;

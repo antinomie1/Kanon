@@ -4,10 +4,11 @@
 //! The agent is the engine that answers a conversation turn (see [`kanon_llm::Agent`]). The node
 //! has one default agent, and a bot instance may override it the same way it overrides the model.
 //!
-//! # Why a selection with a single choice exists
-//! Only the built-in agent is selectable today. The setting is in place so operators already see,
-//! node-wide and per instance, which engine answers; agents provided by plugins are meant to join
-//! [`kanon_llm::selectable_agents`] without the console or this contract changing.
+//! Backend availability is compiled into the node. Builtin is always present; DSH appears
+//! only in feature-enabled builds and manages its own settings, models and sessions.
+
+#[cfg(feature = "dsh")]
+mod dsh;
 
 use axum::Json;
 use axum::Router;
@@ -20,9 +21,12 @@ use crate::state::ApiState;
 
 /// Registers the agent selection endpoints.
 pub fn routes() -> Router<ApiState> {
-    Router::new()
+    let router = Router::new()
         .route("/api/v1/agents", get(list_agents))
-        .route("/api/v1/agents/default", put(set_default_agent))
+        .route("/api/v1/agents/default", put(set_default_agent));
+    #[cfg(feature = "dsh")]
+    let router = router.merge(dsh::routes());
+    router
 }
 
 /// Response of `GET /api/v1/agents`.

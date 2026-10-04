@@ -130,6 +130,9 @@ pub struct NodeSettings {
     pub providers: Vec<ProviderEntry>,
     /// Agent that answers for every instance without an agent override.
     pub default_agent: String,
+    /// Optional external runtime connection; behavioral settings remain owned by DSH.
+    #[cfg(feature = "dsh")]
+    pub dsh: Option<kanon_llm::dsh::DshConfig>,
     /// Canonical `<provider>/<model-id>` the node answers with by default.
     pub default_model: Option<String>,
     /// Per-model settings.
@@ -153,6 +156,8 @@ impl Default for NodeSettings {
         Self {
             providers: Vec::new(),
             default_agent: BUILTIN_AGENT.to_string(),
+            #[cfg(feature = "dsh")]
+            dsh: None,
             default_model: None,
             models: Vec::new(),
             reply_policy: ReplyPolicy::default(),
@@ -176,6 +181,17 @@ impl NodeSettings {
     /// the console describing a node that cannot answer.
     pub fn validate(&self) -> Result<(), String> {
         kanon_llm::check_agent_id(&self.default_agent)?;
+        #[cfg(feature = "dsh")]
+        {
+            if let Some(config) = &self.dsh {
+                config.validate().map_err(|e| e.to_string())?;
+            }
+            if self.default_agent == "dsh" && self.dsh.is_none() {
+                return Err(
+                    "DSH must be configured before selecting it as the default agent".into(),
+                );
+            }
+        }
         self.reply_policy.validate()?;
         self.command_policy.clone().prepare()?;
         self.bash_policy.validate()?;
@@ -329,6 +345,9 @@ struct SystemConfigDocument {
     /// selectable, which therefore keep the built-in agent.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     default_agent: Option<String>,
+    /// Retain presence when compiled out so unsupported configuration is rejected explicitly.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    dsh: Option<serde_json::Value>,
     /// Canonical `<provider>/<model-id>` the node answers with by default.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     default_model: Option<String>,
@@ -558,7 +577,17 @@ impl SystemConfigStore {
             None => return Ok(NodeSettings::default()),
         };
 
+        #[cfg(not(feature = "dsh"))]
+        if document.dsh.is_some() {
+            return Err("DSH configuration requires a build with the dsh feature".into());
+        }
         let settings = NodeSettings {
+            #[cfg(feature = "dsh")]
+            dsh: document
+                .dsh
+                .map(serde_json::from_value)
+                .transpose()
+                .map_err(|e| format!("invalid DSH configuration: {e}"))?,
             providers: document.providers.unwrap_or_default(),
             default_model: document.default_model,
             default_agent: document
@@ -590,6 +619,15 @@ impl SystemConfigStore {
 
         document.providers = Some(settings.providers.clone());
         document.default_agent = Some(settings.default_agent.clone());
+        #[cfg(feature = "dsh")]
+        {
+            document.dsh = settings
+                .dsh
+                .as_ref()
+                .map(serde_json::to_value)
+                .transpose()
+                .map_err(|e| e.to_string())?;
+        }
         document.default_model = settings.default_model.clone();
         document.models = Some(settings.models.clone());
         document.reply_policy = Some(settings.reply_policy);

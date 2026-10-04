@@ -4,12 +4,12 @@ import { t } from '../../stores/i18n.svelte';
 import { toasts } from '../../stores/toast.svelte';
 import Section from '../ui/Section.svelte';
 import Select from '../ui/Select.svelte';
+import DshSettings from './DshSettings.svelte';
 
 /**
  * The node's default agent: the engine that answers for every instance without its own choice.
  *
- * A change applies at once, like the default model. Only the built-in agent exists today, so the
- * picker mostly shows which engine answers; the list comes from the node.
+ * A change applies at once. The node advertises only its compiled backends.
  */
 
 $effect(() => {
@@ -53,3 +53,7 @@ async function apply(next: string) {
     {/if}
   {/if}
 </Section>
+
+{#if agentsStore.agents.includes('dsh')}
+  <DshSettings />
+{/if}

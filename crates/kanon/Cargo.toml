@@ -9,6 +9,10 @@ description = "Kanon node entrypoint: microkernel engine, process supervisor and
 name = "kanon"
 path = "src/main.rs"
 
+[features]
+default = []
+dsh = ["kanon-api/dsh", "kanon-core/dsh", "kanon-llm/dsh"]
+
 [dependencies]
 kanon-adapter-milky = { path = "../kanon-adapter-milky" }
 kanon-adapter-onebot = { path = "../kanon-adapter-onebot" }

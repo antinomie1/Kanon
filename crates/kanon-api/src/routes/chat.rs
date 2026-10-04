@@ -9,6 +9,9 @@
 //! - `stream: true` → `text/event-stream` where each `data:` frame carries `delta`, `done` or
 //!   `error` payloads, matching the SSE conventions already used by the LLM providers.
 
+#[cfg(feature = "dsh")]
+mod dsh;
+
 use std::convert::Infallible;
 use std::sync::Arc;
 use std::time::Duration;
@@ -35,6 +38,9 @@ pub fn routes() -> Router<ApiState> {
 /// Request payload for a sandbox completion.
 #[derive(Debug, Deserialize)]
 pub struct ChatCompletionRequest {
+    /// Conversation backend; omitted requests inherit the node default.
+    #[serde(default)]
+    pub agent: Option<String>,
     /// Session key to run the turn against (opaque, provided by the caller).
     pub session_id: String,
     /// User message text.
@@ -123,6 +129,16 @@ async fn completions(
         ));
     }
 
+    let selected = state.agent_factory().agent_id(request.agent.as_deref());
+    kanon_llm::check_agent_id(&selected).map_err(ApiError::BadRequest)?;
+    #[cfg(feature = "dsh")]
+    if let Some(client) = state
+        .agent_factory()
+        .dsh_for(Some(&selected))
+        .map_err(ApiError::Unavailable)?
+    {
+        return dsh::completion(state, client, request).await;
+    }
     let agent = resolve_agent(&state, &request)?;
     MetricsRegistry::incr(&state.observability().metrics.chat_completions);
 
@@ -283,6 +299,8 @@ fn map_agent_error(err: AgentError) -> ApiError {
         }
         // Console turns carry no stop signal today; should one be stopped, it is a conflict with
         // whoever stopped it, not a server fault.
+        #[cfg(feature = "dsh")]
+        AgentError::Dsh(error) => ApiError::Upstream(error.to_string()),
         AgentError::Stopped => ApiError::Conflict("The turn was stopped before it finished".into()),
     }
 }

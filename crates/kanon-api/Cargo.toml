@@ -5,6 +5,10 @@ edition = "2024"
 license = "GPL-3.0-only"
 description = "Decoupled RESTful API and WebSocket gateway for Kanon"
 
+[features]
+default = []
+dsh = ["kanon-core/dsh", "kanon-llm/dsh"]
+
 [dependencies]
 kanon-core = { path = "../kanon-core" }
 kanon-adapter-milky = { path = "../kanon-adapter-milky" }

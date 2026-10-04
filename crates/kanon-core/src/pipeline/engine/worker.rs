@@ -120,6 +120,7 @@ impl PipelineEngine {
             }
         }
         // Drop futures before recording their events so no canceled lane can append a late reply.
+        drop(running);
         for event in active.into_values().filter_map(|(_, event)| event) {
             self.dead_letter_event(
                 &event,

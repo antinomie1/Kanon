@@ -126,6 +126,8 @@ function discard() {
 function testChat() {
   if (instance) router.navigate('chat', instance.id);
 }
+/** The selected backend owns its own model and context configuration. */
+const dsh = $derived((store.formAgent || store.nodeDefaultAgent) === 'dsh');
 </script>
 
 <section class="card relative px-5 pb-6 sm:px-7">
@@ -395,12 +397,11 @@ function testChat() {
       {/if}
     </Section>
 
-    <Section title={t('instances.sec_brain')} hint={t('instances.sec_brain_hint')} collapsible summary={`${store.formModel || store.nodeDefaultModel || t('instances.model_inherit')} · ${store.formSystemPrompt.trim() ? t('instances.field_prompt') : store.personas.find((persona) => persona.id === store.formPersonaId)?.name || t('instances.persona_none')}`}>
+    <Section title={t('instances.sec_brain')} hint={t('instances.sec_brain_hint')} collapsible summary={dsh ? agentName('dsh') : `${store.formModel || store.nodeDefaultModel || t('instances.model_inherit')} · ${store.formSystemPrompt.trim() ? t('instances.field_prompt') : store.personas.find((persona) => persona.id === store.formPersonaId)?.name || t('instances.persona_none')}`}>
       <div class="grid gap-3.5 sm:grid-cols-2">
         <label class="min-w-0">
           <span class="label">{t('instances.field_agent')}</span>
-          <!-- Only the built-in agent exists today, so the picker shows what answers rather than
-               offering a real choice; agents added by the node later appear without a change. -->
+          <!-- Backend availability comes from the node's compiled agent catalog. -->
           <Select bind:value={store.formAgent} disabled={store.agentChoices.length < 2}>
             <option value="">
               {store.nodeDefaultAgent
@@ -414,6 +415,7 @@ function testChat() {
             {/each}
           </Select>
         </label>
+        {#if !dsh}
         <label class="min-w-0">
           <span class="label">{t('instances.field_model')}</span>
           <Select bind:value={store.formModel}>
@@ -436,7 +438,11 @@ function testChat() {
             {/each}
           </Select>
         </label>
+        {/if}
       </div>
+      {#if dsh}
+        <p class="hint">{t('agents.dsh_owned')} <a href="#/settings" class="text-accent">{t('settings.section_agent')}</a></p>
+      {:else}
       {#if store.modelReferences.length === 0}
         <p class="m-0 hint text-warn!">
           {t('instances.model_catalog_empty')}
@@ -453,6 +459,7 @@ function testChat() {
         ></textarea>
         <span class="mt-1.5 block hint">{t('instances.prompt_hint')}</span>
       </label>
+      {/if}
     </Section>
   </div>
 

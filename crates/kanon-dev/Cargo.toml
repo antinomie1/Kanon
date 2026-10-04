@@ -5,6 +5,10 @@ edition = "2024"
 license = "GPL-3.0-only"
 description = "CLI tool for Kanon plugin project management, scaffolding, and testing"
 
+[features]
+default = []
+dsh = ["kanon-core/dsh", "kanon-llm/dsh"]
+
 [dependencies]
 clap = { version = "4.5", features = ["derive"] }
 tokio = { version = "1.40", features = ["full"] }

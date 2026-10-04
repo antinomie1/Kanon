@@ -21,6 +21,33 @@ impl PipelineEngine {
             },
             None => None,
         };
+        #[cfg(feature = "dsh")]
+        if let Some(client) = self.dsh_for(instance.as_ref())? {
+            let instance = instance.as_ref().ok_or_else(|| {
+                ConversationError::Invalid("DSH conversation history requires an instance".into())
+            })?;
+            let conversation = instance_conversation_key(event, Some(instance));
+            let session_id = instance.dsh_session_id_at(
+                &conversation,
+                instance.dsh_session_generation(&conversation),
+            );
+            // Uncreated current generations have no history. Reading never creates a session.
+            let exists = client
+                .sessions()
+                .await?
+                .iter()
+                .any(|session| session.session_id == session_id);
+            let messages = if exists {
+                kanon_llm::dsh::conversation_messages(&client, &session_id).await?
+            } else {
+                Vec::new()
+            };
+            return Ok(ConversationHistory {
+                session_id,
+                summary: None,
+                messages,
+            });
+        }
         let agent = match &self.agent_factory {
             Some(factory) => {
                 factory.agent_for_model(instance.as_ref().and_then(|i| i.model.as_deref()))
@@ -305,7 +332,14 @@ impl PipelineEngine {
         let target = self
             .delete_conversation(chat, &conversations[index - 1].session_id)
             .await?;
-        let mut reply = format!("已删除会话 {index}：{}", display_title(&target.title));
+        let action = "已删除";
+        #[cfg(feature = "dsh")]
+        let action = if self.dsh_for(Some(&chat.instance))?.is_some() {
+            "已在 DSH 中归档"
+        } else {
+            action
+        };
+        let mut reply = format!("{action}会话 {index}：{}", display_title(&target.title));
         if target.current {
             reply.push_str("\n已开启新会话。");
         }
@@ -320,8 +354,26 @@ impl PipelineEngine {
     pub(super) async fn handle_model_command(
         &self,
         instance: &crate::instance::BotInstance,
+        _event: &PipelineEventRequest,
         args: &[String],
     ) -> PipelineResult {
+        #[cfg(feature = "dsh")]
+        {
+            let result = match self.dsh_for(Some(instance)) {
+                Ok(Some(client)) => Some(
+                    self.dsh_model_command(&client, instance, _event, args)
+                        .await,
+                ),
+                Ok(None) => None,
+                Err(error) => Some(Err(error)),
+            };
+            if let Some(result) = result {
+                return result.unwrap_or_else(|error| PipelineResult::BuiltinReplied {
+                    command: MODEL_COMMAND.to_string(),
+                    replies: vec![text_reply(format!("DSH 模型操作失败：{error}"))],
+                });
+            }
+        }
         let options = self.model_options(instance);
         let current = instance
             .model
@@ -337,7 +389,11 @@ impl PipelineEngine {
             return PipelineResult::ModelListed {
                 instance_id: instance.id.clone(),
                 count: options.len(),
-                replies: vec![text_reply(render_model_list(&options, current.as_deref()))],
+                replies: vec![text_reply(render_model_list(
+                    &options,
+                    current.as_deref(),
+                    "实例",
+                ))],
             };
         };
 
@@ -352,7 +408,11 @@ impl PipelineEngine {
             return PipelineResult::ModelListed {
                 instance_id: instance.id.clone(),
                 count: options.len(),
-                replies: vec![text_reply(render_model_list(&options, current.as_deref()))],
+                replies: vec![text_reply(render_model_list(
+                    &options,
+                    current.as_deref(),
+                    "实例",
+                ))],
             };
         };
 
@@ -598,10 +658,20 @@ impl PipelineEngine {
         if let Some(instance) = instance {
             rendered.push_str(&format!("实例: {} ({})\n", instance.name, instance.id));
         }
-        let model = instance
-            .and_then(|instance| instance.model.clone())
-            .or_else(|| self.node_model_reference())
-            .unwrap_or_else(|| "未配置".to_string());
+        let backend = self
+            .agent_factory
+            .as_ref()
+            .map(|factory| factory.agent_id(instance.and_then(|i| i.agent.as_deref())))
+            .unwrap_or_else(|| kanon_llm::BUILTIN_AGENT.into());
+        rendered.push_str(&format!("Agent: {backend}\n"));
+        let model = if backend == "dsh" {
+            Some("由 DSH 管理（/model 查看当前会话）".to_string())
+        } else {
+            None
+        }
+        .or_else(|| instance.and_then(|instance| instance.model.clone()))
+        .or_else(|| self.node_model_reference())
+        .unwrap_or_else(|| "未配置".to_string());
         rendered.push_str(&format!("模型: {model}\n"));
         rendered.push_str(&format!("适配器: {}", event.platform));
 

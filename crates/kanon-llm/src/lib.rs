@@ -21,7 +21,7 @@
 //! - [`tool_router`]: Specialized pipeline router adapter, dynamic tool aggregation, and in-memory Protobuf/JSON translation.
 
 pub mod agent;
-pub mod builtin;
+pub use agent::builtin;
 pub mod compaction;
 pub mod error;
 pub mod factory;
@@ -48,7 +48,7 @@ pub use agent::{
 pub use builtin::{AgentBuilder, BuiltinAgent, FAILED_TOOL_RESULT, STOPPED_TOOL_RESULT};
 pub use compaction::{COMPACTION_INSTRUCTION, CompactionPolicy};
 pub use error::{AgentError, GatewayError, MemoryError, ToolRouterError};
-pub use factory::{AgentFactory, ProviderRuntime};
+pub use factory::{AgentFactory, ConversationBackend, ProviderRuntime};
 pub use gateway::providers::{
     AnthropicMessagesProvider, AnthropicProvider, OpenAiChatProvider, OpenAiProvider,
     OpenAiResponsesProvider, SseDecoder, SseEvent,
@@ -84,3 +84,7 @@ pub use tool_router::{
     resolve_tools,
 };
 pub use visible_reply::visible_reply;
+
+/// Optional deepseek-harness transport and remote session ownership.
+#[cfg(feature = "dsh")]
+pub use agent::dsh;

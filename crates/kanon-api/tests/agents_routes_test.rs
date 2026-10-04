@@ -34,7 +34,14 @@ async fn the_default_agent_is_selectable_persisted_and_validated() {
 
     let (status, body) = common::send_json(&app, Method::GET, "/api/v1/agents", None).await;
     assert_eq!(status, StatusCode::OK, "unexpected body: {body}");
-    assert_eq!(body["agents"], json!(["builtin"]));
+    assert_eq!(
+        body["agents"],
+        if cfg!(feature = "dsh") {
+            json!(["builtin", "dsh"])
+        } else {
+            json!(["builtin"])
+        }
+    );
     assert_eq!(body["default_agent"], json!("builtin"));
 
     // An engine the node cannot run is refused before anything reaches disk.

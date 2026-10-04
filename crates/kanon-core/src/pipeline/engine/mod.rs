@@ -11,6 +11,8 @@
 //! The queue is deliberately bounded: when a platform cannot keep up, the overflow is reported as
 //! an explicit `OutboundFailed` stage instead of growing memory without limit.
 
+#[cfg(feature = "dsh")]
+mod agent_commands;
 mod commands;
 mod inbound;
 mod message;
@@ -637,6 +639,25 @@ impl PipelineEngine {
         // Configuration failures finish the announced turn too; keep resolution inside the
         // captured result so every AGENT_BEGIN receives its matching AGENT_DONE.
         let result = async {
+            let agent = match agent {
+                kanon_llm::ConversationBackend::Builtin(agent) => agent,
+                #[cfg(feature = "dsh")]
+                kanon_llm::ConversationBackend::Dsh(client) => {
+                    if options != kanon_llm::TurnOptions::default() {
+                        return Err(kanon_llm::ToolRouterError::InvalidRequest(
+                            "DSH owns turn settings; configure them in DSH".into(),
+                        ));
+                    }
+                    return kanon_llm::dsh::run_message(
+                        &client,
+                        session_id,
+                        &event.event_id,
+                        message,
+                        &running.signal(),
+                    )
+                    .await;
+                }
+            };
             if let Some(instance_id) =
                 crate::instance::BotInstance::instance_id_from_session(session_id)
                 && let Some(instances) = self.instances()

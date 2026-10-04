@@ -58,13 +58,32 @@ struct DirectProvider {
 const MAX_CACHED_OVERRIDES: usize = 64;
 
 /// Mutable routing state, held across both configuration publication and override construction.
-#[derive(Default)]
 struct FactoryState {
+    default_agent: String,
+    #[cfg(feature = "dsh")]
+    dsh: Option<Arc<crate::dsh::DshClient>>,
     default_model: Option<String>,
     direct: Option<DirectProvider>,
     /// Least recently used first; a single bounded container needs no parallel ordering index.
     overrides: VecDeque<(String, Arc<dyn Agent>)>,
 }
+
+impl Default for FactoryState {
+    fn default() -> Self {
+        Self {
+            default_agent: crate::agent::BUILTIN_AGENT.into(),
+            #[cfg(feature = "dsh")]
+            dsh: None,
+            default_model: None,
+            direct: None,
+            overrides: VecDeque::new(),
+        }
+    }
+}
+
+#[path = "factory/backend.rs"]
+mod backend;
+pub use backend::ConversationBackend;
 
 /// Builds every agent the node runs, so they all share one memory, session manager, persona
 /// registry and trace bus.

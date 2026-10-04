@@ -1,6 +1,10 @@
 import type {
   AdaptersResponse,
   AgentsResponse,
+  DshConnection,
+  DshSettings,
+  DshSession,
+  DshSnapshot,
   BashPolicy,
   CallPluginToolResponse,
   ChatCompletionRequest,
@@ -195,6 +199,19 @@ export const api = {
       method: 'PUT',
       body: JSON.stringify({ agent }),
     }),
+
+  // DSH is an optional agent; callers expose these routes only when its identifier is available.
+  getDshConnection: () => request<DshConnection | null>('/api/v1/agents/dsh/connection'),
+  setDshConnection: (config: DshConnection | null) => request<DshConnection | null>('/api/v1/agents/dsh/connection', {
+    method: 'PUT', body: JSON.stringify(config),
+  }),
+  getDshSettings: () => request<DshSettings>('/api/v1/agents/dsh/settings'),
+  updateDshSettings: (namespace: string, patch: Record<string, unknown>, revision: number) =>
+    request<unknown>('/api/v1/agents/dsh/settings', { method: 'PUT', body: JSON.stringify({ namespace, patch, revision }) }),
+  getDshSessions: () => request<DshSession[]>('/api/v1/agents/dsh/sessions'),
+  getDshSession: (id: string) => request<DshSnapshot>(`/api/v1/agents/dsh/sessions/${encodeURIComponent(id)}`),
+  stopDshSession: (id: string) => request<unknown>(`/api/v1/agents/dsh/sessions/${encodeURIComponent(id)}/stop`, { method: 'POST' }),
+  archiveDshSession: (id: string) => request<unknown>(`/api/v1/agents/dsh/sessions/${encodeURIComponent(id)}/archive`, { method: 'POST' }),
 
   // Model catalog: per-model context window, modalities and sampling overrides keyed by reference.
   getModels: () => request<ModelsResponse>('/api/v1/models'),
