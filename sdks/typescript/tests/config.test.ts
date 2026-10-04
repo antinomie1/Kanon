@@ -42,7 +42,8 @@ function sleep(ms: number): Promise<void> {
 /** Promisifies one unary call on a dynamically loaded gRPC client. */
 function unary(client: any, method: string, request: any): Promise<any> {
   return new Promise((resolve, reject) =>
-    client[method](request, (err: any, res: any) => (err ? reject(err) : resolve(res))),
+    client[method](request, { deadline: Date.now() + 3000 },
+      (err: any, res: any) => (err ? reject(err) : resolve(res))),
   );
 }
 
@@ -95,6 +96,22 @@ test("stored and reloaded configuration reach the plugin", async () => {
     });
     assert.equal(rejected.success, false);
     assert.equal(await description(), JSON.stringify({ city: "Rome" }));
+    // Invalid wire numbers must reject the reload without killing the host or advancing its version.
+    const invalid = await unary(client, "ReloadPluginConfig", {
+      plugin_id: PLUGIN_ID,
+      config: { fields: { bad: { numberValue: Number.NaN } } },
+      version: 2,
+    });
+    assert.equal(invalid.success, false);
+    assert.match(invalid.error_message, /finite/);
+    assert.equal(await description(), JSON.stringify({ city: "Rome" }));
+    const retried = await unary(client, "ReloadPluginConfig", {
+      plugin_id: PLUGIN_ID,
+      config: toProtoStruct({ city: "Tokyo" }),
+      version: 2,
+    });
+    assert.equal(retried.success, true, retried.error_message);
+    assert.equal(await description(), JSON.stringify({ city: "Tokyo" }));
     client.close();
   } finally {
     host.kill("SIGKILL");

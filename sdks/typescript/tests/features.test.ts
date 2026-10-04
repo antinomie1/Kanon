@@ -247,7 +247,7 @@ test("runtime tools are announced and rolled back when the node refuses", async 
   await assert.rejects(plugin.removeTool("greet"), /declared with @Tool/);
 });
 
-test("non-finite tool results fail instead of becoming null", async () => {
+test("non-finite tool arguments and results fail instead of becoming null", async () => {
   const plugin = new Features();
   plugin.context = {
     dataDir: ".",
@@ -255,12 +255,26 @@ test("non-finite tool results fail instead of becoming null", async () => {
     core: { refreshMeta: async () => [plugin.id] } as any,
   };
   let number = 1.5;
-  await plugin.addTool("numeric-result", { args: {} }, () => ({ nested: [number] }));
+  let calls = 0;
+  await plugin.addTool("numeric-result", { args: {} }, () => {
+    calls++;
+    return { nested: [number] };
+  });
   for (number of [NaN, Infinity, -Infinity]) {
     const response = await plugin.onCallTool(toolCall("numeric-result", {}));
     assert.equal(response.success, false);
     assert.match(response.error_message, /finite/);
     assert.equal(response.structured_result, undefined);
+  }
+  for (const invalid of [NaN, Infinity, -Infinity]) {
+    const request = toolCall("numeric-result", {});
+    request.structured_args = { fields: { nested: { listValue: { values: [{ numberValue: invalid }] } } } };
+    const before = calls;
+    const response = await plugin.onCallTool(request);
+    assert.equal(response.success, false);
+    assert.equal(response.call_id, request.call_id);
+    assert.match(response.error_message, /finite/);
+    assert.equal(calls, before, "invalid arguments must not reach the handler");
   }
   number = 1.5;
   const response = await plugin.onCallTool(toolCall("numeric-result", {}));

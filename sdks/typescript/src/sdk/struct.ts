@@ -43,7 +43,12 @@ export function toProtoStruct(obj: Record<string, any>): {
 /** Converts a Protobuf Value descriptor back to a standard JS value. */
 export function fromProtoValue(val: any): any {
   if (!val) return null;
-  if ("numberValue" in val) return val.numberValue;
+  if ("numberValue" in val) {
+    if (!Number.isFinite(val.numberValue)) {
+      throw new TypeError("Struct numbers must be finite");
+    }
+    return val.numberValue;
+  }
   if ("stringValue" in val) return val.stringValue;
   if ("boolValue" in val) return val.boolValue;
   if ("nullValue" in val) return null;

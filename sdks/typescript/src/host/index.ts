@@ -264,8 +264,8 @@ async function main(): Promise<void> {
       }
       if (call.request.config) {
         const previous = ctx.config;
-        ctx.config = fromProtoStruct(call.request.config);
         try {
+          ctx.config = fromProtoStruct(call.request.config);
           await plugin.onConfigReload(ctx.config);
         } catch (err: any) {
           // A rejected reload leaves the plugin on the configuration it accepted last.
