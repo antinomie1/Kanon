@@ -217,7 +217,10 @@ async fn the_request_deadline_includes_an_http_body_that_never_finishes() {
                     started.notify_one();
                     Ok::<_, std::convert::Infallible>(axum::body::Bytes::from_static(b"{"))
                 });
-                axum::body::Body::from_stream(prefix.chain(futures_util::stream::pending()))
+                (
+                    [("content-type", "application/json")],
+                    axum::body::Body::from_stream(prefix.chain(futures_util::stream::pending())),
+                )
             }
         }),
     );

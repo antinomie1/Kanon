@@ -26,7 +26,7 @@ use kanon_llm::tool_router::{ToolAttachment, ToolHost, json_to_prost_struct};
 use kanon_proto::v1::{PluginMeta, ToolCallRequest, ToolCallResponse, ToolMeta};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::process::{Child, Command};
 use tokio::sync::{Mutex, RwLock};
 
@@ -38,6 +38,12 @@ pub const DEFAULT_MCP_CONFIG: &str = "./data/mcp.json";
 
 /// Per-request deadline for an MCP call.
 pub const MCP_REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// Maximum wire size of one response, enough for four maximum-sized base64 attachments.
+pub const MCP_MAX_MESSAGE_BYTES: usize = 48 * 1024 * 1024;
+
+/// Protocol revisions implemented by this client, newest first.
+const MCP_PROTOCOL_VERSIONS: &[&str] = &["2025-06-18", "2025-03-26", "2024-11-05"];
 
 /// How often the MCP watchdog probes every configured server.
 pub const MCP_WATCHDOG_INTERVAL: Duration = Duration::from_secs(30);
@@ -63,13 +69,6 @@ pub const MCP_MAX_ATTACHMENT_BYTES: usize = 8 * 1024 * 1024;
 /// Largest number of attachments forwarded from one tool result.
 pub const MCP_MAX_ATTACHMENTS: usize = 4;
 
-/// Longest raw JSON fallback handed to the model when a tool replies with neither text nor
-/// attachments.
-///
-/// MCP servers may answer with structured content of any size; passing it through unbounded would
-/// let a single call consume the whole context window.
-pub const MCP_FALLBACK_TEXT_LIMIT: usize = 2000;
-
 /// Failures raised while configuring or talking to MCP servers.
 #[derive(Debug, Error)]
 pub enum McpError {
@@ -93,6 +92,16 @@ pub enum McpError {
         /// Method that failed.
         method: String,
         /// Error message reported by the server.
+        message: String,
+    },
+    /// The RPC succeeded, but the tool reported an execution failure in its result.
+    #[error("MCP tool '{tool}' on server '{server}' failed: {message}")]
+    Tool {
+        /// Server identifier.
+        server: String,
+        /// Unqualified tool name.
+        tool: String,
+        /// Model-facing diagnostic supplied by the tool.
         message: String,
     },
 }
@@ -309,7 +318,7 @@ impl McpConfigStore {
 
 /// Validates a server description before it is stored.
 fn validate_config(config: &McpServerConfig) -> Result<(), McpError> {
-    let id = config.id.trim();
+    let id = config.id.as_str();
     if id.is_empty()
         || id.len() > 64
         || !id
@@ -330,12 +339,24 @@ fn validate_config(config: &McpServerConfig) -> Result<(), McpError> {
         McpTransport::Stdio { command, .. } if command.trim().is_empty() => Err(
             McpError::InvalidConfig("stdio command must not be empty".into()),
         ),
-        McpTransport::Http { url, .. }
-            if !url.starts_with("http://") && !url.starts_with("https://") =>
-        {
-            Err(McpError::InvalidConfig(
-                "HTTP MCP url must start with http:// or https://".into(),
-            ))
+        McpTransport::Http { url, headers } => {
+            let endpoint = reqwest::Url::parse(url)
+                .map_err(|err| McpError::InvalidConfig(format!("invalid HTTP MCP url: {err}")))?;
+            if !matches!(endpoint.scheme(), "http" | "https") || endpoint.host_str().is_none() {
+                return Err(McpError::InvalidConfig(
+                    "HTTP MCP url must use http:// or https:// and include a host".into(),
+                ));
+            }
+            for (name, value) in headers {
+                reqwest::header::HeaderName::from_bytes(name.as_bytes()).map_err(|err| {
+                    McpError::InvalidConfig(format!("invalid HTTP MCP header name: {err}"))
+                })?;
+                reqwest::header::HeaderValue::from_str(value).map_err(|err| {
+                    // Header values can contain credentials; never include them in diagnostics.
+                    McpError::InvalidConfig(format!("invalid HTTP MCP header '{name}': {err}"))
+                })?;
+            }
+            Ok(())
         }
         _ => Ok(()),
     }
@@ -343,14 +364,39 @@ fn validate_config(config: &McpServerConfig) -> Result<(), McpError> {
 
 /// Reads the configuration document, returning `None` when it does not exist.
 fn read_document(path: &Path) -> Result<Option<McpDocument>, McpError> {
-    if !path.exists() {
-        return Ok(None);
+    let raw = match std::fs::read_to_string(path) {
+        Ok(raw) => raw,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(err) => {
+            return Err(McpError::Config(format!(
+                "failed to read {}: {err}",
+                path.display()
+            )));
+        }
+    };
+    let document: McpDocument = serde_json::from_str(&raw)
+        .map_err(|err| McpError::Config(format!("failed to parse {}: {err}", path.display())))?;
+    if document.version != default_version() {
+        return Err(McpError::Config(format!(
+            "unsupported MCP configuration version {} in {}",
+            document.version,
+            path.display()
+        )));
     }
-    let raw = std::fs::read_to_string(path)
-        .map_err(|err| McpError::Config(format!("failed to read {}: {err}", path.display())))?;
-    serde_json::from_str(&raw)
-        .map(Some)
-        .map_err(|err| McpError::Config(format!("failed to parse {}: {err}", path.display())))
+    let mut ids = std::collections::HashSet::new();
+    for server in &document.servers {
+        validate_config(server).map_err(|err| {
+            McpError::Config(format!("invalid server in {}: {err}", path.display()))
+        })?;
+        if !ids.insert(&server.id) {
+            return Err(McpError::Config(format!(
+                "duplicate MCP server id '{}' in {}",
+                server.id,
+                path.display()
+            )));
+        }
+    }
+    Ok(Some(document))
 }
 
 /// Live connection to one MCP server.
@@ -371,17 +417,128 @@ enum Connection {
         /// Child's stdin for outgoing requests.
         stdin: tokio::process::ChildStdin,
     },
-    /// HTTP endpoint.
-    Http {
-        /// Shared HTTP client.
-        client: reqwest::Client,
-        /// Endpoint URL.
-        url: String,
-        /// Extra headers.
-        headers: HashMap<String, String>,
-        /// Session assigned by `initialize`, sent on every subsequent request and notification.
-        session_id: Option<String>,
-    },
+    /// HTTP endpoint and its negotiated session.
+    Http(HttpConnection),
+}
+
+/// Protocol-owned headers are assembled once for requests, notifications and server replies.
+struct HttpConnection {
+    client: reqwest::Client,
+    url: String,
+    headers: HashMap<String, String>,
+    session_id: Option<String>,
+    protocol_version: Option<String>,
+}
+
+impl HttpConnection {
+    /// Sends one message without consuming its body. The caller owns the overall deadline.
+    async fn send(&mut self, payload: &serde_json::Value) -> Result<reqwest::Response, McpError> {
+        let mut request = self.client.post(&self.url);
+        for (key, value) in &self.headers {
+            if ![
+                "accept",
+                "content-type",
+                "mcp-session-id",
+                "mcp-protocol-version",
+            ]
+            .iter()
+            .any(|reserved| key.eq_ignore_ascii_case(reserved))
+            {
+                request = request.header(key, value);
+            }
+        }
+        request = request
+            .json(payload)
+            .header("accept", "application/json, text/event-stream");
+        if let Some(session_id) = &self.session_id {
+            request = request.header("mcp-session-id", session_id);
+        }
+        if let Some(version) = &self.protocol_version {
+            request = request.header("mcp-protocol-version", version);
+        }
+        let response = request
+            .send()
+            .await
+            .map_err(|error| McpError::Transport(format!("HTTP request failed: {error}")))?;
+        if response.status() == reqwest::StatusCode::NOT_FOUND && self.session_id.is_some() {
+            self.session_id = None;
+            self.protocol_version = None;
+            // The caller drops this connection. A subsequent operation initializes afresh;
+            // never replay a possibly side-effecting tools/call behind the model's back.
+            return Err(McpError::Transport(
+                "MCP HTTP session expired; reconnect before retrying".into(),
+            ));
+        }
+        if !response.status().is_success() {
+            return Err(McpError::Transport(format!(
+                "MCP HTTP request rejected with {}",
+                response.status()
+            )));
+        }
+        if response
+            .content_length()
+            .is_some_and(|length| length > MCP_MAX_MESSAGE_BYTES as u64)
+        {
+            return Err(McpError::Transport(
+                "MCP response exceeds the message size limit".into(),
+            ));
+        }
+        if payload.get("method").and_then(|value| value.as_str()) == Some("initialize") {
+            self.session_id = response
+                .headers()
+                .get("mcp-session-id")
+                .map(|value| value.to_str().map(str::to_string))
+                .transpose()
+                .map_err(|error| {
+                    McpError::Transport(format!("invalid MCP session header: {error}"))
+                })?;
+            if self.session_id.as_ref().is_some_and(|id| {
+                id.is_empty() || !id.bytes().all(|byte| (0x21..=0x7e).contains(&byte))
+            }) {
+                return Err(McpError::Transport("invalid MCP session identifier".into()));
+            }
+        }
+        Ok(response)
+    }
+
+    /// Notifications and responses to server requests are acknowledged without an RPC body.
+    async fn send_one_way(&mut self, payload: &serde_json::Value) -> Result<(), McpError> {
+        let response = self.send(payload).await.map_err(|error| {
+            McpError::Transport(format!("MCP notification or reply failed: {error}"))
+        })?;
+        if response.status() != reqwest::StatusCode::ACCEPTED {
+            return Err(McpError::Transport(format!(
+                "MCP notification or reply expected HTTP 202, received {}",
+                response.status()
+            )));
+        }
+        Ok(())
+    }
+}
+
+/// A validated inbound message either completes our request or needs a separate server reply.
+enum IncomingMessage {
+    Result(serde_json::Value),
+    Reply(serde_json::Value),
+    Ignore,
+}
+
+/// Writes complete JSON-RPC lines through the same path for all stdio message kinds.
+async fn write_stdio(
+    stdin: &mut tokio::process::ChildStdin,
+    payload: &serde_json::Value,
+) -> Result<(), McpError> {
+    let mut line = serde_json::to_vec(payload)
+        .map_err(|error| McpError::Transport(format!("failed to encode message: {error}")))?;
+    line.push(b'\n');
+    stdin
+        .write_all(&line)
+        .await
+        .map_err(|error| McpError::Transport(format!("failed to write message: {error}")))?;
+    stdin
+        .flush()
+        .await
+        .map_err(|error| McpError::Transport(format!("failed to flush message: {error}")))
 }
 
 /// Runtime health of one MCP server.
@@ -483,7 +640,20 @@ impl McpServer {
 
     /// Current health snapshot.
     pub async fn health(&self) -> McpHealth {
-        self.health.lock().await.clone()
+        let mut health = self.health.lock().await.clone();
+        // A cancelled stdio operation drops its locally owned connection before releasing the
+        // mutex. Release the health guard before inspecting the connection to preserve the
+        // writer lock order. try_lock keeps health reporting responsive during a slow tool.
+        if health.state == "connected"
+            && self
+                .connection
+                .try_lock()
+                .is_ok_and(|connection| connection.is_none())
+        {
+            health.state = "disconnected".to_string();
+            health.tools = 0;
+        }
+        health
     }
 
     /// Whether a transport is currently open.
@@ -516,10 +686,19 @@ impl McpServer {
             return Ok(());
         }
 
-        let attempt = if let Some(connection) = current.as_mut() {
+        let attempt = if matches!(current.as_ref(), Some(Connection::Stdio { .. })) {
+            // A cancelled read may already have consumed a JSON prefix, and a cancelled write
+            // may have sent only part of a request. Own stdio until this probe commits so either
+            // cancellation drops the child or the next operation receives complete framing.
+            // Keep the committed catalog visible while discovery is in flight.
+            let mut connection = current.take().expect("checked stdio connection");
+            self.read_tools(&mut connection)
+                .await
+                .map(|metadata| (Some(connection), metadata))
+        } else if let Some(connection) = current.as_mut() {
             // A probe refreshes an already initialized transport. Keep its committed metadata
             // while the RPC runs so concurrent tool discovery never sees an empty catalog.
-            // Cancelling this read leaves the previous connected state intact.
+            // HTTP responses have independent framing, so cancellation can retain its session.
             self.read_tools(connection)
                 .await
                 .map(|metadata| (None, metadata))
@@ -666,27 +845,44 @@ impl McpServer {
                     stdin,
                 })
             }
-            McpTransport::Http { url, headers } => Ok(Connection::Http {
-                client: reqwest::Client::new(),
+            McpTransport::Http { url, headers } => Ok(Connection::Http(HttpConnection {
+                client: reqwest::Client::builder().build().map_err(|error| {
+                    McpError::Transport(format!("failed to create HTTP client: {error}"))
+                })?,
                 url: url.clone(),
                 headers: headers.clone(),
                 session_id: None,
-            }),
+                protocol_version: None,
+            })),
         }
     }
 
     /// Performs the MCP `initialize` handshake.
     async fn handshake(&self, connection: &mut Connection) -> Result<(), McpError> {
-        self.request_on(
-            connection,
-            "initialize",
-            serde_json::json!({
-                "protocolVersion": "2024-11-05",
-                "capabilities": {},
-                "clientInfo": { "name": "kanon", "version": env!("CARGO_PKG_VERSION") }
-            }),
-        )
-        .await?;
+        let result = self
+            .request_on(
+                connection,
+                "initialize",
+                serde_json::json!({
+                    "protocolVersion": MCP_PROTOCOL_VERSIONS[0],
+                    "capabilities": {},
+                    "clientInfo": { "name": "kanon", "version": env!("CARGO_PKG_VERSION") }
+                }),
+            )
+            .await?;
+
+        let version = result
+            .get("protocolVersion")
+            .and_then(|value| value.as_str())
+            .filter(|version| MCP_PROTOCOL_VERSIONS.contains(version))
+            .ok_or_else(|| {
+                McpError::Transport(
+                    "MCP server selected an unsupported or missing protocol version".into(),
+                )
+            })?;
+        if let Connection::Http(http) = connection {
+            http.protocol_version = Some(version.to_string());
+        }
 
         // No JSON-RPC response is expected, but delivery must still succeed before tools are used.
         self.notify(
@@ -705,35 +901,97 @@ impl McpServer {
 
     /// Reads candidate metadata without exposing it before the connection commit.
     async fn read_tools(&self, connection: &mut Connection) -> Result<Vec<PluginMeta>, McpError> {
-        let response = self
-            .request_on(connection, "tools/list", serde_json::json!({}))
-            .await?;
-        let tools = response
-            .get("tools")
-            .and_then(|tools| tools.as_array())
-            .cloned()
-            .unwrap_or_default();
+        let malformed = |message: &str| {
+            McpError::Transport(format!(
+                "MCP server '{}' returned invalid tools/list data: {message}",
+                self.config.id
+            ))
+        };
+        let mut metas = Vec::new();
+        let mut names = std::collections::HashSet::new();
+        let mut cursors = std::collections::HashSet::new();
+        let mut params = serde_json::json!({});
+        let deadline = tokio::time::Instant::now() + MCP_REQUEST_TIMEOUT;
+        let mut remaining_bytes = MCP_MAX_MESSAGE_BYTES;
+        loop {
+            let response = tokio::time::timeout_at(
+                deadline,
+                self.request_on(connection, "tools/list", params),
+            )
+            .await
+            .map_err(|_| malformed("tool discovery deadline exceeded"))??;
+            // A valid next cursor must not reset either budget: discovery is one bounded operation.
+            remaining_bytes = remaining_bytes
+                .checked_sub(response.to_string().len())
+                .ok_or_else(|| {
+                    malformed("tool discovery exceeds the aggregate message size limit")
+                })?;
+            let tools = response
+                .get("tools")
+                .and_then(|tools| tools.as_array())
+                .ok_or_else(|| malformed("tools must be an array"))?;
 
-        let mut metas = Vec::with_capacity(tools.len());
-        for tool in &tools {
-            let Some(name) = tool.get("name").and_then(|name| name.as_str()) else {
-                continue;
+            for tool in tools {
+                let name = tool
+                    .get("name")
+                    .and_then(|name| name.as_str())
+                    .filter(|name| !name.trim().is_empty())
+                    .ok_or_else(|| malformed("tool name must be a nonempty string"))?;
+                if !names.insert(name.to_string()) {
+                    return Err(malformed(&format!("duplicate tool name '{name}'")));
+                }
+                let description = match tool.get("description") {
+                    None => String::new(),
+                    Some(value) => value
+                        .as_str()
+                        .ok_or_else(|| malformed("tool description must be a string"))?
+                        .to_string(),
+                };
+                let schema = tool
+                    .get("inputSchema")
+                    .filter(|schema| {
+                        schema.get("type").and_then(|value| value.as_str()) == Some("object")
+                    })
+                    .ok_or_else(|| malformed("tool inputSchema must declare type 'object'"))?;
+                if schema
+                    .get("properties")
+                    .is_some_and(|properties| !properties.is_object())
+                {
+                    return Err(malformed("inputSchema properties must be an object"));
+                }
+                if schema.get("required").is_some_and(|required| {
+                    required
+                        .as_array()
+                        .is_none_or(|fields| fields.iter().any(|field| !field.is_string()))
+                }) {
+                    return Err(malformed(
+                        "inputSchema required must be an array of strings",
+                    ));
+                }
+                let parameters = json_to_prost_struct(schema)
+                    .ok_or_else(|| malformed("tool inputSchema must be an object"))?;
+
+                metas.push(ToolMeta {
+                    name: qualified_tool_name(&self.config.id, name),
+                    description,
+                    parameters: Some(parameters),
+                });
+            }
+
+            let Some(cursor) = response.get("nextCursor") else {
+                break;
             };
-            let description = tool
-                .get("description")
-                .and_then(|value| value.as_str())
-                .unwrap_or("")
-                .to_string();
-            let parameters = tool
-                .get("inputSchema")
-                .cloned()
-                .map(|schema| json_to_prost_struct(&schema).unwrap_or_default());
-
-            metas.push(ToolMeta {
-                name: qualified_tool_name(&self.config.id, name),
-                description,
-                parameters,
-            });
+            let cursor = cursor
+                .as_str()
+                .ok_or_else(|| malformed("nextCursor must be a string"))?;
+            if !cursors.insert(cursor.to_string()) {
+                return Err(malformed("pagination cursor repeated"));
+            }
+            // Cursors are opaque, including whitespace. Publish nothing until every page validates.
+            params = serde_json::json!({"cursor": cursor});
+        }
+        if tokio::time::Instant::now() >= deadline {
+            return Err(malformed("tool discovery deadline exceeded"));
         }
 
         Ok(vec![PluginMeta {
@@ -768,21 +1026,48 @@ impl McpServer {
             )
             .await?;
 
+        let malformed = |message: &str| McpError::Tool {
+            server: self.config.id.clone(),
+            tool: tool.to_string(),
+            message: format!("invalid tool result: {message}"),
+        };
+        let is_error = match response.get("isError") {
+            None => false,
+            Some(value) => value
+                .as_bool()
+                .ok_or_else(|| malformed("isError must be a boolean"))?,
+        };
+        let structured = response.get("structuredContent");
+        if structured.is_some_and(|value| !value.is_object()) {
+            return Err(malformed("structuredContent must be an object"));
+        }
+        let items = response
+            .get("content")
+            .and_then(|value| value.as_array())
+            .ok_or_else(|| malformed("content must be an array"))?;
         let mut texts: Vec<String> = Vec::new();
         // Reasons an attachment was dropped travel with the text: a missing picture must be
         // visible to the operator instead of silently vanishing from the conversation.
         let mut notes: Vec<String> = Vec::new();
         let mut attachments: Vec<ToolAttachment> = Vec::new();
 
-        if let Some(items) = response.get("content").and_then(|value| value.as_array()) {
+        {
             for item in items {
                 match item.get("type").and_then(|value| value.as_str()) {
                     Some("text") => {
                         if let Some(text) = item.get("text").and_then(|value| value.as_str()) {
-                            texts.push(text.to_string());
+                            // MCP servers commonly include the same JSON in a text block for old
+                            // clients. Keep its structured form once, without losing other prose.
+                            let duplicates_structured = structured.is_some_and(|structured| {
+                                serde_json::from_str::<serde_json::Value>(text)
+                                    .is_ok_and(|value| &value == structured)
+                            });
+                            if !text.is_empty() && !duplicates_structured {
+                                texts.push(text.to_string());
+                            }
                         }
                     }
-                    Some("image") | Some("audio") => {
+                    Some("image") | Some("audio") if !is_error => {
                         let mime = item
                             .get("mimeType")
                             .and_then(|value| value.as_str())
@@ -801,9 +1086,12 @@ impl McpServer {
                             continue;
                         };
                         if let Some(text) = resource.get("text").and_then(|value| value.as_str()) {
-                            texts.push(text.to_string());
-                        } else if let Some(blob) =
-                            resource.get("blob").and_then(|value| value.as_str())
+                            if !text.is_empty() {
+                                texts.push(text.to_string());
+                            }
+                        } else if !is_error
+                            && let Some(blob) =
+                                resource.get("blob").and_then(|value| value.as_str())
                         {
                             let mime = resource
                                 .get("mimeType")
@@ -822,13 +1110,25 @@ impl McpServer {
                             );
                         }
                     }
-                    // Other content kinds (resource links, ...) are ignored rather than guessed
-                    // at; the text items still describe the result.
-                    _ => {}
+                    Some("resource_link") => {
+                        // The URI, name and description are model-visible output even when a
+                        // server also supplied a textual summary. Never fetch the URI implicitly.
+                        texts.push(item.to_string());
+                    }
+                    // Error attachments intentionally remain undelivered; unsupported content
+                    // is made explicit instead of silently claiming that the result was empty.
+                    Some("image" | "audio") if is_error => {}
+                    kind => notes.push(format!(
+                        "[unsupported MCP content type: {}]",
+                        kind.unwrap_or("missing")
+                    )),
                 }
             }
         }
 
+        if let Some(structured) = structured {
+            texts.push(structured.to_string());
+        }
         texts.extend(notes);
         let text = if !texts.is_empty() {
             texts.join("\n")
@@ -842,12 +1142,21 @@ impl McpServer {
                 attachments.len(),
                 kinds.join(", ")
             )
+        } else if is_error {
+            "the tool reported failure without diagnostic content".to_string()
         } else {
-            // Structured content the model can still read, bounded so one call cannot consume the
-            // whole context window.
-            truncate_for_model(&response.to_string(), MCP_FALLBACK_TEXT_LIMIT)
+            "[tool completed without content]".to_string()
         };
 
+        if is_error {
+            // An execution failure is a paired tool result, not a broken MCP connection. No
+            // attachment was materialized, and ToolHost reports the diagnostic as a failure.
+            return Err(McpError::Tool {
+                server: self.config.id.clone(),
+                tool: tool.to_string(),
+                message: text,
+            });
+        }
         Ok(McpToolOutcome { text, attachments })
     }
 
@@ -893,6 +1202,14 @@ impl McpServer {
             .map(|(_, encoded)| encoded)
             .unwrap_or(data)
             .trim();
+        // Reject impossible sizes before the decoder reserves an output buffer. The decoded
+        // check remains necessary because the final base64 quartet may contain padding.
+        if payload.len() > MCP_MAX_ATTACHMENT_BYTES.div_ceil(3) * 4 {
+            return Err(format!(
+                "{mime} encoded data exceeds the {} byte attachment limit",
+                MCP_MAX_ATTACHMENT_BYTES
+            ));
+        }
         let bytes = base64::engine::general_purpose::STANDARD
             .decode(payload)
             .map_err(|err| format!("{mime} is not valid base64: {err}"))?;
@@ -927,10 +1244,34 @@ impl McpServer {
     ) -> Result<serde_json::Value, McpError> {
         let mut guard = self.connection.lock().await;
         self.ensure_available().await?;
-        let connection = guard.as_mut().ok_or_else(|| {
+        // Stdio has one byte stream for every request. On cancellation, dropping this local
+        // owner also closes any half-written request or half-consumed response; never hand those
+        // bytes to the next caller. HTTP request cancellation leaves other responses intact.
+        let mut owned = if matches!(guard.as_ref(), Some(Connection::Stdio { .. })) {
+            guard.take()
+        } else {
+            None
+        };
+        let connection = owned.as_mut().or(guard.as_mut()).ok_or_else(|| {
             McpError::Transport(format!("MCP server '{}' is not connected", self.config.id))
         })?;
-        self.request_on(connection, method, params).await
+        let result = self.request_on(connection, method, params).await;
+        if let Err(McpError::Transport(error)) = &result {
+            // Framing, I/O and expired-session failures make the connection unusable. RPC/tool
+            // errors are different: the server answered correctly and may handle the next call.
+            *guard = None;
+            self.clear_metadata();
+            let mut health = self.health.lock().await;
+            health.failures += 1;
+            health.state = "reconnecting".to_string();
+            health.tools = 0;
+            health.last_error = Some(error.clone());
+        } else if let Some(connection) = owned {
+            // A complete result or RPC error consumed its entire frame. Restoring ownership has
+            // no await, so cancellation cannot interrupt the commit after transport validation.
+            *guard = Some(connection);
+        }
+        result
     }
 
     /// Uses a transport already exclusively owned by an initialization or live request.
@@ -943,111 +1284,100 @@ impl McpServer {
         let id = self
             .next_request_id
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        let payload = serde_json::json!({
-            "jsonrpc": "2.0",
-            "id": id,
-            "method": method,
-            "params": params,
-        });
-
-        // One deadline covers writes, every ignored stdio line, HTTP headers and the entire body.
-        // Resetting it for each read lets a noisy server keep this exclusive connection forever.
-        let response = tokio::time::timeout(MCP_REQUEST_TIMEOUT, async {
+        let payload =
+            serde_json::json!({"jsonrpc": "2.0", "id": id, "method": method, "params": params});
+        // One deadline includes writes, server-initiated pings, and every streamed event.
+        tokio::time::timeout(MCP_REQUEST_TIMEOUT, async {
             match connection {
                 Connection::Stdio { stdout, stdin, .. } => {
-                    let mut line = serde_json::to_vec(&payload).map_err(|err| {
-                        McpError::Transport(format!("failed to encode request: {err}"))
-                    })?;
-                    line.push(b'\n');
-                    stdin.write_all(&line).await.map_err(|err| {
-                        McpError::Transport(format!("failed to write request: {err}"))
-                    })?;
-                    stdin.flush().await.map_err(|err| {
-                        McpError::Transport(format!("failed to flush request: {err}"))
-                    })?;
-
-                    // Read until the matching response id; notifications are ignored.
-                    let mut buffer = String::new();
+                    write_stdio(stdin, &payload).await?;
+                    let mut buffer = Vec::new();
                     loop {
                         buffer.clear();
-                        let read = stdout.read_line(&mut buffer).await.map_err(|err| {
-                            McpError::Transport(format!("failed to read response: {err}"))
-                        })?;
-
+                        // take() bounds allocation even if a broken server never writes a newline.
+                        let read = (&mut *stdout)
+                            .take((MCP_MAX_MESSAGE_BYTES + 1) as u64)
+                            .read_until(b'\n', &mut buffer)
+                            .await
+                            .map_err(|error| {
+                                McpError::Transport(format!("failed to read response: {error}"))
+                            })?;
                         if read == 0 {
                             return Err(McpError::Transport(format!(
                                 "MCP server '{}' closed its output while answering '{method}'",
                                 self.config.id
                             )));
                         }
-
-                        let trimmed = buffer.trim();
-                        if trimmed.is_empty() {
-                            continue;
+                        if read > MCP_MAX_MESSAGE_BYTES {
+                            return Err(McpError::Transport(
+                                "MCP response exceeds the message size limit".into(),
+                            ));
                         }
-                        let Ok(message) = serde_json::from_str::<serde_json::Value>(trimmed) else {
-                            // Servers may log to stdout; ignore anything that is not JSON-RPC.
-                            continue;
-                        };
-                        if message.get("id").and_then(|value| value.as_u64()) != Some(id) {
-                            continue;
+                        let message = serde_json::from_slice(&buffer).map_err(|error| {
+                            McpError::Transport(format!("invalid MCP JSON: {error}"))
+                        })?;
+                        match self.incoming(message, id, method)? {
+                            IncomingMessage::Result(result) => return Ok(result),
+                            IncomingMessage::Reply(reply) => write_stdio(stdin, &reply).await?,
+                            IncomingMessage::Ignore => {}
                         }
-                        break Ok(message);
                     }
                 }
-                Connection::Http {
-                    client,
-                    url,
-                    headers,
-                    session_id,
-                } => {
-                    let mut request = client
-                        .post(url.as_str())
-                        .json(&payload)
-                        .header("accept", "application/json, text/event-stream");
-                    for (key, value) in headers {
-                        request = request.header(key.as_str(), value.as_str());
-                    }
-                    if let Some(session_id) = session_id.as_deref() {
-                        request = request.header("mcp-session-id", session_id);
-                    }
-                    let response = request.send().await.map_err(|err| {
-                        McpError::Transport(format!("HTTP request failed: {err}"))
-                    })?;
-
-                    let status = response.status();
-                    if method == "initialize" && status.is_success() {
-                        *session_id = response
-                            .headers()
-                            .get("mcp-session-id")
-                            .map(|value| value.to_str().map(str::to_string))
-                            .transpose()
-                            .map_err(|err| {
-                                McpError::Transport(format!("invalid MCP session header: {err}"))
-                            })?;
-                    }
-                    let body = response.text().await.map_err(|err| {
-                        McpError::Transport(format!("failed to read HTTP response: {err}"))
-                    })?;
-
-                    if !status.is_success() {
+                Connection::Http(http) => {
+                    let mut response = http.send(&payload).await?;
+                    let content_type = response
+                        .headers()
+                        .get(reqwest::header::CONTENT_TYPE)
+                        .and_then(|value| value.to_str().ok())
+                        .and_then(|value| value.split(';').next())
+                        .unwrap_or("")
+                        .trim();
+                    let is_sse = content_type.eq_ignore_ascii_case("text/event-stream");
+                    if !is_sse && !content_type.eq_ignore_ascii_case("application/json") {
                         return Err(McpError::Transport(format!(
-                            "MCP server '{}' answered HTTP {status}",
-                            self.config.id
+                            "unsupported MCP response Content-Type '{content_type}'"
                         )));
                     }
-
-                    // Streamable HTTP servers may answer with an SSE stream; take the last data line.
-                    let json = body
-                        .lines()
-                        .filter_map(|line| line.strip_prefix("data:"))
-                        .map(str::trim)
-                        .filter(|line| !line.is_empty())
-                        .next_back()
-                        .unwrap_or(body.trim());
-                    serde_json::from_str::<serde_json::Value>(json).map_err(|err| {
-                        McpError::Transport(format!("failed to decode HTTP response: {err}"))
-                    })
+                    let mut decoder = kanon_llm::SseDecoder::new();
+                    let mut body = Vec::new();
+                    let mut received = 0;
+                    while let Some(chunk) = response.chunk().await.map_err(|error| {
+                        McpError::Transport(format!("failed to read HTTP response: {error}"))
+                    })? {
+                        received += chunk.len();
+                        if received > MCP_MAX_MESSAGE_BYTES {
+                            return Err(McpError::Transport(
+                                "MCP response exceeds the message size limit".into(),
+                            ));
+                        }
+                        if !is_sse {
+                            body.extend_from_slice(&chunk);
+                            continue;
+                        }
+                        for event in decoder.decode(&chunk) {
+                            let message = serde_json::from_str(&event.data).map_err(|error| {
+                                McpError::Transport(format!("invalid MCP SSE JSON: {error}"))
+                            })?;
+                            match self.incoming(message, id, method)? {
+                                IncomingMessage::Result(result) => return Ok(result),
+                                IncomingMessage::Reply(reply) => http.send_one_way(&reply).await?,
+                                IncomingMessage::Ignore => {}
+                            }
+                        }
+                    }
+                    if !is_sse {
+                        let message = serde_json::from_slice(&body).map_err(|error| {
+                            McpError::Transport(format!("invalid MCP JSON: {error}"))
+                        })?;
+                        if let IncomingMessage::Result(result) =
+                            self.incoming(message, id, method)?
+                        {
+                            return Ok(result);
+                        }
+                    }
+                    Err(McpError::Transport(
+                        "MCP HTTP response ended without the matching JSON-RPC result".into(),
+                    ))
                 }
             }
         })
@@ -1057,24 +1387,74 @@ impl McpServer {
                 "MCP server '{}' did not answer '{method}' in time",
                 self.config.id
             ))
-        })??;
+        })?
+    }
 
-        if let Some(error) = response.get("error") {
-            let message = error
-                .get("message")
-                .and_then(|value| value.as_str())
-                .unwrap_or("unknown error");
+    /// Validates envelopes before interpreting payloads; server and client request IDs are separate.
+    fn incoming(
+        &self,
+        mut message: serde_json::Value,
+        id: u64,
+        method: &str,
+    ) -> Result<IncomingMessage, McpError> {
+        let invalid = || McpError::Transport("invalid MCP JSON-RPC envelope".into());
+        if message.get("jsonrpc").and_then(|value| value.as_str()) != Some("2.0") {
+            return Err(invalid());
+        }
+        if let Some(server_method) = message.get("method") {
+            let server_method = server_method.as_str().ok_or_else(invalid)?;
+            if message.get("result").is_some() || message.get("error").is_some() {
+                return Err(invalid());
+            }
+            let Some(server_id) = message.get("id") else {
+                return Ok(IncomingMessage::Ignore);
+            };
+            if !server_id.is_string() && !server_id.is_i64() && !server_id.is_u64() {
+                return Err(invalid());
+            }
+            // No sampling/elicitation capability is advertised. Respond explicitly instead of
+            // leaving a server blocked waiting on a request this client cannot implement.
+            let reply = if server_method == "ping" {
+                serde_json::json!({"jsonrpc":"2.0", "id":server_id, "result":{}})
+            } else {
+                serde_json::json!({"jsonrpc":"2.0", "id":server_id, "error":{"code":-32601, "message":"Method not supported"}})
+            };
+            return Ok(IncomingMessage::Reply(reply));
+        }
+        let result = message.get("result");
+        let error = message.get("error");
+        if result.is_some() == error.is_some()
+            || result.is_some_and(|value| !value.is_object())
+            || error.is_some_and(|error| {
+                error.get("code").and_then(|value| value.as_i64()).is_none()
+                    || error
+                        .get("message")
+                        .and_then(|value| value.as_str())
+                        .is_none()
+            })
+        {
+            return Err(invalid());
+        }
+        let response_id = message.get("id").ok_or_else(invalid)?;
+        if !response_id.is_string() && !response_id.is_i64() && !response_id.is_u64() {
+            return Err(invalid());
+        }
+        if response_id.as_u64() != Some(id) {
+            // A canceled stdio request may leave a late response. Never use it for another call.
+            return Ok(IncomingMessage::Ignore);
+        }
+        if let Some(error) = error {
             return Err(McpError::Rpc {
                 server: self.config.id.clone(),
                 method: method.to_string(),
-                message: message.to_string(),
+                message: error["message"]
+                    .as_str()
+                    .expect("validated error message")
+                    .to_string(),
             });
         }
-
-        Ok(response
-            .get("result")
-            .cloned()
-            .unwrap_or(serde_json::Value::Null))
+        // The envelope is owned here; move its potentially large result without a second copy.
+        Ok(IncomingMessage::Result(message["result"].take()))
     }
 
     /// Sends one JSON-RPC notification (no response expected).
@@ -1084,50 +1464,12 @@ impl McpServer {
         method: &str,
         params: serde_json::Value,
     ) -> Result<(), McpError> {
-        let payload = serde_json::json!({ "jsonrpc": "2.0", "method": method, "params": params });
+        let payload = serde_json::json!({"jsonrpc": "2.0", "method": method, "params": params});
         tokio::time::timeout(MCP_REQUEST_TIMEOUT, async {
             match connection {
-                Connection::Stdio { stdin, .. } => {
-                    let mut line = serde_json::to_vec(&payload).map_err(|err| {
-                        McpError::Transport(format!("failed to encode notice: {err}"))
-                    })?;
-                    line.push(b'\n');
-                    stdin.write_all(&line).await.map_err(|err| {
-                        McpError::Transport(format!("failed to write notice: {err}"))
-                    })?;
-                    stdin.flush().await.map_err(|err| {
-                        McpError::Transport(format!("failed to flush notice: {err}"))
-                    })?;
-                }
-                Connection::Http {
-                    client,
-                    url,
-                    headers,
-                    session_id,
-                } => {
-                    let mut request = client
-                        .post(url.as_str())
-                        .json(&payload)
-                        .header("accept", "application/json, text/event-stream");
-                    for (key, value) in headers {
-                        request = request.header(key.as_str(), value.as_str());
-                    }
-                    if let Some(session_id) = session_id.as_deref() {
-                        request = request.header("mcp-session-id", session_id);
-                    }
-                    let response = request.send().await.map_err(|err| {
-                        McpError::Transport(format!("HTTP notification failed: {err}"))
-                    })?;
-                    if !response.status().is_success() {
-                        return Err(McpError::Transport(format!(
-                            "MCP server '{}' rejected notification '{method}' with HTTP {}",
-                            self.config.id,
-                            response.status()
-                        )));
-                    }
-                }
+                Connection::Stdio { stdin, .. } => write_stdio(stdin, &payload).await,
+                Connection::Http(http) => http.send_one_way(&payload).await,
             }
-            Ok(())
         })
         .await
         .map_err(|_| {
@@ -1193,8 +1535,6 @@ impl ToolHost for McpServer {
 
         match self.call(&tool, arguments).await {
             Ok(outcome) => {
-                let result = json_to_prost_struct(&serde_json::json!({ "content": outcome.text }))
-                    .unwrap_or_default();
                 // Attachments ride beside the text: the router forwards them to the pipeline, which
                 // turns them into message segments the platform can deliver.
                 let attachments = outcome
@@ -1206,9 +1546,11 @@ impl ToolHost for McpServer {
                     call_id: req.call_id,
                     success: true,
                     error_message: String::new(),
-                    payload: Some(
-                        kanon_proto::v1::tool_call_response::Payload::StructuredResult(result),
-                    ),
+                    // This is already the model-facing text; a Struct wrapper would quote and
+                    // escape any rendered JSON again in the conversation history.
+                    payload: Some(kanon_proto::v1::tool_call_response::Payload::RawBytes(
+                        outcome.text.into_bytes(),
+                    )),
                     attachments,
                 })
             }
@@ -1542,18 +1884,6 @@ pub(crate) fn new_attachment_path(
         }
         None => Ok(dir.join(format!("{stamp}-{seq}.{}", extension_for_mime(mime)))),
     }
-}
-
-/// Truncates a tool result so it can never flood the model context window.
-///
-/// Truncation happens on a character boundary and marks itself, so the model can tell a clipped
-/// result from a complete one.
-fn truncate_for_model(value: &str, limit: usize) -> String {
-    if value.chars().count() <= limit {
-        return value.to_string();
-    }
-    let head: String = value.chars().take(limit).collect();
-    format!("{head}… [truncated at {limit} characters]")
 }
 
 /// Deletes attachment files older than `max_age` and reports how many were swept.
