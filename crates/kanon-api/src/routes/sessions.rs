@@ -210,12 +210,8 @@ async fn set_persona(
         .map(str::trim)
         .filter(|id| !id.is_empty());
 
-    // Binding a persona is itself a session-registering action: a console may pre-configure a
-    // session before its first message arrives, so metadata is created on demand here.
-    state.sessions().get_or_create(&session_id);
-
     let Some(persona_id) = requested else {
-        state.sessions().clear_persona(&session_id);
+        state.sessions().clear_persona(&session_id)?;
         tracing::info!(session_id = %session_id, "Session persona binding removed by control plane");
         return Ok(Json(PersonaSwitchResponse {
             session_key: session_id,
@@ -229,7 +225,9 @@ async fn set_persona(
         .get(persona_id)
         .ok_or_else(|| ApiError::NotFound(format!("Persona '{persona_id}' is not registered")))?;
 
-    state.sessions().set_persona(&session_id, persona_id);
+    // The binding itself creates and persists a missing session after persona validation, so a
+    // rejected persona or failed write cannot leave behind an empty session record.
+    state.sessions().set_persona(&session_id, persona_id)?;
 
     state
         .observability()

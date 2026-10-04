@@ -119,7 +119,7 @@ async fn deleting_a_session_removes_history_summary_and_record_across_restarts()
                 .await
                 .unwrap();
             sessions.record_turn(key, 10);
-            sessions.set_persona(key, "pirate");
+            sessions.set_persona(key, "pirate").unwrap();
         }
         sessions
             .memory()
@@ -152,7 +152,7 @@ async fn deleting_a_session_removes_history_summary_and_record_across_restarts()
 #[tokio::test]
 async fn a_session_record_without_messages_is_listed_without_a_last_turn() {
     let sessions = SessionManager::new(Arc::new(InMemory::new()));
-    sessions.set_persona("instance:a:chat#3", "pirate");
+    sessions.set_persona("instance:a:chat#3", "pirate").unwrap();
     sessions.record_turn("instance:a:chat#4", 1);
 
     let listed = sessions

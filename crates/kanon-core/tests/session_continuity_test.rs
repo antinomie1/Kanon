@@ -158,7 +158,7 @@ async fn a_restarted_node_continues_the_conversation_it_was_having() {
         say(&node, "e4", "third").await;
 
         // An operator binds a persona to that session from the console.
-        node.sessions.set_persona(&session_id, "pirate");
+        node.sessions.set_persona(&session_id, "pirate").unwrap();
         (session_id, id)
     };
     assert_eq!(session, format!("instance:{id}:group:1:user:1#1"));

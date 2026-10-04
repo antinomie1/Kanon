@@ -3,12 +3,17 @@
 
 mod common;
 
+use std::collections::HashMap;
 use std::path::Path;
-use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
 
 use axum::http::{Method, StatusCode};
 use kanon_api::{ApiState, open_session_manager};
 use kanon_llm::ChatMessage;
+use kanon_llm::error::MemoryError;
+use kanon_llm::memory::InMemory;
+use kanon_llm::session::{SessionManager, SessionMetadata, SessionStore};
 use serde_json::json;
 
 use common::send_json;
@@ -88,7 +93,7 @@ async fn resetting_a_session_clears_its_history_durably_but_keeps_its_persona() 
     let db = dir.path().join("sessions.db");
     {
         let state = node(&db);
-        state.sessions().set_persona("s", "assistant");
+        state.sessions().set_persona("s", "assistant").unwrap();
         state.sessions().record_turn("s", 5);
         state
             .sessions()
@@ -142,4 +147,135 @@ fn storage_that_cannot_be_opened_is_an_error_not_an_empty_manager() {
         error.contains("Failed to create"),
         "unexpected error: {error}"
     );
+}
+
+/// A durable-state fixture whose writes can fail after an initial binding is saved.
+#[derive(Default)]
+struct RefusingStore {
+    rows: Mutex<HashMap<String, SessionMetadata>>,
+    reject: AtomicBool,
+}
+
+impl SessionStore for RefusingStore {
+    fn load_all(&self) -> Result<Vec<SessionMetadata>, MemoryError> {
+        Ok(self.rows.lock().unwrap().values().cloned().collect())
+    }
+
+    fn save(&self, metadata: &SessionMetadata) -> Result<(), MemoryError> {
+        if self.reject.load(Ordering::SeqCst) {
+            return Err(MemoryError::Backend("disk full".to_string()));
+        }
+        self.rows
+            .lock()
+            .unwrap()
+            .insert(metadata.session_key.clone(), metadata.clone());
+        Ok(())
+    }
+
+    fn delete(&self, key: &str) -> Result<(), MemoryError> {
+        self.rows.lock().unwrap().remove(key);
+        Ok(())
+    }
+}
+
+#[tokio::test]
+async fn rejected_persona_changes_preserve_live_and_durable_bindings() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = Arc::new(RefusingStore::default());
+    let sessions = Arc::new(
+        SessionManager::new(Arc::new(InMemory::new()))
+            .with_store(store.clone())
+            .unwrap(),
+    );
+    sessions.set_persona("existing", "assistant").unwrap();
+    let original = serde_json::to_value(sessions.get_metadata("existing")).unwrap();
+    let supervisor = Arc::new(kanon_core::supervisor::Supervisor::new(
+        Some(dir.path().to_path_buf()),
+        None,
+    ));
+    let state = ApiState::builder(supervisor)
+        .with_sessions(sessions.clone())
+        .with_llm_provider(
+            "test-agent",
+            Arc::new(common::MockProvider::new("unused")),
+            kanon_api::default_agent_config("mock-model"),
+        )
+        .build();
+    state
+        .personas()
+        .register(kanon_llm::Persona::custom("pirate", "Pirate", "", "Arr.").unwrap())
+        .unwrap();
+    let app = kanon_api::app(state);
+    store.reject.store(true, Ordering::SeqCst);
+
+    for (key, persona) in [
+        ("existing", json!("pirate")),
+        ("existing", json!(null)),
+        ("new", json!("pirate")),
+    ] {
+        let (status, body) = send_json(
+            &app,
+            Method::POST,
+            &format!("/api/v1/sessions/{key}/persona"),
+            Some(json!({ "persona_id": persona })),
+        )
+        .await;
+        assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR, "{body}");
+        assert_eq!(
+            serde_json::to_value(sessions.get_metadata("existing")).unwrap(),
+            original,
+        );
+        assert!(sessions.get_metadata("new").is_none());
+        assert_eq!(
+            serde_json::to_value(store.rows.lock().unwrap().get("existing")).unwrap(),
+            original,
+        );
+    }
+
+    let (status, _) = send_json(
+        &app,
+        Method::POST,
+        "/api/v1/sessions/invalid/persona",
+        Some(json!({ "persona_id": "unknown" })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    assert!(sessions.get_metadata("invalid").is_none());
+
+    // A chat override must fail before any model turn or history append takes place.
+    let (status, body) = send_json(
+        &app,
+        Method::POST,
+        "/api/v1/chat/completions",
+        Some(json!({ "session_id": "chat", "message": "hi", "persona_id": "pirate" })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR, "{body}");
+    assert!(sessions.get_metadata("chat").is_none());
+    assert!(
+        sessions
+            .memory()
+            .get_messages("chat")
+            .await
+            .unwrap()
+            .is_empty()
+    );
+
+    // Recovering storage makes the same switch and clear durable, without a restart to retry.
+    store.reject.store(false, Ordering::SeqCst);
+    for persona in [Some("pirate"), None] {
+        let (status, body) = send_json(
+            &app,
+            Method::POST,
+            "/api/v1/sessions/existing/persona",
+            Some(json!({ "persona_id": persona })),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        let restored = SessionManager::new(Arc::new(InMemory::new()))
+            .with_store(store.clone())
+            .unwrap();
+        assert_eq!(sessions.get_persona("existing").as_deref(), persona);
+        assert_eq!(restored.get_persona("existing").as_deref(), persona);
+    }
 }

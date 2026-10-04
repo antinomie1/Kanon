@@ -472,16 +472,34 @@ impl SessionManager {
     ///
     /// The pipeline calls this for every message of a conversation whose instance chose a persona,
     /// so re-binding the persona a session already has is a no-op — and costs no write.
-    pub fn set_persona(&self, session_key: &str, persona_id: impl Into<String>) {
+    /// A failed store write leaves the previous binding intact and does not create a new record.
+    pub fn set_persona(
+        &self,
+        session_key: &str,
+        persona_id: impl Into<String>,
+    ) -> Result<(), MemoryError> {
+        use dashmap::mapref::entry::Entry;
+
         let pid = persona_id.into();
-        self.update(session_key, |entry| {
-            if entry.persona_id.as_deref() == Some(pid.as_str()) {
-                return false;
+        let entry = self.metadata.entry(session_key.to_string());
+        let mut candidate = match &entry {
+            Entry::Occupied(existing) => {
+                if existing.get().persona_id.as_deref() == Some(pid.as_str()) {
+                    return Ok(());
+                }
+                existing.get().clone()
             }
-            entry.persona_id = Some(pid);
-            entry.last_active_at = current_unix_timestamp();
-            true
-        });
+            Entry::Vacant(_) => SessionMetadata::new(session_key, self.default_scope.clone()),
+        };
+        candidate.persona_id = Some(pid);
+        candidate.last_active_at = current_unix_timestamp();
+        // Retain the shard through persistence so another writer cannot publish a newer binding
+        // first. Unlike usage counters, a requested persona must be durable before it takes effect.
+        if let Some(store) = &self.store {
+            store.save(&candidate)?;
+        }
+        entry.insert(candidate);
+        Ok(())
     }
 
     /// Returns the active persona identifier for a session, if configured.
@@ -508,13 +526,18 @@ impl SessionManager {
         unbound
     }
 
-    /// Removes the persona binding of one session, which then uses the base assistant.
-    pub fn clear_persona(&self, session_key: &str) {
-        self.update_existing(session_key, |meta| {
-            meta.persona_id = None;
-            meta.last_active_at = current_unix_timestamp();
-            true
-        });
+    /// Removes a session's persona binding after persistence succeeds; missing sessions are a no-op.
+    pub fn clear_persona(&self, session_key: &str) -> Result<(), MemoryError> {
+        if let Some(mut entry) = self.metadata.get_mut(session_key) {
+            let mut candidate = entry.clone();
+            candidate.persona_id = None;
+            candidate.last_active_at = current_unix_timestamp();
+            if let Some(store) = &self.store {
+                store.save(&candidate)?;
+            }
+            *entry = candidate;
+        }
+        Ok(())
     }
 
     /// Sets a session-scoped state variable.

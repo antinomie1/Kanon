@@ -30,7 +30,7 @@ async fn everything_about_a_session_survives_a_restart() {
     {
         let sessions = open(&db);
         sessions.get_or_create_with_scope(&SessionKey::custom(key));
-        sessions.set_persona(key, "pirate");
+        sessions.set_persona(key, "pirate").unwrap();
         sessions.set_variable(key, "lang", "zh-CN");
         sessions.set_variable(key, "tz", "UTC+8");
         sessions.remove_variable(key, "tz");
@@ -86,9 +86,9 @@ async fn every_kind_of_change_is_written_through() {
 
     {
         let sessions = open(&db);
-        sessions.set_persona("a", "pirate");
-        sessions.set_persona("b", "pirate");
-        sessions.set_persona("c", "other");
+        sessions.set_persona("a", "pirate").unwrap();
+        sessions.set_persona("b", "pirate").unwrap();
+        sessions.set_persona("c", "other").unwrap();
         sessions.close_session("c");
         sessions.record_turn("d", 10);
         sessions
@@ -99,10 +99,10 @@ async fn every_kind_of_change_is_written_through() {
 
         // Deleting a persona unbinds every session using it; clearing removes one binding.
         assert_eq!(sessions.unbind_persona("pirate"), 2);
-        sessions.set_persona("a", "kept");
-        sessions.clear_persona("a");
+        sessions.set_persona("a", "kept").unwrap();
+        sessions.clear_persona("a").unwrap();
         // A reset zeroes the counters but keeps the persona and variables.
-        sessions.set_persona("d", "sticky");
+        sessions.set_persona("d", "sticky").unwrap();
         sessions.set_variable("d", "k", "v");
         sessions.reset_session("d").await.unwrap();
     }
@@ -176,10 +176,10 @@ fn rebinding_the_persona_a_session_already_has_costs_no_write() {
         .with_store(store.clone())
         .unwrap();
 
-    sessions.set_persona("s", "pirate");
+    sessions.set_persona("s", "pirate").unwrap();
     assert_eq!(store.saves.load(Ordering::SeqCst), 1);
     for _ in 0..100 {
-        sessions.set_persona("s", "pirate");
+        sessions.set_persona("s", "pirate").unwrap();
     }
     assert_eq!(
         store.saves.load(Ordering::SeqCst),
@@ -187,7 +187,7 @@ fn rebinding_the_persona_a_session_already_has_costs_no_write() {
         "a hundred messages must not be a hundred writes"
     );
 
-    sessions.set_persona("s", "other");
+    sessions.set_persona("s", "other").unwrap();
     assert_eq!(store.saves.load(Ordering::SeqCst), 2);
 
     // Reading never writes, and creating a session on first sight writes exactly once.
@@ -217,17 +217,18 @@ impl SessionStore for BrokenStore {
 }
 
 #[test]
-fn a_failing_store_never_turns_a_reply_into_an_error() {
+fn a_failing_store_keeps_counters_best_effort_but_rejects_persona_changes() {
     let sessions = SessionManager::new(Arc::new(InMemory::new()))
         .with_store(Arc::new(BrokenStore))
         .unwrap();
 
-    // The write fails (and is logged), but the session keeps working in memory.
+    // Usage bookkeeping remains best effort; an explicit persona change must report its failure.
     sessions.record_turn("s", 5);
-    sessions.set_persona("s", "pirate");
+    let error = sessions.set_persona("s", "pirate").unwrap_err();
+    assert!(error.to_string().contains("disk full"));
     let record = sessions.get_metadata("s").unwrap();
     assert_eq!(record.turn_count, 1);
-    assert_eq!(record.persona_id.as_deref(), Some("pirate"));
+    assert!(record.persona_id.is_none());
 }
 
 /// A store that cannot be read.
@@ -352,7 +353,7 @@ fn race_metadata_commits(
             .with_store(store.clone())
             .unwrap(),
     );
-    sessions.set_persona("s", "old");
+    sessions.set_persona("s", "old").unwrap();
     store.delay_next.store(true, Ordering::SeqCst);
     let writer_sessions = sessions.clone();
     let writer = std::thread::spawn(move || first(&writer_sessions));

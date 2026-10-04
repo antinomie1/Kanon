@@ -260,8 +260,7 @@ fn apply_persona_override(
         )));
     }
 
-    state.sessions().get_or_create(session_id);
-    state.sessions().set_persona(session_id, persona_id);
+    state.sessions().set_persona(session_id, persona_id)?;
     Ok(())
 }
 

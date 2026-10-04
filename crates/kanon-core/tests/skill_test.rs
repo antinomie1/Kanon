@@ -259,7 +259,9 @@ async fn the_skill_catalog_reaches_the_model_alongside_the_persona() {
     let memory = Arc::new(InMemory::new());
     let sessions = Arc::new(SessionManager::new(memory.clone()));
     let personas = Arc::new(PersonaRegistry::default());
-    sessions.set_persona("instance:ai:group:1:user:1#0", "assistant");
+    sessions
+        .set_persona("instance:ai:group:1:user:1#0", "assistant")
+        .unwrap();
 
     let agent = BuiltinAgent::builder(
         "catalog-integration",

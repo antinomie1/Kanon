@@ -107,7 +107,7 @@ async fn session_reset_preserves_persona_and_variables() {
     let key = "channel:9:user:7";
     state.sessions().record_turn(key, 25);
     state.sessions().set_variable(key, "locale", "zh-CN");
-    state.sessions().set_persona(key, "coder");
+    state.sessions().set_persona(key, "coder").unwrap();
     state
         .sessions()
         .memory()
@@ -228,7 +228,10 @@ async fn session_persona_switch_binds_persona() {
 
     // A blank or null identifier removes the binding: the session uses the base assistant again.
     for cleared in [json!({ "persona_id": null }), json!({ "persona_id": "  " })] {
-        state.sessions().set_persona("webui:debug", "coder");
+        state
+            .sessions()
+            .set_persona("webui:debug", "coder")
+            .unwrap();
         let (status, body) = send_json(
             &app,
             Method::POST,

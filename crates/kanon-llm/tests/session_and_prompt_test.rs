@@ -67,7 +67,7 @@ async fn injected_system_context_survives_the_persona_hook() {
     let memory = Arc::new(InMemory::new());
     let sessions = Arc::new(SessionManager::new(memory.clone()));
     let personas = Arc::new(PersonaRegistry::default());
-    sessions.set_persona("session-1", "assistant");
+    sessions.set_persona("session-1", "assistant").unwrap();
 
     let agent = BuiltinAgent::builder(
         "hook-order",
@@ -169,7 +169,7 @@ async fn test_session_manager_metadata_and_variable_lifecycle() {
     assert_eq!(updated.status, SessionStatus::Active);
 
     // 4. Set persona
-    sm.set_persona(key, "coder");
+    sm.set_persona(key, "coder").unwrap();
     assert_eq!(sm.get_persona(key).as_deref(), Some("coder"));
 
     // 5. Reset session clears memory and turn counts, but preserves persona & variables
@@ -417,7 +417,7 @@ async fn test_agent_persona_hook_integration() {
     assert!(meta.total_tokens_used > 0);
 
     // 2. Switching the session persona takes effect on the very next turn.
-    session_mgr.set_persona(session_id, "coder");
+    session_mgr.set_persona(session_id, "coder").unwrap();
     agent
         .run_standalone(session_id, "Write a binary search algorithm in Rust")
         .await
@@ -454,16 +454,16 @@ async fn test_agent_persona_hook_integration() {
 async fn deleting_a_persona_unbinds_the_sessions_that_use_it() {
     let memory = Arc::new(InMemory::new());
     let session_mgr = Arc::new(SessionManager::new(memory));
-    session_mgr.set_persona("s1", "coder");
-    session_mgr.set_persona("s2", "coder");
-    session_mgr.set_persona("s3", "other");
+    session_mgr.set_persona("s1", "coder").unwrap();
+    session_mgr.set_persona("s2", "coder").unwrap();
+    session_mgr.set_persona("s3", "other").unwrap();
 
     assert_eq!(session_mgr.unbind_persona("coder"), 2);
     assert!(session_mgr.get_persona("s1").is_none());
     assert!(session_mgr.get_persona("s2").is_none());
     assert_eq!(session_mgr.get_persona("s3").as_deref(), Some("other"));
 
-    session_mgr.clear_persona("s3");
+    session_mgr.clear_persona("s3").unwrap();
     assert!(session_mgr.get_persona("s3").is_none());
 }
 
@@ -482,7 +482,7 @@ async fn the_persona_hook_owns_the_first_system_message() {
             Persona::custom("custom-bot", "Custom Bot", "", "Bot instructions.").expect("valid"),
         )
         .expect("registered");
-    session_mgr.set_persona("sess_1", "custom-bot");
+    session_mgr.set_persona("sess_1", "custom-bot").unwrap();
 
     let hook = Arc::new(PersonaHook::new(session_mgr.clone(), persona_reg));
     let agent = BuiltinAgent::builder("hook_agent", provider)

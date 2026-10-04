@@ -184,7 +184,9 @@ impl PipelineEngine {
                 if let Some(persona_id) = chat.instance.effective_persona_id()
                     && let Some(sessions) = agent.session_manager()
                 {
-                    sessions.set_persona(&session_id, persona_id);
+                    sessions
+                        .set_persona(&session_id, persona_id)
+                        .map_err(|error| ConversationError::Storage(error.to_string()))?;
                 }
                 writing
                     .scope(self.run_conversation_turn(

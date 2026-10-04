@@ -494,7 +494,7 @@ async fn plugins_manage_the_operators_personas_through_the_shared_store() {
         .await
         .expect("deselect the persona");
     let session = format!("{}0", node.chat);
-    node.sessions.set_persona(&session, "pirate");
+    node.sessions.set_persona(&session, "pirate").unwrap();
     let writer = node.sessions.try_write(&session).unwrap();
     let busy = service
         .delete_persona(Request::new(DeletePersonaRequest {

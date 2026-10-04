@@ -2229,7 +2229,21 @@ impl PipelineEngine {
                 && let Some(persona_id) = instance.effective_persona_id()
                 && let Some(sessions) = agent.session_manager()
             {
-                sessions.set_persona(&session_id, persona_id);
+                if let Err(error) = sessions.set_persona(&session_id, persona_id) {
+                    tracing::error!(session_id = %session_id, %error, "Failed to persist the instance persona");
+                    // Do not send a turn with the previous persona when the instance requested
+                    // another one. Unsolicited group turns keep the usual quiet failure policy.
+                    let asked = notice.is_none()
+                        && (!kind.is_policy_governed()
+                            || bot_mentioned(filtered_event.metadata.as_ref()));
+                    if asked {
+                        return PipelineResult::LlmFailed {
+                            error: error.to_string(),
+                            replies: vec![text_reply("会话设置保存失败，本轮未执行，请稍后重试。")],
+                        };
+                    }
+                    return PipelineResult::Passed(filtered_event);
+                }
             }
             // A model the catalog marks as not tool-capable is offered no external tools. Native
             // in-process tools stay available: they never leave the node and cost nothing to offer.
