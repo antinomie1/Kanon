@@ -497,14 +497,19 @@ impl InstanceRegistry {
     /// operator chasing a phantom routing problem.
     pub async fn open(path: impl Into<PathBuf>) -> Result<Self, InstanceError> {
         let path = path.into();
-        let instances = match Self::read_document(&path)? {
-            Some(document) => document
-                .instances
-                .into_iter()
-                .map(|instance| (instance.id.clone(), instance))
-                .collect(),
-            None => HashMap::new(),
-        };
+        let mut instances = HashMap::new();
+        if let Some(document) = Self::read_document(&path)? {
+            for instance in document.instances {
+                let instance = prepare_instance(instance)?;
+                let id = instance.id.clone();
+                if instances.insert(id.clone(), instance).is_some() {
+                    return Err(InstanceError::Invalid(format!(
+                        "instance '{id}' is defined twice in {}",
+                        path.display()
+                    )));
+                }
+            }
+        }
 
         let registry = Self {
             path: Some(path),
@@ -810,9 +815,7 @@ impl InstanceRegistry {
             .get_mut(id)
             .ok_or_else(|| InstanceError::NotFound(id.to_string()))?;
 
-        instance.model = model
-            .map(|model| model.trim().to_string())
-            .filter(|model| !model.is_empty());
+        instance.model = normalize_model(model)?;
         let updated = instance.clone();
         self.commit(&mut instances, next)?;
 
@@ -839,11 +842,6 @@ impl InstanceRegistry {
     async fn validate_all(&self) -> Result<(), InstanceError> {
         let instances = self.instances.read().await;
         for instance in instances.values() {
-            if let Some(agent) = instance.agent.as_deref() {
-                kanon_llm::check_agent_id(agent).map_err(|err| {
-                    InstanceError::Invalid(format!("instance '{}': {err}", instance.id))
-                })?;
-            }
             Self::validate_claims(&instances, instance)?;
         }
         Ok(())
@@ -876,17 +874,27 @@ impl InstanceRegistry {
 
     /// Reads the catalog document, returning `None` when the file does not exist.
     fn read_document(path: &Path) -> Result<Option<InstanceCatalogDocument>, InstanceError> {
-        if !path.exists() {
-            return Ok(None);
-        }
-
-        let raw = std::fs::read_to_string(path).map_err(|err| {
-            InstanceError::Io(format!("failed to read {}: {err}", path.display()))
-        })?;
+        let raw = match std::fs::read_to_string(path) {
+            Ok(raw) => raw,
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(err) => {
+                return Err(InstanceError::Io(format!(
+                    "failed to read {}: {err}",
+                    path.display()
+                )));
+            }
+        };
         let document: InstanceCatalogDocument = serde_json::from_str(&raw).map_err(|err| {
             InstanceError::Io(format!("failed to parse {}: {err}", path.display()))
         })?;
 
+        if document.version != 1 {
+            return Err(InstanceError::Invalid(format!(
+                "{} has schema version {}, expected 1",
+                path.display(),
+                document.version
+            )));
+        }
         Ok(Some(document))
     }
 
@@ -953,8 +961,44 @@ fn build_instance(
     name: String,
     draft: InstanceDraft,
 ) -> Result<BotInstance, InstanceError> {
+    prepare_instance(BotInstance {
+        id,
+        name,
+        enabled: draft.enabled,
+        adapters: draft.adapters,
+        persona_id: draft.persona_id,
+        system_prompt: draft.system_prompt,
+        agent: draft.agent,
+        model: draft.model,
+        reply_policy: draft.reply_policy,
+        context_policy: draft.context_policy,
+        session_scope: draft.session_scope,
+        observe_group: draft.observe_group,
+        command_policy: draft.command_policy,
+        bash: draft.bash,
+        plugins: draft.plugins,
+        skills: draft.skills,
+        mcp: draft.mcp,
+        session_generations: HashMap::new(),
+    })
+}
+
+/// Normalizes and validates API candidates and restored records without touching session state.
+fn prepare_instance(mut instance: BotInstance) -> Result<BotInstance, InstanceError> {
+    if instance.id.is_empty()
+        || !instance
+            .id
+            .chars()
+            .all(|ch| ch.is_ascii_alphanumeric() || ch == '-' || ch == '_')
+    {
+        return Err(InstanceError::Invalid(format!(
+            "invalid instance id '{}'",
+            instance.id
+        )));
+    }
+    instance.name = normalize_name(&instance.name)?;
     let mut adapters: Vec<String> = Vec::new();
-    for adapter in draft.adapters {
+    for adapter in std::mem::take(&mut instance.adapters) {
         let platform = adapter.trim();
         if platform.is_empty() {
             return Err(InstanceError::Invalid(
@@ -966,59 +1010,54 @@ fn build_instance(
         }
     }
 
-    let agent = draft
+    instance.agent = instance
         .agent
         .map(|agent| agent.trim().to_string())
         .filter(|agent| !agent.is_empty());
-    if let Some(agent) = agent.as_deref() {
+    if let Some(agent) = instance.agent.as_deref() {
         kanon_llm::check_agent_id(agent).map_err(InstanceError::Invalid)?;
     }
 
-    let model = draft
-        .model
-        .map(|model| model.trim().to_string())
-        .filter(|model| !model.is_empty());
+    instance.model = normalize_model(instance.model)?;
 
-    let system_prompt = draft
+    instance.system_prompt = instance
         .system_prompt
         .map(|prompt| prompt.trim().to_string())
         .filter(|prompt| !prompt.is_empty());
 
-    let persona_id = draft
+    instance.persona_id = instance
         .persona_id
         .map(|persona| persona.trim().to_string())
         .filter(|persona| !persona.is_empty());
 
-    if let Some(policy) = draft.reply_policy.as_ref() {
+    if let Some(policy) = instance.reply_policy.as_ref() {
         policy.validate().map_err(InstanceError::Invalid)?;
     }
     // Normalized like the node-wide policy, so a stored override matches exactly what is enforced.
-    let command_policy = draft
+    instance.command_policy = instance
         .command_policy
         .map(CommandPolicy::prepare)
         .transpose()
         .map_err(InstanceError::Invalid)?;
 
-    Ok(BotInstance {
-        id,
-        name,
-        enabled: draft.enabled,
-        adapters,
-        persona_id,
-        system_prompt,
-        agent,
-        model,
-        reply_policy: draft.reply_policy,
-        context_policy: draft.context_policy,
-        session_scope: draft.session_scope,
-        observe_group: draft.observe_group,
-        command_policy,
-        bash: draft.bash,
-        plugins: draft.plugins,
-        skills: draft.skills,
-        mcp: draft.mcp,
-        session_generations: HashMap::new(),
-    })
+    instance.adapters = adapters;
+    Ok(instance)
+}
+
+/// Canonicalizes an optional override without ever guessing a provider for a bare model id.
+fn normalize_model(model: Option<String>) -> Result<Option<String>, InstanceError> {
+    model
+        .filter(|model| !model.trim().is_empty())
+        .map(|model| {
+            let reference = kanon_llm::ModelRef::parse(&model);
+            if reference.provider().is_none() {
+                return Err(InstanceError::Invalid(format!(
+                    "model '{model}' must be written as <provider>/<model-id>"
+                )));
+            }
+            Ok(reference.canonical())
+        })
+        .transpose()
 }
 
 /// Derives a unique, readable identifier from an instance name.

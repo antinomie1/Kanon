@@ -177,6 +177,24 @@ async fn custom_prompt_is_published_as_a_persona_and_survives_deletion_cleanup()
         "instance persona missing from {personas}"
     );
 
+    let (status, _) = common::send_json(
+        &app,
+        Method::PUT,
+        &format!("/api/v1/instances/{instance_id}"),
+        Some(json!({"name": "Bot", "enabled": true, "model": "unqualified-model"})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert!(
+        state
+            .instances()
+            .get(&instance_id)
+            .await
+            .unwrap()
+            .model
+            .is_none()
+    );
+
     // An update may also reshape the fields the console edits.
     let (status, updated) = common::send_json(
         &app,
@@ -187,12 +205,15 @@ async fn custom_prompt_is_published_as_a_persona_and_survives_deletion_cleanup()
             "enabled": true,
             "adapters": ["fixture_platform"],
             "system_prompt": "你是一只叫黑猪AI的猪。",
-            "model": "deepseek-flash",
+            "model": "deepseek/deepseek-flash",
         })),
     )
     .await;
     assert_eq!(status, StatusCode::OK);
-    assert_eq!(updated["instance"]["model"], json!("deepseek-flash"));
+    assert_eq!(
+        updated["instance"]["model"],
+        json!("deepseek/deepseek-flash")
+    );
 
     // Explicit selections of a generated persona are also unbound, but never during a busy turn.
     state

@@ -100,7 +100,7 @@ fn a_legacy_default_provider_is_ignored_and_dropped_on_the_next_save() {
 }
 
 #[test]
-fn a_persisted_default_model_naming_no_configured_provider_is_dropped() {
+fn a_persisted_default_model_naming_no_configured_provider_is_rejected() {
     let dir = tempfile::tempdir().expect("temp dir");
     let path = dir.path().join("system.json");
     std::fs::write(
@@ -112,14 +112,10 @@ fn a_persisted_default_model_naming_no_configured_provider_is_dropped() {
     )
     .expect("seed document");
 
-    let settings = SystemConfigStore::new(&path)
+    let error = SystemConfigStore::new(&path)
         .load_node_settings()
-        .expect("load");
-    assert_eq!(settings.providers.len(), 1);
-    assert!(
-        settings.default_model.is_none(),
-        "a default that cannot resolve must not be reported as the node's model"
-    );
+        .expect_err("an invalid configured default must not be silently cleared");
+    assert!(error.contains("gone"), "unexpected error: {error}");
 }
 
 #[test]
@@ -315,4 +311,122 @@ fn the_default_agent_is_builtin_until_set_and_an_unknown_one_stops_loading() {
         err.contains("unknown agent 'dify'"),
         "unexpected error: {err}"
     );
+}
+
+#[test]
+fn adapter_saves_preserve_legacy_models_and_explicit_provider_choices() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("system.json");
+    let store = SystemConfigStore::new(&path);
+    let legacy = serde_json::json!({
+        "llm": {"protocol": "openai", "base_url": "https://api.deepseek.com/v1", "model": "old-model"}
+    });
+    for kind in ["onebot", "milky", "qqofficial"] {
+        std::fs::write(&path, legacy.to_string()).unwrap();
+        match kind {
+            "onebot" => store.save_onebot(&Default::default()).unwrap(),
+            "milky" => store.save_milky(&Default::default()).unwrap(),
+            _ => store.save_qqofficial(&Default::default()).unwrap(),
+        }
+        let settings = store.load_node_settings().unwrap();
+        assert_eq!(
+            settings.default_model.as_deref(),
+            Some("deepseek/old-model")
+        );
+        assert_eq!(settings.providers.len(), 1);
+        let saved: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        assert!(saved.get("llm").is_none());
+        assert_eq!(saved["providers"][0]["name"], "deepseek");
+    }
+
+    let mut explicit_model = legacy.clone();
+    explicit_model["default_model"] = serde_json::json!("deepseek/chosen-model");
+    std::fs::write(&path, explicit_model.to_string()).unwrap();
+    store.save_onebot(&Default::default()).unwrap();
+    assert_eq!(
+        store.load_node_settings().unwrap().default_model.as_deref(),
+        Some("deepseek/chosen-model")
+    );
+
+    let mut explicitly_empty = legacy;
+    explicitly_empty["providers"] = serde_json::json!([]);
+    std::fs::write(&path, explicitly_empty.to_string()).unwrap();
+    store.save_onebot(&Default::default()).unwrap();
+    let settings = store.load_node_settings().unwrap();
+    assert!(settings.providers.is_empty());
+    assert!(settings.default_model.is_none());
+}
+
+#[test]
+fn persisted_settings_use_the_same_policy_and_provider_validation_as_updates() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("system.json");
+    let store = SystemConfigStore::new(&path);
+    for (document, message) in [
+        (
+            serde_json::json!({"providers": [
+                {"name": "dup", "protocol": "openai", "base_url": "http://localhost/v1"},
+                {"name": "dup", "protocol": "openai", "base_url": "http://localhost/other"}
+            ]}),
+            "defined twice",
+        ),
+        (
+            serde_json::json!({"providers": [
+                {"name": "bad/name", "protocol": "openai", "base_url": "http://localhost/v1"}
+            ]}),
+            "must not contain",
+        ),
+        (
+            serde_json::json!({"models": [{"provider": "gone", "model": "model"}]}),
+            "not configured",
+        ),
+        (
+            serde_json::json!({
+                "providers": [{"name": "local", "protocol": "openai", "base_url": "http://localhost/v1"}],
+                "models": [{"provider": "local", "model": "model"}, {"provider": "local", "model": "model"}]
+            }),
+            "defined twice",
+        ),
+        (
+            serde_json::json!({
+                "providers": [{"name": "local", "protocol": "openai", "base_url": "http://localhost/v1"}],
+                "models": [{"provider": "local", "model": "model", "temperature": 5}]
+            }),
+            "outside",
+        ),
+        (
+            serde_json::json!({"reply_policy": {"mode": "probability", "probability": 5}}),
+            "outside",
+        ),
+        (
+            serde_json::json!({"command_policy": {"admins": ["missing-platform"]}}),
+            "administrator",
+        ),
+    ] {
+        std::fs::write(&path, document.to_string()).unwrap();
+        let error = store.load_node_settings().unwrap_err();
+        assert!(error.contains(message), "{error}");
+    }
+    std::fs::write(
+        &path,
+        r#"{"command_policy":{"admins":[" onebot:42 "],"access":{" /HELP ":"admins"}}}"#,
+    )
+    .unwrap();
+    let settings = store.load_node_settings().unwrap();
+    assert_eq!(settings.command_policy.admins, ["onebot:42"]);
+    assert!(settings.command_policy.access.contains_key("help"));
+}
+
+/// Metadata failures must not look like an unconfigured node or an empty catalog.
+#[cfg(unix)]
+#[tokio::test]
+async fn configuration_loaders_report_unreadable_paths_instead_of_returning_defaults() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("loop.json");
+    std::os::unix::fs::symlink("loop.json", &path).unwrap();
+    assert!(SystemConfigStore::new(&path).load_node_settings().is_err());
+    assert!(kanon_core::InstanceRegistry::open(&path).await.is_err());
+    assert!(kanon_core::ToggleStore::open(&path).await.is_err());
+    assert!(kanon_llm::PersonaStore::new(&path).load().is_err());
 }

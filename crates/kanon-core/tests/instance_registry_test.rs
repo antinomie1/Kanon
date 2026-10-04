@@ -301,7 +301,7 @@ async fn update_preserves_session_history_and_validates_input() {
                 adapters: vec!["qqofficial".to_string()],
                 persona_id: Some("assistant".to_string()),
                 system_prompt: Some("  be nice  ".to_string()),
-                model: Some("  deepseek-flash ".to_string()),
+                model: Some("  deepseek/deepseek-flash ".to_string()),
                 reply_policy: None,
                 context_policy: None,
                 plugins: Default::default(),
@@ -317,7 +317,7 @@ async fn update_preserves_session_history_and_validates_input() {
     // A form submit must not reset runtime session state.
     assert_eq!(updated.session_generation("c2c:user-1"), 1);
     assert_eq!(updated.system_prompt.as_deref(), Some("be nice"));
-    assert_eq!(updated.model.as_deref(), Some("deepseek-flash"));
+    assert_eq!(updated.model.as_deref(), Some("deepseek/deepseek-flash"));
     // A custom prompt wins over the selected catalog persona.
     assert_eq!(
         updated.effective_persona_id().as_deref(),
@@ -415,5 +415,105 @@ async fn an_unknown_agent_is_refused_on_save_and_on_load() {
     assert!(
         matches!(err, InstanceError::Invalid(_)),
         "unexpected: {err}"
+    );
+}
+
+#[tokio::test]
+async fn persisted_instances_reject_ambiguous_or_invalid_records() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("instances.json");
+    let valid = serde_json::json!({"id": "bot", "name": "Bot", "enabled": false});
+    let mut invalid_records = Vec::new();
+    for (field, value) in [
+        ("id", serde_json::json!("bad:session")),
+        ("name", serde_json::json!(" ")),
+        ("adapters", serde_json::json!([""])),
+        ("model", serde_json::json!("unqualified-model")),
+        (
+            "reply_policy",
+            serde_json::json!({"mode": "probability", "probability": 5}),
+        ),
+        (
+            "command_policy",
+            serde_json::json!({"admins": ["missing-platform"]}),
+        ),
+    ] {
+        let mut instance = valid.clone();
+        instance[field] = value;
+        invalid_records.push(serde_json::json!({"version": 1, "instances": [instance]}));
+    }
+    invalid_records
+        .push(serde_json::json!({"version": 1, "instances": [valid.clone(), valid.clone()]}));
+    invalid_records.push(serde_json::json!({"version": 2, "instances": [valid]}));
+    for document in invalid_records {
+        std::fs::write(&path, document.to_string()).unwrap();
+        assert!(
+            InstanceRegistry::open(&path).await.is_err(),
+            "accepted {document}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn restored_instances_normalize_policy_without_resetting_session_generations() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("instances.json");
+    std::fs::write(
+        &path,
+        serde_json::json!({
+            "version": 1,
+            "instances": [{
+                "id": "bot", "name": " Bot ", "enabled": true,
+                "adapters": [" onebot ", "onebot"],
+                "command_policy": {"admins": [" onebot:42 "], "access": {" /HELP ": "admins"}},
+                "session_generations": {"c2c:user": 9}
+            }]
+        })
+        .to_string(),
+    )
+    .unwrap();
+    let registry = InstanceRegistry::open(&path).await.unwrap();
+    let restored = registry.get("bot").await.unwrap();
+    assert_eq!(restored.name, "Bot");
+    assert_eq!(restored.adapters, ["onebot"]);
+    assert_eq!(restored.session_generation("c2c:user"), 9);
+    let policy = restored.command_policy.unwrap();
+    assert_eq!(policy.admins, ["onebot:42"]);
+    assert!(policy.access.contains_key("help"));
+}
+
+#[tokio::test]
+async fn direct_model_changes_require_a_provider_and_preserve_the_previous_choice_on_failure() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("instances.json");
+    let registry = InstanceRegistry::open(&path).await.unwrap();
+    let instance = registry
+        .create(draft("Bot", false, &[]), None)
+        .await
+        .unwrap();
+    let updated = registry
+        .set_model(&instance.id, Some(" endpoint / vendor/model ".into()))
+        .await
+        .unwrap();
+    assert_eq!(updated.model.as_deref(), Some("endpoint/vendor/model"));
+    let before = std::fs::read(&path).unwrap();
+    assert!(
+        registry
+            .set_model(&instance.id, Some("model".into()))
+            .await
+            .is_err()
+    );
+    assert_eq!(
+        registry.get(&instance.id).await.unwrap().model,
+        updated.model
+    );
+    assert_eq!(std::fs::read(path).unwrap(), before);
+    assert!(
+        registry
+            .set_model(&instance.id, None)
+            .await
+            .unwrap()
+            .model
+            .is_none()
     );
 }

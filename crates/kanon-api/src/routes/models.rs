@@ -137,18 +137,6 @@ async fn upsert_model(
 ) -> Result<Json<ModelsResponse>, ApiError> {
     spec.provider = spec.provider.trim().to_string();
     spec.model = spec.model.trim().to_string();
-    if spec.provider.is_empty() || spec.model.is_empty() {
-        return Err(ApiError::BadRequest(
-            "provider and model must not be empty".to_string(),
-        ));
-    }
-    if let Some(temperature) = spec.temperature
-        && !(0.0..=2.0).contains(&temperature)
-    {
-        return Err(ApiError::BadRequest(format!(
-            "temperature {temperature} is outside 0.0..=2.0"
-        )));
-    }
     spec.source = ModelSettingsSource::Manual;
 
     let reference = spec.full_name();

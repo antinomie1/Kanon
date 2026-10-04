@@ -216,14 +216,21 @@ fn section_of(
 
 /// Reads the toggle document, returning `None` when the file does not exist.
 fn read_document(path: &Path) -> Result<Option<ToggleDocument>, String> {
-    if !path.exists() {
-        return Ok(None);
-    }
-
-    let raw = std::fs::read_to_string(path)
-        .map_err(|err| format!("failed to read {}: {err}", path.display()))?;
+    let raw = match std::fs::read_to_string(path) {
+        Ok(raw) => raw,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(err) => return Err(format!("failed to read {}: {err}", path.display())),
+    };
     let document: ToggleDocument = serde_json::from_str(&raw)
         .map_err(|err| format!("failed to parse {}: {err}", path.display()))?;
 
+    if document.version != default_version() {
+        return Err(format!(
+            "{} has schema version {}, expected {}",
+            path.display(),
+            document.version,
+            default_version()
+        ));
+    }
     Ok(Some(document))
 }

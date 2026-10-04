@@ -99,11 +99,11 @@ impl PersonaStore {
     /// validation, is an error: silently dropping the operator's personas would change how the bot
     /// behaves without anyone noticing.
     pub fn load(&self) -> Result<Vec<Persona>, String> {
-        if !self.path.exists() {
-            return Ok(Vec::new());
-        }
-        let raw = std::fs::read_to_string(&self.path)
-            .map_err(|err| format!("Failed to read {}: {err}", self.path.display()))?;
+        let raw = match std::fs::read_to_string(&self.path) {
+            Ok(raw) => raw,
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+            Err(err) => return Err(format!("Failed to read {}: {err}", self.path.display())),
+        };
         let document: PersonaDocument = serde_json::from_str(&raw)
             .map_err(|err| format!("Failed to parse {}: {err}", self.path.display()))?;
         if document.version != DOCUMENT_VERSION {
@@ -114,11 +114,12 @@ impl PersonaStore {
             ));
         }
 
+        let mut ids = std::collections::HashSet::new();
         document
             .personas
             .into_iter()
             .map(|record| {
-                Persona::custom(
+                let persona = Persona::custom(
                     record.id.clone(),
                     record.name,
                     record.description,
@@ -130,7 +131,15 @@ impl PersonaStore {
                         record.id,
                         self.path.display()
                     )
-                })
+                })?;
+                if !ids.insert(persona.id.clone()) {
+                    return Err(format!(
+                        "Persona '{}' is defined twice in {}",
+                        persona.id,
+                        self.path.display()
+                    ));
+                }
+                Ok(persona)
             })
             .collect()
     }

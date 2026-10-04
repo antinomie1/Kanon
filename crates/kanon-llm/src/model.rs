@@ -216,6 +216,22 @@ impl ModelSpec {
         }
     }
 
+    /// Validates identity and sampling settings before persistence or catalog publication.
+    pub fn validate(&self) -> Result<(), String> {
+        if self.provider.is_empty() || self.model.is_empty() {
+            return Err("provider and model must not be empty".to_string());
+        }
+        if self.provider.trim() != self.provider || self.model.trim() != self.model {
+            return Err("provider and model must not contain surrounding whitespace".to_string());
+        }
+        if let Some(temperature) = self.temperature
+            && !(0.0..=2.0).contains(&temperature)
+        {
+            return Err(format!("temperature {temperature} is outside 0.0..=2.0"));
+        }
+        Ok(())
+    }
+
     /// Canonical `<provider>/<model-id>` name.
     pub fn full_name(&self) -> String {
         format!("{}/{}", self.provider, self.model)

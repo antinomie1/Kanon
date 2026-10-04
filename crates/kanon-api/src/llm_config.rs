@@ -188,6 +188,22 @@ impl NodeSettings {
             }
         }
 
+        let mut references = std::collections::HashSet::new();
+        for model in &self.models {
+            model.validate()?;
+            if !names.contains(model.provider.as_str()) {
+                return Err(format!(
+                    "model '{}' names provider '{}', which is not configured",
+                    model.full_name(),
+                    model.provider
+                ));
+            }
+            let reference = model.full_name();
+            if !references.insert(reference.clone()) {
+                return Err(format!("model '{reference}' is defined twice"));
+            }
+        }
+
         if let Some(model) = self.default_model.as_deref() {
             let reference = ModelRef::parse(model);
             match reference.provider() {
@@ -529,53 +545,22 @@ impl SystemConfigStore {
             None => return Ok(NodeSettings::default()),
         };
 
-        let mut settings = NodeSettings {
+        let settings = NodeSettings {
+            providers: document.providers.unwrap_or_default(),
+            default_model: document.default_model,
             default_agent: document
                 .default_agent
                 .unwrap_or_else(|| BUILTIN_AGENT.to_string()),
             reply_policy: document.reply_policy.unwrap_or_default(),
             context_policy: document.context_policy.unwrap_or_default(),
             event_policy: document.event_policy.unwrap_or_default(),
-            command_policy: document.command_policy.unwrap_or_default(),
+            command_policy: document.command_policy.unwrap_or_default().prepare()?,
             bash_policy: document.bash_policy.unwrap_or_default(),
             models: document.models.unwrap_or_default(),
-            ..NodeSettings::default()
         };
 
-        match document.providers {
-            Some(providers) if !providers.is_empty() => {
-                settings.providers = providers;
-                settings.default_model = document.default_model;
-            }
-            _ => {
-                if let Some(legacy) = document.llm.as_ref() {
-                    let migrated = legacy.into_node_settings();
-                    settings.providers = migrated.providers;
-                    settings.default_model = migrated.default_model;
-                }
-            }
-        }
-
-        // A default that names no configured endpoint would fail every conversation at call
-        // time; dropping it here reports the honest state ("no default model") instead.
-        if let Some(model) = settings.default_model.as_deref() {
-            let reference = ModelRef::parse(model);
-            let served = reference
-                .provider()
-                .is_some_and(|name| settings.providers.iter().any(|entry| entry.name == name));
-            if !served {
-                tracing::warn!(
-                    default_model = %model,
-                    "Persisted default model names no configured provider; starting without one"
-                );
-                settings.default_model = None;
-            }
-        }
-
-        // An agent the node does not know is refused, not replaced by the built-in one: answering
-        // with a different engine than the one configured is the surprise this file must not hide.
-        kanon_llm::check_agent_id(&settings.default_agent)?;
-        settings.bash_policy.validate()?;
+        // Disk edits obey the same contract as API updates; never guess a replacement default.
+        settings.validate()?;
         Ok(settings)
     }
 
@@ -605,15 +590,25 @@ impl SystemConfigStore {
 
     /// Reads and parses the document, returning `None` when the file does not exist.
     fn read_document(&self) -> Result<Option<SystemConfigDocument>, String> {
-        if !self.path.exists() {
-            return Ok(None);
-        }
-
-        let raw = std::fs::read_to_string(&self.path)
-            .map_err(|err| format!("Failed to read {}: {err}", self.path.display()))?;
-        let document: SystemConfigDocument = serde_json::from_str(&raw)
+        let raw = match std::fs::read_to_string(&self.path) {
+            Ok(raw) => raw,
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(err) => return Err(format!("Failed to read {}: {err}", self.path.display())),
+        };
+        let mut document: SystemConfigDocument = serde_json::from_str(&raw)
             .map_err(|err| format!("Failed to parse {}: {err}", self.path.display()))?;
 
+        // Every section writer must carry the migration forward before serialization drops `llm`.
+        // An explicit provider directory, including an empty one, always wins over legacy data.
+        if document.providers.is_none()
+            && let Some(legacy) = document.llm.as_ref()
+        {
+            let migrated = legacy.into_node_settings();
+            document.providers = Some(migrated.providers);
+            if document.default_model.is_none() {
+                document.default_model = migrated.default_model;
+            }
+        }
         Ok(Some(document))
     }
 

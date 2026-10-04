@@ -233,19 +233,6 @@ async fn upsert_provider(
     Json(payload): Json<UpsertProviderRequest>,
 ) -> Result<Json<ProvidersCatalogResponse>, ApiError> {
     let name = payload.name.trim().to_string();
-    if name.is_empty() {
-        return Err(ApiError::BadRequest(
-            "Provider name must not be empty".to_string(),
-        ));
-    }
-    if name.contains('/') {
-        // The name is the prefix of `<provider>/<model-id>`: a slash would make every reference
-        // to this endpoint parse as a different provider.
-        return Err(ApiError::BadRequest(
-            "Provider name must not contain '/'".to_string(),
-        ));
-    }
-
     state.update_node_settings(|settings| {
         let existing = settings.providers.iter().find(|entry| entry.name == name);
         let base_url = payload.base_url.trim().to_string();

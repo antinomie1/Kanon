@@ -122,3 +122,26 @@ async fn an_in_memory_store_never_touches_the_filesystem() {
         .expect("disable without a path");
     assert!(!store.is_enabled(PLUGIN_SECTION, "org.kanon.plugin.x").await);
 }
+
+#[tokio::test]
+async fn unsupported_versions_are_neither_loaded_nor_overwritten() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("toggles.json");
+    let store = ToggleStore::open(&path).await.unwrap();
+    let future = r#"{"version":2,"plugins":{"plugin":false}}"#;
+    std::fs::write(&path, future).unwrap();
+    assert!(
+        ToggleStore::open(&path)
+            .await
+            .unwrap_err()
+            .contains("schema version 2")
+    );
+    assert!(
+        store
+            .set_enabled(PLUGIN_SECTION, "other", false)
+            .await
+            .is_err()
+    );
+    assert_eq!(std::fs::read_to_string(path).unwrap(), future);
+    assert!(store.is_enabled(PLUGIN_SECTION, "other").await);
+}

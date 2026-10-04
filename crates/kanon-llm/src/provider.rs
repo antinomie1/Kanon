@@ -83,6 +83,12 @@ impl ProviderEntry {
         if self.name.trim().is_empty() {
             return Err("provider name must not be empty".to_string());
         }
+        if self.name.contains('/') || self.name.trim() != self.name {
+            return Err(format!(
+                "provider name '{}' must not contain '/' or surrounding whitespace",
+                self.name
+            ));
+        }
         if self.protocol.trim().is_empty() {
             return Err(format!("provider '{}' has no protocol", self.name));
         }
