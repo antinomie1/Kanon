@@ -452,7 +452,7 @@ async fn anthropic_complete_and_streamed_calls_require_usable_output() {
         ]);
         let sse: String = events
             .iter()
-            .map(|event| format!("data: {event}\n\n"))
+            .map(|event| format!("event:\ndata: {event}\n\n"))
             .collect();
         let body = json!({"role":"assistant", "content":content, "stop_reason":reason});
         let app = Router::new().route(

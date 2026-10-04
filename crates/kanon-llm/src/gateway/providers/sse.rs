@@ -7,7 +7,7 @@
 /// An individual Server-Sent Event frame.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct SseEvent {
-    /// Optional event name emitted via `event: <name>`.
+    /// Optional nonempty event name emitted via `event: <name>`.
     pub event: Option<String>,
     /// Accumulated data payload emitted via `data: <payload>`.
     pub data: String,
@@ -71,7 +71,8 @@ impl SseDecoder {
                 let value = value.strip_prefix(' ').unwrap_or(value);
                 match field {
                     "data" => self.current_data.push(value.to_string()),
-                    "event" => self.current_event = Some(value.to_string()),
+                    // An empty event field resets the name to the default message event.
+                    "event" => self.current_event = (!value.is_empty()).then(|| value.to_string()),
                     _ => {} // Comments and unused fields do not affect event data.
                 }
             }

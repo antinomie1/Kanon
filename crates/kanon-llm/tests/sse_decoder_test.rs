@@ -5,10 +5,12 @@ use kanon_llm::gateway::providers::SseDecoder;
 #[test]
 fn unicode_event_names_and_data_survive_every_chunk_boundary() {
     let wire = "\u{feff}event: 更新\r\ndata: {\"text\":\"你好🌍\"}\r\ndata: 后续\r\n\r\n\
-                event: done\rdata: [DONE]\r\r";
+                event: done\rdata: [DONE]\r\r\
+                event: reset\nevent:\ndata: unnamed\n\n";
     let expected: Vec<(Option<String>, String)> = vec![
         (Some("更新".into()), "{\"text\":\"你好🌍\"}\n后续".into()),
         (Some("done".into()), "[DONE]".into()),
+        (None, "unnamed".into()),
     ];
 
     for split in 0..=wire.len() {
