@@ -845,6 +845,8 @@ fn custom_outbound_segment(custom: &RawCustomSegment) -> Result<OutgoingSegment,
         .payload
         .as_ref()
         .map(struct_to_json)
+        .transpose()
+        .map_err(|error| MappingError::CustomPayload(type_name.into(), error.to_string()))?
         .unwrap_or(Value::Null);
 
     // Each arm rebuilds the very JSON shape `known_custom_payload` produced inbound, so a segment
@@ -915,85 +917,25 @@ fn string_field(object: &Map<String, Value>, key: &str) -> Result<String, Mappin
 /// fields the adapter stores there (QQ numbers, sequence numbers, timestamps) stay far inside that
 /// range.
 pub fn json_to_struct(value: &Value) -> prost_types::Struct {
-    match value {
-        Value::Object(fields) => prost_types::Struct {
-            fields: fields
-                .iter()
-                .map(|(key, value)| (key.clone(), json_to_value(value)))
-                .collect(),
-        },
-        // A non-object cannot be represented as a `Struct`, and silently dropping the payload
-        // would lose the segment; recording it under a well-known key keeps it visible.
-        other => prost_types::Struct {
-            fields: [("value".to_string(), json_to_value(other))]
-                .into_iter()
-                .collect(),
-        },
-    }
-}
-
-/// Converts one `serde_json` value into a protobuf `Value`.
-fn json_to_value(value: &Value) -> prost_types::Value {
-    use prost_types::value::Kind;
-    let kind = match value {
-        Value::Null => Kind::NullValue(0),
-        Value::Bool(flag) => Kind::BoolValue(*flag),
-        Value::Number(number) => Kind::NumberValue(number.as_f64().unwrap_or_default()),
-        Value::String(text) => Kind::StringValue(text.clone()),
-        Value::Array(items) => Kind::ListValue(prost_types::ListValue {
-            values: items.iter().map(json_to_value).collect(),
-        }),
-        Value::Object(_) => Kind::StructValue(json_to_struct(value)),
-    };
-    prost_types::Value { kind: Some(kind) }
-}
-
-/// Converts a protobuf `Struct` back into a `serde_json` object.
-pub fn struct_to_json(value: &prost_types::Struct) -> Value {
-    Value::Object(
-        value
-            .fields
-            .iter()
-            .map(|(key, value)| (key.clone(), prost_value_to_json(value)))
+    // A non-object remains visible under the adapter's existing wrapper key.
+    match kanon_proto::json::json_to_prost_struct(value) {
+        Some(fields) => fields,
+        None => prost_types::Struct {
+            fields: [(
+                "value".to_string(),
+                kanon_proto::json::json_to_prost_value(value),
+            )]
+            .into_iter()
             .collect(),
-    )
-}
-
-/// Converts one protobuf `Value` back into a `serde_json` value.
-fn prost_value_to_json(value: &prost_types::Value) -> Value {
-    use prost_types::value::Kind;
-    match value.kind.as_ref() {
-        None | Some(Kind::NullValue(_)) => Value::Null,
-        Some(Kind::BoolValue(flag)) => Value::Bool(*flag),
-        Some(Kind::NumberValue(number)) => number_to_json(*number),
-        Some(Kind::StringValue(text)) => Value::String(text.clone()),
-        Some(Kind::ListValue(list)) => {
-            Value::Array(list.values.iter().map(prost_value_to_json).collect())
-        }
-        Some(Kind::StructValue(fields)) => struct_to_json(fields),
+        },
     }
 }
 
-/// Renders a protobuf number back into the closest JSON representation.
-///
-/// A protobuf `Struct` stores every number as a double, so a value that was an integer on the wire
-/// comes back as one. Rendering it as `77.0` would be a visible fidelity loss — the pipeline, the
-/// model and an operator reading the metadata all expect `77` — and it would break exact JSON round
-/// trips of preserved payloads. Integral values inside the `i64` range are therefore rendered as
-/// integers, which is the representation they had when they arrived.
-fn number_to_json(number: f64) -> Value {
-    let integral = number.fract() == 0.0
-        && number.is_finite()
-        && number >= i64::MIN as f64
-        && number <= i64::MAX as f64;
-
-    if integral {
-        Value::Number(serde_json::Number::from(number as i64))
-    } else {
-        serde_json::Number::from_f64(number)
-            .map(Value::Number)
-            .unwrap_or(Value::Null)
-    }
+/// Converts a protobuf payload without changing non-finite numbers into JSON null.
+pub fn struct_to_json(
+    value: &prost_types::Struct,
+) -> Result<Value, kanon_proto::json::NonFiniteNumber> {
+    kanon_proto::json::prost_struct_to_json(value.clone())
 }
 
 /// Inserts a numeric metadata field, replacing any previous value.
@@ -1142,7 +1084,7 @@ pub fn set_notice_actor(notice: &mut PipelineEventRequest, name: &str) {
     if let Some(metadata) = notice.metadata.as_mut() {
         metadata.fields.insert(
             kanon_core::META_NOTICE_ACTOR.into(),
-            json_to_value(&json!(name)),
+            kanon_proto::json::json_to_prost_value(&json!(name)),
         );
     }
 }
@@ -1220,7 +1162,10 @@ pub fn attach_forward(
         .payload
         .get_or_insert_with(Default::default)
         .fields
-        .insert("messages".into(), json_to_value(&Value::Array(rendered)));
+        .insert(
+            "messages".into(),
+            kanon_proto::json::json_to_prost_value(&Value::Array(rendered)),
+        );
     Ok(())
 }
 

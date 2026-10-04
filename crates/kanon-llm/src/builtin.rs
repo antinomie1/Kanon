@@ -96,10 +96,15 @@ impl BuiltinAgent {
     }
 
     /// Merges native and plugin/MCP tools; final normalization follows the request hooks.
-    fn collect_tools(&self, hosts: &[Arc<dyn ToolHost>]) -> Vec<ToolDefinition> {
+    fn collect_tools(
+        &self,
+        hosts: &[Arc<dyn ToolHost>],
+    ) -> Result<Vec<ToolDefinition>, AgentError> {
         let mut tools: Vec<ToolDefinition> = self.tools.iter().map(|t| t.definition()).collect();
-        tools.extend(aggregate_tools(hosts));
-        tools
+        tools.extend(aggregate_tools(hosts).map_err(|error| {
+            AgentError::InvalidRequest(format!("invalid plugin tool schema: {error}"))
+        })?);
+        Ok(tools)
     }
 
     /// Builds the request for one model call, laid out static-first.
@@ -374,7 +379,7 @@ impl BuiltinAgent {
         let tools = if options.without_tools {
             Vec::new()
         } else {
-            self.collect_tools(hosts)
+            self.collect_tools(hosts)?
         };
         let max_iterations = options.max_iterations.unwrap_or(self.config.max_iterations);
 
@@ -680,7 +685,27 @@ impl BuiltinAgent {
                 };
                 match result {
                     Ok(resp) => {
-                        let is_success = resp.success;
+                        // Decode before accepting attachments or recording success. A malformed
+                        // result still needs a paired tool response so the session can continue.
+                        let decoded = if !resp.success {
+                            Err(resp.error_message)
+                        } else {
+                            match resp.payload {
+                                Some(tool_call_response::Payload::StructuredResult(s)) => {
+                                    prost_struct_to_json(s)
+                                        .map(|value| value.to_string())
+                                        .map_err(|error| {
+                                            format!("invalid structured tool result: {error}")
+                                        })
+                                }
+                                Some(tool_call_response::Payload::RawBytes(bytes)) => {
+                                    Ok(String::from_utf8_lossy(&bytes).to_string())
+                                }
+                                None => Ok("{}".to_string()),
+                            }
+                        };
+                        let is_success = decoded.is_ok();
+                        let result_str = decoded.unwrap_or_else(|error| format!("Error: {error}"));
                         executed_tools.push(ExecutedToolCall {
                             call_id: call.id.clone(),
                             tool_name: call.name.clone(),
@@ -709,19 +734,6 @@ impl BuiltinAgent {
                             }
                         }
 
-                        let result_str = if !is_success {
-                            format!("Error: {}", resp.error_message)
-                        } else {
-                            match resp.payload {
-                                Some(tool_call_response::Payload::StructuredResult(s)) => {
-                                    prost_struct_to_json(s).to_string()
-                                }
-                                Some(tool_call_response::Payload::RawBytes(bytes)) => {
-                                    String::from_utf8_lossy(&bytes).to_string()
-                                }
-                                None => "{}".to_string(),
-                            }
-                        };
                         let result_str = redact_tool_paths(result_str, &redactions);
 
                         for hook in &self.hooks {
@@ -1006,7 +1018,7 @@ impl Agent for BuiltinAgent {
             .as_ref()
             .map(|sessions| sessions.agent_write(session_id))
             .transpose()?;
-        let tools = self.collect_tools(hosts);
+        let tools = self.collect_tools(hosts)?;
         self.compact(session_id, &tools).await
     }
 }

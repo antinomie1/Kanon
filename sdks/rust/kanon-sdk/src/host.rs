@@ -353,10 +353,18 @@ impl<P: Plugin> PluginHostService for HostServiceImpl<P> {
         request: Request<kanon_proto::v1::PluginActionRequest>,
     ) -> Result<Response<kanon_proto::v1::PluginActionResponse>, Status> {
         let request = request.into_inner();
-        let params = request
-            .parameters
-            .map(|params| serde_json::Value::Object(crate::json::from_struct(params)))
-            .unwrap_or(serde_json::Value::Null);
+        let params = match request.parameters.map(crate::json::from_struct).transpose() {
+            Ok(params) => params
+                .map(serde_json::Value::Object)
+                .unwrap_or(serde_json::Value::Null),
+            Err(error) => {
+                return Ok(Response::new(kanon_proto::v1::PluginActionResponse {
+                    success: false,
+                    error_message: format!("invalid action parameters: {error}"),
+                    result: None,
+                }));
+            }
+        };
         let outcome = self
             .plugin
             .read()

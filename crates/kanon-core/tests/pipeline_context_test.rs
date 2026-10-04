@@ -28,7 +28,7 @@ fn build_with_defaults(
     event: &PipelineEventRequest,
     capabilities: &ModelCapabilities,
 ) -> kanon_llm::ChatMessage {
-    build_user_message(event, capabilities, &ContextPolicy::default())
+    build_user_message(event, capabilities, &ContextPolicy::default()).unwrap()
 }
 
 /// Builds a pipeline event wrapping the given segments.
@@ -314,7 +314,8 @@ fn forward_expansion_can_be_turned_off() {
         &event(vec![fetched_forward()], "[forward]"),
         &caps(true),
         &policy,
-    );
+    )
+    .unwrap();
 
     assert_eq!(
         message.content.as_deref(),
@@ -429,6 +430,7 @@ fn metadata_does_not_replace_a_raw_text_only_message() {
     ];
     for policy in policies {
         let content = build_user_message(&event, &caps(false), &policy)
+            .unwrap()
             .content
             .unwrap();
         assert!(content.starts_with('['), "metadata is missing: {content}");
@@ -461,7 +463,7 @@ fn the_sender_id_and_time_are_included_only_when_the_policy_asks() {
     });
 
     // Default: neither extra is added, so a private id never reaches the model by accident.
-    let off = build_user_message(&event, &caps(false), &ContextPolicy::default());
+    let off = build_user_message(&event, &caps(false), &ContextPolicy::default()).unwrap();
     assert_eq!(off.content.as_deref(), Some("hi"));
 
     let on = build_user_message(
@@ -474,7 +476,7 @@ fn the_sender_id_and_time_are_included_only_when_the_policy_asks() {
             ..Default::default()
         },
     );
-    let content = on.content.unwrap_or_default();
+    let content = on.unwrap().content.unwrap_or_default();
     assert!(content.contains("[群号: group:1]"), "{content}");
     assert!(content.contains("[发送者: 1705702687]"), "{content}");
 
@@ -490,4 +492,25 @@ fn the_sender_id_and_time_are_included_only_when_the_policy_asks() {
         !timestamp.contains("UTC"),
         "local time must not be labelled UTC: {content}"
     );
+}
+
+#[test]
+fn custom_payload_nonfinite_number_is_rejected_before_prompt_rendering() {
+    let payload = prost_types::Struct {
+        fields: [(
+            "value".into(),
+            prost_types::Value {
+                kind: Some(prost_types::value::Kind::NumberValue(f64::NAN)),
+            },
+        )]
+        .into(),
+    };
+    let request = event(
+        vec![Segment::Custom(RawCustomSegment {
+            type_name: "forward".into(),
+            payload: Some(payload),
+        })],
+        "forwarded message",
+    );
+    assert!(build_user_message(&request, &caps(true), &ContextPolicy::default()).is_err());
 }

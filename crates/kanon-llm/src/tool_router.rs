@@ -9,7 +9,12 @@
 use async_trait::async_trait;
 use std::sync::Arc;
 
+use kanon_proto::json::NonFiniteNumber;
 use kanon_proto::v1::{PluginMeta, ToolCallRequest, ToolCallResponse};
+
+pub use kanon_proto::json::{
+    json_to_prost_struct, json_to_prost_value, prost_struct_to_json, prost_value_to_json,
+};
 
 use crate::agent::Agent;
 use crate::builtin::BuiltinAgent;
@@ -139,7 +144,8 @@ pub struct ResolvedTool {
 ///
 /// Prevents name collision: if multiple plugins declare tools with identical names,
 /// they are automatically disambiguated with namespacing (`<plugin_id>__<tool_name>`).
-pub fn resolve_tools(hosts: &[Arc<dyn ToolHost>]) -> Vec<ResolvedTool> {
+/// Returns an error if a tool schema contains a non-finite protobuf number.
+pub fn resolve_tools(hosts: &[Arc<dyn ToolHost>]) -> Result<Vec<ResolvedTool>, NonFiniteNumber> {
     // 1. First pass: count tool name occurrences across all plugins
     let mut name_counts: std::collections::HashMap<String, usize> =
         std::collections::HashMap::new();
@@ -160,7 +166,7 @@ pub fn resolve_tools(hosts: &[Arc<dyn ToolHost>]) -> Vec<ResolvedTool> {
         for plugin in &metas {
             for tool in &plugin.tools {
                 let parameters = match &tool.parameters {
-                    Some(s) => crate::layout::canonical_json(prost_struct_to_json(s.clone())),
+                    Some(s) => crate::layout::canonical_json(prost_struct_to_json(s.clone())?),
                     None => serde_json::json!({
                         "type": "object",
                         "properties": {}
@@ -200,18 +206,20 @@ pub fn resolve_tools(hosts: &[Arc<dyn ToolHost>]) -> Vec<ResolvedTool> {
     // One fixed order, whatever the order hosts registered in: the tool list is the very top of the
     // prompt, so a reshuffle there invalidates the provider's cache for the whole request.
     tools.sort_by(|a, b| a.definition.name.cmp(&b.definition.name));
-    tools
+    Ok(tools)
 }
 
 /// Dynamically aggregates tool definitions declared across all active plugin hosts.
 ///
 /// A thin projection of [`resolve_tools`], which owns the collision rule; keeping one
 /// implementation means the console and the model can never disagree about a tool name.
-pub fn aggregate_tools(hosts: &[Arc<dyn ToolHost>]) -> Vec<ToolDefinition> {
-    resolve_tools(hosts)
+pub fn aggregate_tools(
+    hosts: &[Arc<dyn ToolHost>],
+) -> Result<Vec<ToolDefinition>, NonFiniteNumber> {
+    Ok(resolve_tools(hosts)?
         .into_iter()
         .map(|tool| tool.definition)
-        .collect()
+        .collect())
 }
 
 /// Central Tool Calling state machine router and execution loop.
@@ -338,89 +346,4 @@ impl ToolRouter {
             )),
         }
     }
-}
-
-// =========================================================================
-// In-Memory Protobuf Struct <-> Serde JSON Direct Conversion
-// =========================================================================
-
-/// Directly converts a [`prost_types::Struct`] into a [`serde_json::Value`].
-///
-/// Avoids intermediate JSON string encoding/decoding, preserving performance.
-pub fn prost_struct_to_json(s: prost_types::Struct) -> serde_json::Value {
-    let mut map = serde_json::Map::with_capacity(s.fields.len());
-    for (k, v) in s.fields {
-        map.insert(k, prost_value_to_json(v));
-    }
-    serde_json::Value::Object(map)
-}
-
-/// Largest magnitude below which every integer is exactly representable as an `f64`.
-const MAX_SAFE_INTEGER: f64 = (1_u64 << 53) as f64;
-
-/// Converts a [`prost_types::Value`] into its corresponding [`serde_json::Value`].
-///
-/// `Struct` has a single double-precision number type, so a plugin's `{"default": 6}` or a tool
-/// result `{"count": 42}` arrives as `6.0` / `42.0`. Whole numbers within the exactly
-/// representable range are turned back into JSON integers: the model then sees the same JSON the
-/// plugin author wrote (an `integer` schema with an integer default), and the request prefix does
-/// not depend on which SDK produced the value.
-pub fn prost_value_to_json(v: prost_types::Value) -> serde_json::Value {
-    match v.kind {
-        Some(prost_types::value::Kind::NullValue(_)) | None => serde_json::Value::Null,
-        Some(prost_types::value::Kind::NumberValue(n))
-            if n.fract() == 0.0 && n.abs() <= MAX_SAFE_INTEGER =>
-        {
-            serde_json::Value::from(n as i64)
-        }
-        Some(prost_types::value::Kind::NumberValue(n)) => serde_json::Number::from_f64(n)
-            .map(serde_json::Value::Number)
-            .unwrap_or(serde_json::Value::Null),
-        Some(prost_types::value::Kind::StringValue(s)) => serde_json::Value::String(s),
-        Some(prost_types::value::Kind::BoolValue(b)) => serde_json::Value::Bool(b),
-        Some(prost_types::value::Kind::StructValue(s)) => prost_struct_to_json(s),
-        Some(prost_types::value::Kind::ListValue(l)) => {
-            serde_json::Value::Array(l.values.into_iter().map(prost_value_to_json).collect())
-        }
-    }
-}
-
-/// Directly converts a [`serde_json::Value`] object into a [`prost_types::Struct`].
-///
-/// Returns `None` if the input is not a JSON object (`Value::Object`).
-pub fn json_to_prost_struct(val: &serde_json::Value) -> Option<prost_types::Struct> {
-    let map = val.as_object()?;
-    let mut fields = std::collections::BTreeMap::new();
-    for (k, v) in map {
-        fields.insert(k.clone(), json_to_prost_value(v));
-    }
-    Some(prost_types::Struct { fields })
-}
-
-/// Converts a [`serde_json::Value`] into its corresponding [`prost_types::Value`].
-pub fn json_to_prost_value(val: &serde_json::Value) -> prost_types::Value {
-    let kind = match val {
-        serde_json::Value::Null => Some(prost_types::value::Kind::NullValue(0)),
-        serde_json::Value::Bool(b) => Some(prost_types::value::Kind::BoolValue(*b)),
-        serde_json::Value::Number(n) => Some(prost_types::value::Kind::NumberValue(
-            n.as_f64().unwrap_or(0.0),
-        )),
-        serde_json::Value::String(s) => Some(prost_types::value::Kind::StringValue(s.clone())),
-        serde_json::Value::Array(arr) => {
-            let values = arr.iter().map(json_to_prost_value).collect();
-            Some(prost_types::value::Kind::ListValue(
-                prost_types::ListValue { values },
-            ))
-        }
-        serde_json::Value::Object(map) => {
-            let mut fields = std::collections::BTreeMap::new();
-            for (k, v) in map {
-                fields.insert(k.clone(), json_to_prost_value(v));
-            }
-            Some(prost_types::value::Kind::StructValue(prost_types::Struct {
-                fields,
-            }))
-        }
-    };
-    prost_types::Value { kind }
 }

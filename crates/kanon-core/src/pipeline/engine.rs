@@ -2154,7 +2154,26 @@ impl PipelineEngine {
         for (index, text) in lead.into_iter().enumerate() {
             filtered_event.segments.insert(index, text_reply(text));
         }
-        let mut user_message = build_user_message(&filtered_event, &capabilities, &context_policy);
+        let mut user_message = match build_user_message(
+            &filtered_event,
+            &capabilities,
+            &context_policy,
+        ) {
+            Ok(message) => message,
+            Err(error) => {
+                tracing::error!(event_id = %filtered_event.event_id, %error, "Invalid message payload");
+                let asked = notice.is_none()
+                    && (!kind.is_policy_governed()
+                        || bot_mentioned(filtered_event.metadata.as_ref()));
+                if answering && asked {
+                    return PipelineResult::LlmFailed {
+                        error: error.to_string(),
+                        replies: vec![text_reply("消息格式无效，本轮无法处理。")],
+                    };
+                }
+                return PipelineResult::Passed(filtered_event);
+            }
+        };
         // Only a turn that reaches a model needs its pictures; see `media` for why the node
         // downloads them instead of passing the platform's URLs on.
         if answering {

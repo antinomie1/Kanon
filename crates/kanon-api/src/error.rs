@@ -163,3 +163,9 @@ impl From<std::io::Error> for ApiError {
         ApiError::Internal(format!("Filesystem failure: {err}"))
     }
 }
+
+impl From<kanon_proto::json::NonFiniteNumber> for ApiError {
+    fn from(err: kanon_proto::json::NonFiniteNumber) -> Self {
+        ApiError::Upstream(format!("Invalid plugin payload: {err}"))
+    }
+}

@@ -10,6 +10,7 @@ use kanon_adapter_milky::mapping::{
     outbound_segment, parse_channel_id, render_text,
 };
 use kanon_adapter_milky::protocol::{Event, IncomingSegment, OutgoingSegment};
+use kanon_proto::prost_types::{self, value::Kind};
 use kanon_proto::v1::message_segment::Segment;
 use kanon_proto::v1::{
     AudioSegment, ImageSegment, MentionSegment, MessageSegment, ReplySegment, TextSegment,
@@ -349,7 +350,7 @@ fn unknown_segment_type_is_preserved_verbatim() {
     };
 
     assert_eq!(custom.type_name, "milky.future_thing");
-    let payload = mapping::struct_to_json(custom.payload.as_ref().expect("payload"));
+    let payload = mapping::struct_to_json(custom.payload.as_ref().expect("payload")).unwrap();
     assert_eq!(payload, wire);
     // The textual view names the unknown kind instead of hiding it.
     assert_eq!(render_text(&[segment(wire)]), "[future_thing]");
@@ -511,6 +512,47 @@ fn outbound_custom_segments_round_trip() {
     );
 }
 
+/// Invalid plugin numbers must fail even in fields the Milky segment builder would ignore.
+#[test]
+fn outbound_custom_payload_rejects_nested_nonfinite_numbers() {
+    for number in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+        let mut payload = mapping::json_to_struct(&json!({"face_id": "21", "is_large": true}));
+        payload.fields.insert(
+            "extra".into(),
+            prost_types::Value {
+                kind: Some(Kind::ListValue(prost_types::ListValue {
+                    values: vec![prost_types::Value {
+                        kind: Some(Kind::NumberValue(number)),
+                    }],
+                })),
+            },
+        );
+        let custom = MessageSegment {
+            segment: Some(Segment::Custom(kanon_proto::v1::RawCustomSegment {
+                type_name: "milky.face".into(),
+                payload: Some(payload),
+            })),
+        };
+        let err = outbound_segment(&custom).expect_err("non-finite payload must not become null");
+        assert!(
+            matches!(&err, MappingError::CustomPayload(kind, reason)
+                if kind == "face" && reason.contains("must be finite")),
+            "{err}"
+        );
+    }
+}
+
+/// The rounded floating-point i64 upper bound must never be cast into a different integer.
+#[test]
+fn preserved_number_at_two_to_the_63_is_not_clamped_to_i64_max() {
+    let payload = mapping::json_to_struct(&json!({"nested": [1_u64 << 63], "safe": 77}));
+    let restored = mapping::struct_to_json(&payload).expect("finite payload");
+    assert_eq!(restored["safe"].as_i64(), Some(77));
+    assert!(restored["nested"][0].is_f64());
+    assert_eq!(restored["nested"][0].as_f64(), Some((1_u64 << 63) as f64));
+    assert_eq!(restored["nested"][0].as_i64(), None);
+}
+
 /// A native Kanon segment and its Milky counterpart round-trip through both directions.
 #[test]
 fn native_segments_round_trip_both_ways() {
@@ -621,7 +663,7 @@ fn json_struct_conversion_round_trips() {
     });
 
     let structured = mapping::json_to_struct(&value);
-    assert_eq!(mapping::struct_to_json(&structured), value);
+    assert_eq!(mapping::struct_to_json(&structured).unwrap(), value);
 }
 
 /// Typed video and face segments map to Milky's own; a file cannot travel inside a message, so

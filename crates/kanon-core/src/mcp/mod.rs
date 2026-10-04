@@ -1035,6 +1035,7 @@ impl ToolHost for McpServer {
         let arguments = match req.payload {
             Some(kanon_proto::v1::tool_call_request::Payload::StructuredArgs(args)) => {
                 kanon_llm::tool_router::prost_struct_to_json(args)
+                    .map_err(|error| tonic::Status::invalid_argument(error.to_string()))?
             }
             _ => serde_json::json!({}),
         };

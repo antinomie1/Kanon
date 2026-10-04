@@ -10,7 +10,8 @@ use async_trait::async_trait;
 use kanon_llm::BuiltinAgent;
 use kanon_llm::tool_router::{ToolHost, json_to_prost_struct};
 use kanon_llm::{
-    Agent, ChatRequest, ChatResponse, GatewayError, InMemory, LlmProvider, Memory, ToolCall,
+    Agent, AgentError, AgentHook, ChatRequest, ChatResponse, GatewayError, InMemory, LlmProvider,
+    Memory, ToolCall,
 };
 use kanon_proto::v1::{
     PluginMeta, ToolAttachment, ToolCallRequest, ToolCallResponse, ToolMeta, tool_call_response,
@@ -23,6 +24,143 @@ const SECRET_PATH: &str = "/var/lib/kanon/data/attachments/secret-card.png";
 struct ScriptedProvider {
     responses: Mutex<std::collections::VecDeque<ChatResponse>>,
     requests: Arc<Mutex<Vec<ChatRequest>>>,
+}
+
+/// Supplies malformed protobuf at either discovery or execution, keeping normal attachments.
+struct InvalidHost {
+    invalid_schema: bool,
+}
+
+#[async_trait]
+impl ToolHost for InvalidHost {
+    fn host_id(&self) -> &str {
+        "host_invalid"
+    }
+
+    fn plugin_metas(&self) -> Vec<PluginMeta> {
+        let mut metas = DrawingHost.plugin_metas();
+        if self.invalid_schema {
+            metas[0].tools[0].parameters = Some(invalid_numbers());
+        }
+        metas
+    }
+
+    async fn call_tool(&self, request: ToolCallRequest) -> Result<ToolCallResponse, tonic::Status> {
+        let mut response = DrawingHost.call_tool(request).await?;
+        response.payload = Some(tool_call_response::Payload::StructuredResult(
+            invalid_numbers(),
+        ));
+        Ok(response)
+    }
+}
+
+fn invalid_numbers() -> prost_types::Struct {
+    prost_types::Struct {
+        fields: [(
+            "count".into(),
+            prost_types::Value {
+                kind: Some(prost_types::value::Kind::NumberValue(f64::NAN)),
+            },
+        )]
+        .into(),
+    }
+}
+
+/// Captures the status delivered to plugin observers after tool completion.
+#[derive(Default)]
+struct CompletionHook(Mutex<Vec<bool>>);
+
+#[async_trait]
+impl AgentHook for CompletionHook {
+    async fn on_after_tool_call(
+        &self,
+        _session_id: &str,
+        _call: &ToolCall,
+        _result: &str,
+        success: bool,
+    ) -> Result<(), AgentError> {
+        self.0.lock().unwrap().push(success);
+        Ok(())
+    }
+}
+
+#[tokio::test]
+async fn invalid_schema_fails_before_calling_the_provider() {
+    let requests = Arc::new(Mutex::new(Vec::new()));
+    let provider = Arc::new(ScriptedProvider {
+        responses: Mutex::new(Default::default()),
+        requests: requests.clone(),
+    });
+    let agent = BuiltinAgent::builder("invalid-schema", provider).build();
+    let hosts: Vec<Arc<dyn ToolHost>> = vec![Arc::new(InvalidHost {
+        invalid_schema: true,
+    })];
+
+    let error = agent.run("session", "draw", &hosts).await.unwrap_err();
+
+    assert!(matches!(error, AgentError::InvalidRequest(_)));
+    assert!(error.to_string().contains("protobuf number must be finite"));
+    assert!(requests.lock().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn invalid_tool_result_is_a_paired_failure_without_attachments() {
+    let requests = Arc::new(Mutex::new(Vec::new()));
+    let provider = Arc::new(ScriptedProvider {
+        responses: Mutex::new(
+            vec![
+                ChatResponse {
+                    tool_calls: vec![ToolCall {
+                        id: "call_1".into(),
+                        name: "draw_card".into(),
+                        arguments: serde_json::json!({}),
+                    }],
+                    finish_reason: Some("tool_calls".into()),
+                    ..Default::default()
+                },
+                ChatResponse {
+                    content: Some("The tool returned invalid data.".into()),
+                    finish_reason: Some("stop".into()),
+                    ..Default::default()
+                },
+            ]
+            .into(),
+        ),
+        requests: requests.clone(),
+    });
+    let hook = Arc::new(CompletionHook::default());
+    let agent = BuiltinAgent::builder("invalid-result", provider)
+        .hook_arc(hook.clone())
+        .build();
+    let hosts: Vec<Arc<dyn ToolHost>> = vec![Arc::new(InvalidHost {
+        invalid_schema: false,
+    })];
+
+    let output = agent.run("session", "draw", &hosts).await.unwrap();
+
+    assert_eq!(output.executed_tools.len(), 1);
+    assert!(!output.executed_tools[0].success);
+    assert!(output.attachments.is_empty());
+    assert_eq!(*hook.0.lock().unwrap(), [false]);
+    let requests = requests.lock().unwrap();
+    let tool = requests[1]
+        .messages
+        .iter()
+        .find(|message| message.role == kanon_llm::Role::Tool)
+        .expect("paired tool response");
+    assert_eq!(tool.tool_call_id.as_deref(), Some("call_1"));
+    assert!(
+        tool.content
+            .as_deref()
+            .unwrap()
+            .contains("Error: invalid structured tool result")
+    );
+    assert!(
+        tool.content
+            .as_deref()
+            .unwrap()
+            .contains("protobuf number must be finite")
+    );
 }
 
 #[async_trait]

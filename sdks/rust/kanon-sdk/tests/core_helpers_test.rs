@@ -40,6 +40,7 @@ struct FakeCore {
     personas: Mutex<Vec<Persona>>,
     /// When set, `RefreshPluginMeta` fails with this code.
     refresh_fails: Mutex<Option<tonic::Code>>,
+    platform_result: Mutex<Option<prost_types::Value>>,
 }
 
 impl FakeCore {
@@ -107,6 +108,11 @@ impl BotApiService for Served {
         &self,
         _request: Request<PlatformApiRequest>,
     ) -> Result<Response<PlatformApiResponse>, Status> {
+        if let Some(result) = self.0.platform_result.lock().unwrap().clone() {
+            return Ok(Response::new(PlatformApiResponse {
+                result: Some(result),
+            }));
+        }
         Err(Status::permission_denied("not allowed"))
     }
 
@@ -412,6 +418,32 @@ fn invalid(result: Result<impl std::fmt::Debug, CoreError>) -> String {
         Err(CoreError::InvalidArgument(message)) => message,
         other => panic!("expected InvalidArgument, got {other:?}"),
     }
+}
+
+#[tokio::test]
+async fn platform_api_rejects_nonfinite_results_without_changing_valid_nulls() {
+    let (fake, core, socket) = start("core-platform-json").await;
+    for number in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+        *fake.platform_result.lock().unwrap() = Some(prost_types::Value {
+            kind: Some(prost_types::value::Kind::NumberValue(number)),
+        });
+        let error = core
+            .call_platform_api("onebot", "inspect", json!({}))
+            .await
+            .unwrap_err();
+        assert!(matches!(error, CoreError::Unexpected(_)));
+        assert!(error.to_string().contains("protobuf number must be finite"));
+    }
+    for value in [json!(null), json!({"count": 3, "ratio": 0.5})] {
+        *fake.platform_result.lock().unwrap() = Some(kanon_sdk::json::to_value(value.clone()));
+        assert_eq!(
+            core.call_platform_api("onebot", "inspect", json!({}))
+                .await
+                .unwrap(),
+            value
+        );
+    }
+    let _ = std::fs::remove_file(&socket);
 }
 
 #[derive(Debug, PartialEq, Serialize, Deserialize)]

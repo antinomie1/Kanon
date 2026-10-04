@@ -357,7 +357,7 @@ async fn install_from_dir(
                     plugin_id: plugin_id.clone(),
                     host_id: host.host_id.clone(),
                 });
-            let (commands, tools) = plugin_views_for(&host)
+            let (commands, tools) = plugin_views_for(&host)?
                 .into_iter()
                 .find(|view| view.id == plugin_id)
                 .map(|view| (view.commands, view.tools))

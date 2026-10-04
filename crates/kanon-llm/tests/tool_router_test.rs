@@ -121,7 +121,9 @@ impl ToolHost for MockToolHost {
             })
         } else if req.tool_name == "add_numbers" {
             let structured_args = match req.payload {
-                Some(tool_call_request::Payload::StructuredArgs(s)) => prost_struct_to_json(s),
+                Some(tool_call_request::Payload::StructuredArgs(s)) => {
+                    prost_struct_to_json(s).unwrap()
+                }
                 _ => serde_json::Value::Null,
             };
 
@@ -365,7 +367,7 @@ fn test_prost_json_roundtrip() {
     });
 
     let prost_struct = json_to_prost_struct(&json_input).expect("Valid JSON object");
-    let json_output = prost_struct_to_json(prost_struct);
+    let json_output = prost_struct_to_json(prost_struct).unwrap();
 
     assert_eq!(json_input, json_output);
 }
@@ -379,7 +381,7 @@ fn test_whole_struct_numbers_become_json_integers() {
     }))
     .expect("Valid JSON object");
 
-    let json = prost_struct_to_json(from_plugin);
+    let json = prost_struct_to_json(from_plugin).unwrap();
 
     assert_eq!(serde_json::to_string(&json["default"]).unwrap(), "6");
     // Beyond 2^53 a double no longer names one integer, so it stays a float.
@@ -418,12 +420,12 @@ async fn test_aggregate_tools_disambiguates_duplicate_names() {
     ));
 
     let hosts: Vec<Arc<dyn ToolHost>> = vec![host_a, host_b];
-    let defs = aggregate_tools(&hosts);
+    let defs = aggregate_tools(&hosts).unwrap();
     assert_eq!(defs.len(), 3);
 
     // The attributed form is what the console renders; it must agree with the model's view name by
     // name, which is why both go through one implementation.
-    let resolved = kanon_llm::tool_router::resolve_tools(&hosts);
+    let resolved = kanon_llm::tool_router::resolve_tools(&hosts).unwrap();
     let projected: Vec<_> = resolved
         .iter()
         .map(|tool| tool.definition.clone())

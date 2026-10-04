@@ -47,11 +47,12 @@ const MAX_FORWARD_IMAGES: usize = 4;
 /// accepts it, and images are attached only when it accepts images, because sending a modality an
 /// endpoint rejects fails the whole turn. `context_policy` decides whether the sender id and the
 /// message time are prepended; both are off by default.
+/// Rejects custom payloads with numbers that cannot be represented as JSON.
 pub fn build_user_message(
     event: &PipelineEventRequest,
     capabilities: &ModelCapabilities,
     context_policy: &ContextPolicy,
-) -> ChatMessage {
+) -> Result<ChatMessage, kanon_proto::json::NonFiniteNumber> {
     // Metadata cannot count as message content: raw-text-only events still need their body.
     let mut metadata = TextBuffer::default();
     let mut text = TextBuffer::default();
@@ -130,6 +131,7 @@ pub fn build_user_message(
                     .payload
                     .as_ref()
                     .map(|payload| prost_struct_to_json(payload.clone()))
+                    .transpose()?
                     .unwrap_or(Value::Null);
                 let expand = context_policy.expand_forward;
                 render_custom(&custom.type_name, &json, expand, &mut text);
@@ -163,11 +165,11 @@ pub fn build_user_message(
         };
     }
 
-    if images.is_empty() {
+    Ok(if images.is_empty() {
         ChatMessage::user(text)
     } else {
         ChatMessage::user_multimodal(text, images)
-    }
+    })
 }
 
 /// Describes a notice event in one line, or `None` for an ordinary message.

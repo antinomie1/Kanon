@@ -232,7 +232,7 @@ pub struct ToolCall {
     pub session_id: String,
     /// The name the model used (namespaced as `<plugin>__<tool>` when names collide).
     pub tool_name: String,
-    /// The arguments, a JSON object (numbers arrive as floats).
+    /// The arguments as a JSON object; whole numbers within ±2^53 arrive as integers.
     pub arguments: serde_json::Value,
 }
 

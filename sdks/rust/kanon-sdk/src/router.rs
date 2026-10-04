@@ -1088,7 +1088,17 @@ impl Plugin for Router {
         };
         let args = match req.payload {
             Some(tool_call_request::Payload::StructuredArgs(args)) => {
-                serde_json::Value::Object(crate::json::from_struct(args))
+                match crate::json::from_struct(args) {
+                    Ok(args) => serde_json::Value::Object(args),
+                    Err(error) => {
+                        return Ok(ToolCallResponse {
+                            call_id: req.call_id,
+                            success: false,
+                            error_message: format!("invalid tool arguments: {error}"),
+                            ..Default::default()
+                        });
+                    }
+                }
             }
             _ => serde_json::Value::Object(serde_json::Map::new()),
         };
@@ -1166,6 +1176,7 @@ impl Plugin for Router {
                     arguments: serde_json::Value::Object(
                         call.arguments
                             .map(crate::json::from_struct)
+                            .transpose()?
                             .unwrap_or_default(),
                     ),
                 }),

@@ -579,6 +579,8 @@ impl BotApiService for CoreApiService {
         let params = req
             .params
             .map(kanon_llm::tool_router::prost_struct_to_json)
+            .transpose()
+            .map_err(|error| Status::invalid_argument(error.to_string()))?
             .unwrap_or_else(|| serde_json::Value::Object(Default::default()));
         match adapter.call_api(&req.action, params).await {
             Ok(result) => Ok(Response::new(PlatformApiResponse {

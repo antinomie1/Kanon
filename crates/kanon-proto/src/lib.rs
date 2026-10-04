@@ -6,3 +6,5 @@ pub mod v1 {
 }
 
 pub use prost_types;
+
+pub mod json;

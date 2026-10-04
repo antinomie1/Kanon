@@ -9,6 +9,7 @@ description = "Protobuf and gRPC definitions for Kanon"
 tonic = "0.12"
 prost = "0.13"
 prost-types = "0.13"
+serde_json = "1.0"
 
 [build-dependencies]
 tonic-build = "0.12"

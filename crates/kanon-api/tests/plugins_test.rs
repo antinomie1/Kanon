@@ -517,6 +517,13 @@ async fn plugin_action_returns_host_result() {
             req: Request<PluginActionRequest>,
         ) -> Result<Response<PluginActionResponse>, Status> {
             let req = req.into_inner();
+            if req.action == "invalid_result" {
+                return Ok(Response::new(PluginActionResponse {
+                    success: true,
+                    error_message: String::new(),
+                    result: Some(nonfinite_payload()),
+                }));
+            }
             if req.action != "bind_credentials" {
                 return Ok(Response::new(PluginActionResponse {
                     success: false,
@@ -605,6 +612,16 @@ async fn plugin_action_returns_host_result() {
         .build();
     let app: Router = app(state);
 
+    let (status, body) = send_json(
+        &app,
+        Method::POST,
+        &format!("/api/v1/plugins/{FIXTURE_PLUGIN_ID}/actions/invalid_result"),
+        Some(json!({})),
+    )
+    .await;
+    assert_eq!(status, 502, "{body}");
+    assert_eq!(error_code(&body), "upstream_error");
+
     // 1. A declared action returns its structured payload.
     let (status, body) = send_json(
         &app,
@@ -634,4 +651,69 @@ async fn plugin_action_returns_host_result() {
             .contains("Unknown action"),
         "unexpected body: {body}"
     );
+}
+
+/// Explicit non-object arguments must not be silently replaced by an empty object.
+#[tokio::test]
+async fn plugin_calls_reject_non_object_arguments() {
+    let dir = tempfile::tempdir().unwrap();
+    let app = app(fixture_state(dir.path().to_path_buf(), false).await);
+    for endpoint in ["tools/fixture_tool", "actions/bind_credentials"] {
+        let uri = format!("/api/v1/plugins/{FIXTURE_PLUGIN_ID}/{endpoint}");
+        for arguments in [json!(null), json!([]), json!("text"), json!(7), json!(true)] {
+            let (status, _) = send_json(
+                &app,
+                Method::POST,
+                &uri,
+                Some(json!({"arguments": arguments})),
+            )
+            .await;
+            assert_eq!(status, 422, "{endpoint}: {arguments}");
+        }
+        // Omission still means an empty object and reaches the host (which is offline here).
+        let (status, _) = send_json(&app, Method::POST, &uri, Some(json!({}))).await;
+        assert!(status.is_server_error());
+    }
+}
+
+/// Catalog endpoints must surface malformed host schemas instead of publishing altered schemas.
+#[tokio::test]
+async fn catalogs_reject_nonfinite_tool_schemas() {
+    let dir = tempfile::tempdir().unwrap();
+    let state = fixture_state(dir.path().to_path_buf(), false).await;
+    let mut meta = common::fixture_meta();
+    meta.tools[0].parameters = Some(nonfinite_payload());
+    state
+        .supervisor()
+        .register_managed_host(std::sync::Arc::new(kanon_core::ManagedHost::new(
+            FIXTURE_HOST_ID.into(),
+            dir.path().join("host.sock"),
+            common::dead_channel(),
+            vec![meta],
+            100,
+        )))
+        .await;
+    let app = app(state);
+    for uri in [
+        "/api/v1/plugins".to_string(),
+        format!("/api/v1/plugins/{FIXTURE_PLUGIN_ID}"),
+        "/api/v1/tools".to_string(),
+    ] {
+        let (status, body) = send_json(&app, Method::GET, &uri, None).await;
+        assert_eq!(status, 502, "{uri}: {body}");
+        assert_eq!(error_code(&body), "upstream_error");
+    }
+}
+
+/// Constructs an invalid upstream payload that ordinary JSON cannot represent.
+fn nonfinite_payload() -> kanon_proto::prost_types::Struct {
+    kanon_proto::prost_types::Struct {
+        fields: [(
+            "value".into(),
+            kanon_proto::prost_types::Value {
+                kind: Some(kanon_proto::prost_types::value::Kind::NumberValue(f64::NAN)),
+            },
+        )]
+        .into(),
+    }
 }

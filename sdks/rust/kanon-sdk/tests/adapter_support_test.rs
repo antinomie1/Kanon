@@ -549,10 +549,10 @@ async fn core_handle_calls_the_platform_api_with_json() {
         )
         .await
         .expect("platform API call");
-    // Numbers travel as doubles, so integers come back as floats.
+    // Whole protobuf numbers are restored as JSON integers for platform identifiers.
     assert_eq!(
         result,
-        serde_json::json!({ "group_id": 1.0, "users": ["a"], "notify": true })
+        serde_json::json!({ "group_id": 1, "users": ["a"], "notify": true })
     );
 
     let rejected = handle

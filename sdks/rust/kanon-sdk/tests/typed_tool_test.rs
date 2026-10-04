@@ -127,7 +127,7 @@ fn tool_request(name: &str, args: serde_json::Value) -> ToolCallRequest {
 fn result_json(response: &ToolCallResponse) -> serde_json::Value {
     match &response.payload {
         Some(tool_call_response::Payload::StructuredResult(result)) => {
-            serde_json::Value::Object(kanon_sdk::json::from_struct(result.clone()))
+            serde_json::Value::Object(kanon_sdk::json::from_struct(result.clone()).unwrap())
         }
         other => panic!("no structured result: {other:?}"),
     }
@@ -155,14 +155,14 @@ async fn typed_tools_declare_their_schema_and_receive_decoded_arguments() {
     let meta = router.meta();
     assert_eq!(meta.tools.len(), 1);
     assert_eq!(meta.tools[0].description, "Get the weather");
-    let declared = kanon_sdk::json::from_struct(meta.tools[0].parameters.clone().unwrap());
+    let declared = kanon_sdk::json::from_struct(meta.tools[0].parameters.clone().unwrap()).unwrap();
     let serde_json::Value::Object(expected) = tool_parameters::<Forecast>() else {
         panic!("schemas are objects");
     };
-    // Compared after the same protobuf round trip, which turns integers into doubles.
+    // Both paths share the protobuf round trip and normalize whole doubles back to integers.
     assert_eq!(
         declared,
-        kanon_sdk::json::from_struct(kanon_sdk::json::to_struct(expected))
+        kanon_sdk::json::from_struct(kanon_sdk::json::to_struct(expected)).unwrap()
     );
 
     // Protobuf carries every number as a double; `3.0` must still fill the `u32`.
@@ -184,11 +184,11 @@ async fn typed_tools_declare_their_schema_and_receive_decoded_arguments() {
         result_json(&response),
         json!({
             "city": "Paris",
-            "days": 3.0,
+            "days": 3,
             "metric": true,
             "location": [48.5, 2.25],
             "verbose": false,
-            "labels": { "a": 1.0 },
+            "labels": { "a": 1 },
         })
     );
 }
@@ -240,6 +240,53 @@ async fn bad_arguments_fail_the_call_for_the_model_without_running_the_handler()
 }
 
 #[tokio::test]
+async fn nonfinite_arguments_fail_before_reaching_the_handler() {
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    let calls = Arc::new(AtomicUsize::new(0));
+    let recorded = calls.clone();
+    let router = Router::new("test.plugin", "Test", "0.1.0").tool(
+        ToolSpec::new("inspect"),
+        move |_args, _event| {
+            recorded.fetch_add(1, Ordering::SeqCst);
+            async { Ok(json!({"ok": true})) }
+        },
+    );
+    for number in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+        let mut request = tool_request("inspect", json!({}));
+        request.payload = Some(tool_call_request::Payload::StructuredArgs(
+            prost_types::Struct {
+                fields: [(
+                    "value".into(),
+                    prost_types::Value {
+                        kind: Some(prost_types::value::Kind::NumberValue(number)),
+                    },
+                )]
+                .into(),
+            },
+        ));
+        let response = router.on_call_tool(request).await.unwrap();
+        assert!(!response.success);
+        assert_eq!(response.call_id, "call-1");
+        assert!(
+            response
+                .error_message
+                .contains("protobuf number must be finite")
+        );
+    }
+    assert_eq!(calls.load(Ordering::SeqCst), 0);
+    assert!(
+        router
+            .on_call_tool(tool_request("inspect", json!({"value": null})))
+            .await
+            .unwrap()
+            .success
+    );
+    assert_eq!(calls.load(Ordering::SeqCst), 1);
+}
+
+#[tokio::test]
 async fn typed_results_are_serialized_and_scalars_wrapped() {
     #[derive(Serialize)]
     struct Total {
@@ -264,12 +311,12 @@ async fn typed_results_are_serialized_and_scalars_wrapped() {
         .on_call_tool(tool_request("add", json!({ "a": 2, "b": 3 })))
         .await
         .unwrap();
-    assert_eq!(result_json(&added), json!({ "sum": 5.0 }));
+    assert_eq!(result_json(&added), json!({ "sum": 5 }));
     let subtracted = router
         .on_call_tool(tool_request("sub", json!({ "a": 2, "b": 3 })))
         .await
         .unwrap();
-    assert_eq!(result_json(&subtracted), json!({ "result": -1.0 }));
+    assert_eq!(result_json(&subtracted), json!({ "result": -1 }));
 }
 
 #[test]

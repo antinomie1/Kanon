@@ -207,6 +207,39 @@ fn integer_ids_never_pass_through_floating_point() {
 }
 
 #[test]
+fn custom_payloads_keep_the_recursive_integer_precision_policy() {
+    let safe = 1_i64 << 53;
+    let data = json!({"nested": [{
+        "positive": safe,
+        "negative": -safe,
+        "string_id": u64::MAX.to_string(),
+        "float": (1_u64 << 63) as f64,
+        "values": [null, true, 1.5]
+    }]});
+    let mapped = map_event("onebot", event(json!([{"type": "future", "data": data}])))
+        .unwrap()
+        .unwrap();
+    let (_, params) = delivery(&request(mapped.segments)).unwrap();
+    assert_eq!(params["message"][0]["data"], data);
+
+    // The policy rejects all integer-encoded values outside ±2^53, including those that
+    // happen to be representable as doubles; already floating-point values retain their type.
+    for number in [
+        json!(safe + 1),
+        json!(-safe - 1),
+        json!(safe + 2),
+        json!(u64::MAX),
+    ] {
+        let err = map_event(
+            "onebot",
+            event(json!([{"type": "future", "data": {"nested": [{"id": number}]}}])),
+        )
+        .expect_err("opaque numeric IDs must not lose precision");
+        assert!(err.contains("exceeds exact protobuf precision"), "{err}");
+    }
+}
+
+#[test]
 fn mapped_facts_drive_the_current_core_reply_policy() {
     let policy = kanon_core::ReplyPolicy::new(kanon_core::ReplyMode::Mention);
     for (scene, message, expected) in [

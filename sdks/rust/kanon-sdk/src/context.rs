@@ -289,9 +289,10 @@ impl CoreHandle {
     /// (`BotApiService.CallPlatformApi`).
     ///
     /// This reaches what the generic contract does not model, e.g. OneBot's
-    /// `get_group_member_list`. `params` must be a JSON object (or `null` for none); numbers in
-    /// the result come back as floats. Fails with [`CoreError::NotFound`] for an unknown
-    /// platform, [`CoreError::Unimplemented`] when the adapter offers no API and
+    /// `get_group_member_list`. `params` must be a JSON object (or `null` for none).
+    /// Fails with [`CoreError::Unexpected`] for a non-finite result number,
+    /// [`CoreError::NotFound`] for an unknown platform,
+    /// [`CoreError::Unimplemented`] when the adapter offers no API and
     /// [`CoreError::Unavailable`] when the platform refused the call.
     pub async fn call_platform_api(
         &self,
@@ -318,6 +319,8 @@ impl CoreHandle {
             .into_inner()
             .result
             .map(crate::json::from_value)
+            .transpose()
+            .map_err(|error| CoreError::Unexpected(error.to_string()))?
             .unwrap_or(serde_json::Value::Null))
     }
 

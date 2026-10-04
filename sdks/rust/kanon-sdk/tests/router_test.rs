@@ -197,7 +197,7 @@ async fn tools_receive_json_and_the_asking_message() {
         panic!("expected a structured result");
     };
     assert_eq!(
-        serde_json::Value::Object(kanon_sdk::json::from_struct(result)),
+        serde_json::Value::Object(kanon_sdk::json::from_struct(result).unwrap()),
         json!({ "asked": "me", "sender": "u1" })
     );
 }
@@ -321,7 +321,7 @@ async fn tool_replies_carry_attachments_with_absolute_paths() {
     };
     // The model still reads only the value; the media travel beside it.
     assert_eq!(
-        serde_json::Value::Object(kanon_sdk::json::from_struct(result)),
+        serde_json::Value::Object(kanon_sdk::json::from_struct(result).unwrap()),
         json!({ "result": "drawn" })
     );
     // The core reads the file from its own process, so a relative path must not reach it.

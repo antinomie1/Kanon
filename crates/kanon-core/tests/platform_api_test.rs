@@ -102,7 +102,7 @@ async fn a_call_reaches_the_adapter_and_returns_its_result() {
         .expect("call succeeds")
         .into_inner();
     assert_eq!(
-        prost_value_to_json(response.result.expect("result")),
+        prost_value_to_json(response.result.expect("result")).unwrap(),
         json!({ "action": "get_group_info", "params": { "group_id": 42 } })
     );
 }
@@ -123,4 +123,24 @@ async fn failures_map_to_distinct_statuses() {
             .expect_err("call fails");
         assert_eq!(status.code(), code, "{platform}/{action}: {status:?}");
     }
+}
+
+#[tokio::test]
+async fn nonfinite_parameters_are_rejected_before_adapter_dispatch() {
+    let mut request = call("qq", "fail").into_inner();
+    request.params.as_mut().unwrap().fields.insert(
+        "bad".into(),
+        kanon_proto::prost_types::Value {
+            kind: Some(kanon_proto::prost_types::value::Kind::NumberValue(
+                f64::INFINITY,
+            )),
+        },
+    );
+    // The adapter would return Unavailable for this action if dispatch were reached.
+    let status = service()
+        .await
+        .call_platform_api(Request::new(request))
+        .await
+        .unwrap_err();
+    assert_eq!(status.code(), Code::InvalidArgument);
 }

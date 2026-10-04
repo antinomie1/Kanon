@@ -368,8 +368,8 @@ pub struct RestartResponse {
 }
 
 /// Lists every supervised host and plugin with static metadata.
-async fn list_plugins(State(state): State<ApiState>) -> Json<PluginCatalog> {
-    Json(catalog(&state).await)
+async fn list_plugins(State(state): State<ApiState>) -> Result<Json<PluginCatalog>, ApiError> {
+    Ok(Json(catalog(&state).await?))
 }
 
 /// Returns one plugin as the catalog presents it, including its translations.
@@ -378,7 +378,7 @@ async fn get_plugin(
     AxumPath(plugin_id): AxumPath<String>,
 ) -> Result<Json<PluginView>, ApiError> {
     catalog(&state)
-        .await
+        .await?
         .plugins
         .into_iter()
         .find(|view| view.id == plugin_id)
@@ -389,14 +389,14 @@ async fn get_plugin(
 }
 
 /// Assembles the catalog of hosts and plugins.
-async fn catalog(state: &ApiState) -> PluginCatalog {
+async fn catalog(state: &ApiState) -> Result<PluginCatalog, ApiError> {
     let hosts = state.supervisor().get_all_hosts().await;
 
     let mut host_views = Vec::with_capacity(hosts.len());
     let mut plugin_views = Vec::new();
 
     for host in &hosts {
-        let p_views = plugin_views_for(host);
+        let p_views = plugin_views_for(host)?;
         let pid = host.pid().await;
         host_views.push(host_view(host, pid, p_views.clone()));
         plugin_views.extend(p_views);
@@ -473,11 +473,11 @@ async fn catalog(state: &ApiState) -> PluginCatalog {
     host_views.sort_by(|a, b| a.host_id.cmp(&b.host_id));
     plugin_views.sort_by(|a, b| a.id.cmp(&b.id));
 
-    PluginCatalog {
+    Ok(PluginCatalog {
         total: plugin_views.len(),
         hosts: host_views,
         plugins: plugin_views,
-    }
+    })
 }
 
 /// Rescans the plugin directory on the operator's request and answers with the fresh catalog.
@@ -496,7 +496,7 @@ async fn rescan_plugins(State(state): State<ApiState>) -> Result<Json<PluginCata
         dir = %state.plugins_dir().display(),
         "Plugin directory rescanned on request"
     );
-    Ok(Json(catalog(&state).await))
+    Ok(Json(catalog(&state).await?))
 }
 
 /// Builds catalog entries for plugins on disk that have no running host.
@@ -730,7 +730,7 @@ async fn restart_plugin(
 
     Ok(Json(RestartResponse {
         host_id,
-        plugins: plugin_views_for(&restarted),
+        plugins: plugin_views_for(&restarted)?,
     }))
 }
 
@@ -739,7 +739,7 @@ async fn restart_plugin(
 pub struct CallPluginToolRequest {
     /// Arguments payload passed to the tool.
     #[serde(default)]
-    pub arguments: Value,
+    pub arguments: serde_json::Map<String, Value>,
 }
 
 /// Response returned after executing a plugin tool.
@@ -770,7 +770,8 @@ async fn call_plugin_tool(
             ))
         })?;
 
-    let args_struct = json_to_prost_struct(&body.arguments).unwrap_or_default();
+    let args_struct = json_to_prost_struct(&Value::Object(body.arguments))
+        .expect("the request arguments are a JSON object");
     let call_id = format!(
         "call-{}",
         std::time::SystemTime::now()
@@ -796,7 +797,7 @@ async fn call_plugin_tool(
 
     let result = match response.payload {
         Some(kanon_proto::v1::tool_call_response::Payload::StructuredResult(res)) => {
-            prost_struct_to_json(res)
+            prost_struct_to_json(res)?
         }
         _ => Value::Null,
     };
@@ -832,7 +833,8 @@ async fn invoke_plugin_action(
             ))
         })?;
 
-    let parameters = json_to_prost_struct(&body.arguments).unwrap_or_default();
+    let parameters = json_to_prost_struct(&Value::Object(body.arguments))
+        .expect("the request arguments are a JSON object");
     let request = kanon_proto::v1::PluginActionRequest {
         plugin_id: plugin_id.clone(),
         action: action_name.clone(),
@@ -860,6 +862,7 @@ async fn invoke_plugin_action(
         result: response
             .result
             .map(prost_struct_to_json)
+            .transpose()?
             .unwrap_or(Value::Null),
         error: if response.error_message.is_empty() {
             None
@@ -1178,14 +1181,14 @@ fn host_view(host: &ManagedHost, pid: Option<u32>, plugins: Vec<PluginView>) -> 
 }
 
 /// Builds plugin views for a host, merging live metadata with the static manifest.
-pub(crate) fn plugin_views_for(host: &ManagedHost) -> Vec<PluginView> {
+pub(crate) fn plugin_views_for(host: &ManagedHost) -> Result<Vec<PluginView>, ApiError> {
     let manifest = host.manifest();
 
     let mut views: Vec<PluginView> = host
         .metas()
         .iter()
         .map(|meta| plugin_view_from_meta(meta, host, manifest))
-        .collect();
+        .collect::<Result<_, _>>()?;
 
     // A host that declares a manifest but has not reported its plugin (or reports it later)
     // still appears in the catalog as `declared`, so consoles never hide a configured plugin.
@@ -1195,7 +1198,7 @@ pub(crate) fn plugin_views_for(host: &ManagedHost) -> Vec<PluginView> {
         views.push(plugin_view_from_manifest(host, manifest));
     }
 
-    views
+    Ok(views)
 }
 
 /// Builds a plugin view from live process metadata.
@@ -1203,10 +1206,10 @@ fn plugin_view_from_meta(
     meta: &PluginMeta,
     host: &ManagedHost,
     manifest: Option<&kanon_core::PluginManifest>,
-) -> PluginView {
+) -> Result<PluginView, ApiError> {
     let fallback = manifest.filter(|m| m.plugin.id == meta.id);
 
-    PluginView {
+    Ok(PluginView {
         id: meta.id.clone(),
         name: non_empty_or(meta.name.clone(), || {
             fallback.map(|m| m.plugin.name.clone()).unwrap_or_default()
@@ -1245,19 +1248,22 @@ fn plugin_view_from_meta(
         tools: meta
             .tools
             .iter()
-            .map(|tool| ToolView {
-                name: tool.name.clone(),
-                description: tool.description.clone(),
-                parameters: tool
-                    .parameters
-                    .clone()
-                    .map(prost_struct_to_json)
-                    .unwrap_or_else(|| json!({ "type": "object" })),
+            .map(|tool| {
+                Ok(ToolView {
+                    name: tool.name.clone(),
+                    description: tool.description.clone(),
+                    parameters: tool
+                        .parameters
+                        .clone()
+                        .map(prost_struct_to_json)
+                        .transpose()?
+                        .unwrap_or_else(|| json!({ "type": "object" })),
+                })
             })
-            .collect(),
+            .collect::<Result<_, ApiError>>()?,
         serves_http: meta.serves_http,
         ..PluginView::default()
-    }
+    })
 }
 
 /// Builds a plugin view from the static manifest alone.

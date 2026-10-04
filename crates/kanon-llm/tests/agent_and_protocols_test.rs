@@ -79,7 +79,9 @@ impl ToolHost for MockHost {
     async fn call_tool(&self, req: ToolCallRequest) -> Result<ToolCallResponse, tonic::Status> {
         if req.tool_name == "reverse_string" {
             let structured_args = match req.payload {
-                Some(tool_call_request::Payload::StructuredArgs(s)) => prost_struct_to_json(s),
+                Some(tool_call_request::Payload::StructuredArgs(s)) => {
+                    prost_struct_to_json(s).unwrap()
+                }
                 _ => serde_json::Value::Null,
             };
 

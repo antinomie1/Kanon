@@ -275,7 +275,7 @@ async fn image_content_becomes_a_file_the_platform_can_send() {
     // The text still reaches the model ...
     let payload = match response.payload {
         Some(kanon_proto::v1::tool_call_response::Payload::StructuredResult(result)) => {
-            kanon_llm::tool_router::prost_struct_to_json(result)
+            kanon_llm::tool_router::prost_struct_to_json(result).unwrap()
         }
         other => panic!("unexpected payload: {other:?}"),
     };

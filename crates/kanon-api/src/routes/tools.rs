@@ -122,7 +122,7 @@ async fn list_tools(State(state): State<ApiState>) -> Result<Json<ToolCatalog>, 
             .await,
     );
 
-    let mut provided: Vec<ToolView> = resolve_tools(&hosts)
+    let mut provided: Vec<ToolView> = resolve_tools(&hosts)?
         .into_iter()
         .map(|resolved| {
             // A host identifier registered by the pool identifies an MCP server; anything else is

@@ -435,6 +435,19 @@ async fn agent_events_reach_their_subscribers() {
     // A notification without its detail is a contract violation, reported rather than dropped.
     assert!(router.on_event(EventNotification::default()).await.is_err());
 
+    // Invalid arguments must not be delivered as a plausible null to event subscribers.
+    let error = router
+        .on_event(EventNotification {
+            detail: Some(event_notification::Detail::ToolCall(ToolCallEvent {
+                arguments: Some(nonfinite_parameters()),
+                ..Default::default()
+            })),
+            ..Default::default()
+        })
+        .await
+        .unwrap_err();
+    assert!(error.to_string().contains("protobuf number must be finite"));
+
     assert_eq!(
         *seen.lock().unwrap(),
         [
@@ -450,6 +463,77 @@ fn temp_socket(name: &str) -> PathBuf {
     let dir = std::env::temp_dir().join("kanon-sdk-tests");
     std::fs::create_dir_all(&dir).expect("temp socket dir");
     dir.join(format!("{name}-{}.sock", std::process::id()))
+}
+
+fn nonfinite_parameters() -> prost_types::Struct {
+    prost_types::Struct {
+        fields: [(
+            "value".into(),
+            prost_types::Value {
+                kind: Some(prost_types::value::Kind::NumberValue(f64::NAN)),
+            },
+        )]
+        .into(),
+    }
+}
+
+#[tokio::test]
+async fn invalid_action_parameters_never_reach_the_handler() {
+    use kanon_proto::v1::plugin_host_service_client::PluginHostServiceClient;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    let calls = Arc::new(AtomicUsize::new(0));
+    let recorded = calls.clone();
+    let plugin = Router::new("test.plugin", "Test", "0.1.0").action("inspect", move |params| {
+        recorded.fetch_add(1, Ordering::SeqCst);
+        async move { Ok(params) }
+    });
+    let socket = temp_socket("invalid-action-parameters");
+    let host = KanonHost::new(plugin).with_socket_path(socket.clone());
+    let (stop, stopped) = oneshot::channel::<()>();
+    let running = tokio::spawn(host.run_with_shutdown(async move {
+        let _ = stopped.await;
+    }));
+    let mut channel = None;
+    for _ in 0..50 {
+        if let Ok(connected) = connect_ipc(socket.clone()).await {
+            channel = Some(connected);
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    let mut client = PluginHostServiceClient::new(channel.expect("host is reachable"));
+    let response = client
+        .invoke_action(PluginActionRequest {
+            plugin_id: "test.plugin".into(),
+            action: "inspect".into(),
+            parameters: Some(nonfinite_parameters()),
+        })
+        .await
+        .unwrap()
+        .into_inner();
+    assert!(!response.success);
+    assert!(
+        response
+            .error_message
+            .contains("protobuf number must be finite")
+    );
+    assert_eq!(calls.load(Ordering::SeqCst), 0);
+
+    let response = client
+        .invoke_action(PluginActionRequest {
+            plugin_id: "test.plugin".into(),
+            action: "inspect".into(),
+            parameters: None,
+        })
+        .await
+        .unwrap()
+        .into_inner();
+    assert!(response.success);
+    assert_eq!(calls.load(Ordering::SeqCst), 1);
+    drop(client);
+    stop.send(()).unwrap();
+    running.await.unwrap().unwrap();
 }
 
 /// The hook and HTTP RPCs reach the router through a running host, and an empty rewrite is

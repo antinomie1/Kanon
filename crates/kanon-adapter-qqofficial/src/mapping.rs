@@ -21,14 +21,14 @@
 use std::collections::{HashMap, VecDeque};
 
 use base64::Engine;
-use kanon_proto::prost_types::{self, value::Kind};
+use kanon_proto::prost_types;
 use kanon_proto::v1::message_segment::Segment;
 use kanon_proto::v1::{
     ImageSegment, MessageSegment, PipelineEventRequest, RawCustomSegment, ReplySegment,
     TextSegment, image_segment,
 };
 use serde::Deserialize;
-use serde_json::{Map, Value, json};
+use serde_json::{Value, json};
 
 use crate::config::PLATFORM;
 
@@ -560,20 +560,11 @@ fn custom(type_name: &str, payload: Value) -> Result<Segment, String> {
 
 /// Converts a flat JSON object (strings, booleans and numbers) into a protobuf `Struct`.
 fn to_struct(value: &Value) -> Result<prost_types::Struct, String> {
-    let object: &Map<String, Value> = value.as_object().ok_or("payload must be an object")?;
-    let fields = object
-        .iter()
-        .map(|(key, value)| {
-            let kind = match value {
-                Value::String(text) => Kind::StringValue(text.clone()),
-                Value::Bool(flag) => Kind::BoolValue(*flag),
-                Value::Number(number) => {
-                    Kind::NumberValue(number.as_f64().ok_or("invalid JSON number")?)
-                }
-                other => return Err(format!("unsupported payload value for '{key}': {other}")),
-            };
-            Ok((key.clone(), prost_types::Value { kind: Some(kind) }))
-        })
-        .collect::<Result<_, String>>()?;
-    Ok(prost_types::Struct { fields })
+    let object = value.as_object().ok_or("payload must be an object")?;
+    for (key, value) in object {
+        if !matches!(value, Value::String(_) | Value::Bool(_) | Value::Number(_)) {
+            return Err(format!("unsupported payload value for '{key}': {value}"));
+        }
+    }
+    kanon_proto::json::json_to_prost_struct(value).ok_or_else(|| "payload must be an object".into())
 }

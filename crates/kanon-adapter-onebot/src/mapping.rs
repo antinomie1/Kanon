@@ -378,7 +378,11 @@ fn outgoing(segment: &MessageSegment) -> Result<Value, String> {
                 .payload
                 .as_ref()
                 .ok_or("custom OneBot segment has no data")?;
-            (kind, from_struct(data))
+            (
+                kind,
+                kanon_proto::json::prost_struct_to_json(data.clone())
+                    .map_err(|error| error.to_string())?,
+            )
         }
         None => return Err("message contains an empty segment".into()),
     };
@@ -449,67 +453,31 @@ fn unescape(text: &str, parameter: bool) -> String {
 }
 
 fn to_struct(value: &Value) -> Result<prost_types::Struct, String> {
-    let fields = value
-        .as_object()
-        .ok_or("protobuf payload must be an object")?;
-    Ok(prost_types::Struct {
-        fields: fields
-            .iter()
-            .map(|(key, value)| Ok((key.clone(), to_value(value)?)))
-            .collect::<Result<_, String>>()?,
-    })
+    validate_numeric_precision(value)?;
+    kanon_proto::json::json_to_prost_struct(value)
+        .ok_or_else(|| "protobuf payload must be an object".into())
 }
 
+/// Validates forwarded payloads before using the shared protobuf representation.
 fn to_value(value: &Value) -> Result<prost_types::Value, String> {
-    let kind = match value {
-        Value::Null => Kind::NullValue(0),
-        Value::Bool(flag) => Kind::BoolValue(*flag),
-        Value::String(text) => Kind::StringValue(text.clone()),
-        Value::Number(number) => {
-            // Reject unrepresentable custom numbers instead of corrupting an opaque ID.
+    validate_numeric_precision(value)?;
+    Ok(kanon_proto::json::json_to_prost_value(value))
+}
+
+/// OneBot opaque numeric payloads retain the adapter's stricter identity precision policy.
+fn validate_numeric_precision(value: &Value) -> Result<(), String> {
+    match value {
+        Value::Number(number)
             if number
                 .as_i64()
                 .is_some_and(|n| n.unsigned_abs() > (1_u64 << 53))
-                || number.as_u64().is_some_and(|n| n > (1_u64 << 53))
-            {
-                return Err(
-                    "OneBot custom numeric value exceeds exact protobuf precision; use a string"
-                        .into(),
-                );
-            }
-            Kind::NumberValue(number.as_f64().ok_or("invalid JSON number")?)
-        }
-        Value::Array(items) => Kind::ListValue(prost_types::ListValue {
-            values: items.iter().map(to_value).collect::<Result<_, _>>()?,
-        }),
-        Value::Object(_) => Kind::StructValue(to_struct(value)?),
-    };
-    Ok(prost_types::Value { kind: Some(kind) })
-}
-
-fn from_struct(value: &prost_types::Struct) -> Value {
-    Value::Object(
-        value
-            .fields
-            .iter()
-            .map(|(key, value)| (key.clone(), from_value(value)))
-            .collect(),
-    )
-}
-
-fn from_value(value: &prost_types::Value) -> Value {
-    match value.kind.as_ref() {
-        None | Some(Kind::NullValue(_)) => Value::Null,
-        Some(Kind::BoolValue(flag)) => json!(flag),
-        Some(Kind::StringValue(text)) => json!(text),
-        Some(Kind::NumberValue(number))
-            if number.fract() == 0.0 && number.abs() <= (1_u64 << 53) as f64 =>
+                || number.as_u64().is_some_and(|n| n > (1_u64 << 53)) =>
         {
-            json!(*number as i64)
+            Err("OneBot custom numeric value exceeds exact protobuf precision; use a string".into())
         }
-        Some(Kind::NumberValue(number)) => json!(number),
-        Some(Kind::ListValue(list)) => Value::Array(list.values.iter().map(from_value).collect()),
-        Some(Kind::StructValue(value)) => from_struct(value),
+        Value::Array(items) => items.iter().try_for_each(validate_numeric_precision),
+        Value::Object(fields) => fields.values().try_for_each(validate_numeric_precision),
+        _ => Ok(()),
     }
 }
 

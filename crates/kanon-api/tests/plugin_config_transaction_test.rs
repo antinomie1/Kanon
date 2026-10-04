@@ -60,7 +60,7 @@ impl PluginHostService for ControlledHost {
         request: Request<ReloadPluginConfigRequest>,
     ) -> Result<Response<ReloadPluginConfigResponse>, Status> {
         let request = request.into_inner();
-        let value = kanon_llm::tool_router::prost_struct_to_json(request.config.unwrap());
+        let value = kanon_llm::tool_router::prost_struct_to_json(request.config.unwrap()).unwrap();
         self.0.calls.fetch_add(1, Ordering::SeqCst);
         if value["api_key"] == "blocked" {
             self.0.entered.notify_one();

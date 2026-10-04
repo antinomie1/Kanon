@@ -867,7 +867,8 @@ async fn call_tool(
     );
     match &resp.payload {
         Some(tool_call_response::Payload::StructuredResult(s)) => {
-            let json_val = kanon_llm::tool_router::prost_struct_to_json(s.clone());
+            let json_val = kanon_llm::tool_router::prost_struct_to_json(s.clone())
+                .map_err(|error| tonic::Status::data_loss(error.to_string()))?;
             println!(
                 "Result: {}",
                 serde_json::to_string_pretty(&json_val).unwrap_or_default()
