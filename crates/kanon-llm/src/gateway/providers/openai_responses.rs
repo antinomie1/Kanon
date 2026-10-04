@@ -143,6 +143,70 @@ mod wire {
     }
 }
 
+/// Accepts only the JSON string/object argument forms supported by Responses gateways.
+fn function_call_arguments(
+    arguments: serde_json::Value,
+) -> Result<serde_json::Value, GatewayError> {
+    match arguments {
+        serde_json::Value::String(arguments) => Ok(serde_json::from_str(&arguments)?),
+        arguments @ serde_json::Value::Object(_) => Ok(arguments),
+        _ => Err(GatewayError::InvalidResponse(
+            "function call arguments must be a JSON string or object".into(),
+        )),
+    }
+}
+
+/// Leaves string fragments unparsed until completion and preserves object-form arguments.
+fn streamed_arguments(arguments: &serde_json::Value) -> Result<String, GatewayError> {
+    match arguments {
+        serde_json::Value::String(arguments) => Ok(arguments.clone()),
+        arguments => Ok(function_call_arguments(arguments.clone())?.to_string()),
+    }
+}
+
+/// Partial text remains useful to callers, but unfinished or refused calls cannot execute.
+fn response_finish_reason(
+    status: Option<&str>,
+    has_tool_calls: bool,
+    refused: bool,
+) -> Result<Option<String>, GatewayError> {
+    if let Some(status) = status
+        && (status != "completed" && (status != "incomplete" || has_tool_calls))
+    {
+        return Err(GatewayError::InvalidResponse(format!(
+            "Responses result has unusable status: {status}"
+        )));
+    }
+    if refused && has_tool_calls {
+        return Err(GatewayError::InvalidResponse(
+            "refused response contains tool calls".into(),
+        ));
+    }
+    Ok(if refused {
+        Some("refusal".into())
+    } else if has_tool_calls {
+        Some("tool_calls".into())
+    } else {
+        status.map(str::to_owned)
+    })
+}
+
+/// Validates the terminal status before publishing any accumulated call for execution.
+fn finish_response(
+    calls: std::collections::BTreeMap<usize, super::PendingToolCall>,
+    status: &str,
+    refused: bool,
+) -> Result<ChatChunk, GatewayError> {
+    let reason = response_finish_reason(Some(status), !calls.is_empty(), refused)?;
+    // An empty initial fragment is allowed while streaming, but it is never complete JSON.
+    if calls.values().any(|call| call.arguments.is_empty()) {
+        return Err(GatewayError::InvalidResponse(
+            "function call has no arguments".into(),
+        ));
+    }
+    super::finish_tool_calls(calls, reason)
+}
+
 /// Requires the provider's result-correlation identifier, not the distinct output item `id`.
 /// Inventing an identifier would execute a tool whose result cannot be matched to its call.
 fn function_call_id(call_id: Option<&str>) -> Result<String, GatewayError> {
@@ -412,15 +476,7 @@ impl LlmProvider for OpenAiResponsesProvider {
                 } => {
                     let call_id = function_call_id(call_id.as_deref())?;
 
-                    let parsed_args = match arguments {
-                        serde_json::Value::String(s) => serde_json::from_str(&s)?,
-                        val @ serde_json::Value::Object(_) => val,
-                        _ => {
-                            return Err(GatewayError::InvalidResponse(
-                                "function call arguments must be a JSON string or object".into(),
-                            ));
-                        }
-                    };
+                    let parsed_args = function_call_arguments(arguments)?;
 
                     tool_calls.push(ToolCall {
                         id: call_id,
@@ -434,13 +490,8 @@ impl LlmProvider for OpenAiResponsesProvider {
 
         // A completed transport response can still refuse the task. Keep the visible answer,
         // but never let compaction mistake that refusal for a summary and discard history.
-        let finish_reason = if refused {
-            Some("refusal".to_string())
-        } else if !tool_calls.is_empty() {
-            Some("tool_calls".to_string())
-        } else {
-            wire_resp.status
-        };
+        let finish_reason =
+            response_finish_reason(wire_resp.status.as_deref(), !tool_calls.is_empty(), refused)?;
 
         let usage = wire_resp.usage.map(|u| TokenUsage {
             prompt_tokens: u.input_tokens.unwrap_or(0),
@@ -478,7 +529,7 @@ impl LlmProvider for OpenAiResponsesProvider {
         tokio::spawn(async move {
             let mut decoder = SseDecoder::new();
             let mut calls = std::collections::BTreeMap::<usize, super::PendingToolCall>::new();
-            let mut finish_reason = "completed";
+            let mut refused = false;
 
             while let Some(chunk_res) = byte_stream.next().await {
                 let chunk = match chunk_res {
@@ -490,9 +541,7 @@ impl LlmProvider for OpenAiResponsesProvider {
                 };
                 for event in decoder.decode(&chunk) {
                     if event.data.trim() == "[DONE]" {
-                        let _ = tx
-                            .send(super::finish_tool_calls(calls, Some(finish_reason.into())))
-                            .await;
+                        let _ = tx.send(finish_response(calls, "completed", refused)).await;
                         return;
                     }
                     let value: serde_json::Value = match serde_json::from_str(&event.data) {
@@ -507,7 +556,7 @@ impl LlmProvider for OpenAiResponsesProvider {
                         event_type,
                         Some("response.refusal.delta" | "response.refusal.done")
                     ) {
-                        finish_reason = "refusal";
+                        refused = true;
                     }
                     match event_type {
                         Some("response.output_item.added" | "response.output_item.done")
@@ -529,15 +578,28 @@ impl LlmProvider for OpenAiResponsesProvider {
                                     return;
                                 }
                             };
+                            // Added items can precede their first argument fragment. Completed
+                            // items must provide arguments, even when the object is empty.
+                            let arguments = match if event_type
+                                == Some("response.output_item.added")
+                                && item["arguments"].is_null()
+                            {
+                                Ok(String::new())
+                            } else {
+                                streamed_arguments(&item["arguments"])
+                            } {
+                                Ok(arguments) => arguments,
+                                Err(error) => {
+                                    let _ = tx.send(Err(error)).await;
+                                    return;
+                                }
+                            };
                             calls.insert(
                                 index as usize,
                                 super::PendingToolCall {
                                     id,
                                     name: item["name"].as_str().unwrap_or_default().into(),
-                                    arguments: item["arguments"]
-                                        .as_str()
-                                        .unwrap_or_default()
-                                        .into(),
+                                    arguments,
                                 },
                             );
                         }
@@ -557,9 +619,13 @@ impl LlmProvider for OpenAiResponsesProvider {
                                 return;
                             };
                             if event_type == Some("response.function_call_arguments.done") {
-                                if let Some(arguments) = value["arguments"].as_str() {
-                                    call.arguments = arguments.into();
-                                }
+                                call.arguments = match streamed_arguments(&value["arguments"]) {
+                                    Ok(arguments) => arguments,
+                                    Err(error) => {
+                                        let _ = tx.send(Err(error)).await;
+                                        return;
+                                    }
+                                };
                             } else if let Some(delta) = value["delta"].as_str() {
                                 call.arguments.push_str(delta);
                             }
@@ -581,13 +647,42 @@ impl LlmProvider for OpenAiResponsesProvider {
                                 return;
                             }
                         }
-                        Some("response.completed" | "response.done") => {
-                            let _ = tx
-                                .send(super::finish_tool_calls(calls, Some(finish_reason.into())))
-                                .await;
+                        Some("response.completed" | "response.done" | "response.incomplete") => {
+                            let response = &value["response"];
+                            if !response["error"].is_null() {
+                                let _ = tx
+                                    .send(Err(GatewayError::ApiStatus {
+                                        status: 200,
+                                        message: response["error"]["message"]
+                                            .as_str()
+                                            .map(str::to_owned)
+                                            .unwrap_or_else(|| response["error"].to_string()),
+                                    }))
+                                    .await;
+                                return;
+                            }
+                            let status = match &response["status"] {
+                                serde_json::Value::String(status) => status.as_str(),
+                                serde_json::Value::Null => {
+                                    if event_type == Some("response.incomplete") {
+                                        "incomplete"
+                                    } else {
+                                        "completed"
+                                    }
+                                }
+                                _ => {
+                                    let _ = tx
+                                        .send(Err(GatewayError::InvalidResponse(
+                                            "Responses status must be a string".into(),
+                                        )))
+                                        .await;
+                                    return;
+                                }
+                            };
+                            let _ = tx.send(finish_response(calls, status, refused)).await;
                             return;
                         }
-                        Some("response.failed" | "response.incomplete" | "error") => {
+                        Some("response.failed" | "response.cancelled" | "error") => {
                             let _ = tx
                                 .send(Err(GatewayError::InvalidResponse(value.to_string())))
                                 .await;

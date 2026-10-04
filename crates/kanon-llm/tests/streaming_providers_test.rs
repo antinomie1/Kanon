@@ -333,7 +333,7 @@ async fn streamed_tool_arguments_are_assembled_and_malformed_arguments_fail() {
                     serde_json::json!({"choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"function":{"arguments":tail}}]},"finish_reason":"tool_calls"}]}),
                 ],
                 "responses" => vec![
-                    serde_json::json!({"type":"response.output_item.added","output_index":0,"item":{"type":"function_call","call_id":"call-1","name":"weather","arguments":""}}),
+                    serde_json::json!({"type":"response.output_item.added","output_index":0,"item":{"type":"function_call","call_id":"call-1","name":"weather"}}),
                     serde_json::json!({"type":"response.function_call_arguments.delta","output_index":0,"delta":"{\"city\":\""}),
                     serde_json::json!({"type":"response.function_call_arguments.delta","output_index":0,"delta":tail}),
                     serde_json::json!({"type":"response.completed"}),

@@ -107,6 +107,7 @@ mod wire {
     pub struct OpenAiResponseMessageWire {
         pub role: String,
         pub content: Option<String>,
+        pub refusal: Option<String>,
         #[serde(default, deserialize_with = "reasoning_channel")]
         pub reasoning_content: Option<String>,
         #[serde(default)]
@@ -150,6 +151,8 @@ mod wire {
         pub role: Option<String>,
         #[serde(default)]
         pub content: Option<String>,
+        #[serde(default)]
+        pub refusal: Option<String>,
         #[serde(default, deserialize_with = "reasoning_channel")]
         pub reasoning_content: Option<String>,
         #[serde(default)]
@@ -445,6 +448,19 @@ impl LlmProvider for OpenAiChatProvider {
             GatewayError::InvalidResponse("No choices returned in response".to_string())
         })?;
 
+        let refusal = choice.message.refusal.filter(|text| !text.is_empty());
+        let refused = refusal.is_some();
+        if refused
+            && choice
+                .message
+                .tool_calls
+                .as_ref()
+                .is_some_and(|calls| !calls.is_empty())
+        {
+            return Err(GatewayError::InvalidResponse(
+                "refused response contains tool calls".into(),
+            ));
+        }
         let tool_calls = choice
             .message
             .tool_calls
@@ -473,11 +489,20 @@ impl LlmProvider for OpenAiChatProvider {
             total_tokens: u.total_tokens,
         });
 
+        let mut content = choice.message.content;
+        if let Some(refusal) = refusal {
+            content.get_or_insert_default().push_str(&refusal);
+        }
         let mut response = ChatResponse {
-            content: choice.message.content,
+            content,
             reasoning_content: choice.message.reasoning_content,
             tool_calls,
-            finish_reason: choice.finish_reason,
+            // Refusal text is visible output, but cannot serve as a compaction summary.
+            finish_reason: if refused {
+                Some("refusal".into())
+            } else {
+                choice.finish_reason
+            },
             usage,
         };
         response.separate_reasoning();
@@ -493,6 +518,7 @@ impl LlmProvider for OpenAiChatProvider {
         tokio::spawn(async move {
             let mut decoder = SseDecoder::new();
             let mut calls = std::collections::BTreeMap::<usize, super::PendingToolCall>::new();
+            let mut refused = false;
 
             while let Some(chunk_res) = byte_stream.next().await {
                 let chunk = match chunk_res {
@@ -505,7 +531,10 @@ impl LlmProvider for OpenAiChatProvider {
                 for event in decoder.decode(&chunk) {
                     if event.data.trim() == "[DONE]" {
                         let _ = tx
-                            .send(super::finish_tool_calls(calls, Some("stop".into())))
+                            .send(super::finish_tool_calls(
+                                calls,
+                                Some(if refused { "refusal" } else { "stop" }.into()),
+                            ))
                             .await;
                         return;
                     }
@@ -545,8 +574,22 @@ impl LlmProvider for OpenAiChatProvider {
                                 }
                             }
                         }
+                        let mut text = choice.delta.content.unwrap_or_default();
+                        if let Some(refusal) = choice.delta.refusal.filter(|text| !text.is_empty())
+                        {
+                            refused = true;
+                            text.push_str(&refusal);
+                        }
+                        if refused && !calls.is_empty() {
+                            let _ = tx
+                                .send(Err(GatewayError::InvalidResponse(
+                                    "refused response contains tool calls".into(),
+                                )))
+                                .await;
+                            return;
+                        }
                         let out = ChatChunk {
-                            delta_text: choice.delta.content.unwrap_or_default(),
+                            delta_text: text,
                             reasoning_text: choice.delta.reasoning_content,
                             ..ChatChunk::default()
                         };
@@ -556,8 +599,13 @@ impl LlmProvider for OpenAiChatProvider {
                             return;
                         }
                         if choice.finish_reason.is_some() {
+                            let finish_reason = if refused {
+                                Some("refusal".into())
+                            } else {
+                                choice.finish_reason
+                            };
                             let _ = tx
-                                .send(super::finish_tool_calls(calls, choice.finish_reason))
+                                .send(super::finish_tool_calls(calls, finish_reason))
                                 .await;
                             return;
                         }

@@ -832,6 +832,110 @@ async fn responses_refusal_deltas_are_visible_and_persisted_once() {
 }
 
 #[tokio::test]
+async fn chat_refusal_remains_visible_and_cannot_replace_history() {
+    for terminal in ["complete", "stop", "[DONE]"] {
+        let url = server(Router::new().route("/v1/chat/completions", post(move |Json(body): Json<Value>| async move {
+            if body["stream"] == true {
+                let events = [
+                    json!({"choices":[{"index":0,"delta":{"reasoning_content":"private"},"finish_reason":null}]}),
+                    json!({"choices":[{"index":0,"delta":{"content":null,"refusal":"synthetic "},"finish_reason":null}]}),
+                    json!({"choices":[{"index":0,"delta":{"refusal":"refusal"},"finish_reason":null}]}),
+                ];
+                let mut sse: String = events.iter().map(|event| format!("data: {event}\n\n")).collect();
+                if terminal == "stop" {
+                    let event = json!({"choices":[{"index":0,"delta":{},"finish_reason":"stop"}]});
+                    sse.push_str(&format!("data: {event}\n\n"));
+                }
+                sse.push_str("data: [DONE]\n\n");
+                ([("content-type", "text/event-stream")], sse).into_response()
+            } else {
+                Json(json!({"choices":[{"index":0,"message":{"role":"assistant","content":null,"refusal":"synthetic refusal","reasoning_content":"private"},"finish_reason":"stop"}]})).into_response()
+            }
+        }))).await;
+        let memory = Arc::new(InMemory::new());
+        let agent = BuiltinAgent::builder(
+            "fixture",
+            Arc::new(OpenAiChatProvider::new(url, None, "fixture")),
+        )
+        .memory(memory.clone())
+        .compaction(None)
+        .build();
+        if terminal == "complete" {
+            let output = agent.run_standalone("s", "question").await.unwrap();
+            assert_eq!(output.content, "synthetic refusal");
+            assert_eq!(output.finish_reason.as_deref(), Some("refusal"));
+        } else {
+            let chunks = agent
+                .run_standalone_stream("s", "question")
+                .await
+                .unwrap()
+                .collect::<Vec<_>>()
+                .await
+                .into_iter()
+                .collect::<Result<Vec<_>, _>>()
+                .unwrap();
+            assert_eq!(
+                chunks
+                    .iter()
+                    .map(|chunk| chunk.delta_text.as_str())
+                    .collect::<String>(),
+                "synthetic refusal"
+            );
+            assert_eq!(chunks.iter().filter(|chunk| chunk.is_finished).count(), 1);
+            assert_eq!(
+                chunks.last().unwrap().finish_reason.as_deref(),
+                Some("refusal")
+            );
+        }
+        let messages = memory.get_messages("s");
+        assert_eq!(messages.len(), 2);
+        assert_eq!(messages[1].content.as_deref(), Some("synthetic refusal"));
+        assert_eq!(messages[1].reasoning_content.as_deref(), Some("private"));
+        agent.run_standalone("s", "another question").await.unwrap();
+        let before = memory.snapshot("s").await.unwrap();
+        let error = agent.compact_session("s", &[]).await.unwrap_err();
+        assert!(error.to_string().contains("refusal"));
+        assert_eq!(memory.snapshot("s").await.unwrap(), before);
+    }
+}
+
+#[tokio::test]
+async fn chat_refusal_with_tool_calls_rejects_the_entire_reply() {
+    let url = server(Router::new().route("/v1/chat/completions", post(|Json(body): Json<Value>| async move {
+        let message = json!({"role":"assistant","refusal":"synthetic refusal","tool_calls":[{
+            "index":0,"id":"call-1","type":"function","function":{"name":"lookup","arguments":"{}"}
+        }]});
+        if body["stream"] == true {
+            let event = json!({"choices":[{"index":0,"delta":message,"finish_reason":"tool_calls"}]});
+            ([("content-type", "text/event-stream")], format!("data: {event}\n\ndata: [DONE]\n\n")).into_response()
+        } else {
+            Json(json!({"choices":[{"index":0,"message":message,"finish_reason":"tool_calls"}]})).into_response()
+        }
+    }))).await;
+    let provider = OpenAiChatProvider::new(url, None, "fixture");
+    let req = request(vec![ChatMessage::user("question")]);
+    let error = provider.chat(&req).await.unwrap_err();
+    assert!(
+        error
+            .to_string()
+            .contains("refused response contains tool calls")
+    );
+    let chunks = provider
+        .chat_stream(&req)
+        .await
+        .unwrap()
+        .collect::<Vec<_>>()
+        .await;
+    assert!(chunks.iter().any(Result::is_err));
+    assert!(
+        chunks
+            .iter()
+            .filter_map(|chunk| chunk.as_ref().ok())
+            .all(|chunk| chunk.tool_calls.is_empty() && !chunk.is_finished)
+    );
+}
+
+#[tokio::test]
 async fn responses_refusal_remains_visible_and_cannot_replace_history() {
     let url = server(Router::new().route("/v1/responses", post(|| async {
         Json(json!({"output":[{"type":"message","role":"assistant","content":[{"type":"refusal","refusal":"synthetic refusal"}]}],"status":"completed"}))
