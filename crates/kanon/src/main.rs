@@ -267,10 +267,17 @@ async fn main() -> StartupResult<()> {
         state.agent_factory().dsh_for(instance.agent.as_deref())?;
     }
 
-    restore_instance_personas(&instances.list().await, state.personas(), state.sessions())
-        .map_err(|err| {
-            format!("Failed to restore instance personas and session bindings: {err}")
-        })?;
+    let builtin_instances: Vec<_> = instances
+        .list()
+        .await
+        .into_iter()
+        .filter(|instance| {
+            state.agent_factory().agent_id(instance.agent.as_deref()) == kanon_llm::BUILTIN_AGENT
+        })
+        .collect();
+    restore_instance_personas(&builtin_instances, state.personas(), state.sessions()).map_err(
+        |err| format!("Failed to restore instance personas and session bindings: {err}"),
+    )?;
 
     match state.agent() {
         Some(agent) => tracing::info!(

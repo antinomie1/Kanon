@@ -82,45 +82,45 @@ impl PipelineEngine {
         )?;
         // Preparation is required, so a missing/old native plugin fails before model input is
         // submitted. There is no fallback to an unscoped DSH tool environment.
-        let prepare = async {
-            client.create_session(session_id, None).await?;
-            if let Some(reference) = native_model {
-                let (provider, model) = reference.split_once('/').ok_or_else(|| {
-                    kanon_llm::dsh::DshError::Config("DSH model requires provider/model".into())
-                })?;
-                client
-                    .select_model(session_id, provider, model, None)
-                    .await?;
-            }
-            let ready: serde_json::Value = client
-                .call(
-                    "kanon/prepare",
-                    serde_json::json!({
-                        "sessionId": session_id, "requestId": request_id,
-                    }),
-                )
-                .await?;
-            if ready["leaseId"] != lease_id || ready["requestId"] != request_id {
-                return Err(kanon_llm::dsh::DshError::Protocol(
-                    "DSH bridge prepared a different turn".into(),
-                ));
-            }
-            Ok::<_, kanon_llm::dsh::DshError>(())
+        let content = kanon_llm::dsh::message_content(message)?;
+        let prepared_session = session_id.to_string();
+        let prepared_request = request_id.clone();
+        let output = client
+            .run_prepared_turn(
+                session_id,
+                &request_id,
+                content,
+                native_model.map(str::to_string),
+                move |client| async move {
+                    let ready: serde_json::Value = client
+                        .call(
+                            "kanon/prepare",
+                            serde_json::json!({
+                                "sessionId": prepared_session, "requestId": prepared_request,
+                            }),
+                        )
+                        .await?;
+                    if ready["leaseId"] != lease_id || ready["requestId"] != prepared_request {
+                        return Err(kanon_llm::dsh::DshError::Protocol(
+                            "DSH bridge prepared a different turn".into(),
+                        ));
+                    }
+                    Ok(())
+                },
+                signal.stopped(),
+                ephemeral,
+            )
+            .await
+            .map_err(|error| match error {
+                kanon_llm::dsh::DshError::Stopped => AgentError::Stopped,
+                other => AgentError::Dsh(other),
+            })?;
+        let mut output = ToolRouterOutput {
+            content: output.content,
+            reasoning: None,
+            executed_tools: Vec::new(),
+            attachments: Vec::new(),
         };
-        tokio::select! {
-            biased;
-            () = signal.stopped() => return Err(AgentError::Stopped),
-            result = prepare => result.map_err(AgentError::Dsh)?,
-        }
-        let mut output = kanon_llm::dsh::run_message(
-            &client,
-            session_id,
-            &request_id,
-            message,
-            &signal,
-            ephemeral,
-        )
-        .await?;
         guard.finish(&mut output).await;
         Ok(output)
     }

@@ -1,6 +1,8 @@
 /** zh settings and shared platform translations. */
 export default {
     'dsh.continue': '继续对话',
+    'dsh.archived': '已归档会话',
+    'dsh.restore': '恢复',
     'dsh.sessions_hint': '历史、模型和会话设置由 deepseek-harness 管理。',
     'dsh.no_sessions': '还没有 DSH 会话。',
     'dsh.archive': '归档',

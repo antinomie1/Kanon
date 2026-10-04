@@ -6,4 +6,4 @@ mod message;
 
 pub use history::conversation_messages;
 pub use kanon_dsh::*;
-pub use message::run_message;
+pub use message::message_content;

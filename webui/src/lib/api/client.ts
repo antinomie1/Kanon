@@ -7,6 +7,7 @@ import type {
   DshSnapshot,
   DshModels,
   DshPage,
+  DshAttachment,
   BashPolicy,
   CallPluginToolResponse,
   ChatCompletionRequest,
@@ -213,6 +214,8 @@ export const api = {
   getDshSessions: () => request<DshSession[]>('/api/v1/agents/dsh/sessions'),
   getDshModels: () => request<DshModels>('/api/v1/agents/dsh/models'),
   getDshSession: (id: string) => request<DshSnapshot>(`/api/v1/agents/dsh/sessions/${encodeURIComponent(id)}`),
+  getDshAttachment: (id: string, attachment: string) =>
+    request<DshAttachment>(`/api/v1/agents/dsh/sessions/${encodeURIComponent(id)}/attachments/${encodeURIComponent(attachment)}`),
   getDshHistory: (id: string, throughSeq: number, beforeSeq: number) =>
     request<DshPage>(`/api/v1/agents/dsh/sessions/${encodeURIComponent(id)}/history?through_seq=${throughSeq}&before_seq=${beforeSeq}`),
   selectDshModel: (id: string, provider: string, model: string) =>
@@ -225,6 +228,7 @@ export const api = {
     }),
   stopDshSession: (id: string) => request<unknown>(`/api/v1/agents/dsh/sessions/${encodeURIComponent(id)}/stop`, { method: 'POST' }),
   archiveDshSession: (id: string) => request<unknown>(`/api/v1/agents/dsh/sessions/${encodeURIComponent(id)}/archive`, { method: 'POST' }),
+  restoreDshSession: (id: string) => request<unknown>(`/api/v1/agents/dsh/sessions/${encodeURIComponent(id)}/restore`, { method: 'POST' }),
 
   // Model catalog: per-model context window, modalities and sampling overrides keyed by reference.
   getModels: () => request<ModelsResponse>('/api/v1/models'),

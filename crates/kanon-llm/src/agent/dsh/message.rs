@@ -1,19 +1,11 @@
 //! Converts the current user message without importing builtin history or prompt settings.
 
-use super::{DshClient, DshError};
-use crate::{AgentError, ChatMessage, ContentPart, Role, StopSignal, ToolRouterOutput};
-use serde_json::json;
+use crate::{AgentError, ChatMessage, ContentPart, Role};
+use serde_json::{Value, json};
 
-/// Runs a current user message under DSH's own model, tools and session journal.
-/// Images must already be inlined by the caller; DSH must never read a Kanon-local path.
-pub async fn run_message(
-    client: &DshClient,
-    session_id: &str,
-    request_id: &str,
-    message: ChatMessage,
-    stop: &StopSignal,
-    ephemeral: bool,
-) -> Result<ToolRouterOutput, AgentError> {
+/// Converts current input before remote session creation can have any side effect.
+/// Images must already be inlined; DSH must never read a Kanon-local path.
+pub fn message_content(message: ChatMessage) -> Result<Vec<Value>, AgentError> {
     if message.role != Role::User || message.tool_calls.is_some() {
         return Err(AgentError::InvalidRequest(
             "DSH accepts only current user input".into(),
@@ -39,20 +31,10 @@ pub async fn run_message(
             content.push(json!({"type": "image", "mediaType": mime, "data": data}));
         }
     }
-    if stop.is_stopped() {
-        return Err(AgentError::Stopped);
+    if content.is_empty() {
+        return Err(AgentError::InvalidRequest(
+            "DSH prompt must contain content".into(),
+        ));
     }
-    let output = client
-        .run_scoped_turn(session_id, request_id, content, stop.stopped(), ephemeral)
-        .await
-        .map_err(|error| match error {
-            DshError::Stopped => AgentError::Stopped,
-            other => AgentError::Dsh(other),
-        })?;
-    Ok(ToolRouterOutput {
-        content: output.content,
-        reasoning: None,
-        executed_tools: Vec::new(),
-        attachments: Vec::new(),
-    })
+    Ok(content)
 }

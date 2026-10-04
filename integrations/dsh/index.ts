@@ -1,6 +1,6 @@
 /** Native DSH plugin: real agent identity, native context assembly, Kanon's shared tool policy. */
 import type { Context } from "@deepseek-ai/cordis";
-import type { Agent } from "@deepseek-ai/dsh-agent";
+import { assembleContextFor, type Agent } from "@deepseek-ai/dsh-agent";
 import "@deepseek-ai/dsh-api-session-controller";
 import "@deepseek-ai/dsh-system-prompt";
 import "@deepseek-ai/dsh-tools";
@@ -103,9 +103,30 @@ export default class KanonBridge extends TypertRemoteService {
           });
           prepared.dispose.push(agent.ctx.tools.register(definition));
         }
-        prepared.dispose.push(agent.ctx.systemPrompt.section({
+        const section = agent.ctx.systemPrompt.section({
           name: "kanon", order: 100, text: catalog.instructions, interpolate: false,
-        }));
+        });
+        prepared.dispose.push(section);
+        if (catalog.instructions) {
+          const context = assembleContextFor(agent, combined);
+          const assembly = await agent.ctx.systemPrompt.assemble(context);
+          if (!assembly.sections.some(section => section.name === "kanon")) {
+            // Native complete prompts deliberately exclude other system sections. Keep that
+            // authority and contribute the required integration policy through DSH's own
+            // durable context snapshots instead. Never rewrite a frozen native model call.
+            section();
+            prepared.dispose.pop();
+            prepared.dispose.push(agent.ctx.systemPrompt.variable("kanon_instructions", () => catalog.instructions));
+            prepared.dispose.push(agent.ctx.systemPrompt.context({
+              name: "kanon", order: 100, text: "{{kanon_instructions}}",
+            }));
+            const native = await agent.ctx.systemPrompt.assemble(context);
+            if (!native.contexts.some(context => context.name === "kanon")) {
+              throw new Error("DSH suppresses both system contributions and native context; Kanon policy cannot be delivered");
+            }
+          }
+        }
+        combined.throwIfAborted();
         this.prepared.set(agent, prepared);
         this.owned.add(agent);
         return { leaseId: catalog.leaseId, requestId };

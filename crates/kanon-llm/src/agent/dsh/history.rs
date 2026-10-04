@@ -16,8 +16,8 @@ struct Page {
     has_more: bool,
 }
 
-/// Reads the current visible user/assistant text at one immutable remote journal cut.
-/// Native replacement markers retire their earlier range before the replacement is shown.
+/// Reads the human user/assistant transcript at one immutable remote journal cut.
+/// Context replacement copies belong to the model surface and never retire human history.
 /// Large journals fail explicitly instead of returning an apparently complete partial history.
 pub async fn conversation_messages(
     client: &DshClient,
@@ -62,22 +62,10 @@ pub async fn conversation_messages(
             .as_u64()
             .ok_or_else(|| DshError::Protocol("history event has no sequence".into()))?;
         let op = &event["surfaceOp"];
-        if op["op"] == "replace" {
-            let start = op["startSeq"].as_u64();
-            let end = op["endSeq"].as_u64();
-            let (Some(start), Some(end)) = (start, end) else {
-                return Err(DshError::Protocol("invalid history replacement".into()));
-            };
-            if start > end || end >= seq {
-                return Err(DshError::Protocol(
-                    "invalid history replacement range".into(),
-                ));
-            }
-            visible.retain(|key, _| *key < start || *key > end);
-        } else if !op.is_null() && op != "append" {
-            return Err(DshError::Protocol(
-                "unknown history surface operation".into(),
-            ));
+        if !op.is_null() && op != "append" {
+            // Native compaction replaces only the model context. The human transcript retains
+            // the original append events and excludes their model-only replacement copies.
+            continue;
         }
         let (blocks, user) = match event["type"].as_str() {
             Some("user/message") => (&event["data"]["content"], true),

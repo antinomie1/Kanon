@@ -32,7 +32,19 @@ impl PipelineEngine {
         let prefix = instance.dsh_session_prefix(conversation);
         let current = instance.dsh_session_generation(conversation);
         let sessions = client.sessions().await?;
+        if sessions.iter().any(|session| {
+            session.archived
+                && session.session_id == instance.dsh_session_id_at(conversation, current)
+        }) {
+            return Err(ConversationError::Invalid(
+                "current DSH session is archived; create a new conversation or restore it in DSH"
+                    .into(),
+            ));
+        }
         let matching = sessions.into_iter().filter_map(|session| {
+            if session.archived {
+                return None;
+            }
             let generation = session
                 .session_id
                 .strip_prefix(&prefix)?
@@ -86,5 +98,33 @@ impl PipelineEngine {
         }
         conversations.sort_by_key(|conversation| conversation.generation);
         Ok(conversations)
+    }
+
+    /// Retired journals still reserve their generation; a new chat must never adopt one.
+    pub(super) async fn dsh_next_generation(
+        &self,
+        chat: &Chat,
+        client: &DshClient,
+    ) -> Result<u64, ConversationError> {
+        let instance = self.live_instance(&chat.instance).await?;
+        let prefix = instance.dsh_session_prefix(&chat.conversation);
+        client
+            .sessions()
+            .await?
+            .iter()
+            .filter_map(|session| {
+                session
+                    .session_id
+                    .strip_prefix(&prefix)?
+                    .parse::<u64>()
+                    .ok()
+            })
+            .chain(std::iter::once(
+                instance.dsh_session_generation(&chat.conversation),
+            ))
+            .max()
+            .unwrap_or(0)
+            .checked_add(1)
+            .ok_or_else(|| ConversationError::Invalid("DSH session generation exhausted".into()))
     }
 }

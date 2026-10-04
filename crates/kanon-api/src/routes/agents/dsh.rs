@@ -24,10 +24,15 @@ pub(super) fn routes() -> Router<ApiState> {
         .route("/api/v1/agents/dsh/sessions", get(sessions))
         .route("/api/v1/agents/dsh/sessions/:id", get(snapshot))
         .route("/api/v1/agents/dsh/sessions/:id/history", get(history))
+        .route(
+            "/api/v1/agents/dsh/sessions/:id/attachments/:attachment",
+            get(attachment),
+        )
         .route("/api/v1/agents/dsh/sessions/:id/model", put(select_model))
         .route("/api/v1/agents/dsh/sessions/:id/title", put(rename))
         .route("/api/v1/agents/dsh/sessions/:id/stop", post(stop))
         .route("/api/v1/agents/dsh/sessions/:id/archive", post(archive))
+        .route("/api/v1/agents/dsh/sessions/:id/restore", post(restore))
 }
 
 fn client(state: &ApiState) -> Result<Arc<DshClient>, ApiError> {
@@ -159,6 +164,17 @@ async fn history(
         .map_err(remote_error)
 }
 
+async fn attachment(
+    State(state): State<ApiState>,
+    Path((id, attachment)): Path<(String, String)>,
+) -> Result<Json<Value>, ApiError> {
+    client(&state)?
+        .attachment(&id, &attachment)
+        .await
+        .map(Json)
+        .map_err(remote_error)
+}
+
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct ModelSelection {
@@ -224,6 +240,17 @@ async fn archive(
         .map_err(|e| ApiError::Conflict(e.to_string()))?;
     client
         .archive_session(&id)
+        .await
+        .map(Json)
+        .map_err(remote_error)
+}
+
+async fn restore(
+    State(state): State<ApiState>,
+    Path(id): Path<String>,
+) -> Result<Json<Value>, ApiError> {
+    client(&state)?
+        .restore_session(&id)
         .await
         .map(Json)
         .map_err(remote_error)

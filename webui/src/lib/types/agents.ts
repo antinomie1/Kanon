@@ -25,6 +25,7 @@ export interface DshSession {
   updatedAt: number;
   running: boolean;
   blank: boolean;
+  archived: boolean;
   projections?: { values: { title?: { title: string }; modelSelection?: { next?: { provider: string; model: string } } } };
 }
 
@@ -59,4 +60,10 @@ export interface DshModels {
   default: { provider: string; model: string };
   groups: Array<{ id: string; name: string; models: Array<{ id: string; name: string }> }>;
   failures: Array<{ id: string; name: string; message: string }>;
+}
+
+/** DSH authorizes immutable image bytes against the addressed native journal. */
+export interface DshAttachment {
+  attachment: { attachmentId: string; mediaType: string; name?: string };
+  data: string;
 }

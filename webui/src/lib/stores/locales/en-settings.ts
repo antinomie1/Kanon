@@ -1,6 +1,8 @@
 /** en settings and shared platform translations. */
 export default {
     'dsh.continue': 'Continue chat',
+    'dsh.archived': 'Archived sessions',
+    'dsh.restore': 'Restore',
     'dsh.sessions_hint': 'History, models and session settings are managed by deepseek-harness.',
     'dsh.no_sessions': 'No DSH sessions yet.',
     'dsh.archive': 'Archive',

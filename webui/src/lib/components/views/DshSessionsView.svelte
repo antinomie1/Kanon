@@ -16,6 +16,8 @@ import Button from '../ui/Button.svelte';
 import Modal from '../ui/Modal.svelte';
 import PageHead from '../ui/PageHead.svelte';
 import TextField from '../ui/TextField.svelte';
+import Switch from '../ui/Switch.svelte';
+import DshImage from './DshImage.svelte';
 
 let sessions = $state<DshSession[]>([]);
 let loading = $state(false);
@@ -29,6 +31,8 @@ let messages = $state<DshMessage[]>([]);
 let hasMore = $state(false);
 let title = $state('');
 let model = $state('');
+let showArchived = $state(false);
+const displayed = $derived(sessions.filter(session => session.archived === showArchived));
 
 async function load() {
   loading = true;
@@ -107,6 +111,7 @@ async function archive(session: DshSession) {
 }
 
 function canResume(session: DshSession): boolean {
+  if (session.archived) return false;
   const target = dshConsoleTarget(session.sessionId);
   if (target === null) return false;
   const instance = target ? instancesStore.find(target.slice(2)) : undefined;
@@ -133,11 +138,15 @@ async function resume(session: DshSession) {
     </Button>
   {/snippet}
 </PageHead>
+<span class="flex items-center gap-2">
+  <Switch checked={showArchived} label={t('dsh.archived')} onchange={(value) => showArchived = value} />
+  {t('dsh.archived')}
+</span>
 {#if error && !selected}<div class="notice notice-bad">{error}</div>{/if}
 {#if !loaded}<p class="hint">{t('common.loading')}</p>{/if}
-{#if loaded && sessions.length === 0 && !error}<p class="hint">{t('dsh.no_sessions')}</p>{/if}
+{#if loaded && displayed.length === 0 && !error}<p class="hint">{t('dsh.no_sessions')}</p>{/if}
 <ul class="m-0 flex list-none flex-col gap-2 p-0">
-  {#each sessions as session (session.sessionId)}
+  {#each displayed as session (session.sessionId)}
     <li class="card flex flex-wrap items-center gap-3 px-5 py-4">
       <div class="min-w-0 flex-1">
         <p class="m-0 truncate font-medium">{session.projections?.values.title?.title || session.sessionId}</p>
@@ -149,8 +158,12 @@ async function resume(session: DshSession) {
       {#if canResume(session)}
         <Button size="sm" disabled={busy || session.running} onclick={() => void resume(session)}>{t('dsh.continue')}</Button>
       {/if}
-      <Button size="sm" disabled={busy || !session.running} onclick={() => void change(() => api.stopDshSession(session.sessionId))}>{t('chat.stop')}</Button>
-      <Button size="sm" disabled={busy} onclick={() => void archive(session)}>{t('dsh.archive')}</Button>
+      {#if session.archived}
+        <Button size="sm" disabled={busy} onclick={() => void change(() => api.restoreDshSession(session.sessionId))}>{t('dsh.restore')}</Button>
+      {:else}
+        <Button size="sm" disabled={busy || !session.running} onclick={() => void change(() => api.stopDshSession(session.sessionId))}>{t('chat.stop')}</Button>
+        <Button size="sm" disabled={busy} onclick={() => void archive(session)}>{t('dsh.archive')}</Button>
+      {/if}
     </li>
   {/each}
 </ul>
@@ -161,11 +174,11 @@ async function resume(session: DshSession) {
     <p class="hint break-all">{sessionId}</p>
     <div class="flex flex-col gap-3">
       <label class="label" for="dsh-title">{t('dsh.title')}</label>
-      <TextField id="dsh-title" bind:value={title} />
-      <Button disabled={busy} onclick={() => void change(() => api.renameDshSession(sessionId, title))}>{t('common.save')}</Button>
+      <TextField id="dsh-title" bind:value={title} disabled={selected.archived} />
+      <Button disabled={busy || selected.archived} onclick={() => void change(() => api.renameDshSession(sessionId, title))}>{t('common.save')}</Button>
       <label class="label" for="dsh-model">{t('chat.model')}</label>
-      <DshModelPicker bind:value={model} disabled={busy} />
-      <Button disabled={busy || !model} onclick={() => void saveModel()}>{t('common.save')}</Button>
+      <DshModelPicker bind:value={model} disabled={busy || selected.archived} />
+      <Button disabled={busy || !model || selected.archived} onclick={() => void saveModel()}>{t('common.save')}</Button>
       {#if error}<div class="notice notice-bad">{error}</div>{/if}
       {#if hasMore}<Button disabled={busy} onclick={() => void earlier()}>{t('dsh.earlier')}</Button>{/if}
       {#each messages as message (message.seq)}
@@ -176,8 +189,8 @@ async function resume(session: DshSession) {
           {/if}
           <p class="m-0 break-words whitespace-pre-wrap">{message.text}</p>
           {#each message.blocks as block}
-            {#if block.type === 'image' && typeof block.data === 'string' && typeof block.mediaType === 'string'}
-              <img alt={t('dsh.image')} src={`data:${block.mediaType};base64,${block.data}`} class="max-h-64 max-w-full" />
+            {#if block.type === 'image' && block.attachment && typeof block.attachment === 'object' && 'attachmentId' in block.attachment}
+              <DshImage {sessionId} attachmentId={String(block.attachment.attachmentId)} />
             {:else if block.type === 'tool-call'}
               <p class="hint">{t('dsh.tool')}: {String(block.name ?? '')}</p>
             {/if}

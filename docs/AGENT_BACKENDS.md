@@ -2,7 +2,7 @@
 
 `agent` is the shared selection boundary. `builtin` uses Kanon's local model loop;
 `dsh` delegates to the independent `kanon-dsh` library and the external deepseek-harness runtime.
-The native tool bridge and shared simulation path are connected; remaining integration work is listed below.
+The optional backend shares Kanon's tool executor and simulation pipeline while retaining native DSH state.
 
 ## Ownership and build contract
 
@@ -61,12 +61,12 @@ plugin shares DSH peer dependencies with its host instead of instantiating a sec
 - Plugin conversation reads use a bounded, read-only text projection of the remote journal.
   Native journal records remain available through the paginated agent API. Completed builtin
   turn import is explicitly rejected because DSH exposes no equivalent append contract.
-- In-conversation `RunAgent` can select DSH without requiring a builtin provider. Unsupported
-  builtin overrides and private runs fail explicitly rather than falling back.
+- In-conversation `RunAgent` can select DSH without requiring a builtin provider. Private runs support native
+  model references, instructions and tool-less execution; unsupported builtin overrides fail explicitly.
 - Console completions accept `agent`, including native DSH SSE completion. Caller disconnect
   signals the remote owner to cancel; the reservation remains held through bounded cleanup.
 - `/api/v1/agents/dsh/connection`, `/settings`, `/models` and `/sessions` expose native management.
-  Session routes support snapshot/history, model/title changes, stop and archive. Settings writes
+  Session routes support snapshot/history, attachments, model/title changes, stop, archive and restore. Settings writes
   pass DSH's revision unchanged. The UI places DSH under Agent, offers connection and native
   settings controls, and hides builtin model/persona controls for a DSH instance.
 - DSH turns prepare the native bridge before prompt submission and expose the same permitted
@@ -76,81 +76,53 @@ plugin shares DSH peer dependencies with its host instead of instantiating a sec
 - Group simulation selects either backend and shares message batching, participant context,
   deadlines, reply limits and the existing `conversation_say`/`wait`/`leave` implementations.
   A DSH turn contributes its mode and skill instructions to native prompt assembly; DSH owns the
-  resulting journal and model context. Full platform simulation verification remains below.
+  resulting journal and model context. Native complete prompts retain Kanon policy through DSH's
+  context snapshots; suppressing both system and runtime contributions fails explicitly.
 - Feature-enabled IPC publishes an owner-only `core.agent-token` beside the bound endpoint for
   the optional native plugin. The credential rotates at startup, is read on every RPC, and is
   removed when that IPC server exits. Default builds do not publish a bridge or credential file.
 
-## Remaining integration work
+## Lifecycle and transcript rules
 
-1. Verify console and private runs against a complete native SessionController deployment,
-   including durable restart, archive/restore, attachment history and concurrent writes.
-   Console and private runs now reuse the core bridge and instance tool selector. Private runs
-   suppress plugin hooks, permit tool-less execution and native model references, and archive
-   their native journal after completion or cancellation. DSH owns step limits; unsupported
-   per-request limits fail explicitly. No builtin provider is substituted.
-2. Verify shared group participation end to end with an isolated native DSH runtime and platform
-   adapter under concurrent arrivals and interruptions, then improve fresh-message handling and quoting. Audit native complete
-   prompt overrides and plugin request/response observation so no hook silently loses its effect.
-3. Audit cross-platform routing identities, generation races, startup persona restoration for DSH,
-   shutdown cancellation completion, archive visibility and legacy history projection against
-   native persistence. No claim is made that the bounded cancellation owner fully solves shutdown.
-4. Run both builds and all existing tests, then finish the requested final bug audit. Keep every
-   source below 1000 lines and add no test functions. The three baseline notice assertions and
-   duplicate async-trait attributes remain deliberately deferred to that final phase.
+A bounded remote owner holds the session reservation from creation through preparation, prompt
+consumption and cleanup. Caller disconnect signals cancellation without abandoning that owner.
+An in-flight preparation settles before retirement, preventing a late model/create commit from
+racing archive. Private runs archive their journal after preparation failure, completion or stop.
+Input conversion and native model reference validation precede remote creation.
 
-## Verification so far
+Archive membership is read from the native Workspace baseline, because `session/list` includes
+retired journals. Archives remain visible in the native UI and reserve their generation numbers.
+Chat management operations share a fail-fast routing lock; publication checks its instance snapshot
+under the catalog write lock. Startup restores builtin personas only for builtin instances.
 
-- Refactor commit `96a93e4`: all scanned source files are below 1000 lines; 939 Rust test functions
-  are unchanged in count and identity. Rust workspace check is clean. TypeScript has 39 passing
-  tests, Python has 73, and WebUI type checking/build pass. Both locale catalogs retain all 856
-  translations unchanged.
-- Full Rust run after the refactor: 950 passed, 3 failed. The three failures in
-  `notice_pipeline_test` also fail on the original `33d97a6` snapshot: their expected text omits
-  the already-present conversation metadata prefix. Repair these existing assertions during the
-  final bug phase, without undoing the context behavior or adding test functions.
-- Feature-enabled workspace check passes. A temporary local wire probe exercised RPC envelopes,
-  correlation failures, remote errors, snapshot isolation, durable reply collection, both inbox
-  lanes and a turn stopped before submission. This is not a live DSH/model end-to-end verification.
-- A duplicate `#[tonic::async_trait]` in the original supervisor host implementation was observed;
-  remove it during the final cleanup after the integration behavior is settled.
+Human history retains original append messages and excludes model-only context replacement copies.
+Neither the legacy text projection nor the console transcript is used as model context. Images are
+read through DSH's session-authorized attachment endpoint, using the durable `attachmentId`.
 
-- The independent `kanon-dsh` library passes its standalone check. Dependency trees confirm it
-  is absent from the default `kanon`/`kanon-dev` build and present with `--features dsh`.
-- The current backend work passes default product and feature-enabled workspace checks, the
-  existing agent/chat/config transaction suites (13 tests), and WebUI type checking (zero errors
-  or warnings). The local wire probe still passes after moving transport into the standalone crate.
-- The full feature-enabled workspace run completed with 948 passed and 5 failed (24 ignored).
-  Two new regressions (unknown-backend HTTP status and builtin graceful shutdown) were fixed;
-  both affected suites then passed, 9/9. The remaining three failures are the pre-existing notice
-  assertions described above. WebUI production build passes with its existing bundle-size notice.
+Kanon's static prompt hooks operate on its mode/skill contribution. DSH owns the complete persona,
+model request, response and compaction hooks. Tool lifecycle hooks and pipeline reply events remain
+shared. Native frozen model requests are never replaced with a builtin context approximation.
 
-- Shared executor: all 211 existing LLM tests pass, including prompt layout and tool failure paths.
-  Seven affected core suites pass, 36 tests total; subsequent instance-scope verification also uses
-  existing skill/hook suites. No test functions were added.
-- The native plugin passes TypeScript checking and builds as a package. A temporary isolated probe
-  runs the actual DSH agent loop and tool registry with a deterministic local model adapter, calls
-  `kanon/prepare` through the actual native gateway, and verifies scoped dispatch, ordinary-session
-  isolation, unowned prompt rejection and stale leases. This does not contact an external model
-  or messaging platform and does not establish complete production end-to-end coverage.
+## Verification
 
-- A second temporary probe connects the actual Rust ingress and authenticated core IPC service to
-  DSH's real native loop/tool registry through a local protocol shim and deterministic model.
-  It verifies native tool dispatch, explicit simulation speech, quote target preservation, silent
-  internal final text, no builtin session records, and credential-file cleanup. This exposed and
-  fixed empty-journal cursor handling (`-1`, followed by event `0`) and the simulation guard's
-  builtin-only session comparison. Both backends now share one session-routing helper.
-- The latest existing policy/instance suites pass 31 tests. Default and all-feature workspace
-  checks are clean; the bridge plugin builds and typechecks. Repository test counts are unchanged.
+- All source files remain below 1000 lines after the module splits. No repository test functions
+  were added. Default and all-feature workspace checks pass without compiler warnings.
+- A complete temporary native deployment runs SessionController, WorkspaceController, JSONL
+  persistence, SQLite session queries, attachment storage, browser authentication, the actual
+  agent loop/tool registry and the HTTP/WebSocket gateway. A deterministic local model adapter
+  connects to the actual Rust ingress, authenticated gRPC bridge and delivery pipeline.
+- That deployment verifies durable cold reads and restart continuation, console tool permissions,
+  tool-less and private runs, native model selection, complete prompt contributions, archive and
+  restore, durable image bytes, foreign-session attachment rejection and absence of builtin history.
+- Failure probes cover preparation rejection, stop during preparation, caller disconnect and
+  reservation retention until cleanup. Group probes deliver a second sender while the first
+  model call runs, then check fresh-message delivery and exact quote targets. Only explicit speech
+  tools reach the adapter; internal final text stays private.
+- Existing API agent/chat, core conversation/instance and plugin-agent suites pass. The shared
+  executor previously passed all 211 LLM tests, including stable prompt layout. TypeScript SDK
+  tests and native bridge checking/build pass; WebUI checking reports zero errors or warnings,
+  and its production build retains the existing bundle-size advisory.
 
-- Console/private integration: the existing API chat/agent routes and core plugin-agent suites
-  pass 19 tests. A temporary Rust/native-loop probe also covers console tool permissions,
-  tool-less turns, private instructions, native model-selection requests and session archival.
-  Its protocol shim does not establish complete native persistence coverage. Default and
-  all-feature checks and WebUI type checking/build are clean apart from the existing bundle-size
-  advisory. No test functions were added, and all source files remain below 1000 lines.
-- The console lists DSH's own sessions, pages native history at one immutable cursor, selects
-  native models, changes titles, stops work and archives restorable journals. DSH console
-  conversations can be resumed from that list. Their IDs carry only a routing target; no model,
-  memory, context or settings are persisted in builtin SessionStore. Human history excludes
-  model-only replacement copies, following DSH's native transcript convention.
+The native probes do not contact external models or real IM platforms. Final workspace tests and
+the general bug audit remain in progress, including the three baseline notice assertions and
+cross-platform assistant routing. Windows runtime behavior requires execution on Windows.

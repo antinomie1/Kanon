@@ -21,6 +21,9 @@ pub struct DshSession {
     pub running: bool,
     /// Whether the session has no user-visible messages yet.
     pub blank: bool,
+    /// Native Workspace archive state, joined for display without a local metadata store.
+    #[serde(default)]
+    pub archived: bool,
     /// Native metadata such as title, model selection and token usage.
     pub projections: Option<Value>,
 }
@@ -53,14 +56,70 @@ pub struct DshTurnOutput {
 }
 
 impl DshClient {
+    /// Reads image bytes only through DSH's session-authorized attachment endpoint.
+    pub async fn attachment(
+        &self,
+        session_id: &str,
+        attachment_id: &str,
+    ) -> Result<Value, DshError> {
+        validate_id(session_id)?;
+        validate_id(attachment_id)?;
+        let value: Value = self
+            .call(
+                "session/attachment",
+                json!({"request": {
+                    "sessionId": session_id, "attachmentId": attachment_id,
+                }}),
+            )
+            .await?;
+        if value["attachment"]["attachmentId"] != attachment_id || !value["data"].is_string() {
+            return Err(DshError::Protocol(
+                "attachment response has a different identity or no bytes".into(),
+            ));
+        }
+        Ok(value)
+    }
+
     /// Lists native DSH sessions without creating local metadata or activating their agents.
     pub async fn sessions(&self) -> Result<Vec<DshSession>, DshError> {
         #[derive(Deserialize)]
         struct Catalog {
             items: Vec<DshSession>,
         }
-        let value: Catalog = self.call("session/list", json!({"_request": {}})).await?;
+        let (mut value, archived): (Catalog, std::collections::HashSet<String>) = tokio::try_join!(
+            self.call("session/list", json!({"_request": {}})),
+            self.archived_sessions(),
+        )?;
+        for session in &mut value.items {
+            session.archived = archived.contains(&session.session_id);
+        }
         Ok(value.items)
+    }
+
+    /// Reads the native archive set from its required opening Workspace baseline.
+    async fn archived_sessions(&self) -> Result<std::collections::HashSet<String>, DshError> {
+        let mut stream = self.open_stream("workspace/follow", json!({})).await?;
+        let value = tokio::time::timeout(self.config.request_timeout(), stream.next())
+            .await
+            .map_err(|_| DshError::Timeout("workspace baseline"))??;
+        if value["type"] != "baseline" {
+            return Err(DshError::Protocol(
+                "workspace follow has no opening baseline".into(),
+            ));
+        }
+        serde_json::from_value(value["value"]["archivedSessionIds"].clone())
+            .map_err(|e| DshError::Protocol(e.to_string()))
+    }
+
+    /// Restores an archived journal using DSH's native Workspace owner.
+    pub async fn restore_session(&self, session_id: &str) -> Result<Value, DshError> {
+        validate_id(session_id)?;
+        let _writing = self.writers.claim(session_id)?;
+        self.call(
+            "workspace/unarchiveSession",
+            json!({"request": {"sessionId": session_id}}),
+        )
+        .await
     }
 
     /// Creates or adopts an explicitly named DSH session; no model or history is supplied.
@@ -154,6 +213,17 @@ impl DshClient {
     ) -> Result<Value, DshError> {
         validate_id(session_id)?;
         let _writing = self.writers.claim(session_id)?;
+        self.select_owned_model(session_id, provider, model, effort)
+            .await
+    }
+
+    async fn select_owned_model(
+        &self,
+        session_id: &str,
+        provider: &str,
+        model: &str,
+        effort: Option<&str>,
+    ) -> Result<Value, DshError> {
         if provider.trim().is_empty() || model.trim().is_empty() {
             return Err(DshError::Config(
                 "DSH model selection requires provider and model".into(),
@@ -270,10 +340,46 @@ impl DshClient {
         stop: impl Future<Output = ()> + Send,
         ephemeral: bool,
     ) -> Result<DshTurnOutput, DshError> {
+        self.run_prepared_turn(
+            session_id,
+            request_id,
+            content,
+            None,
+            |_| async { Ok(()) },
+            stop,
+            ephemeral,
+        )
+        .await
+    }
+
+    /// Owns admission, preparation, the turn and private retirement across caller disconnects.
+    /// An in-flight preparation is allowed to settle before cancellation and archive, avoiding
+    /// a late create/model commit racing retirement. Each RPC still has its bounded deadline.
+    pub async fn run_prepared_turn<F, P>(
+        &self,
+        session_id: &str,
+        request_id: &str,
+        content: Vec<Value>,
+        native_model: Option<String>,
+        prepare: P,
+        stop: impl Future<Output = ()> + Send,
+        ephemeral: bool,
+    ) -> Result<DshTurnOutput, DshError>
+    where
+        P: FnOnce(DshClient) -> F + Send + 'static,
+        F: Future<Output = Result<(), DshError>> + Send + 'static,
+    {
         validate_id(session_id)?;
         validate_id(request_id)?;
         if content.is_empty() {
             return Err(DshError::Config("DSH prompt must contain content".into()));
+        }
+        if let Some(reference) = &native_model
+            && reference.split_once('/').is_none_or(|(provider, model)| {
+                provider.trim().is_empty() || model.trim().is_empty()
+            })
+        {
+            return Err(DshError::Config("DSH model requires provider/model".into()));
         }
         let mut stop = std::pin::pin!(stop);
         tokio::select! {
@@ -291,11 +397,32 @@ impl DshClient {
         // Its reservation remains held through cancellation, so new prompts cannot race cleanup.
         let mut task = tokio::spawn(async move {
             let _writing = writing;
-            let result = client
-                .run_owned_turn(&session_id, &request_id, content, async {
-                    let _ = cancel_rx.await;
-                })
-                .await;
+            let admission = async {
+                client.create_session(&session_id, None).await?;
+                if let Some(reference) = native_model {
+                    let (provider, model) = reference.split_once('/').expect("validated model");
+                    client
+                        .select_owned_model(&session_id, provider, model, None)
+                        .await?;
+                }
+                prepare(client.clone()).await
+            };
+            let prepared = tokio::time::timeout(
+                Duration::from_secs(client.config.turn_timeout_seconds),
+                admission,
+            )
+            .await
+            .unwrap_or(Err(DshError::Timeout("turn preparation")));
+            let result = match prepared {
+                Ok(()) => {
+                    client
+                        .run_owned_turn(&session_id, &request_id, content, async {
+                            let _ = cancel_rx.await;
+                        })
+                        .await
+                }
+                Err(error) => Err(error),
+            };
             if ephemeral {
                 let retirement = tokio::time::timeout(
                     client.config.request_timeout(),

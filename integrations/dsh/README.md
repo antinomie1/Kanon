@@ -48,5 +48,9 @@ implementations as builtin. Tool attachments return through Kanon's delivery pip
 file paths are not sent to DSH. Tool events, Bash caller scope and cancellation use the common
 executor. The bridge retains only the active turn's routing, call identities and pending media.
 
-Console chat, private plugin runs and full native model/session UI integration are still being
-completed; see [the integration record](../../docs/AGENT_BACKENDS.md).
+Console chat and private plugin runs use the same admitted bridge. Native models, settings,
+archived sessions, history pages and authorized images are available under Kanon's Agent UI.
+Private journals are archived after completion, stop or preparation failure. Kanon mode/skill
+contributions use native context snapshots when a complete DSH system prompt excludes sections;
+disabling both contribution surfaces fails explicitly. See [the integration record](../../docs/AGENT_BACKENDS.md)
+for ownership, lifecycle rules and the scope of native deployment verification.

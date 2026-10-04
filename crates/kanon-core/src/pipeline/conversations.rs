@@ -207,6 +207,16 @@ impl PipelineEngine {
         &self,
         chat: &Chat,
     ) -> Result<String, ConversationError> {
+        let _routing = self.conversation_selection(chat)?;
+        let chat = &Chat {
+            instance: self.live_instance(&chat.instance).await?,
+            conversation: chat.conversation.clone(),
+        };
+        #[cfg(feature = "dsh")]
+        if let Some(client) = self.dsh_for(Some(&chat.instance))? {
+            let next = self.dsh_next_generation(chat, &client).await?;
+            return self.select_generation(chat, next).await;
+        }
         let conversations = self.chat_conversations(chat).await?;
         let next = conversations
             .iter()
@@ -224,6 +234,11 @@ impl PipelineEngine {
         chat: &Chat,
         session_id: &str,
     ) -> Result<ConversationInfo, ConversationError> {
+        let _routing = self.conversation_selection(chat)?;
+        let chat = &Chat {
+            instance: self.live_instance(&chat.instance).await?,
+            conversation: chat.conversation.clone(),
+        };
         let conversations = self.chat_conversations(chat).await?;
         let target = conversations
             .into_iter()
@@ -245,6 +260,11 @@ impl PipelineEngine {
         chat: &Chat,
         session_id: &str,
     ) -> Result<ConversationInfo, ConversationError> {
+        let _routing = self.conversation_selection(chat)?;
+        let chat = &Chat {
+            instance: self.live_instance(&chat.instance).await?,
+            conversation: chat.conversation.clone(),
+        };
         let sessions = self.session_manager().ok_or(ConversationError::NoModel)?;
         let conversations = self.chat_conversations(chat).await?;
         let target = conversations
@@ -252,18 +272,40 @@ impl PipelineEngine {
             .find(|conversation| conversation.session_id == session_id)
             .cloned()
             .ok_or_else(|| ConversationError::NotFound(session_id.to_string()))?;
+        #[cfg(feature = "dsh")]
+        let remote = self.dsh_for(Some(&chat.instance))?;
+        #[cfg(not(feature = "dsh"))]
+        let remote: Option<()> = None;
+        // Validate generation availability before retiring any durable history. Overflow or a
+        // failed remote catalog read must leave the existing conversation available to resume.
+        let replacement = if target.current {
+            let next = conversations
+                .iter()
+                .map(|conversation| conversation.generation)
+                .max()
+                .unwrap_or(0)
+                .checked_add(1)
+                .ok_or_else(|| {
+                    ConversationError::Invalid("conversation generation overflow".into())
+                })?;
+            #[cfg(feature = "dsh")]
+            let next = if let Some(client) = &remote {
+                self.dsh_next_generation(chat, client).await?
+            } else {
+                next
+            };
+            Some(next)
+        } else {
+            None
+        };
         let writing = sessions
             .try_write(session_id)
             .map_err(|_| ConversationError::Busy(session_id.to_string()))?;
-        #[cfg(feature = "dsh")]
-        let remote = self.dsh_for(Some(&chat.instance))?;
         #[cfg(feature = "dsh")]
         if let Some(client) = &remote {
             // Archive is DSH's restorable retirement operation. No builtin history is touched.
             client.archive_session(session_id).await?;
         }
-        #[cfg(not(feature = "dsh"))]
-        let remote: Option<()> = None;
         if remote.is_none() {
             writing
                 .scope(sessions.delete_session(session_id))
@@ -275,15 +317,7 @@ impl PipelineEngine {
             session_id = %session_id,
             "Conversation deleted"
         );
-        if target.current {
-            // One past every generation listed before the deletion, the deleted one included:
-            // the chat moves on instead of reopening a number it just used.
-            let next = conversations
-                .iter()
-                .map(|conversation| conversation.generation)
-                .max()
-                .unwrap_or(0)
-                + 1;
+        if let Some(next) = replacement {
             self.select_generation(chat, next).await?;
         }
         Ok(target)
@@ -299,6 +333,11 @@ impl PipelineEngine {
         chat: &Chat,
         messages: Vec<ChatMessage>,
     ) -> Result<String, ConversationError> {
+        let _routing = self.conversation_selection(chat)?;
+        let chat = &Chat {
+            instance: self.live_instance(&chat.instance).await?,
+            conversation: chat.conversation.clone(),
+        };
         #[cfg(feature = "dsh")]
         if self.dsh_for(Some(&chat.instance))?.is_some() {
             return Err(ConversationError::Invalid(
@@ -373,17 +412,40 @@ impl PipelineEngine {
             // remote session rather than a routing pointer to a session that never existed.
             client.create_session(&id, None).await?;
             registry
-                .select_session(
+                .select_session_checked(
                     &chat.instance.id,
                     &BotInstance::dsh_routing_key(&chat.conversation),
                     generation,
+                    Some(&chat.instance),
                 )
                 .await?;
             return Ok(id);
         }
         Ok(registry
-            .select_session(&chat.instance.id, &chat.conversation, generation)
+            .select_session_checked(
+                &chat.instance.id,
+                &chat.conversation,
+                generation,
+                Some(&chat.instance),
+            )
             .await?)
+    }
+
+    /// Serializes management for this chat without holding its running model's writer lock.
+    /// The same fail-fast lock table serves RPCs and commands; it stores no conversation data.
+    fn conversation_selection(
+        &self,
+        chat: &Chat,
+    ) -> Result<kanon_llm::session::SessionWriteGuard, ConversationError> {
+        let key = format!(
+            "conversation-choice:{}",
+            chat.instance
+                .conversation_session_prefix(&chat.conversation)
+        );
+        self.session_manager()
+            .ok_or(ConversationError::NoModel)?
+            .try_write(&key)
+            .map_err(|_| ConversationError::Busy(key))
     }
 
     /// The instance's current record; it may have changed since the event was resolved.
