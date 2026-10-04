@@ -39,6 +39,26 @@ fn aiff(rate: u32, channels: &[Vec<f32>]) -> Vec<u8> {
     file
 }
 
+/// A mono CAF file with 16-bit big-endian PCM and an unrestricted floating-point sample rate.
+fn caf(rate: f64, samples: &[i16]) -> Vec<u8> {
+    let mut file = b"caff\x00\x01\x00\x00desc".to_vec();
+    file.extend_from_slice(&32i64.to_be_bytes());
+    file.extend_from_slice(&rate.to_be_bytes());
+    file.extend_from_slice(b"lpcm");
+    file.extend_from_slice(&0u32.to_be_bytes()); // integer, big-endian format flags
+    file.extend_from_slice(&2u32.to_be_bytes()); // bytes per packet
+    file.extend_from_slice(&1u32.to_be_bytes()); // frames per packet
+    file.extend_from_slice(&1u32.to_be_bytes()); // channels per frame
+    file.extend_from_slice(&16u32.to_be_bytes()); // bits per channel
+    file.extend_from_slice(b"data");
+    file.extend_from_slice(&(4 + samples.len() as i64 * 2).to_be_bytes());
+    file.extend_from_slice(&0u32.to_be_bytes()); // edit count
+    for sample in samples {
+        file.extend_from_slice(&sample.to_be_bytes());
+    }
+    file
+}
+
 fn tone(frequency: f32, rate: u32, seconds: f32, amplitude: f32) -> Vec<f32> {
     (0..(rate as f32 * seconds) as usize)
         .map(|n| amplitude * (std::f32::consts::TAU * frequency * n as f32 / rate as f32).sin())
@@ -85,7 +105,7 @@ fn formats_qq_plays_are_uploaded_unchanged() {
 #[test]
 fn other_audio_becomes_24khz_mono_wav_with_its_tone_intact() {
     // Downsampling by an integer and a fractional ratio, upsampling, and a stereo mixdown.
-    for (rate, channels) in [(48_000, 2), (44_100, 1), (8_000, 1)] {
+    for (rate, channels) in [(48_000, 2), (44_100, 1), (8_000, 1), (192_000, 1)] {
         let source = tone(440.0, rate, 1.0, 0.5);
         let converted = playable(aiff(rate, &vec![source; channels])).expect("converts");
         let samples = wav_samples(&converted);
@@ -130,4 +150,37 @@ fn audio_kanon_cannot_convert_fails_naming_what_is_accepted() {
         assert!(err.contains("QQ plays WAV, MP3 and SILK"), "{err}");
     }
     assert!(playable(Vec::new()).is_err());
+}
+
+#[test]
+fn extreme_sample_rates_do_not_allocate_unbounded_filter_tables() {
+    // Enough frames for one output sample, but the claimed rate would require a 119 GiB
+    // phase table despite each source file being less than 100 KiB.
+    let rate = 1_000_000_007;
+    for audio in [
+        aiff(rate, &[vec![0.0; 41_667]]),
+        caf(f64::from(rate), &vec![0; 41_667]),
+    ] {
+        let err = playable(audio).expect_err("filter memory is bounded");
+        assert!(
+            err.contains("16 MiB resampling filter memory limit"),
+            "{err}"
+        );
+    }
+
+    // A source shorter than one output sample needs no filter, even at an extreme rate.
+    let empty = playable(aiff(u32::MAX, &[vec![0.0]])).expect("empty WAV");
+    assert!(wav_samples(&empty).is_empty());
+}
+
+#[test]
+fn caf_rates_that_decode_to_zero_are_rejected_explicitly() {
+    let normal = playable(caf(8_000.0, &[0; 8])).expect("valid CAF fixture");
+    assert_eq!(wav_samples(&normal).len(), 24);
+
+    // CAF stores a floating-point rate; the demuxer casts it to an integer for the decoder.
+    for rate in [0.5, -1.0, f64::NAN] {
+        let err = playable(caf(rate, &[0; 8])).expect_err("invalid rate");
+        assert!(err.contains("invalid zero sample rate"), "{err}");
+    }
 }

@@ -27,8 +27,11 @@ pub const VOICE_RATE: u32 = 24_000;
 /// Nyquist frequency survives while what lies above it is cut instead of aliasing back down.
 const KERNEL_ZEROS: f64 = 16.0;
 
-/// Size of the canonical WAV header [`wav`] writes.
+/// Size of the canonical WAV header [`wav_header`] writes.
 const WAV_HEADER_BYTES: usize = 44;
+
+/// Maximum storage for precomputed resampling phases, independent of source-file size.
+const MAX_KERNEL_BYTES: usize = 16 * 1024 * 1024;
 
 /// Returns `audio` in a form QQ plays as a voice message.
 ///
@@ -41,7 +44,7 @@ pub fn playable(audio: Vec<u8>) -> Result<Vec<u8>, String> {
         return Ok(audio);
     }
     let (samples, rate) = decode_mono(audio)?;
-    Ok(wav(&resample(&samples, rate, VOICE_RATE), VOICE_RATE))
+    resample(&samples, rate, VOICE_RATE)
 }
 
 /// SILK as QQ writes it: the `#!SILK_V3` header, with or without Tencent's leading `0x02`.
@@ -131,6 +134,9 @@ fn decode_mono(audio: Vec<u8>) -> Result<(Vec<f32>, u32), String> {
             .decode(&packet)
             .map_err(|err| format!("voice file is damaged: {err}"))?;
         let spec_rate = decoded.spec().rate();
+        if spec_rate == 0 {
+            return Err("voice file has an invalid zero sample rate".into());
+        }
         let channels = decoded.spec().channels().count().max(1);
         match rate {
             None => rate = Some(spec_rate),
@@ -158,7 +164,7 @@ fn decode_mono(audio: Vec<u8>) -> Result<(Vec<f32>, u32), String> {
     }
 }
 
-/// Resamples mono audio from `from` Hz to `to` Hz and converts it to 16-bit samples.
+/// Resamples mono audio from `from` Hz to `to` Hz directly into a 16-bit PCM WAV file.
 ///
 /// Each output sample is a Hann-windowed sinc interpolation of its input neighborhood. When
 /// downsampling, the sinc's cutoff drops to the new Nyquist frequency, so a 48 kHz recording
@@ -167,19 +173,36 @@ fn decode_mono(audio: Vec<u8>) -> Result<(Vec<f32>, u32), String> {
 /// The kernel depends only on where an output sample falls between two input samples, and that
 /// fractional position repeats every `to / gcd(from, to)` outputs. The taps are therefore built
 /// once per phase, which keeps the inner loop to multiply-adds.
-fn resample(input: &[f32], from: u32, to: u32) -> Vec<i16> {
+fn resample(input: &[f32], from: u32, to: u32) -> Result<Vec<u8>, String> {
     let divisor = gcd(from, to);
     // Input advances by `step / phases` samples per output sample.
     let step = u64::from(from / divisor);
     let phases = u64::from(to / divisor);
+    let output_len = input.len() as u64 * phases / step;
+    // A short source at a high rate may contain less than one output sample. Preserve the
+    // empty WAV result without building a filter that will never be used.
+    if output_len == 0 {
+        return Ok(wav_header(0, to));
+    }
     let cutoff = (f64::from(to) / f64::from(from)).min(1.0);
     // A lower cutoff stretches the sinc, so the window widens to keep the same zero crossings.
     let half = (KERNEL_ZEROS / cutoff).ceil() as usize;
     let width = 2 * half;
+    // Container sample rates are untrusted. A tiny AIFF can otherwise request gigabytes of
+    // phase tables; checked arithmetic also prevents capacity overflow on 32-bit targets.
+    let kernel_len = (phases as usize)
+        .checked_mul(width)
+        .filter(|len| *len <= MAX_KERNEL_BYTES / std::mem::size_of::<f32>())
+        .ok_or_else(|| {
+            format!(
+                "voice sample rate {from} Hz exceeds the {} MiB resampling filter memory limit",
+                MAX_KERNEL_BYTES >> 20
+            )
+        })?;
 
     // Tap `j` of a phase weighs the input sample `j + 1 - half` places after the one at or
     // before the output position; `x` is that sample's distance from the position.
-    let mut kernel = Vec::with_capacity(phases as usize * width);
+    let mut kernel = Vec::with_capacity(kernel_len);
     for phase in 0..phases {
         let fraction = phase as f64 / phases as f64;
         let taps: Vec<f64> = (0..width)
@@ -196,24 +219,26 @@ fn resample(input: &[f32], from: u32, to: u32) -> Vec<i16> {
         kernel.extend(taps.iter().map(|tap| (tap / gain) as f32));
     }
 
-    let output_len = input.len() as u64 * phases / step;
-    (0..output_len)
-        .map(|n| {
-            let position = n * step;
-            let base = (position / phases) as usize;
-            let phase = (position % phases) as usize;
-            let taps = &kernel[phase * width..(phase + 1) * width];
-            // Tap `j` reads input `base + 1 + j - half`. Samples before the start and past the
-            // end count as silence: the leading taps are skipped and the zip stops at the end.
-            let skipped = half.saturating_sub(base + 1);
-            let first = base + 1 + skipped - half;
-            let mut acc = 0.0f32;
-            for (tap, sample) in taps[skipped..].iter().zip(input.iter().skip(first)) {
-                acc += tap * sample;
-            }
-            (acc.clamp(-1.0, 1.0) * f32::from(i16::MAX)).round() as i16
-        })
-        .collect()
+    // Append quantized samples to the final output so a second, equally large i16 buffer
+    // never overlaps the WAV allocation. The filter and rounding stay unchanged.
+    let mut out = wav_header(output_len as usize, to);
+    for n in 0..output_len {
+        let position = n * step;
+        let base = (position / phases) as usize;
+        let phase = (position % phases) as usize;
+        let taps = &kernel[phase * width..(phase + 1) * width];
+        // Tap `j` reads input `base + 1 + j - half`. Samples before the start and past the
+        // end count as silence: the leading taps are skipped and the zip stops at the end.
+        let skipped = half.saturating_sub(base + 1);
+        let first = base + 1 + skipped - half;
+        let mut acc = 0.0f32;
+        for (tap, sample) in taps[skipped..].iter().zip(input.iter().skip(first)) {
+            acc += tap * sample;
+        }
+        let sample = (acc.clamp(-1.0, 1.0) * f32::from(i16::MAX)).round() as i16;
+        out.extend_from_slice(&sample.to_le_bytes());
+    }
+    Ok(out)
 }
 
 /// The normalized sinc function, `sin(πx) / πx`.
@@ -233,9 +258,9 @@ fn gcd(mut a: u32, mut b: u32) -> u32 {
     a
 }
 
-/// Wraps 16-bit mono samples in a canonical PCM WAV file.
-fn wav(samples: &[i16], rate: u32) -> Vec<u8> {
-    let data_len = (samples.len() * 2) as u32;
+/// Writes a canonical PCM WAV header and reserves space for its 16-bit mono samples.
+fn wav_header(samples: usize, rate: u32) -> Vec<u8> {
+    let data_len = (samples * 2) as u32;
     let mut out = Vec::with_capacity(WAV_HEADER_BYTES + data_len as usize);
     out.extend_from_slice(b"RIFF");
     out.extend_from_slice(&(36 + data_len).to_le_bytes());
@@ -249,8 +274,5 @@ fn wav(samples: &[i16], rate: u32) -> Vec<u8> {
     out.extend_from_slice(&16u16.to_le_bytes()); // bits per sample
     out.extend_from_slice(b"data");
     out.extend_from_slice(&data_len.to_le_bytes());
-    for sample in samples {
-        out.extend_from_slice(&sample.to_le_bytes());
-    }
     out
 }
