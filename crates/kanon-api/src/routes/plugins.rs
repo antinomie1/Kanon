@@ -907,7 +907,9 @@ async fn set_plugin_enabled(
         .await
         .map_err(ApiError::Internal)?;
 
-    if !changed {
+    // Persisted intent alone does not prove that the requested lifecycle action finished. A
+    // failed launch keeps the plugin enabled, so another enable must retry the missing host.
+    if !changed && running.is_some() == body.enabled {
         return Ok(Json(PluginStateResponse {
             applied: false,
             message: if body.enabled {

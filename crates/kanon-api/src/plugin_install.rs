@@ -12,6 +12,8 @@
 //! 3. **Staged replacement**: the new files are copied into a hidden staging folder first; only
 //!    when that succeeded is the running host stopped and the folder swapped in by rename. A failed
 //!    download, extraction or copy therefore leaves the installed version untouched and running.
+//!    Once the old host stops, the commit finishes even if the caller disconnects; shutdown waits
+//!    on the same plugin configuration guard until installation or rollback has completed.
 //!
 //! Packages are bounded: at most [`MAX_PACKAGE_BYTES`] compressed, [`MAX_UNPACKED_BYTES`]
 //! extracted and [`MAX_PACKAGE_ENTRIES`] entries, so a small "zip bomb" cannot fill the disk.
@@ -75,7 +77,7 @@ pub async fn install(
     replace: bool,
 ) -> Result<InstallPluginResponse, ApiError> {
     match source {
-        InstallSource::Path(path) => install_from_dir(state, &path, replace).await,
+        InstallSource::Path(path) => install_from_dir(state, &path, replace, None).await,
         InstallSource::Archive(bytes) => install_from_archive(state, bytes, replace).await,
         InstallSource::Url(url) => {
             let bytes = plugin_sources::download(&url, MAX_PACKAGE_BYTES, PACKAGE_DOWNLOAD_TIMEOUT)
@@ -90,9 +92,9 @@ pub async fn install(
             plugin_sources::git_clone(&url, git_ref.as_deref(), &repo, GIT_CLONE_TIMEOUT)
                 .await
                 .map_err(git_error)?;
-            let size = {
+            let (checkout, size) = {
                 let repo = repo.clone();
-                tokio::task::spawn_blocking(move || tree_size(&repo))
+                tokio::task::spawn_blocking(move || tree_size(&repo).map(|size| (checkout, size)))
                     .await
                     .map_err(|err| ApiError::Internal(format!("Size check failed: {err}")))??
             };
@@ -102,7 +104,7 @@ pub async fn install(
                 )));
             }
             tracing::info!(url = %url, git_ref = ?git_ref, "Plugin repository cloned");
-            install_from_dir(state, &repo, replace).await
+            install_from_dir(state, &repo, replace, Some(checkout)).await
         }
     }
 }
@@ -145,10 +147,13 @@ async fn install_from_archive(
         )));
     }
     let temp_dir = tempfile::tempdir()?;
-    let extract_into = temp_dir.path().to_path_buf();
-    tokio::task::spawn_blocking(move || extract_archive(&bytes, &extract_into))
-        .await
-        .map_err(|err| ApiError::Internal(format!("Extraction task failed: {err}")))??;
+    // Blocking workers outlive a cancelled HTTP future. The worker must own its directory,
+    // otherwise cancellation removes it while extraction can still recreate files beneath it.
+    let temp_dir = tokio::task::spawn_blocking(move || {
+        extract_archive(&bytes, temp_dir.path()).map(|()| temp_dir)
+    })
+    .await
+    .map_err(|err| ApiError::Internal(format!("Extraction task failed: {err}")))??;
 
     let source_dir = if temp_dir.path().join("plugin.toml").is_file() {
         temp_dir.path().to_path_buf()
@@ -163,7 +168,7 @@ async fn install_from_archive(
         ));
     };
 
-    install_from_dir(state, &source_dir, replace).await
+    install_from_dir(state, &source_dir, replace, Some(temp_dir)).await
 }
 
 /// Unpacks a ZIP container under the entry-count and extracted-size limits.
@@ -236,6 +241,7 @@ async fn install_from_dir(
     state: &ApiState,
     source_path: &Path,
     replace: bool,
+    source_guard: Option<tempfile::TempDir>,
 ) -> Result<InstallPluginResponse, ApiError> {
     let manifest_file = locate_manifest(source_path)?;
     let manifest = PluginManifest::load_from_file(&manifest_file)
@@ -244,7 +250,7 @@ async fn install_from_dir(
 
     let plugin_id = manifest.plugin.id.clone();
     // Replacement must not switch the registered host halfway through a configuration commit.
-    let _configuration = state.supervisor().lock_plugin_config(&plugin_id).await;
+    let configuration = state.supervisor().lock_plugin_config(&plugin_id).await;
     let source_dir = manifest_file.parent().unwrap_or(source_path).to_path_buf();
     let plugins_root = state.plugins_dir().to_path_buf();
     std::fs::create_dir_all(&plugins_root)?;
@@ -282,124 +288,173 @@ async fn install_from_dir(
 
     // Copy first, while the installed version keeps running: everything that can fail slowly
     // (a large copy, a full disk) happens before anything is stopped or replaced.
-    let staged = if in_place {
-        None
+    let (staged, source_guard) = if in_place {
+        (None, source_guard)
     } else {
         let staging = tempfile::Builder::new()
             .prefix(".kanon-install-")
             .tempdir_in(&plugins_root)?;
-        let (from, to) = (source_dir.clone(), staging.path().to_path_buf());
+        let from = source_dir.clone();
         let entrypoint = manifest.plugin.entrypoint.trim().to_string();
-        tokio::task::spawn_blocking(move || {
-            copy_dir_recursive(&from, &to)?;
-            copy_entrypoint(&from, &to, &entrypoint)
+        let staging = tokio::task::spawn_blocking(move || {
+            // Both ends belong to this worker. An extracted archive or Git checkout must not
+            // disappear midway through copying when its HTTP caller disconnects.
+            let _source_guard = source_guard;
+            copy_dir_recursive(&from, staging.path())?;
+            copy_entrypoint(&from, staging.path(), &entrypoint)?;
+            Ok::<_, std::io::Error>(staging)
         })
         .await
         .map_err(|err| ApiError::Internal(format!("Copy task failed: {err}")))?
         .map_err(|err| ApiError::Internal(format!("Failed to copy the plugin files: {err}")))?;
-        Some(staging)
+        (Some(staging), None)
     };
 
-    // Point of no return: the old host stops so its files can be replaced.
-    if let Some(host) = &running {
-        state
-            .supervisor()
-            .stop_host(&host.host_id)
-            .await
-            .map_err(|err| {
-                ApiError::Internal(format!(
-                    "Could not stop the running host '{}' before replacing it: {err}",
-                    host.host_id
-                ))
-            })?;
-    }
-    if let Some(staging) = staged {
-        swap_into_place(staging, &dest_dir, &plugins_root)?;
-    }
+    // The caller may cancel preparation, but stopping the old host commits to finishing the
+    // replacement. Transfer the already-held guard into this task before the first side effect;
+    // shutdown and subsequent lifecycle requests then wait for its final launch outcome.
+    let state = state.clone();
+    tokio::spawn(async move {
+        let _configuration = configuration;
+        let _source_guard = source_guard;
+        let result = async {
+            // Point of no return: the old host stops so its files can be replaced.
+            if let Some(host) = &running {
+                state
+                    .supervisor()
+                    .stop_host(&host.host_id)
+                    .await
+                    .map_err(|err| {
+                        ApiError::Internal(format!(
+                            "Could not stop the running host '{}' before replacing it: {err}",
+                            host.host_id
+                        ))
+                    })?;
+            }
+            if let Some(staging) = staged
+                && let Err(failure) = swap_into_place(staging, &dest_dir, &plugins_root)
+            {
+                // A filesystem rollback also needs to restore service: the old host was stopped
+                // before the swap. Never relaunch it when its directory could not be restored.
+                if failure.previous_in_place
+                    && let Some(host) = &running
+                    && let Some(LaunchSpec::Manifest {
+                        manifest_path,
+                        executable_override,
+                        ..
+                    }) = host.launch_spec()
+                {
+                    let restored = state
+                        .supervisor()
+                        .spawn_from_manifest(manifest_path, executable_override.as_deref())
+                        .await;
+                    return Err(ApiError::Internal(format!(
+                        "{}; {}",
+                        failure.error,
+                        match restored {
+                            Ok(_) => "the previous host was restarted".to_string(),
+                            Err(error) =>
+                                format!("restarting the previous host also failed: {error}"),
+                        }
+                    )));
+                }
+                return Err(failure.error);
+            }
 
-    ensure_entrypoint_executable(&dest_dir, &manifest.plugin.entrypoint);
+            ensure_entrypoint_executable(&dest_dir, &manifest.plugin.entrypoint);
 
-    let target_manifest_path = dest_dir.join("plugin.toml");
-    // The files are in place, so the node knows the plugin from here on, even if its host fails
-    // to start below: the operator can then fix the cause and enable it from the console.
-    state.record_installed_plugin(DiscoveredPlugin {
-        manifest: manifest.clone(),
-        manifest_path: target_manifest_path.clone(),
-        plugin_dir: dest_dir.clone(),
-    });
+            let target_manifest_path = dest_dir.join("plugin.toml");
+            // The files are in place, so the node knows the plugin from here on, even if its host fails
+            // to start below: the operator can then fix the cause and enable it from the console.
+            state.record_installed_plugin(DiscoveredPlugin {
+                manifest: manifest.clone(),
+                manifest_path: target_manifest_path.clone(),
+                plugin_dir: dest_dir.clone(),
+            });
 
-    // Reinstalling a plugin the operator switched off must not switch it back on behind their back.
-    if !state
-        .plugin_state()
-        .is_enabled(kanon_core::PLUGIN_SECTION, &plugin_id)
-        .await
-    {
-        let declared = plugin_view_from_manifest_with_status(&manifest, "disabled");
-        return Ok(response(
-            &manifest,
-            declared.commands,
-            declared.tools,
-            "disabled",
-            "Plugin installed; it stays off because it is disabled on this node",
-        ));
-    }
+            // Reinstalling a plugin the operator switched off must not switch it back on behind their back.
+            if !state
+                .plugin_state()
+                .is_enabled(kanon_core::PLUGIN_SECTION, &plugin_id)
+                .await
+            {
+                let declared = plugin_view_from_manifest_with_status(&manifest, "disabled");
+                return Ok(response(
+                    &manifest,
+                    declared.commands,
+                    declared.tools,
+                    "disabled",
+                    "Plugin installed; it stays off because it is disabled on this node",
+                ));
+            }
 
-    match state
-        .supervisor()
-        .spawn_from_manifest(&target_manifest_path, None)
-        .await
-    {
-        Ok(host) => {
-            state
-                .observability()
-                .events
-                .publish(TraceEvent::PluginInstalled {
-                    plugin_id: plugin_id.clone(),
-                    host_id: host.host_id.clone(),
-                });
-            let (commands, tools) = plugin_views_for(&host)?
-                .into_iter()
-                .find(|view| view.id == plugin_id)
-                .map(|view| (view.commands, view.tools))
-                .unwrap_or_else(|| {
-                    let declared = plugin_view_from_manifest_with_status(&manifest, "running");
-                    (declared.commands, declared.tools)
-                });
-            tracing::info!(
-                plugin_id = %plugin_id,
-                host_id = %host.host_id,
-                "Plugin installed and host spawned successfully"
-            );
-            Ok(response(
-                &manifest,
-                commands,
-                tools,
-                "running",
-                "Plugin installed and launched successfully",
-            ))
+            match state
+                .supervisor()
+                .spawn_from_manifest(&target_manifest_path, None)
+                .await
+            {
+                Ok(host) => {
+                    state
+                        .observability()
+                        .events
+                        .publish(TraceEvent::PluginInstalled {
+                            plugin_id: plugin_id.clone(),
+                            host_id: host.host_id.clone(),
+                        });
+                    let (commands, tools) = plugin_views_for(&host)?
+                        .into_iter()
+                        .find(|view| view.id == plugin_id)
+                        .map(|view| (view.commands, view.tools))
+                        .unwrap_or_else(|| {
+                            let declared =
+                                plugin_view_from_manifest_with_status(&manifest, "running");
+                            (declared.commands, declared.tools)
+                        });
+                    tracing::info!(
+                        plugin_id = %plugin_id,
+                        host_id = %host.host_id,
+                        "Plugin installed and host spawned successfully"
+                    );
+                    Ok(response(
+                        &manifest,
+                        commands,
+                        tools,
+                        "running",
+                        "Plugin installed and launched successfully",
+                    ))
+                }
+                Err(SupervisorError::RuntimeUnavailable { runtime, reason }) => {
+                    tracing::warn!(
+                        plugin_id = %plugin_id,
+                        runtime = %runtime,
+                        reason = %reason,
+                        "Plugin installed but runtime is unavailable"
+                    );
+                    let declared =
+                        plugin_view_from_manifest_with_status(&manifest, "RuntimeUnavailable");
+                    let mut view = response(
+                        &manifest,
+                        declared.commands,
+                        declared.tools,
+                        "RuntimeUnavailable",
+                        &format!("Plugin installed but runtime is unavailable: {reason}"),
+                    );
+                    view.runtime = runtime;
+                    Ok(view)
+                }
+                Err(err) => Err(ApiError::BadRequest(format!(
+                    "Plugin files were installed but its host failed to launch: {err}"
+                ))),
+            }
         }
-        Err(SupervisorError::RuntimeUnavailable { runtime, reason }) => {
-            tracing::warn!(
-                plugin_id = %plugin_id,
-                runtime = %runtime,
-                reason = %reason,
-                "Plugin installed but runtime is unavailable"
-            );
-            let declared = plugin_view_from_manifest_with_status(&manifest, "RuntimeUnavailable");
-            let mut view = response(
-                &manifest,
-                declared.commands,
-                declared.tools,
-                "RuntimeUnavailable",
-                &format!("Plugin installed but runtime is unavailable: {reason}"),
-            );
-            view.runtime = runtime;
-            Ok(view)
+        .await;
+        if let Err(error) = &result {
+            tracing::error!(plugin_id = %plugin_id, %error, "Plugin installation commit failed");
         }
-        Err(err) => Err(ApiError::BadRequest(format!(
-            "Plugin files were installed but its host failed to launch: {err}"
-        ))),
-    }
+        result
+    })
+    .await
+    .map_err(|err| ApiError::Internal(format!("Installation task failed: {err}")))?
 }
 
 /// Builds the installation response.
@@ -531,18 +586,25 @@ fn check_collisions(
     Ok(())
 }
 
+/// A failed swap distinguishes a recoverable old installation from a missing directory.
+struct SwapFailure {
+    error: ApiError,
+    previous_in_place: bool,
+}
+
 /// Moves a fully staged plugin folder to `dest_dir`, keeping the old one until the swap succeeded.
 fn swap_into_place(
     staging: tempfile::TempDir,
     dest_dir: &Path,
     plugins_root: &Path,
-) -> Result<(), ApiError> {
+) -> Result<(), SwapFailure> {
     if !dest_dir.exists() {
-        std::fs::rename(staging.path(), dest_dir).map_err(|err| {
-            ApiError::Internal(format!(
+        std::fs::rename(staging.path(), dest_dir).map_err(|err| SwapFailure {
+            error: ApiError::Internal(format!(
                 "Failed to move the plugin into {}: {err}",
                 dest_dir.display()
-            ))
+            )),
+            previous_in_place: false,
         })?;
         return Ok(());
     }
@@ -551,28 +613,36 @@ fn swap_into_place(
     // deleted — by the guard's drop — once the new version is in place.
     let parking = tempfile::Builder::new()
         .prefix(".kanon-replaced-")
-        .tempdir_in(plugins_root)?;
+        .tempdir_in(plugins_root)
+        .map_err(|error| SwapFailure {
+            error: error.into(),
+            previous_in_place: true,
+        })?;
     let previous = parking.path().join("previous");
-    std::fs::rename(dest_dir, &previous).map_err(|err| {
-        ApiError::Internal(format!(
+    std::fs::rename(dest_dir, &previous).map_err(|err| SwapFailure {
+        error: ApiError::Internal(format!(
             "Failed to move the installed version out of {}: {err}",
             dest_dir.display()
-        ))
+        )),
+        previous_in_place: true,
     })?;
     if let Err(err) = std::fs::rename(staging.path(), dest_dir) {
         // Put the old version back so a failed upgrade leaves a working plugin behind.
         let restored = std::fs::rename(&previous, dest_dir);
-        return Err(ApiError::Internal(format!(
-            "Failed to move the new version into {}: {err}{}",
-            dest_dir.display(),
-            match restored {
-                Ok(()) => "; the previous version was restored".to_string(),
-                Err(restore) => format!(
-                    "; restoring the previous version also failed ({restore}), it is kept in {}",
-                    parking.keep().join("previous").display()
-                ),
-            }
-        )));
+        return Err(SwapFailure {
+            previous_in_place: restored.is_ok(),
+            error: ApiError::Internal(format!(
+                "Failed to move the new version into {}: {err}{}",
+                dest_dir.display(),
+                match restored {
+                    Ok(()) => "; the previous version was restored".to_string(),
+                    Err(restore) => format!(
+                        "; restoring the previous version also failed ({restore}), it is kept in {}",
+                        parking.keep().join("previous").display()
+                    ),
+                }
+            )),
+        });
     }
     Ok(())
 }

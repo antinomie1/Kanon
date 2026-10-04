@@ -229,6 +229,18 @@ async fn enabling_a_stopped_plugin_reports_a_start_failure_instead_of_pretending
     let view = plugin_entry(&catalog, common::FIXTURE_PLUGIN_ID);
     assert_eq!(view["enabled"], json!(true));
     assert_ne!(view["status"], json!("running"));
+
+    // Retrying the same intent must attempt the launch again, rather than claiming the stopped
+    // plugin is already running just because the first failed attempt persisted `enabled`.
+    let (status, body) = common::send_json(
+        &app,
+        Method::PUT,
+        &format!("/api/v1/plugins/{}/enabled", common::FIXTURE_PLUGIN_ID),
+        Some(json!({ "enabled": true })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_GATEWAY, "unexpected body: {body}");
+    assert_eq!(body["error"]["code"], json!("upstream_error"));
 }
 
 #[tokio::test]
@@ -279,4 +291,15 @@ async fn a_plugin_copied_in_by_hand_appears_only_after_a_rescan() {
     assert_ne!(view["status"], json!("running"));
     // The running fixture is still there next to it.
     plugin_entry(&body, common::FIXTURE_PLUGIN_ID);
+
+    // Freshly scanned plugins are enabled by default but have no host yet. Enabling one must
+    // attempt its launch; this fixture deliberately has no executable and therefore fails.
+    let (status, body) = common::send_json(
+        &app,
+        Method::PUT,
+        "/api/v1/plugins/org.kanon.plugin.added/enabled",
+        Some(json!({ "enabled": true })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_GATEWAY, "unexpected body: {body}");
 }
