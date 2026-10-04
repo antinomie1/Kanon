@@ -357,6 +357,7 @@ impl PlatformAdapter for QqOfficialAdapter {
                 let _ = task.await;
             }
             let mut shared = state.write().expect("QQ Official state poisoned");
+            shared.api = None;
             shared.status.connected = false;
             shared.status.connection_state = ConnectionState::Stopped;
         })

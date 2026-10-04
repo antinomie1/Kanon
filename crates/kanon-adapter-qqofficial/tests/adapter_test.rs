@@ -316,6 +316,47 @@ async fn full_round_trip_with_quotes_and_resume() {
 
     adapter.stop().await.unwrap();
     assert_eq!(adapter.status().connection_state, ConnectionState::Stopped);
+
+    let calls_before = mock.calls.lock().unwrap().len();
+    let request = DeliverMessageRequest {
+        platform: "qqofficial".into(),
+        channel_id: "c2c:U1".into(),
+        event_id: "C1".into(),
+        segments: vec![text_segment("after restart")],
+        ..Default::default()
+    };
+    assert!(matches!(
+        adapter.deliver(request.clone()).await,
+        Err(AdapterError::Configuration { .. })
+    ));
+    adapter
+        .acknowledge(&PipelineEventRequest {
+            platform: "qqofficial".into(),
+            channel_id: "c2c:U1".into(),
+            event_id: "C1".into(),
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+    assert_eq!(mock.calls.lock().unwrap().len(), calls_before);
+
+    // Starting again installs a fresh API client and gateway session.
+    let (ingest_tx, _restarted_ingest) = mpsc::channel(8);
+    adapter.start(EventIngress::new(ingest_tx)).await.unwrap();
+    let mut socket = next_socket(&mut accepted).await;
+    socket.send(json!({"op": 10, "d": {"heartbeat_interval": 30000}}));
+    assert_eq!(socket.recv().await["op"], 2);
+    socket.send(json!({"op": 0, "s": 1, "t": "READY", "d": {
+        "session_id": "NEW_SESSION", "user": {"id": "BOT", "username": "kanon-bot"}
+    }}));
+    wait_for_state(&adapter, ConnectionState::Connected).await;
+    assert!(adapter.deliver(request).await.unwrap().success);
+    {
+        let calls = mock.calls.lock().unwrap();
+        assert_eq!(calls.len(), calls_before + 1);
+        assert_eq!(calls.last().unwrap().1["content"], "after restart");
+    }
+    adapter.stop().await.unwrap();
 }
 
 /// Missing intent permissions cannot be fixed by retrying: the adapter stops and says why.
