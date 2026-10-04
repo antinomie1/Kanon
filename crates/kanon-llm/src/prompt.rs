@@ -300,24 +300,18 @@ impl PersonaHook {
         }
     }
 
-    /// Persona that governs a session: the one bound to it, otherwise the base assistant.
-    fn persona_for(&self, session_id: &str) -> Persona {
+    /// Resolves the bound persona; only sessions without a binding use the base assistant.
+    fn persona_for(&self, session_id: &str) -> Result<Persona, AgentError> {
         let Some(bound) = self.session_manager.get_persona(session_id) else {
-            return self.persona_registry.base();
+            return Ok(self.persona_registry.base());
         };
-        match self.persona_registry.get(&bound) {
-            Some(persona) => persona,
-            None => {
-                // Deleting a persona unbinds the sessions using it, so reaching this means a stale
-                // binding slipped through. Say so instead of silently changing behaviour.
-                tracing::warn!(
-                    session_id = %session_id,
-                    persona_id = %bound,
-                    "Session is bound to an unknown persona; using the base assistant"
-                );
-                self.persona_registry.base()
-            }
-        }
+        // A stale binding is a configuration failure. Sending the base prompt would change the
+        // conversation's instructions without the operator selecting a different persona.
+        self.persona_registry.get(&bound).ok_or_else(|| {
+            AgentError::InvalidRequest(format!(
+                "session '{session_id}' is bound to missing persona '{bound}'"
+            ))
+        })
     }
 }
 
@@ -330,7 +324,7 @@ impl AgentHook for PersonaHook {
     ) -> Result<(), AgentError> {
         // The persona is the first part of the static system block, ahead of anything else placed
         // there, because it is the part that changes least.
-        let prompt = self.persona_for(session_id).prompt;
+        let prompt = self.persona_for(session_id)?.prompt;
         request.messages.insert(0, ChatMessage::system(prompt));
         Ok(())
     }

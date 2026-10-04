@@ -433,21 +433,19 @@ async fn test_agent_persona_hook_integration() {
         );
     }
 
-    // 3. A binding to a persona that no longer exists falls back to the base assistant instead of
-    // sending the model no instructions at all.
+    // 3. A stale binding must fail before the provider sees different instructions.
     persona_reg.remove("coder").expect("removed");
-    agent
+    let error = agent
         .run_standalone(session_id, "And now?")
         .await
-        .expect("Third turn should succeed");
-    {
-        let reqs = captured.read().await;
-        assert_eq!(
-            reqs[2].messages[0].content.as_deref(),
-            Some(BASE_PERSONA_PROMPT)
-        );
-    }
-    assert_eq!(session_mgr.get_metadata(session_id).unwrap().turn_count, 3);
+        .expect_err("A missing bound persona must fail explicitly");
+    assert!(matches!(
+        error,
+        kanon_llm::AgentError::InvalidRequest(ref message)
+            if message.contains(session_id) && message.contains("missing persona 'coder'")
+    ));
+    assert_eq!(captured.read().await.len(), 2);
+    assert_eq!(session_mgr.get_metadata(session_id).unwrap().turn_count, 2);
 }
 
 #[tokio::test]
