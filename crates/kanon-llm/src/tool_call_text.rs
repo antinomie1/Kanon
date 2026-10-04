@@ -126,11 +126,11 @@ fn looks_like_tool_call_markup(content: &str) -> bool {
 
 /// Finds the byte offset of an opening `<tool_call>` tag, tolerating attributes.
 fn find_tag_start(content: &str, tag: &str) -> Option<usize> {
-    let plain = format!("<{tag}>");
-    if let Some(index) = content.find(&plain) {
-        return Some(index);
-    }
-    content.find(&format!("<{tag} "))
+    content
+        .find(&format!("<{tag}>"))
+        .into_iter()
+        .chain(content.find(&format!("<{tag} ")))
+        .min()
 }
 
 /// Parses the body of one `<tool_call>` block into zero or more tool calls.
@@ -157,9 +157,9 @@ fn parse_json_body(body: &str) -> Option<Vec<ToolCall>> {
 
     let mut calls = Vec::new();
     for entry in entries {
-        if let Some(call) = json_entry_to_call(&entry) {
-            calls.push(call);
-        }
+        // Recovery removes the whole block. Keep it intact if any sibling is invalid rather
+        // than executing only part of the model's request and silently discarding the rest.
+        calls.push(json_entry_to_call(&entry)?);
     }
 
     if calls.is_empty() { None } else { Some(calls) }
@@ -189,18 +189,19 @@ fn json_entry_to_call(entry: &serde_json::Value) -> Option<ToolCall> {
     Some(ToolCall {
         id: next_call_id(),
         name: name.to_string(),
-        arguments: normalize_arguments(arguments),
+        arguments: normalize_arguments(arguments)?,
     })
 }
 
-/// Accepts arguments as an object or as a JSON-encoded string, always yielding an object.
-fn normalize_arguments(arguments: serde_json::Value) -> serde_json::Value {
-    match arguments {
-        serde_json::Value::String(encoded) => serde_json::from_str(&encoded)
-            .unwrap_or(serde_json::Value::Object(serde_json::Map::new())),
+/// Accepts an object or its JSON encoding; explicit null means no arguments.
+/// Malformed or non-object arguments leave the original block unparsed, never executable as `{}`.
+fn normalize_arguments(arguments: serde_json::Value) -> Option<serde_json::Value> {
+    let arguments = match arguments {
+        serde_json::Value::String(encoded) => serde_json::from_str(&encoded).ok()?,
         serde_json::Value::Null => serde_json::Value::Object(serde_json::Map::new()),
         other => other,
-    }
+    };
+    arguments.is_object().then_some(arguments)
 }
 
 /// Parses `<function=NAME><parameter=KEY>VALUE</parameter>...</function>` bodies.
@@ -211,10 +212,10 @@ fn parse_function_body(body: &str) -> Option<Vec<ToolCall>> {
 
     while let Some(relative) = body[cursor..].find("<function") {
         let start = cursor + relative;
-        let Some((name, after_open)) = parse_function_tag(&body[start..]) else {
-            // A malformed block must not discard the calls recovered before it.
-            break;
-        };
+        let (name, after_open) = parse_function_tag(&body[start..])?;
+        if name.is_empty() {
+            return None;
+        }
         let params_start = start + after_open;
         // Parameters run until the matching `</function>` or the next `<function` block.
         let remainder = &body[params_start..];
@@ -222,15 +223,13 @@ fn parse_function_body(body: &str) -> Option<Vec<ToolCall>> {
             .find("</function>")
             .or_else(|| remainder.find("<function"))
             .unwrap_or(remainder.len());
-        let parameters = parse_parameters(&remainder[..end]);
+        let parameters = parse_parameters(&remainder[..end])?;
 
-        if !name.is_empty() {
-            calls.push(ToolCall {
-                id: next_call_id(),
-                name,
-                arguments: serde_json::Value::Object(parameters),
-            });
-        }
+        calls.push(ToolCall {
+            id: next_call_id(),
+            name,
+            arguments: serde_json::Value::Object(parameters),
+        });
         cursor = params_start + end;
     }
 
@@ -268,8 +267,8 @@ fn parse_function_tag(text: &str) -> Option<(String, usize)> {
     None
 }
 
-/// Parses every `<parameter=KEY>VALUE</parameter>` / `<parameter name="KEY">VALUE</parameter>` pair.
-fn parse_parameters(text: &str) -> serde_json::Map<String, serde_json::Value> {
+/// Parses every parameter pair, refusing malformed keys or ambiguous boundaries as a whole.
+fn parse_parameters(text: &str) -> Option<serde_json::Map<String, serde_json::Value>> {
     const OPEN: &str = "<parameter";
     let mut arguments = serde_json::Map::new();
     let mut cursor = 0usize;
@@ -282,37 +281,40 @@ fn parse_parameters(text: &str) -> serde_json::Map<String, serde_json::Value> {
         // prefix that was consumed. Deriving it (instead of re-adding a guessed tag length) is what
         // keeps the first character of every value from being eaten.
         let (key, value_start) = if let Some(rest) = after_tag.strip_prefix(" name=") {
-            let Some(end) = rest.find('>') else { break };
+            let end = rest.find('>')?;
             (
                 unquote(rest[..end].trim()),
                 start + OPEN.len() + " name=".len() + end + 1,
             )
         } else if let Some(rest) = after_tag.strip_prefix('=') {
-            let Some(end) = rest.find('>') else { break };
+            let end = rest.find('>')?;
             (
                 unquote(rest[..end].trim()),
                 start + OPEN.len() + 1 + end + 1,
             )
         } else {
-            break;
+            return None;
         };
+        if key.trim().is_empty() {
+            return None;
+        }
 
         let remainder = &text[value_start..];
         let end = match remainder.find("</parameter>") {
             Some(end) => end,
-            // A parameter without a closing tag consumes the rest of the block; that is the only
-            // reading that does not silently drop the model's final argument.
+            // A final parameter may omit its closing tag when its boundary is unambiguous.
             None => remainder.len(),
         };
         let value = &remainder[..end];
-
-        if !key.is_empty() {
-            arguments.insert(key, coerce_scalar(value.trim()));
+        if value.contains(OPEN) {
+            // A new parameter before this one closes cannot be guessed into either value.
+            return None;
         }
+        arguments.insert(key, coerce_scalar(value.trim()));
         cursor = value_start + end;
     }
 
-    arguments
+    Some(arguments)
 }
 
 /// Converts a textual parameter value into the JSON type it obviously represents.

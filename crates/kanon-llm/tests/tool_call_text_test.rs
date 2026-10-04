@@ -32,14 +32,17 @@ fn recovers_the_function_parameter_markup_used_by_mimo_style_models() {
 
 #[test]
 fn recovers_attribute_style_function_and_parameter_tags() {
-    let content = r#"<tool_call><function name="weather"><parameter name="city">北京</parameter></function></tool_call>"#;
+    for close in ["</parameter>", ""] {
+        let content = format!(
+            r#"<tool_call><function name="weather"><parameter name="city">北京{close}</function></tool_call>"#
+        );
+        let (calls, cleaned) = extract_textual_tool_calls(&content);
 
-    let (calls, cleaned) = extract_textual_tool_calls(content);
-
-    assert_eq!(calls.len(), 1);
-    assert_eq!(calls[0].name, "weather");
-    assert_eq!(calls[0].arguments["city"], json!("北京"));
-    assert!(cleaned.is_empty());
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].name, "weather");
+        assert_eq!(calls[0].arguments["city"], json!("北京"));
+        assert!(cleaned.is_empty());
+    }
 }
 
 #[test]
@@ -68,15 +71,18 @@ fn recovers_the_openai_shaped_json_body() {
 
 #[test]
 fn recovers_several_blocks_from_one_message() {
-    let content = "<tool_call><function=a><parameter=x>1</parameter></function></tool_call> and \
-<tool_call><function=b><parameter=y>two</parameter></function></tool_call>";
+    for opening in ["<tool_call>", "<tool_call id=first>"] {
+        let content = format!(
+            "{opening}<function=a><parameter=x>1</parameter></function></tool_call> and \
+<tool_call><function=b><parameter=y>two</parameter></function></tool_call>"
+        );
+        let (calls, cleaned) = extract_textual_tool_calls(&content);
 
-    let (calls, cleaned) = extract_textual_tool_calls(content);
-
-    assert_eq!(calls.len(), 2);
-    assert_eq!(calls[0].name, "a");
-    assert_eq!(calls[1].name, "b");
-    assert_eq!(cleaned, "and");
+        assert_eq!(calls.len(), 2);
+        assert_eq!(calls[0].name, "a");
+        assert_eq!(calls[1].name, "b");
+        assert_eq!(cleaned, "and");
+    }
 }
 
 #[test]
@@ -99,15 +105,49 @@ fn a_tool_calls_wrapper_goes_with_the_calls_it_held() {
 
 #[test]
 fn malformed_markup_is_preserved_instead_of_silently_dropped() {
-    let content = "<tool_call>not a tool call at all</tool_call>";
+    for body in [
+        "not a tool call at all",
+        r#"{"name":"lookup","arguments":"{broken"}"#,
+        r#"{"name":"lookup","arguments":[]}"#,
+        r#"{"name":"lookup","arguments":42}"#,
+        r#"{"name":"lookup","arguments":"[]"}"#,
+        r#"[{"name":"valid","arguments":{}},{"name":"invalid","arguments":"{broken"}]"#,
+        r#"[{"name":"invalid","arguments":42},{"name":"valid","arguments":{}}]"#,
+        "<function=valid></function><function invalid></function>",
+        "<function=valid></function><function=></function>",
+        "<function=lookup><parameter invalid>42</parameter></function>",
+        "<function=lookup><parameter=>42</parameter></function>",
+        r#"<function=lookup><parameter name=" ">42</parameter></function>"#,
+        "<function=lookup><parameter=valid>1</parameter><parameter invalid>2</parameter></function>",
+        "<function=lookup><parameter=first>1<parameter=second>2</parameter></function>",
+    ] {
+        let content = format!("before <tool_call>{body}</tool_call> after");
+        let (calls, cleaned) = extract_textual_tool_calls(&content);
+        assert!(
+            calls.is_empty(),
+            "invalid arguments must not execute: {body}"
+        );
+        assert_eq!(
+            cleaned, content,
+            "the whole invalid block must stay visible"
+        );
+    }
+}
 
-    let (calls, cleaned) = extract_textual_tool_calls(content);
-
-    assert!(calls.is_empty());
-    assert_eq!(
-        cleaned, content,
-        "an unparsable block must stay visible rather than vanish"
-    );
+#[test]
+fn empty_arguments_remain_valid() {
+    for body in [
+        r#"{"name":"lookup"}"#,
+        r#"{"name":"lookup","arguments":null}"#,
+        r#"{"name":"lookup","arguments":{}}"#,
+        r#"{"name":"lookup","arguments":"{}"}"#,
+    ] {
+        let content = format!("<tool_call>{body}</tool_call>");
+        let (calls, cleaned) = extract_textual_tool_calls(&content);
+        assert_eq!(calls.len(), 1, "{body}");
+        assert_eq!(calls[0].arguments, json!({}), "{body}");
+        assert!(cleaned.is_empty());
+    }
 }
 
 #[test]
