@@ -8,7 +8,7 @@ use kanon_llm::gateway::{ChatChunk, ChatChunkStream, ChatRequest, ChatResponse};
 use kanon_llm::memory::InMemory;
 use kanon_llm::{
     Agent, AgentError, AgentHook, BuiltinAgent, GatewayError, LlmProvider, MemoryError,
-    SessionManager,
+    SessionManager, ToolRouter,
 };
 use tokio::sync::{Notify, mpsc};
 use tokio_stream::StreamExt;
@@ -77,7 +77,9 @@ async fn turn_excludes_reset_delete_and_second_turn_including_delegated_callback
         Err(MemoryError::Busy(_))
     ));
     assert!(matches!(
-        agent.run("chat", "racing", &[]).await,
+        ToolRouter::from_arc(agent.clone())
+            .execute("chat", "racing", &[])
+            .await,
         Err(AgentError::Busy(_))
     ));
     assert!(sessions.try_write("other").is_ok());

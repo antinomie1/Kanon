@@ -8,7 +8,7 @@ use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
 use kanon_llm::BuiltinAgent;
-use kanon_llm::tool_router::{ToolHost, json_to_prost_struct};
+use kanon_llm::tool_router::{ToolHost, ToolRouter, json_to_prost_struct};
 use kanon_llm::{
     Agent, AgentError, AgentHook, ChatRequest, ChatResponse, GatewayError, InMemory, LlmProvider,
     Memory, ToolCall,
@@ -96,7 +96,10 @@ async fn invalid_schema_fails_before_calling_the_provider() {
         invalid_schema: true,
     })];
 
-    let error = agent.run("session", "draw", &hosts).await.unwrap_err();
+    let error = ToolRouter::from_agent(agent)
+        .execute("session", "draw", &hosts)
+        .await
+        .unwrap_err();
 
     assert!(matches!(error, AgentError::InvalidRequest(_)));
     assert!(error.to_string().contains("protobuf number must be finite"));
@@ -105,62 +108,90 @@ async fn invalid_schema_fails_before_calling_the_provider() {
 
 #[tokio::test]
 async fn invalid_tool_result_is_a_paired_failure_without_attachments() {
-    let requests = Arc::new(Mutex::new(Vec::new()));
-    let provider = Arc::new(ScriptedProvider {
-        responses: Mutex::new(
-            vec![
-                ChatResponse {
-                    tool_calls: vec![ToolCall {
-                        id: "call_1".into(),
-                        name: "draw_card".into(),
-                        arguments: serde_json::json!({}),
-                    }],
-                    finish_reason: Some("tool_calls".into()),
-                    ..Default::default()
-                },
-                ChatResponse {
-                    content: Some("The tool returned invalid data.".into()),
-                    finish_reason: Some("stop".into()),
-                    ..Default::default()
-                },
-            ]
-            .into(),
-        ),
-        requests: requests.clone(),
-    });
-    let hook = Arc::new(CompletionHook::default());
-    let agent = BuiltinAgent::builder("invalid-result", provider)
-        .hook_arc(hook.clone())
-        .build();
-    let hosts: Vec<Arc<dyn ToolHost>> = vec![Arc::new(InvalidHost {
-        invalid_schema: false,
-    })];
+    for stop_on_failure in [false, true] {
+        let requests = Arc::new(Mutex::new(Vec::new()));
+        let provider = Arc::new(ScriptedProvider {
+            responses: Mutex::new(
+                vec![
+                    ChatResponse {
+                        tool_calls: vec![ToolCall {
+                            id: "call_1".into(),
+                            name: "draw_card".into(),
+                            arguments: serde_json::json!({}),
+                        }],
+                        finish_reason: Some("tool_calls".into()),
+                        ..Default::default()
+                    },
+                    ChatResponse {
+                        content: Some("The tool returned invalid data.".into()),
+                        finish_reason: Some("stop".into()),
+                        ..Default::default()
+                    },
+                ]
+                .into(),
+            ),
+            requests: requests.clone(),
+        });
+        let hook = Arc::new(CompletionHook::default());
+        let agent = BuiltinAgent::builder("invalid-result", provider)
+            .hook_arc(hook.clone())
+            .stop_on_tool_failure(stop_on_failure)
+            .build();
+        let memory = agent.memory().clone();
+        let hosts: Vec<Arc<dyn ToolHost>> = vec![Arc::new(InvalidHost {
+            invalid_schema: false,
+        })];
 
-    let output = agent.run("session", "draw", &hosts).await.unwrap();
-
-    assert_eq!(output.executed_tools.len(), 1);
-    assert!(!output.executed_tools[0].success);
-    assert!(output.attachments.is_empty());
-    assert_eq!(*hook.0.lock().unwrap(), [false]);
-    let requests = requests.lock().unwrap();
-    let tool = requests[1]
-        .messages
-        .iter()
-        .find(|message| message.role == kanon_llm::Role::Tool)
-        .expect("paired tool response");
-    assert_eq!(tool.tool_call_id.as_deref(), Some("call_1"));
-    assert!(
-        tool.content
-            .as_deref()
-            .unwrap()
-            .contains("Error: invalid structured tool result")
-    );
-    assert!(
-        tool.content
-            .as_deref()
-            .unwrap()
-            .contains("protobuf number must be finite")
-    );
+        let result = ToolRouter::from_agent(agent)
+            .execute("session", "draw", &hosts)
+            .await;
+        if stop_on_failure {
+            assert!(matches!(
+                result,
+                Err(AgentError::ToolFailed(ref message))
+                    if message.contains("draw_card") && message.contains("protobuf number must be finite")
+            ));
+        } else {
+            let output = result.unwrap();
+            assert_eq!(output.executed_tools.len(), 1);
+            assert!(!output.executed_tools[0].success);
+            assert!(output.attachments.is_empty());
+        }
+        assert_eq!(*hook.0.lock().unwrap(), [false]);
+        let history = memory.get_messages("session").await.unwrap();
+        let requests = requests.lock().unwrap();
+        assert_eq!(requests.len(), if stop_on_failure { 1 } else { 2 });
+        let tool = history
+            .iter()
+            .find(|message| message.role == kanon_llm::Role::Tool)
+            .expect("paired tool response");
+        assert_eq!(tool.tool_call_id.as_deref(), Some("call_1"));
+        assert!(
+            tool.content
+                .as_deref()
+                .unwrap()
+                .contains("Error: invalid structured tool result")
+        );
+        assert!(
+            tool.content
+                .as_deref()
+                .unwrap()
+                .contains("protobuf number must be finite")
+        );
+        if stop_on_failure {
+            assert!(
+                history
+                    .last()
+                    .unwrap()
+                    .content
+                    .as_deref()
+                    .unwrap()
+                    .contains("a tool execution failed")
+            );
+        } else {
+            assert!(requests[1].messages.contains(tool));
+        }
+    }
 }
 
 #[async_trait]

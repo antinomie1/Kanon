@@ -121,7 +121,7 @@ pub trait Agent: Send + Sync {
         session_id: &str,
         user_input: &str,
         hosts: &[Arc<dyn ToolHost>],
-    ) -> Result<ChatChunkStream, AgentError>;
+    ) -> Result<ChatChunkStream<AgentError>, AgentError>;
 
     /// Folds a session's history into a summary now.
     ///
@@ -179,7 +179,7 @@ pub trait Agent: Send + Sync {
         &self,
         session_id: &str,
         user_input: &str,
-    ) -> Result<ChatChunkStream, AgentError> {
+    ) -> Result<ChatChunkStream<AgentError>, AgentError> {
         self.run_stream(session_id, user_input, &[]).await
     }
 }
@@ -372,6 +372,19 @@ impl AgentTool for NativeTool {
 /// - Observability, tracing, token budget tracking, and latency auditing.
 #[async_trait]
 pub trait AgentHook: Send + Sync {
+    /// Prepares the static system text once per turn, before any model request.
+    ///
+    /// Persona instructions are already present; skills and plugin rules append or rewrite them.
+    /// The turn owns the result through every tool round. Runtime data belongs in the user
+    /// message, while per-request observation or mutation stays in [`Self::on_llm_request`].
+    async fn on_system_prompt(
+        &self,
+        _session_id: &str,
+        _prompt: &mut String,
+    ) -> Result<(), AgentError> {
+        Ok(())
+    }
+
     /// Enriches the originating user message once, before it is appended to durable history.
     ///
     /// Runtime metadata belongs here so tool-loop requests and compaction reuse unchanged history.

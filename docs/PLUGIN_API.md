@@ -131,7 +131,7 @@ Supervisor 启动宿主时注入的**启动契约**（插件不得把其他环�
 | `tool_call` | `EVENT_KIND_TOOL_CALL` | 模型请求调用工具（工具执行前发出，仅供观察，不能否决）：`tool_name`、`arguments` |
 | `tool_result` | `EVENT_KIND_TOOL_RESULT` | 工具调用结束：`tool_name`、`success`、`result`（模型读到的文本） |
 
-智能体事件覆盖流水线回答的每一轮，以及 `RunAgent` 在会话内的运行；控制台聊天与插件的私有运行不发送。`agent_done.error` 是失败类别：`stopped`（被 `/stop` 中止）、`model_error`（模型服务出错）、`tool_error`（工具调用失败）。工具事件的 `tool_name` 是模型看到的名字（重名时为 `<plugin>__<tool>`）。同一轮的事件按发生顺序派发，但各订阅者独立接收，插件不应依赖跨事件的到达顺序。
+智能体事件覆盖流水线回答的每一轮，以及 `RunAgent` 在会话内的运行；控制台聊天与插件的私有运行不发送。`agent_done.error` 是失败类别：`stopped`（被 `/stop` 中止）、`model_error`（模型服务出错）、`tool_error`（工具调用失败）、`request_error`（人设、工具定义或请求布局无效）、`memory_error`（会话存储失败）、`busy`（会话正在使用）、`compaction_error`（会话压缩失败）。实例人设解析失败也会发送成对的 `agent_begin` / `agent_done`；本地配置与存储问题不会归类为模型返回错误。工具事件的 `tool_name` 是模型看到的名字（重名时为 `<plugin>__<tool>`）。同一轮的事件按发生顺序派发，但各订阅者独立接收，插件不应依赖跨事件的到达顺序。
 
 字段号 1、2 已保留（旧版扁平字段），不得复用。
 

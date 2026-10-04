@@ -4,20 +4,18 @@
 //! plugins the answering instance runs (its plugin policy already applied). [`PluginAgentHook`],
 //! registered on every agent of the node, reads that scope from within the agent's loop:
 //!
-//! - before each model request it lets plugins with `PluginMeta.rewrites_system_prompt` rewrite
+//! - once per turn it lets plugins with `PluginMeta.rewrites_system_prompt` rewrite
 //!   the system prompt (`OnLlmRequest`);
 //! - around each tool call it tells subscribers `TOOL_CALL` and `TOOL_RESULT`.
 //!
 //! Outside a scope (the console's chat, a plugin's private agent run, a background compaction)
 //! plugins are never called, so a plugin's own model calls cannot recurse into its hooks.
 //!
-//! # Why rewrites are remembered per session
-//! The system prompt heads every request, so its bytes decide the provider's prompt cache. The
-//! plugins are asked once per turn, at its first request; the turn's later tool rounds and the
-//! compaction that may follow it (which runs on its own task, outside the scope) reuse that
-//! answer, so every request of the turn and its summary share one prefix. An answer is reused only
-//! while the system prompt it was given is unchanged: when the operator edits the persona or a
-//! skill, the stale rewrite is dropped instead of masking the edit.
+//! # Why completed rewrites are remembered per session
+//! The agent owns each active turn's prepared system text and its automatic compaction prefix.
+//! A bounded copy here serves only explicit compaction outside a turn; it never controls whether
+//! an active turn calls plugins. That copy applies only while its original system text is unchanged,
+//! so a later persona or skill edit is not hidden by an old rewrite.
 
 use std::collections::HashMap;
 use std::future::Future;
@@ -25,7 +23,7 @@ use std::hash::{Hash, Hasher};
 use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
-use kanon_llm::{AgentError, AgentHook, ChatMessage, ChatRequest, Role, ToolCall};
+use kanon_llm::{AgentError, AgentHook, ToolCall};
 use kanon_proto::v1::{
     EventKind, LlmRequestHookRequest, PipelineEventRequest, ToolCallEvent, ToolResultEvent,
     event_notification::Detail,
@@ -36,9 +34,8 @@ use crate::supervisor::ManagedHost;
 
 /// Most sessions whose rewrite is remembered; the oldest is forgotten first.
 ///
-/// A rewrite is only needed again by its own turn's tool rounds and by the compaction right after
-/// the turn, so recent sessions are all that matter. A forgotten one costs one cache miss on a
-/// compaction, never a wrong prompt.
+/// Active turns and automatic compaction own their prefixes independently. Forgetting this copy
+/// only affects an explicit compaction outside a turn, never the running turn's hook count.
 const REMEMBERED_SESSIONS: usize = 256;
 
 tokio::task_local! {
@@ -91,8 +88,6 @@ struct Rewrites {
 
 /// One turn's answer from the session's rewriting plugins.
 struct Rewrite {
-    /// The inbound message of the turn that asked.
-    event_id: String,
     /// Hash of the system prompt the plugins were shown (the full text is not worth keeping).
     base: u64,
     /// What they made of it; `None` when none changed it.
@@ -115,21 +110,14 @@ impl PluginAgentHook {
             .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 
-    /// The remembered answer for `session_id`, if it was given `base` (and, when `event_id` is
-    /// given, in that turn).
-    fn remembered(
-        &self,
-        session_id: &str,
-        event_id: Option<&str>,
-        base: u64,
-    ) -> Option<Option<String>> {
+    /// The remembered answer for explicit compaction of `session_id`, if it was given `base`.
+    fn remembered(&self, session_id: &str, base: u64) -> Option<Option<String>> {
         let rewrites = self.lock();
         let rewrite = rewrites.sessions.get(session_id)?;
-        (rewrite.base == base && event_id.is_none_or(|id| id == rewrite.event_id))
-            .then(|| rewrite.rewritten.clone())
+        (rewrite.base == base).then(|| rewrite.rewritten.clone())
     }
 
-    fn remember(&self, session_id: &str, event_id: String, base: u64, rewritten: Option<String>) {
+    fn remember(&self, session_id: &str, base: u64, rewritten: Option<String>) {
         let mut rewrites = self.lock();
         if !rewrites.sessions.contains_key(session_id)
             && rewrites.sessions.len() >= REMEMBERED_SESSIONS
@@ -146,7 +134,6 @@ impl PluginAgentHook {
         rewrites.sessions.insert(
             session_id.to_string(),
             Rewrite {
-                event_id,
                 base,
                 rewritten,
                 stamp,
@@ -161,12 +148,12 @@ impl PluginAgentHook {
 
 #[async_trait]
 impl AgentHook for PluginAgentHook {
-    async fn on_llm_request(
+    async fn on_system_prompt(
         &self,
         session_id: &str,
-        request: &mut ChatRequest,
+        prompt: &mut String,
     ) -> Result<(), AgentError> {
-        let base = kanon_llm::layout::system_text(&request.messages);
+        let base = prompt.clone();
         let base_hash = hash(&base);
         let rewritten = match TURN.try_with(Clone::clone) {
             Ok(scope) => {
@@ -177,34 +164,19 @@ impl AgentHook for PluginAgentHook {
                     self.forget(session_id);
                     return Ok(());
                 }
-                match self.remembered(session_id, Some(&scope.event.event_id), base_hash) {
-                    Some(remembered) => remembered,
-                    None => {
-                        let rewritten =
-                            rewrite_system_prompt(&rewriters, &scope.event, session_id, &base)
-                                .await;
-                        self.remember(
-                            session_id,
-                            scope.event.event_id.clone(),
-                            base_hash,
-                            rewritten.clone(),
-                        );
-                        rewritten
-                    }
-                }
+                // This hook is called once by the agent's static preparation phase. The result
+                // lives in that turn; another session cannot evict it or force a second RPC.
+                let rewritten =
+                    rewrite_system_prompt(&rewriters, &scope.event, session_id, &base).await;
+                self.remember(session_id, base_hash, rewritten.clone());
+                rewritten
             }
             // Outside a turn only a remembered answer applies: the same session's compaction
             // must send the prefix its turn sent.
-            Err(_) => self.remembered(session_id, None, base_hash).flatten(),
+            Err(_) => self.remembered(session_id, base_hash).flatten(),
         };
         if let Some(text) = rewritten {
-            let leading = request
-                .messages
-                .iter()
-                .take_while(|message| message.role == Role::System)
-                .count();
-            request.messages.drain(..leading);
-            request.messages.insert(0, ChatMessage::system(text));
+            *prompt = text;
         }
         Ok(())
     }

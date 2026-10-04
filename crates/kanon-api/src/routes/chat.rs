@@ -268,7 +268,7 @@ fn map_agent_error(err: AgentError) -> ApiError {
     match err {
         AgentError::Busy(session) => ApiError::Conflict(format!("Session '{session}' is busy")),
         AgentError::InvalidRequest(message) => {
-            ApiError::Internal(format!("Model request layout is invalid: {message}"))
+            ApiError::Internal(format!("Model request configuration is invalid: {message}"))
         }
         AgentError::Memory(message) => {
             ApiError::Internal(format!("Conversation memory failure: {message}"))
@@ -280,6 +280,9 @@ fn map_agent_error(err: AgentError) -> ApiError {
             "Tool '{tool}' is not registered by any plugin or native tool"
         )),
         AgentError::Rpc(status) => ApiError::Upstream(format!("Plugin IPC call failed: {status}")),
+        AgentError::ToolFailed(message) => {
+            ApiError::Upstream(format!("Tool execution failed: {message}"))
+        }
         AgentError::Gateway(gateway) => {
             ApiError::Upstream(format!("Model provider failure: {gateway}"))
         }

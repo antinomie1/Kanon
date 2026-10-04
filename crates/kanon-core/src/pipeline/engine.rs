@@ -527,9 +527,13 @@ fn failure_category(error: &kanon_llm::ToolRouterError) -> &'static str {
     match error {
         kanon_llm::ToolRouterError::Stopped => "stopped",
         kanon_llm::ToolRouterError::Gateway(_) => "model_error",
-        kanon_llm::ToolRouterError::Rpc(_) | kanon_llm::ToolRouterError::ToolNotFound(_) => {
-            "tool_error"
-        }
+        kanon_llm::ToolRouterError::Rpc(_)
+        | kanon_llm::ToolRouterError::ToolNotFound(_)
+        | kanon_llm::ToolRouterError::ToolFailed(_) => "tool_error",
+        kanon_llm::ToolRouterError::InvalidRequest(_) => "request_error",
+        kanon_llm::ToolRouterError::Memory(_) => "memory_error",
+        kanon_llm::ToolRouterError::Busy(_) => "busy",
+        kanon_llm::ToolRouterError::Compaction(_) => "compaction_error",
     }
 }
 
@@ -547,7 +551,12 @@ fn failure_notice(error: &kanon_llm::ToolRouterError) -> String {
             "模型的结果无法处理".to_string()
         }
         ToolRouterError::Rpc(_) => "插件工具调用失败".to_string(),
+        ToolRouterError::ToolFailed(_) => "工具执行失败".to_string(),
         ToolRouterError::ToolNotFound(name) => format!("模型调用了未注册的工具 {name}"),
+        ToolRouterError::InvalidRequest(_) => "请求配置无效，请检查节点配置".to_string(),
+        ToolRouterError::Memory(_) => "会话存储失败".to_string(),
+        ToolRouterError::Busy(_) => "会话正在处理其他任务".to_string(),
+        ToolRouterError::Compaction(_) => "会话压缩失败".to_string(),
         // A stopped turn is answered by `/stop` itself; the caller never asks for this notice.
         ToolRouterError::Stopped => "任务已停止".to_string(),
     };
@@ -1036,25 +1045,6 @@ impl PipelineEngine {
             bash_caller,
             mut options,
         } = turn;
-        if let Some(instance_id) =
-            crate::instance::BotInstance::instance_id_from_session(session_id)
-            && let Some(instances) = self.instances()
-        {
-            // Resolve after waiting for this session's writer. The routing snapshot may predate
-            // an instance edit; the current catalog owns inheritance, never session metadata.
-            let personas = self
-                .agent_factory()
-                .map(|factory| factory.personas())
-                .or_else(|| agent.persona_registry());
-            options.persona = instances
-                .persona_for_instance(instance_id, personas.map(Arc::as_ref))
-                .await
-                .map_err(|error| {
-                    kanon_llm::ToolRouterError::Gateway(kanon_llm::GatewayError::InvalidResponse(
-                        error.to_string(),
-                    ))
-                })?;
-        }
         hooks::emit_event(
             hosts,
             EventKind::AgentBegin,
@@ -1063,18 +1053,40 @@ impl PipelineEngine {
                 session_id: session_id.to_string(),
             }),
         );
-        let router = ToolRouter::from_arc(agent);
-        let result = super::agent_hook::with_turn(
-            event.clone(),
-            hosts.to_vec(),
-            crate::with_bash_caller(
-                bash_caller,
-                kanon_llm::with_stop_signal(
-                    running.signal(),
-                    router.execute_message_with(session_id, message, &tool_hosts, options),
+        // Configuration failures finish the announced turn too; keep resolution inside the
+        // captured result so every AGENT_BEGIN receives its matching AGENT_DONE.
+        let result = async {
+            if let Some(instance_id) =
+                crate::instance::BotInstance::instance_id_from_session(session_id)
+                && let Some(instances) = self.instances()
+            {
+                // Resolve after waiting for this session's writer. The routing snapshot may
+                // predate an edit; the current catalog owns inheritance, never session metadata.
+                let personas = self
+                    .agent_factory()
+                    .map(|factory| factory.personas())
+                    .or_else(|| agent.persona_registry());
+                options.persona = instances
+                    .persona_for_instance(instance_id, personas.map(Arc::as_ref))
+                    .await
+                    .map_err(|error| {
+                        kanon_llm::ToolRouterError::InvalidRequest(error.to_string())
+                    })?;
+            }
+            let router = ToolRouter::from_arc(agent);
+            super::agent_hook::with_turn(
+                event.clone(),
+                hosts.to_vec(),
+                crate::with_bash_caller(
+                    bash_caller,
+                    kanon_llm::with_stop_signal(
+                        running.signal(),
+                        router.execute_message_with(session_id, message, &tool_hosts, options),
+                    ),
                 ),
-            ),
-        )
+            )
+            .await
+        }
         .await;
         drop(running);
 

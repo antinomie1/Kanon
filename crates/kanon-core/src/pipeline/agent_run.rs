@@ -82,7 +82,7 @@ pub enum AgentRunError {
     /// The run was stopped (`/stop` in the chat it serves) before it finished.
     #[error("the run was stopped before it finished")]
     Stopped,
-    /// The model or a tool failed.
+    /// The agent failed while preparing or executing the turn.
     #[error("the agent failed: {0}")]
     Failed(ToolRouterError),
 }

@@ -327,23 +327,11 @@ impl ToolRouter {
         &self,
         result: Result<crate::agent::AgentOutput, AgentError>,
     ) -> Result<ToolRouterOutput, ToolRouterError> {
-        match result {
-            Ok(output) => Ok(ToolRouterOutput {
-                content: output.content,
-                reasoning: output.reasoning,
-                executed_tools: output.executed_tools,
-                attachments: output.attachments,
-            }),
-            Err(AgentError::Gateway(e)) => Err(ToolRouterError::Gateway(e)),
-            Err(AgentError::Rpc(s)) => Err(ToolRouterError::Rpc(s)),
-            Err(AgentError::ToolNotFound(name)) => Err(ToolRouterError::ToolNotFound(name)),
-            Err(AgentError::Stopped) => Err(ToolRouterError::Stopped),
-            Err(AgentError::Busy(m))
-            | Err(AgentError::InvalidRequest(m))
-            | Err(AgentError::Memory(m))
-            | Err(AgentError::Compaction(m)) => Err(ToolRouterError::Gateway(
-                crate::error::GatewayError::InvalidResponse(m),
-            )),
-        }
+        result.map(|output| ToolRouterOutput {
+            content: output.content,
+            reasoning: output.reasoning,
+            executed_tools: output.executed_tools,
+            attachments: output.attachments,
+        })
     }
 }

@@ -163,6 +163,29 @@ impl BuiltinAgent {
         })
     }
 
+    /// Prepares the static persona, skill and plugin text once, under the caller's turn scope.
+    ///
+    /// The returned string belongs to this turn, so catalog edits and other sessions' cache
+    /// eviction cannot alter it. Stream producers carry it explicitly across their task boundary.
+    async fn prepare_system_prompt(
+        &self,
+        session_id: &str,
+        persona: Option<&Persona>,
+    ) -> Result<String, AgentError> {
+        let mut parts = Vec::new();
+        if let Some(persona) = persona {
+            parts.push(ChatMessage::system(persona.prompt.clone()));
+        }
+        if let Some(prompt) = &self.system_prompt {
+            parts.push(ChatMessage::system(prompt.clone()));
+        }
+        let mut prompt = crate::layout::system_text(&parts);
+        for hook in &self.hooks {
+            hook.on_system_prompt(session_id, &mut prompt).await?;
+        }
+        Ok(prompt)
+    }
+
     /// Builds the request for one model call, laid out static-first.
     ///
     /// The messages start as the session history (append-only). The agent's own instructions go
@@ -174,10 +197,10 @@ impl BuiltinAgent {
         &self,
         session_id: &str,
         tools: &[ToolDefinition],
-        persona: Option<&Persona>,
+        system_prompt: &str,
     ) -> Result<ChatRequest, AgentError> {
         let snapshot = self.memory.snapshot(session_id).await?;
-        self.request_from(session_id, snapshot, tools, persona, None)
+        self.request_from(session_id, snapshot, tools, system_prompt, None)
             .await
     }
 
@@ -190,7 +213,7 @@ impl BuiltinAgent {
         session_id: &str,
         snapshot: MemorySnapshot,
         tools: &[ToolDefinition],
-        persona: Option<&Persona>,
+        system_prompt: &str,
         prepared_prefix: Option<&[ChatMessage]>,
     ) -> Result<ChatRequest, AgentError> {
         let MemorySnapshot { summary, messages } = snapshot;
@@ -208,19 +231,14 @@ impl BuiltinAgent {
             // its summary, even if configuration or a hook's cache changed after this turn.
             request.messages.splice(..0, prefix.iter().cloned());
         } else {
-            if let Some(prompt) = &self.system_prompt {
+            if !system_prompt.is_empty() {
                 request
                     .messages
-                    .insert(0, ChatMessage::system(prompt.clone()));
+                    .insert(0, ChatMessage::system(system_prompt));
             }
 
-            if let Some(persona) = persona {
-                request
-                    .messages
-                    .insert(0, ChatMessage::system(persona.prompt.clone()));
-            }
-
-            // Ordinary hooks see the selected persona before appending skills or rewriting the prefix.
+            // Ordinary request hooks still run for every model round; static preparation is
+            // already complete, so tracing and request-specific middleware keep their contract.
             for hook in &self.hooks {
                 hook.on_llm_request(session_id, &mut request).await?;
             }
@@ -291,13 +309,18 @@ impl BuiltinAgent {
             return Ok(false);
         }
         let covered = snapshot.messages.len();
+        let system_prompt = if prepared_prefix.is_none() {
+            self.prepare_system_prompt(session_id, persona).await?
+        } else {
+            String::new()
+        };
 
         let mut request = self
             .request_from(
                 session_id,
                 snapshot,
                 tools,
-                persona,
+                &system_prompt,
                 prepared_prefix.as_deref(),
             )
             .await?;
@@ -461,13 +484,24 @@ impl BuiltinAgent {
         mut options: TurnOptions,
     ) -> Result<AgentOutput, AgentError> {
         options.persona = self.resolve_persona(session_id, options.persona)?;
+        let system_prompt = self
+            .prepare_system_prompt(session_id, options.persona.as_ref())
+            .await?;
         let (user_input, media) = self.start_turn(session_id, message).await?;
 
         // From here on the turn is part of history. However it ends, the next turn has to find a
         // conversation the provider accepts, and one that does not ask the model to redo the work
         // that just failed.
         match self
-            .answer(session_id, &user_input, media, hosts, options, None)
+            .answer(
+                session_id,
+                &user_input,
+                media,
+                hosts,
+                options,
+                &system_prompt,
+                None,
+            )
             .await
         {
             Ok(output) => Ok(output),
@@ -505,7 +539,8 @@ impl BuiltinAgent {
         media: Option<Vec<ContentPart>>,
         hosts: &[Arc<dyn ToolHost>],
         options: TurnOptions,
-        stream: Option<&tokio::sync::mpsc::Sender<Result<ChatChunk, GatewayError>>>,
+        system_prompt: &str,
+        stream: Option<&tokio::sync::mpsc::Sender<Result<ChatChunk, AgentError>>>,
     ) -> Result<AgentOutput, AgentError> {
         // 2. Dynamically aggregate tools from both native tools and active plugin hosts
         let tools = if options.without_tools {
@@ -525,7 +560,7 @@ impl BuiltinAgent {
         // 3. Reasoning and tool execution loop
         loop {
             let mut request = self
-                .build_request(session_id, &tools, options.persona.as_ref())
+                .build_request(session_id, &tools, system_prompt)
                 .await?;
             attach_turn_media(&mut request, media.as_ref());
 
@@ -554,10 +589,9 @@ impl BuiltinAgent {
             if let Some((content, reasoning)) = streamed_text
                 && (response.content != content || response.reasoning_content != reasoning)
             {
-                return Err(GatewayError::InvalidResponse(
+                return Err(AgentError::InvalidRequest(
                     "response hooks cannot rewrite text already streamed".into(),
-                )
-                .into());
+                ));
             }
 
             response.separate_reasoning();
@@ -771,7 +805,7 @@ impl BuiltinAgent {
                         .await?;
 
                     if !is_success && self.config.stop_on_tool_failure {
-                        return Err(AgentError::Memory(format!(
+                        return Err(AgentError::ToolFailed(format!(
                             "Native tool '{}' failed: {result_str}",
                             call.name
                         )));
@@ -901,14 +935,14 @@ impl BuiltinAgent {
                         self.memory
                             .push_message(
                                 session_id,
-                                ChatMessage::tool_response(&call.id, result_str),
+                                ChatMessage::tool_response(&call.id, &result_str),
                             )
                             .await?;
 
                         if !is_success && self.config.stop_on_tool_failure {
                             tracing::warn!(tool = %call.name, "Tool reported failure and stop_on_tool_failure is enabled");
-                            return Err(AgentError::Memory(format!(
-                                "Plugin tool '{}' failed",
+                            return Err(AgentError::ToolFailed(format!(
+                                "Plugin tool '{}' failed: {result_str}",
                                 call.name
                             )));
                         }
@@ -1001,7 +1035,7 @@ impl BuiltinAgent {
     async fn complete_round(
         &self,
         request: &ChatRequest,
-        stream: Option<&tokio::sync::mpsc::Sender<Result<ChatChunk, GatewayError>>>,
+        stream: Option<&tokio::sync::mpsc::Sender<Result<ChatChunk, AgentError>>>,
         stop: Option<&StopSignal>,
     ) -> Result<ChatResponse, AgentError> {
         let Some(output) = stream else {
@@ -1065,12 +1099,15 @@ impl BuiltinAgent {
         session_id: &str,
         user_input: &str,
         hosts: &[Arc<dyn ToolHost>],
-    ) -> Result<ChatChunkStream, AgentError> {
+    ) -> Result<ChatChunkStream<AgentError>, AgentError> {
         let writing = self.turn_writer(session_id)?;
         let options = TurnOptions {
             persona: self.resolve_persona(session_id, None)?,
             ..TurnOptions::default()
         };
+        let system_prompt = self
+            .prepare_system_prompt(session_id, options.persona.as_ref())
+            .await?;
         let (user_input, media) = self
             .start_turn(session_id, ChatMessage::user(user_input))
             .await?;
@@ -1083,7 +1120,15 @@ impl BuiltinAgent {
             // The producer, not the SSE reader, owns the writer through failure recovery and
             // the final commit. Tokio does not inherit task locals, so carry the stop explicitly.
             let _writing = writing;
-            let turn = agent.answer(&session_id, &user_input, media, &hosts, options, Some(&tx));
+            let turn = agent.answer(
+                &session_id,
+                &user_input,
+                media,
+                &hosts,
+                options,
+                &system_prompt,
+                Some(&tx),
+            );
             let result = match stop {
                 Some(stop) => crate::with_stop_signal(stop, turn).await,
                 None => turn.await,
@@ -1094,11 +1139,7 @@ impl BuiltinAgent {
                 }
                 Err(error) => {
                     let error = agent.close_failed_turn(&session_id, error).await;
-                    let gateway = match error {
-                        AgentError::Gateway(error) => error,
-                        other => GatewayError::InvalidResponse(other.to_string()),
-                    };
-                    let _ = tx.send(Err(gateway)).await;
+                    let _ = tx.send(Err(error)).await;
                 }
             }
         });
@@ -1148,7 +1189,7 @@ impl Agent for BuiltinAgent {
         session_id: &str,
         user_input: &str,
         hosts: &[Arc<dyn ToolHost>],
-    ) -> Result<ChatChunkStream, AgentError> {
+    ) -> Result<ChatChunkStream<AgentError>, AgentError> {
         self.stream_turn(session_id, user_input, hosts).await
     }
 
@@ -1268,9 +1309,12 @@ fn closing_note(err: &AgentError) -> String {
             "failed: the model's answer could not be read".to_string()
         }
         AgentError::Rpc(_) => "failed: a plugin tool call failed".to_string(),
+        AgentError::ToolFailed(_) => "failed: a tool execution failed".to_string(),
         AgentError::ToolNotFound(name) => format!("failed: the tool '{name}' does not exist"),
         AgentError::Memory(_) => "failed: conversation storage failed".to_string(),
-        AgentError::InvalidRequest(_) => "failed: model request layout is invalid".to_string(),
+        AgentError::InvalidRequest(_) => {
+            "failed: model request configuration is invalid".to_string()
+        }
         AgentError::Compaction(_) => "failed: conversation compaction failed".to_string(),
     };
     format!(

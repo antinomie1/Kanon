@@ -23,7 +23,10 @@ pub use types::{
 };
 
 /// Pinned, boxed stream of asynchronous chat completion chunks.
-pub type ChatChunkStream = Pin<Box<dyn Stream<Item = Result<ChatChunk, GatewayError>> + Send>>;
+///
+/// Providers use the default gateway error; agent streams retain their broader execution errors.
+pub type ChatChunkStream<E = GatewayError> =
+    Pin<Box<dyn Stream<Item = Result<ChatChunk, E>> + Send>>;
 
 /// Asynchronous trait defining interaction with an LLM backend.
 ///

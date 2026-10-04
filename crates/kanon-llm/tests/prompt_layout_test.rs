@@ -4,7 +4,7 @@
 //! but a cost property: from one turn to the next only the tail of the request may change.
 
 use std::net::SocketAddr;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
@@ -28,25 +28,40 @@ use kanon_llm::session::SessionManager;
 use kanon_llm::{TurnOptions, canonical_json, canonical_tools, normalize_request};
 
 /// Simulates a hook whose configuration changes after the turn's final request.
-struct ChangingPrefix(Arc<AtomicBool>);
+struct ChangingPrefix {
+    changed: Arc<AtomicBool>,
+    preparations: Arc<AtomicUsize>,
+    requests: Arc<AtomicUsize>,
+}
 
 #[async_trait]
 impl AgentHook for ChangingPrefix {
+    async fn on_system_prompt(
+        &self,
+        _session: &str,
+        prompt: &mut String,
+    ) -> Result<(), kanon_llm::AgentError> {
+        self.preparations.fetch_add(1, Ordering::SeqCst);
+        let suffix = if self.changed.load(Ordering::SeqCst) {
+            "new configuration"
+        } else {
+            "original configuration"
+        };
+        prompt.push_str(&format!("\n\n{suffix}"));
+        Ok(())
+    }
+
     async fn on_llm_request(
         &self,
         _session: &str,
         request: &mut ChatRequest,
     ) -> Result<(), kanon_llm::AgentError> {
-        let suffix = if self.0.load(Ordering::SeqCst) {
+        self.requests.fetch_add(1, Ordering::SeqCst);
+        let suffix = if self.changed.load(Ordering::SeqCst) {
             "new configuration"
         } else {
             "original configuration"
         };
-        request.messages[0]
-            .content
-            .as_mut()
-            .unwrap()
-            .push_str(&format!("\n\n{suffix}"));
         request.tools[0].description = suffix.to_string();
         Ok(())
     }
@@ -103,6 +118,8 @@ async fn inherited_persona_and_final_hook_prefix_survive_tool_rounds_and_compact
     let sessions = Arc::new(SessionManager::new(Arc::new(InMemory::new())));
     sessions.set_persona("s", "chosen").unwrap();
     let changed = Arc::new(AtomicBool::new(false));
+    let preparations = Arc::new(AtomicUsize::new(0));
+    let request_hooks = Arc::new(AtomicUsize::new(0));
     let provider = Arc::new(PersonaChangeProvider {
         requests: Mutex::new(Vec::new()),
         personas: personas.clone(),
@@ -113,7 +130,11 @@ async fn inherited_persona_and_final_hook_prefix_survive_tool_rounds_and_compact
         .session_manager(sessions.clone())
         .persona_registry(personas)
         .tool(tool("inspect"))
-        .hook(ChangingPrefix(changed))
+        .hook(ChangingPrefix {
+            changed,
+            preparations: preparations.clone(),
+            requests: request_hooks.clone(),
+        })
         .compaction(Some(kanon_llm::CompactionPolicy {
             trigger_ratio: 1.0,
             default_context_tokens: 1,
@@ -169,6 +190,12 @@ async fn inherited_persona_and_final_hook_prefix_survive_tool_rounds_and_compact
     );
     let requests = provider.requests.lock().unwrap();
     assert_eq!(requests.len(), 3);
+    assert_eq!(preparations.load(Ordering::SeqCst), 1);
+    assert_eq!(
+        request_hooks.load(Ordering::SeqCst),
+        2,
+        "ordinary request hooks run for both tool rounds"
+    );
     assert_eq!(
         requests[0].messages[0].content.as_deref(),
         Some("Instance instructions.\n\noriginal configuration")

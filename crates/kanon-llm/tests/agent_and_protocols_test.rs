@@ -15,7 +15,7 @@ use kanon_llm::gateway::types::{
     ChatMessage, ChatRequest, ChatResponse, Role, ToolCall, ToolDefinition,
 };
 use kanon_llm::memory::{Memory, MemorySnapshot, StoredSession};
-use kanon_llm::tool_router::{ToolHost, json_to_prost_struct, prost_struct_to_json};
+use kanon_llm::tool_router::{ToolHost, ToolRouter, json_to_prost_struct, prost_struct_to_json};
 use kanon_llm::{AgentError, GatewayError, MemoryError};
 use kanon_proto::v1::{
     PluginMeta, ToolCallRequest, ToolCallResponse, ToolMeta, tool_call_request, tool_call_response,
@@ -395,6 +395,56 @@ async fn test_agent_native_in_process_tool_and_standalone_run() {
     assert_eq!(output.executed_tools[0].plugin_id, "native");
     assert_eq!(output.executed_tools[0].host_id, "in_process");
     assert!(output.executed_tools[0].success);
+}
+
+#[tokio::test]
+async fn a_failed_native_handler_is_not_a_storage_or_provider_failure() {
+    let provider = Arc::new(ScriptedLlmProvider::new(vec![ChatResponse {
+        tool_calls: vec![ToolCall {
+            id: "failed_native".to_string(),
+            name: "calculate".to_string(),
+            arguments: serde_json::json!({}),
+        }],
+        ..Default::default()
+    }]));
+    let agent = BuiltinAgent::builder("failed-handler", provider.clone())
+        .tool(NativeTool::new(
+            ToolDefinition {
+                name: "calculate".to_string(),
+                description: "Fails to calculate".to_string(),
+                parameters: serde_json::json!({"type": "object"}),
+            },
+            |_session_id, _arguments| async { Err("calculator unavailable".to_string()) },
+        ))
+        .stop_on_tool_failure(true)
+        .build();
+    let router = ToolRouter::from_agent(agent);
+
+    let error = router
+        .execute("failure", "Calculate", &[])
+        .await
+        .unwrap_err();
+
+    assert!(matches!(error, AgentError::ToolFailed(ref message)
+        if message.contains("calculate") && message.contains("calculator unavailable")));
+    assert_eq!(provider.received_requests.read().await.len(), 1);
+    let history = router.memory().get_messages("failure").await.unwrap();
+    assert_eq!(
+        history
+            .iter()
+            .filter(|message| message.tool_call_id.as_deref() == Some("failed_native"))
+            .count(),
+        1
+    );
+    assert!(
+        history
+            .last()
+            .unwrap()
+            .content
+            .as_deref()
+            .unwrap()
+            .contains("a tool execution failed")
+    );
 }
 
 #[tokio::test]

@@ -437,7 +437,7 @@ impl ReadSkillTool {
     }
 }
 
-/// Hook that appends the per-instance skill catalog to every model request.
+/// Hook that snapshots the per-instance skill catalog into each turn's static system text.
 pub struct SkillCatalogHook {
     /// Installed skills.
     store: Arc<SkillStore>,
@@ -464,10 +464,10 @@ impl SkillCatalogHook {
 
 #[async_trait]
 impl kanon_llm::agent::AgentHook for SkillCatalogHook {
-    async fn on_llm_request(
+    async fn on_system_prompt(
         &self,
         session_id: &str,
-        request: &mut kanon_llm::gateway::types::ChatRequest,
+        prompt: &mut String,
     ) -> Result<(), kanon_llm::AgentError> {
         let instance_id = crate::instance::BotInstance::instance_id_from_session(session_id);
         let allowed =
@@ -479,7 +479,7 @@ impl kanon_llm::agent::AgentHook for SkillCatalogHook {
             session_id = %session_id,
             instance_id = ?instance_id,
             allowed = allowed.len(),
-            "Skill catalog evaluated for LLM request"
+            "Skill catalog prepared for agent turn"
         );
 
         let catalog = catalog_prompt(&allowed);
@@ -487,16 +487,12 @@ impl kanon_llm::agent::AgentHook for SkillCatalogHook {
             return Ok(());
         }
 
-        // Appended as a system message so the model sees it next to its instructions without
-        // rewriting the session's persona prompt on every turn.
-        let message = kanon_llm::gateway::types::ChatMessage::system(catalog);
-        let position = request
-            .messages
-            .iter()
-            .rposition(|existing| existing.role == kanon_llm::gateway::types::Role::System)
-            .map(|index| index + 1)
-            .unwrap_or(0);
-        request.messages.insert(position, message);
+        // The turn retains this text through its tool rounds. A hot edit becomes visible on the
+        // next turn, without changing the prefix halfway through the current conversation turn.
+        if !prompt.trim().is_empty() {
+            prompt.push_str("\n\n");
+        }
+        prompt.push_str(&catalog);
         Ok(())
     }
 }

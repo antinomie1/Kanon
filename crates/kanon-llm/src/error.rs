@@ -30,36 +30,13 @@ pub enum GatewayError {
     InvalidResponse(String),
 }
 
-/// Errors arising during tool routing and state machine loop execution.
-#[derive(Debug, Error)]
-pub enum ToolRouterError {
-    /// Error originating from the underlying LLM gateway.
-    #[error("LLM gateway failure: {0}")]
-    Gateway(#[from] GatewayError),
-
-    /// gRPC RPC status error returned by the plugin host.
-    #[error("Tool execution gRPC failure: {0}")]
-    Rpc(Box<tonic::Status>),
-
-    /// Requested tool name was not declared by any active plugin.
-    #[error("Tool '{0}' is not registered on any active plugin host")]
-    ToolNotFound(String),
-
-    /// The turn was stopped through its [`crate::StopSignal`] before it finished.
-    #[error("the turn was stopped before it finished")]
-    Stopped,
-}
-
-impl From<tonic::Status> for ToolRouterError {
-    fn from(status: tonic::Status) -> Self {
-        Self::Rpc(Box::new(status))
-    }
-}
+/// Errors returned by the tool router, preserving the underlying agent failure unchanged.
+pub type ToolRouterError = AgentError;
 
 /// Errors arising during general agent execution and reasoning loops.
 #[derive(Debug, Error)]
 pub enum AgentError {
-    /// The assembled request violates the conversation layout contract.
+    /// The request configuration or conversation layout cannot be sent to the model.
     #[error("Invalid model request: {0}")]
     InvalidRequest(String),
 
@@ -78,6 +55,10 @@ pub enum AgentError {
     #[error("Tool '{0}' is not registered on any active plugin host")]
     ToolNotFound(String),
 
+    /// A native or plugin tool handler failed, or returned an unusable result.
+    #[error("Tool execution failed: {0}")]
+    ToolFailed(String),
+
     /// Memory backend failure.
     #[error("Agent memory failure: {0}")]
     Memory(String),
@@ -94,17 +75,6 @@ pub enum AgentError {
 impl From<tonic::Status> for AgentError {
     fn from(status: tonic::Status) -> Self {
         Self::Rpc(Box::new(status))
-    }
-}
-
-impl From<ToolRouterError> for AgentError {
-    fn from(err: ToolRouterError) -> Self {
-        match err {
-            ToolRouterError::Gateway(g) => Self::Gateway(g),
-            ToolRouterError::Rpc(s) => Self::Rpc(s),
-            ToolRouterError::ToolNotFound(t) => Self::ToolNotFound(t),
-            ToolRouterError::Stopped => Self::Stopped,
-        }
     }
 }
 

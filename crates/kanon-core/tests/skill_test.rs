@@ -140,28 +140,15 @@ async fn the_catalog_hook_injects_descriptions_into_an_instance_session() {
         instance_with_policy(&registry, "alpha", ItemPolicy::Inherit, "qqofficial").await;
 
     let hook = SkillCatalogHook::new(store.clone(), toggles.clone(), registry.clone());
-    let mut request = ChatRequest {
-        model: "test".to_string(),
-        messages: vec![ChatMessage::system("You are a bot")],
-        tools: Vec::new(),
-        temperature: None,
-        max_tokens: None,
-    };
+    let mut injected = "You are a bot".to_string();
 
-    hook.on_llm_request(
+    hook.on_system_prompt(
         &format!("instance:{instance_id}:group:1:user:1#0"),
-        &mut request,
+        &mut injected,
     )
     .await
     .expect("hook");
 
-    let injected = request
-        .messages
-        .iter()
-        .filter(|message| message.role == Role::System)
-        .map(|message| message.content.clone().unwrap_or_default())
-        .collect::<Vec<_>>()
-        .join("\n");
     assert!(injected.contains("Alpha description"), "{injected}");
     // Progressive disclosure: the body must not be spent from the context window up front.
     assert!(
@@ -174,22 +161,15 @@ async fn the_catalog_hook_injects_descriptions_into_an_instance_session() {
         .set_enabled(SKILL_SECTION, "alpha", false)
         .await
         .expect("disable");
-    let mut disabled = ChatRequest {
-        model: "test".to_string(),
-        messages: vec![ChatMessage::system("You are a bot")],
-        tools: Vec::new(),
-        temperature: None,
-        max_tokens: None,
-    };
-    hook.on_llm_request(
+    let mut disabled = "You are a bot".to_string();
+    hook.on_system_prompt(
         &format!("instance:{instance_id}:group:1:user:1#0"),
         &mut disabled,
     )
     .await
     .expect("hook");
     assert_eq!(
-        disabled.messages.len(),
-        1,
+        disabled, "You are a bot",
         "no catalog when nothing is enabled"
     );
 }

@@ -9,22 +9,23 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use async_trait::async_trait;
-use kanon_core::PluginAgentHook;
-use kanon_core::instance::{InstanceDraft, InstanceRegistry};
+use kanon_core::instance::{BotInstance, InstanceDraft, InstanceRegistry};
 use kanon_core::ipc::CoreApiService;
 use kanon_core::pipeline::{PipelineEngine, PipelineResult};
 use kanon_core::supervisor::{ManagedHost, Supervisor};
+use kanon_core::{PluginAgentHook, SkillCatalogHook, SkillStore, ToggleStore};
 use kanon_llm::gateway::types::{
     ChatMessage, ChatRequest, ChatResponse, ContentPart, Role, ToolCall,
 };
 use kanon_llm::{
-    AgentConfig, AgentFactory, AgentSlot, GatewayError, LlmProvider, PersonaStore, SessionManager,
-    SqliteMemory, SqliteSessionStore,
+    AgentConfig, AgentFactory, AgentHook, AgentSlot, GatewayError, LlmProvider, Persona,
+    PersonaStore, SessionManager, SqliteMemory, SqliteSessionStore,
 };
 use kanon_proto::v1::bot_api_service_server::BotApiService;
 use kanon_proto::v1::message_pipeline_service_server::{
     MessagePipelineService, MessagePipelineServiceServer,
 };
+use kanon_proto::v1::message_segment::Segment;
 use kanon_proto::v1::plugin_host_service_server::{PluginHostService, PluginHostServiceServer};
 use kanon_proto::v1::{
     CommandExecuteRequest, CommandExecuteResponse, DecorateReplyRequest, DecorateReplyResult,
@@ -120,6 +121,14 @@ struct Plugin {
     metas: Arc<Mutex<Vec<PluginMeta>>>,
     rewrites: Arc<Mutex<Vec<String>>>,
     events: Arc<Mutex<Vec<Detail>>>,
+    tool_pause: Arc<Mutex<Option<Arc<ToolPause>>>>,
+}
+
+/// Holds one tool call between the first and second model requests.
+#[derive(Default)]
+struct ToolPause {
+    entered: Notify,
+    release: Notify,
 }
 
 fn plugin_meta(tools: &[&str]) -> PluginMeta {
@@ -198,6 +207,11 @@ impl MessagePipelineService for Plugin {
         request: Request<ToolCallRequest>,
     ) -> Result<Response<ToolCallResponse>, Status> {
         let req = request.into_inner();
+        let pause = self.tool_pause.lock().unwrap().clone();
+        if let Some(pause) = pause {
+            pause.entered.notify_one();
+            pause.release.notified().await;
+        }
         Ok(Response::new(ToolCallResponse {
             call_id: req.call_id,
             success: true,
@@ -272,6 +286,8 @@ struct Node {
     model: Arc<Model>,
     sessions: Arc<SessionManager>,
     plugin: Plugin,
+    rewriter: Arc<PluginAgentHook>,
+    supervisor: Arc<Supervisor>,
     /// The session the test chat's messages go to.
     session: String,
 }
@@ -307,13 +323,21 @@ async fn start(dir: &Path) -> Node {
     );
 
     let model = Arc::new(Model::default());
+    let rewriter = Arc::new(PluginAgentHook::new());
     let factory = Arc::new(AgentFactory::new(
         "test",
         Arc::new(AgentSlot::new()),
         sessions.memory().clone(),
         sessions.clone(),
         personas,
-        vec![Arc::new(PluginAgentHook::new())],
+        vec![
+            Arc::new(SkillCatalogHook::new(
+                Arc::new(SkillStore::new(dir.join("skills"))),
+                Arc::new(ToggleStore::in_memory()),
+                registry.clone(),
+            )),
+            rewriter.clone(),
+        ],
         Vec::new(),
     ));
     factory.install(
@@ -331,6 +355,7 @@ async fn start(dir: &Path) -> Node {
         metas: Arc::new(Mutex::new(vec![plugin_meta(&["lookup"])])),
         rewrites: Arc::default(),
         events: Arc::default(),
+        tool_pause: Arc::default(),
     };
     serve_plugin(&supervisor, &dir.join("host.sock"), plugin.clone()).await;
 
@@ -340,7 +365,7 @@ async fn start(dir: &Path) -> Node {
             .with_instances(registry),
     );
     let api = CoreApiService::new(tokio::sync::mpsc::channel(1).0)
-        .with_supervisor(supervisor)
+        .with_supervisor(supervisor.clone())
         .with_engine(engine.clone())
         .with_agent_slot(factory.slot().clone());
     Node {
@@ -350,6 +375,8 @@ async fn start(dir: &Path) -> Node {
         model,
         sessions,
         plugin,
+        rewriter,
+        supervisor,
         session: instance.conversation_session_id("group:1:user:1"),
     }
 }
@@ -472,6 +499,85 @@ async fn plugins_rewrite_the_system_prompt_once_per_turn_and_its_compaction_reus
 }
 
 #[tokio::test]
+async fn skill_edits_and_rewrite_cache_eviction_do_not_change_an_active_turn() {
+    let dir = tempfile::tempdir().unwrap();
+    let skill_dir = dir.path().join("skills/alpha");
+    std::fs::create_dir_all(&skill_dir).unwrap();
+    let skill = skill_dir.join("SKILL.md");
+    std::fs::write(
+        &skill,
+        "---\nname: alpha\ndescription: Original skill\n---\n\nSkill body",
+    )
+    .unwrap();
+    let node = start(dir.path()).await;
+    let pause = Arc::new(ToolPause::default());
+    *node.plugin.tool_pause.lock().unwrap() = Some(pause.clone());
+    let engine = node.engine.clone();
+    let turn = tokio::spawn(async move {
+        engine
+            .process_event(event("held-turn", "please use tool"))
+            .await
+    });
+    tokio::time::timeout(Duration::from_secs(3), pause.entered.notified())
+        .await
+        .unwrap();
+
+    std::fs::write(
+        &skill,
+        "---\nname: alpha\ndescription: Updated skill\n---\n\nSkill body",
+    )
+    .unwrap();
+    let hosts = node.supervisor.get_all_hosts().await;
+    // Force the bounded manual-compaction cache to forget this still-running turn. These other
+    // sessions only prepare their prompts; no model calls or durable session records are needed.
+    for index in 0..257 {
+        let mut prompt = kanon_llm::BASE_PERSONA_PROMPT.to_string();
+        kanon_core::pipeline::with_turn(
+            event(&format!("other-{index}"), "another chat"),
+            hosts.clone(),
+            node.rewriter
+                .on_system_prompt(&format!("other:{index}"), &mut prompt),
+        )
+        .await
+        .unwrap();
+    }
+    *node.plugin.tool_pause.lock().unwrap() = None;
+    pause.release.notify_one();
+    assert!(matches!(
+        turn.await.unwrap(),
+        PipelineResult::LlmReplied { .. }
+    ));
+
+    let requests = seen(&node);
+    assert_eq!(requests.len(), 2);
+    assert!(requests[0].system.contains("Original skill"));
+    assert_eq!(requests[0].system, requests[1].system);
+    assert_eq!(
+        node.plugin
+            .rewrites
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|session| *session == &node.session)
+            .count(),
+        1
+    );
+
+    say(&node, "next-turn", "hello again").await;
+    assert!(seen(&node)[2].system.contains("Updated skill"));
+    assert_eq!(
+        node.plugin
+            .rewrites
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|session| *session == &node.session)
+            .count(),
+        2
+    );
+}
+
+#[tokio::test]
 async fn subscribers_hear_the_turn_and_every_tool_call() {
     let dir = tempfile::tempdir().expect("dir");
     let node = start(dir.path()).await;
@@ -507,6 +613,95 @@ async fn subscribers_hear_the_turn_and_every_tool_call() {
     assert!(done.success);
     assert_eq!(done.content, "done after tool");
     assert_eq!(done.tools, ["lookup"]);
+}
+
+#[tokio::test]
+async fn invalid_personas_keep_their_notice_and_event_category_without_calling_the_model() {
+    let dir = tempfile::tempdir().expect("dir");
+    let node = start(dir.path()).await;
+    let instances = node.engine.instances().unwrap();
+    let instance_id = BotInstance::instance_id_from_session(&node.session).unwrap();
+    let draft = InstanceDraft {
+        name: "Test Bot".to_string(),
+        enabled: true,
+        adapters: vec!["qq".to_string()],
+        ..Default::default()
+    };
+    let personas = node.factory.personas();
+    personas
+        .register(Persona::custom("missing", "Missing", "", "Temporary persona").unwrap())
+        .unwrap();
+    instances
+        .update(
+            instance_id,
+            InstanceDraft {
+                persona_id: Some("missing".to_string()),
+                ..draft.clone()
+            },
+            Some((personas.as_ref(), node.sessions.as_ref())),
+        )
+        .await
+        .unwrap();
+    // Simulate an inconsistent catalog; request resolution must not blame the provider.
+    personas.remove("missing").unwrap();
+
+    for (index, (id, category, notice)) in [
+        ("instance", "request_error", "请求配置无效"),
+        ("session", "request_error", "请求配置无效"),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        if id == "session" {
+            instances
+                .update(
+                    instance_id,
+                    draft.clone(),
+                    Some((personas.as_ref(), node.sessions.as_ref())),
+                )
+                .await
+                .unwrap();
+            node.sessions.set_persona(&node.session, "missing").unwrap();
+        }
+
+        let outcome = node.engine.process_event(event(id, "hello")).await;
+        let PipelineResult::LlmFailed { replies, error } = outcome else {
+            panic!("expected a failed turn, got {outcome:?}");
+        };
+        assert!(!error.contains("response from model provider"), "{error}");
+        let Some(Segment::Text(text)) = &replies[0].segment else {
+            panic!("expected a text failure notice");
+        };
+        assert!(text.content.contains(notice), "{}", text.content);
+        assert!(!text.content.contains("模型的结果无法处理"));
+        assert!(
+            seen(&node).is_empty(),
+            "local failures never call the model"
+        );
+
+        let received = events(&node, (index + 1) * 2).await;
+        assert_eq!(received.len(), (index + 1) * 2, "{received:?}");
+        assert!(received.iter().any(|detail| matches!(
+            detail,
+            Detail::AgentBegin(begin) if begin.context.as_ref().is_some_and(|context| context.event_id == id)
+        )));
+        let done = received
+            .iter()
+            .find_map(|detail| match detail {
+                Detail::AgentDone(done)
+                    if done
+                        .context
+                        .as_ref()
+                        .is_some_and(|context| context.event_id == id) =>
+                {
+                    Some(done)
+                }
+                _ => None,
+            })
+            .expect("every begun turn finishes, including instance lookup failures");
+        assert!(!done.success);
+        assert_eq!(done.error, category);
+    }
 }
 
 #[tokio::test]

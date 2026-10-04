@@ -184,7 +184,17 @@ async fn stopped_and_failed_streams_close_history_without_success_done() {
         while let Some(chunk) = stream.next().await {
             match chunk {
                 Ok(chunk) => assert!(!chunk.is_finished),
-                Err(_) => failed = true,
+                Err(error) => {
+                    if failure == "stop" {
+                        assert!(matches!(error, AgentError::Stopped), "{error}");
+                    } else {
+                        assert!(
+                            matches!(error, AgentError::Gateway(GatewayError::InvalidResponse(_))),
+                            "{error}"
+                        );
+                    }
+                    failed = true;
+                }
             }
         }
         assert!(failed);
@@ -238,7 +248,8 @@ async fn response_hooks_cannot_silently_rewrite_already_delivered_text() {
                 assert_eq!(chunk.delta_text, "original");
             }
             Err(error) => {
-                assert!(error.to_string().contains("cannot rewrite"));
+                assert!(matches!(error, AgentError::InvalidRequest(ref message)
+                    if message.contains("cannot rewrite")));
                 failed = true;
             }
         }
@@ -371,7 +382,10 @@ async fn stopping_a_streamed_tool_round_answers_every_open_call() {
         .await
         .unwrap();
     stop.stop();
-    assert!(stream.next().await.unwrap().is_err());
+    assert!(matches!(
+        stream.next().await.unwrap(),
+        Err(AgentError::Stopped)
+    ));
     assert!(stream.next().await.is_none());
     let messages = memory.get_messages("s");
     assert_eq!(messages.len(), 5);
@@ -391,5 +405,83 @@ async fn stopping_a_streamed_tool_round_answers_every_open_call() {
             .as_deref()
             .unwrap()
             .contains("This turn")
+    );
+}
+
+#[tokio::test]
+async fn a_streamed_tool_failure_keeps_its_type_and_paired_result() {
+    let memory = Arc::new(InMemory::new());
+    let agent = BuiltinAgent::builder(
+        "failed-tool",
+        Arc::new(StaticResponse(ChatResponse {
+            tool_calls: vec![lookup_call("call-1")],
+            ..Default::default()
+        })),
+    )
+    .memory(memory.clone())
+    .stop_on_tool_failure(true)
+    .compaction(None)
+    .tool(NativeTool::new(lookup_definition(), |_, _| async {
+        Err("lookup unavailable".into())
+    }))
+    .build();
+    let mut stream = agent.run_standalone_stream("s", "question").await.unwrap();
+
+    assert!(
+        matches!(stream.next().await.unwrap(), Err(AgentError::ToolFailed(message))
+        if message.contains("lookup unavailable"))
+    );
+    assert!(stream.next().await.is_none());
+    let messages = memory.get_messages("s");
+    assert_eq!(messages[2].tool_call_id.as_deref(), Some("call-1"));
+    assert_eq!(
+        messages[2].content.as_deref(),
+        Some("Error: lookup unavailable")
+    );
+    assert!(
+        messages[3]
+            .content
+            .as_deref()
+            .unwrap()
+            .contains("a tool execution failed")
+    );
+}
+
+#[tokio::test]
+async fn a_streamed_storage_failure_keeps_its_type_and_releases_the_writer() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = dir.path().join("sessions.db");
+    let memory = Arc::new(kanon_llm::SqliteMemory::open(&db).unwrap());
+    let sessions = Arc::new(SessionManager::new(memory.clone()));
+    let (tx, rx) = mpsc::channel(4);
+    let agent = BuiltinAgent::builder("stream", Arc::new(WaitingStream(Mutex::new(Some(rx)))))
+        .session_manager(sessions.clone())
+        .compaction(None)
+        .build();
+    let mut stream = agent.run_stream("s", "question", &[]).await.unwrap();
+    tx.send(Ok(ChatChunk::delta("partial"))).await.unwrap();
+    assert_eq!(stream.next().await.unwrap().unwrap().delta_text, "partial");
+
+    // Fail the actual assistant commit after streaming has started, while keeping reads usable.
+    rusqlite::Connection::open(&db)
+        .unwrap()
+        .execute_batch(
+            "CREATE TRIGGER deny_assistant BEFORE INSERT ON messages WHEN NEW.role = 'assistant'
+         BEGIN SELECT RAISE(FAIL, 'assistant write blocked'); END;",
+        )
+        .unwrap();
+    tx.send(Ok(ChatChunk::done(Some("stop".into()))))
+        .await
+        .unwrap();
+
+    assert!(
+        matches!(stream.next().await.unwrap(), Err(AgentError::Memory(message))
+        if message.contains("assistant write blocked"))
+    );
+    assert!(stream.next().await.is_none());
+    assert!(sessions.try_write("s").is_ok());
+    assert_eq!(
+        memory.get_messages("s").await.unwrap(),
+        [ChatMessage::user("question")]
     );
 }
