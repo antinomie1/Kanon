@@ -91,7 +91,20 @@ async fn canceled_lifecycle_waiters_complete_start_apply_and_stop() {
         access_token: Some("after".into()),
         ..adapter.config()
     };
-    cancel_waiter(adapter.apply(config)).await;
+    let (saved_tx, saved_rx) = tokio::sync::oneshot::channel();
+    cancel_waiter(adapter.update_config(
+        move |_| config,
+        move |config| {
+            saved_tx.send(config.clone()).unwrap();
+            Ok(())
+        },
+    ))
+    .await;
+    let saved = timeout(Duration::from_secs(3), saved_rx)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(saved.access_token.as_deref(), Some("after"));
     wait_state(&adapter, ConnectionState::Listening).await;
     assert_eq!(adapter.config().access_token.as_deref(), Some("after"));
     assert!(!adapter.is_connected());

@@ -798,11 +798,11 @@ export interface MilkyConfigView {
 }
 
 export interface MilkyConfigRequest {
-  enabled: boolean;
-  platform: string;
-  display_name: string | null;
-  base_url: string;
-  transport: MilkyTransport;
+  enabled?: boolean;
+  platform?: string;
+  display_name?: string | null;
+  base_url?: string;
+  transport?: MilkyTransport;
 
   /** Omitted or empty keeps the stored credential. */
   access_token?: string;
@@ -1016,7 +1016,7 @@ export interface QqOfficialConfigView {
 }
 
 /** An omitted or empty secret keeps the stored one. */
-export interface QqOfficialConfigRequest extends QqOfficialConfig {
+export interface QqOfficialConfigRequest extends Partial<QqOfficialConfig> {
   secret?: string;
 }
 
@@ -1065,11 +1065,7 @@ export interface OneBotConfigView {
 }
 
 /** An empty credential preserves the saved token; clearing is explicit. */
-export interface OneBotConfigRequest
-  extends Omit<
-    OneBotConfig,
-    'auto_accept_friends' | 'auto_accept_group_invites'
-  > {
+export interface OneBotConfigRequest extends Partial<OneBotConfig> {
   /** Omitted keeps the stored choice. */
   auto_accept_friends?: boolean;
   /** Omitted keeps the stored choice. */

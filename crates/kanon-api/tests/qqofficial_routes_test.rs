@@ -78,11 +78,13 @@ async fn secret_is_write_only_and_kept_across_edits() {
         &router,
         Method::PUT,
         "/api/v1/adapters/qqofficial/config",
-        Some(json!({"enabled": false, "app_id": "102030", "secret": ""})),
+        Some(json!({"enabled": false})),
     )
     .await;
     assert_eq!(status, 200);
     assert_eq!(adapter.config().secret.as_deref(), Some("s3cret"));
+    assert_eq!(adapter.config().app_id, "102030");
+    assert!(adapter.config().markdown);
     assert_eq!(persisted(dir.path())["qqofficial"]["secret"], "s3cret");
     let restored = SystemConfigStore::new(dir.path().join("system.json"))
         .load_qqofficial()
@@ -106,4 +108,22 @@ async fn enabling_without_credentials_changes_nothing() {
     assert_eq!(status, 400, "body: {body}");
     assert!(!adapter.config().enabled);
     assert!(!dir.path().join("system.json").exists());
+}
+
+/// A storage failure cannot publish settings that the next restart would lose.
+#[tokio::test]
+async fn failed_save_keeps_previous_configuration() {
+    let dir = tempfile::tempdir().unwrap();
+    let (router, adapter) = qq_state(dir.path()).await;
+    let previous = adapter.config();
+    std::fs::create_dir(dir.path().join("system.json")).unwrap();
+    let (status, body) = send_json(
+        &router,
+        Method::PUT,
+        "/api/v1/adapters/qqofficial/config",
+        Some(json!({"app_id": "new", "secret": "replacement", "markdown": true})),
+    )
+    .await;
+    assert_eq!(status, 500, "body: {body}");
+    assert_eq!(adapter.config(), previous);
 }

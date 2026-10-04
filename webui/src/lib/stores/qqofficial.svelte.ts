@@ -104,10 +104,7 @@ class QqOfficialStore {
     this.applyingEnabled = true;
     this.error = null;
     try {
-      const view = await api.updateQqOfficialConfig({
-        ...this.config,
-        enabled,
-      });
+      const view = await api.updateQqOfficialConfig({ enabled });
       this.config = view.config;
       this.status = view.status;
       this.formEnabled = view.config.enabled;

@@ -463,3 +463,48 @@ async fn catalog_lists_the_milky_adapter_as_builtin() {
     assert_eq!(milky["connected"], false);
     assert_eq!(milky["circuit_state"], "closed");
 }
+
+/// A failed durable save preserves the live configuration; a toggle preserves retained fields.
+#[tokio::test]
+async fn failed_save_keeps_configuration_and_toggle_only_changes_enabled() {
+    let dir = temp_dir();
+    let endpoint = FakeEndpoint::start().await;
+    let config = MilkyConfig {
+        enabled: true,
+        base_url: endpoint.base_url.clone(),
+        access_token: Some("retained-token".into()),
+        ..Default::default()
+    };
+    let (state, adapter, _ingest) = milky_state(dir.path(), config).await;
+    let router = app(state);
+    let previous = adapter.config();
+    let path = dir.path().join("system.json");
+    std::fs::create_dir(&path).unwrap();
+    let (status, body) = send_json(
+        &router,
+        Method::PUT,
+        "/api/v1/adapters/milky/config",
+        Some(json!({"enabled": false, "access_token": "replacement"})),
+    )
+    .await;
+    assert_eq!(status, 500, "body: {body}");
+    assert_eq!(adapter.config(), previous);
+    std::fs::remove_dir(&path).unwrap();
+
+    let (status, body) = send_json(
+        &router,
+        Method::PUT,
+        "/api/v1/adapters/milky/config",
+        Some(json!({"enabled": false})),
+    )
+    .await;
+    assert_eq!(status, 200, "body: {body}");
+    assert_eq!(
+        adapter.config(),
+        MilkyConfig {
+            enabled: false,
+            ..previous
+        }
+    );
+    assert_eq!(persisted(&dir)["milky"]["access_token"], "retained-token");
+}

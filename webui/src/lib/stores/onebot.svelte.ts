@@ -97,14 +97,7 @@ class OneBotStore {
     this.applyingEnabled = true;
     this.error = null;
     try {
-      const view = await api.updateOneBotConfig({
-        enabled,
-        platform: this.config.platform,
-        display_name: this.config.display_name,
-        ws_url: this.config.ws_url,
-        transport: this.config.transport,
-        // No credential fields: omitting them keeps the stored token.
-      });
+      const view = await api.updateOneBotConfig({ enabled });
       this.config = view.config;
       this.status = view.status;
       // Keep the panel's switch in step with the node.

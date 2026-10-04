@@ -318,6 +318,9 @@ async fn full_round_trip_with_quotes_and_resume() {
     assert_eq!(adapter.status().connection_state, ConnectionState::Stopped);
 
     let calls_before = mock.calls.lock().unwrap().len();
+    // An edit can finish after shutdown; only start may restore the outbound API client.
+    adapter.apply(adapter.config()).await.unwrap();
+    assert_eq!(adapter.status().connection_state, ConnectionState::Stopped);
     let request = DeliverMessageRequest {
         platform: "qqofficial".into(),
         channel_id: "c2c:U1".into(),

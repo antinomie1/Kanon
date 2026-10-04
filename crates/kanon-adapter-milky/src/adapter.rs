@@ -14,7 +14,7 @@
 //!
 //! # Why the runtime lives behind one lock
 //! Configuration is hot-reloadable, so the client and the stream task are replaced while requests
-//! may be in flight. Both are held in a single [`RwLock`] guarded state that is only ever locked
+//! may be in flight. Configuration and client use one [`RwLock`] guarded state that is only locked
 //! for the duration of a clone or a field assignment: the guard is never held across an `await`,
 //! which is what keeps `is_connected` synchronous for the registry while `apply` stays async.
 //!
@@ -32,6 +32,8 @@ use async_trait::async_trait;
 use kanon_core::{AdapterError, Capability, EventIngress, PlatformAdapter};
 use kanon_proto::v1::{DeliverMessageRequest, DeliverMessageResponse, IngestEventRequest};
 use serde::Serialize;
+use tokio::sync::Mutex;
+use tokio::task::{JoinHandle, JoinSet};
 
 use crate::client::{MilkyClient, MilkyError};
 use crate::config::{ConfigError, MilkyConfig, TransportKind};
@@ -77,7 +79,7 @@ const ACK_REACTION: &str = "76";
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ConnectionState {
-    /// No configuration is enabled; the adapter holds no connection by design.
+    /// No runtime is installed: configuration is disabled or the core stopped the adapter.
     #[default]
     Disabled,
     /// A stream is being established or re-established.
@@ -166,12 +168,43 @@ struct State {
     config: MilkyConfig,
     /// Client used for outbound calls, present while a configuration is enabled and installed.
     client: Option<Arc<MilkyClient>>,
-    /// Running event stream, present while a stream is installed.
-    source: Option<EventSourceHandle>,
-    /// Fast-ACK ingest handle, captured when the core starts the adapter.
-    ingress: Option<EventIngress>,
     /// Live status.
     status: StatusData,
+}
+
+/// Serializes resource preparation, persistence and runtime replacement with start and stop.
+#[derive(Default)]
+struct Lifecycle {
+    /// Transport and event pump belong to the same connection and are retired together.
+    source: Option<EventSourceHandle>,
+    /// Pump owns and drains its connection's asynchronous enrichment jobs.
+    pump: Option<JoinHandle<()>>,
+    /// Present only between the core's start and stop calls.
+    ingress: Option<EventIngress>,
+}
+
+impl Lifecycle {
+    /// Stops production, then joins the pump and its children before another runtime is published.
+    async fn stop_runtime(&mut self) {
+        if let Some(source) = self.source.take() {
+            source.shutdown().await;
+        }
+        if let Some(pump) = self.pump.take() {
+            if let Err(error) = pump.await {
+                tracing::error!(%error, "Milky event pump failed during shutdown");
+            }
+        }
+    }
+}
+
+impl Drop for Lifecycle {
+    fn drop(&mut self) {
+        // The transport handle stops itself on drop. Aborting the pump also drops its JoinSet,
+        // so an adapter released without an explicit stop cannot leave enrichment jobs running.
+        if let Some(pump) = self.pump.take() {
+            pump.abort();
+        }
+    }
 }
 
 /// Counters and cached identity behind [`MilkyStatus`].
@@ -198,6 +231,7 @@ struct StatusData {
 }
 
 /// Kanon platform adapter for the Milky protocol.
+#[derive(Clone)]
 pub struct MilkyAdapter {
     /// Platform identifier owned by the adapter, fixed for the process lifetime.
     platform: String,
@@ -205,6 +239,8 @@ pub struct MilkyAdapter {
     display_name: String,
     /// Connection state shared with the event pump task.
     state: Arc<RwLock<State>>,
+    /// Exclusive lifecycle owner, independent of the short synchronous status lock.
+    lifecycle: Arc<Mutex<Lifecycle>>,
 }
 
 impl MilkyAdapter {
@@ -225,10 +261,9 @@ impl MilkyAdapter {
             state: Arc::new(RwLock::new(State {
                 config,
                 client: None,
-                source: None,
-                ingress: None,
                 status: StatusData::default(),
             })),
+            lifecycle: Arc::new(Mutex::new(Lifecycle::default())),
         })
     }
 
@@ -279,6 +314,39 @@ impl MilkyAdapter {
     /// through `&str` accessors, so changing either would leave the catalog describing an adapter
     /// that no longer exists until the next restart.
     pub async fn apply(&self, config: MilkyConfig) -> Result<MilkyStatus, AdapterError> {
+        self.update_config(move |_| config, |_| Ok(())).await
+    }
+
+    /// Changes the current configuration and persists it before replacing the running connection.
+    ///
+    /// Retained credentials are read under the same lifecycle lock as resource preparation,
+    /// persistence and publication. Once started, a transaction finishes even if its caller leaves.
+    pub async fn update_config(
+        &self,
+        change: impl FnOnce(MilkyConfig) -> MilkyConfig + Send + 'static,
+        persist: impl FnOnce(&MilkyConfig) -> Result<(), String> + Send + 'static,
+    ) -> Result<MilkyStatus, AdapterError> {
+        let adapter = self.clone();
+        tokio::spawn(async move {
+            let mut lifecycle = adapter.lifecycle.lock().await;
+            let config = change(adapter.config());
+            adapter.replace(&mut lifecycle, config, persist).await?;
+            Ok(adapter.status())
+        })
+        .await
+        .map_err(|error| AdapterError::Configuration {
+            platform: self.platform.clone(),
+            reason: format!("Milky lifecycle task failed: {error}"),
+        })?
+    }
+
+    /// Prepares every fallible resource before saving, then retires and replaces the runtime.
+    async fn replace(
+        &self,
+        lifecycle: &mut Lifecycle,
+        config: MilkyConfig,
+        persist: impl FnOnce(&MilkyConfig) -> Result<(), String>,
+    ) -> Result<(), AdapterError> {
         let config = config
             .prepare()
             .map_err(|err| configuration_error(&self.platform, err))?;
@@ -302,40 +370,67 @@ impl MilkyAdapter {
             });
         }
 
-        let previous = {
-            let mut state = self.state.write().expect("adapter state poisoned");
-            state.source.take()
+        let resources = if config.enabled {
+            let configuration_error = |error: MilkyError| AdapterError::Configuration {
+                platform: self.platform.clone(),
+                reason: error.to_string(),
+            };
+            Some((
+                Arc::new(MilkyClient::new(config.clone()).map_err(&configuration_error)?),
+                EventSource::new(config.clone()).map_err(configuration_error)?,
+            ))
+        } else {
+            None
         };
-        if let Some(previous) = previous {
-            previous.shutdown().await;
-        }
+        persist(&config).map_err(|reason| AdapterError::Persistence {
+            platform: self.platform.clone(),
+            reason,
+        })?;
+
+        // After persistence there are no fallible preparation steps. The detached transaction
+        // owns this await and must publish even if the HTTP request was cancelled meanwhile.
+        lifecycle.stop_runtime().await;
+        let runtime = resources.zip(lifecycle.ingress.clone());
 
         {
             let mut state = self.state.write().expect("adapter state poisoned");
             state.config = config;
             // Connection-scoped state is discarded; the counters are lifetime metrics of the
             // adapter and survive a reconfiguration on purpose.
-            state.client = None;
+            state.client = runtime.as_ref().map(|((client, _), _)| client.clone());
             state.status.login = None;
             state.status.implementation = None;
             state.status.last_error = None;
-            state.status.state = if state.config.enabled {
+            state.status.state = if runtime.is_some() {
                 ConnectionState::Connecting
             } else {
                 ConnectionState::Disabled
             };
         }
 
-        self.install_runtime();
-
-        Ok(self.status())
+        if let Some(((_, source), ingress)) = runtime {
+            let (handle, receiver) = source.spawn();
+            lifecycle.source = Some(handle);
+            lifecycle.pump = Some(tokio::spawn(pump(
+                self.state.clone(),
+                self.platform.clone(),
+                ingress,
+                receiver,
+            )));
+        }
+        Ok(())
     }
 
     /// Disables the adapter, releasing its connection.
     pub async fn disable(&self) -> Result<MilkyStatus, AdapterError> {
-        let mut config = self.config();
-        config.enabled = false;
-        self.apply(config).await
+        self.update_config(
+            |mut config| {
+                config.enabled = false;
+                config
+            },
+            |_| Ok(()),
+        )
+        .await
     }
 
     /// Probes an endpoint and reports what answered.
@@ -369,56 +464,6 @@ impl MilkyAdapter {
             login,
             implementation,
         })
-    }
-
-    /// Creates the client and stream for the stored configuration when one is missing.
-    ///
-    /// Called by both [`PlatformAdapter::start`] and [`MilkyAdapter::apply`], so a configuration
-    /// saved before the core handed over its ingest handle still comes up as soon as it does.
-    fn install_runtime(&self) {
-        let mut state = self.state.write().expect("adapter state poisoned");
-
-        if !state.config.enabled || state.source.is_some() {
-            return;
-        }
-        let Some(ingress) = state.ingress.clone() else {
-            // Without an ingest queue the core cannot receive what the stream would deliver; the
-            // adapter stays in `Connecting` until `start` supplies the handle.
-            return;
-        };
-
-        let config = state.config.clone();
-
-        let client = match MilkyClient::new(config.clone()) {
-            Ok(client) => Arc::new(client),
-            Err(err) => {
-                state.status.state = ConnectionState::Error;
-                state.status.last_error = Some(err.to_string());
-                return;
-            }
-        };
-        let source = match EventSource::new(config) {
-            Ok(source) => source,
-            Err(err) => {
-                state.status.state = ConnectionState::Error;
-                state.status.last_error = Some(err.to_string());
-                return;
-            }
-        };
-
-        let (handle, receiver) = source.spawn();
-        state.client = Some(client);
-        state.source = Some(handle);
-        state.status.state = ConnectionState::Connecting;
-        state.status.last_error = None;
-        drop(state);
-
-        tokio::spawn(pump(
-            self.state.clone(),
-            self.platform.clone(),
-            ingress,
-            receiver,
-        ));
     }
 }
 
@@ -689,27 +734,40 @@ impl PlatformAdapter for MilkyAdapter {
 
     /// Captures the ingest handle and brings up the event stream.
     async fn start(&self, ingress: EventIngress) -> Result<(), AdapterError> {
-        {
-            let mut state = self.state.write().expect("adapter state poisoned");
-            state.ingress = Some(ingress);
-        }
-
-        self.install_runtime();
-        Ok(())
+        let adapter = self.clone();
+        tokio::spawn(async move {
+            let mut lifecycle = adapter.lifecycle.lock().await;
+            if lifecycle.source.is_some() {
+                return Ok(());
+            }
+            lifecycle.ingress = Some(ingress);
+            adapter
+                .replace(&mut lifecycle, adapter.config(), |_| Ok(()))
+                .await
+        })
+        .await
+        .map_err(|error| AdapterError::Configuration {
+            platform: self.platform.clone(),
+            reason: format!("Milky lifecycle task failed: {error}"),
+        })?
     }
 
     /// Releases the event stream.
     async fn stop(&self) -> Result<(), AdapterError> {
-        let source = {
-            let mut state = self.state.write().expect("adapter state poisoned");
+        let adapter = self.clone();
+        tokio::spawn(async move {
+            let mut lifecycle = adapter.lifecycle.lock().await;
+            lifecycle.stop_runtime().await;
+            lifecycle.ingress = None;
+            let mut state = adapter.state.write().expect("adapter state poisoned");
             state.client = None;
             state.status.state = ConnectionState::Disabled;
-            state.source.take()
-        };
-
-        if let Some(source) = source {
-            source.shutdown().await;
-        }
+        })
+        .await
+        .map_err(|error| AdapterError::Configuration {
+            platform: self.platform.clone(),
+            reason: format!("Milky lifecycle task failed: {error}"),
+        })?;
         Ok(())
     }
 }
@@ -725,7 +783,20 @@ async fn pump(
     ingress: EventIngress,
     mut receiver: tokio::sync::mpsc::Receiver<StreamEvent>,
 ) {
-    while let Some(item) = receiver.recv().await {
+    let mut jobs = JoinSet::new();
+    loop {
+        let item = tokio::select! {
+            item = receiver.recv() => match item {
+                Some(item) => item,
+                None => break,
+            },
+            result = jobs.join_next(), if !jobs.is_empty() => {
+                if let Some(Err(error)) = result {
+                    tracing::error!(%error, "Milky event enrichment task failed");
+                }
+                continue;
+            },
+        };
         match item {
             StreamEvent::Connected => {
                 let client = {
@@ -738,7 +809,7 @@ async fn pump(
                 // Identity is refreshed on every (re)connection because a protocol implementation
                 // may have been restarted with a different account in the meantime.
                 if let Some(client) = client {
-                    tokio::spawn(refresh_identity(state.clone(), client));
+                    jobs.spawn(refresh_identity(state.clone(), client));
                 }
             }
             StreamEvent::Disconnected(reason) => {
@@ -746,13 +817,24 @@ async fn pump(
                 state.status.state = ConnectionState::Error;
                 state.status.last_error = Some(reason);
             }
-            StreamEvent::Event(event) => handle_event(&state, &platform, &ingress, &event),
+            StreamEvent::Event(event) => {
+                handle_event(&state, &platform, &ingress, &event, &mut jobs)
+            }
         }
     }
+    // Once the source stops, no enrichment from that connection may update status or ingest
+    // into a replacement runtime. Joining cancellation closes that boundary before publication.
+    jobs.shutdown().await;
 }
 
 /// Records one protocol event and ingests it when it is a conversational message.
-fn handle_event(state: &Arc<RwLock<State>>, platform: &str, ingress: &EventIngress, event: &Event) {
+fn handle_event(
+    state: &Arc<RwLock<State>>,
+    platform: &str,
+    ingress: &EventIngress,
+    event: &Event,
+    jobs: &mut JoinSet<()>,
+) {
     let event_type = event.event_type();
     let self_id = event.self_id();
 
@@ -769,7 +851,7 @@ fn handle_event(state: &Arc<RwLock<State>>, platform: &str, ingress: &EventIngre
             Some(client) => {
                 let (state, platform, ingress) =
                     (state.clone(), platform.to_string(), ingress.clone());
-                tokio::spawn(async move {
+                jobs.spawn(async move {
                     let mut request = notice.event;
                     if let Some(actor) = notice.actor_id {
                         let name = display_name(&client, notice.group_id, actor)
@@ -811,7 +893,7 @@ fn handle_event(state: &Arc<RwLock<State>>, platform: &str, ingress: &EventIngre
     match client {
         Some(client) if !forwards.is_empty() => {
             let (state, platform, ingress) = (state.clone(), platform.to_string(), ingress.clone());
-            tokio::spawn(async move {
+            jobs.spawn(async move {
                 let mut request = request;
                 for forward_id in forwards {
                     let fetched = client
@@ -898,13 +980,11 @@ async fn refresh_identity(state: Arc<RwLock<State>>, client: Arc<MilkyClient>) {
     match probe_identity(&client).await {
         Ok((login, implementation)) => {
             let mut guard = state.write().expect("adapter state poisoned");
-            // A probe can finish after reconfiguration or shutdown. Check its client and the
-            // active stream under the same lock as publication, so retired results stay retired.
-            if guard.source.is_none()
-                || !guard
-                    .client
-                    .as_ref()
-                    .is_some_and(|current| Arc::ptr_eq(current, &client))
+            // Only the client currently published in state may supply account identity.
+            if !guard
+                .client
+                .as_ref()
+                .is_some_and(|current| Arc::ptr_eq(current, &client))
             {
                 return;
             }

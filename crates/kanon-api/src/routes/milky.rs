@@ -23,9 +23,7 @@ use axum::extract::State;
 use axum::routing::{get, post};
 use serde::{Deserialize, Serialize};
 
-use kanon_adapter_milky::{
-    DEFAULT_PLATFORM, MilkyAdapter, MilkyConfig, MilkyStatus, MilkyTestReport, TransportKind,
-};
+use kanon_adapter_milky::{MilkyAdapter, MilkyConfig, MilkyStatus, MilkyTestReport, TransportKind};
 use kanon_core::AdapterError;
 
 use crate::error::ApiError;
@@ -61,29 +59,24 @@ pub struct MilkyConfigView {
 #[derive(Debug, Deserialize)]
 pub struct MilkyConfigRequest {
     /// Whether the adapter should connect to the protocol implementation.
-    pub enabled: bool,
-    /// Platform identifier owned by the adapter (defaults to `milky`).
-    #[serde(default = "default_platform")]
-    pub platform: String,
-    /// Console-facing name; falls back to the platform identifier.
+    pub enabled: Option<bool>,
+    /// Platform identifier; omitted values retain the current identity.
+    #[serde(default)]
+    pub platform: Option<String>,
+    /// Console-facing name; omitted values retain the current identity.
     #[serde(default)]
     pub display_name: Option<String>,
     /// Base URL of the protocol implementation.
-    pub base_url: String,
+    pub base_url: Option<String>,
     /// Inbound transport used to receive events.
     #[serde(default)]
-    pub transport: TransportKind,
+    pub transport: Option<TransportKind>,
     /// Replacement credential; omitted or empty keeps the stored one.
     #[serde(default)]
     pub access_token: Option<String>,
     /// Removes the stored credential.
     #[serde(default)]
     pub clear_access_token: bool,
-}
-
-/// Returns the platform identifier used when a request omits one.
-fn default_platform() -> String {
-    DEFAULT_PLATFORM.to_string()
 }
 
 /// Connectivity probe payload.
@@ -124,45 +117,33 @@ async fn update_config(
         ));
     }
 
-    let stored = adapter.config();
-    let access_token = if body.clear_access_token {
-        None
-    } else {
-        match body.access_token.as_deref().map(str::trim) {
-            Some(token) if !token.is_empty() => Some(token.to_string()),
-            // Omitted or blank: keep whatever is stored, so an unrelated edit cannot drop it.
-            _ => stored.access_token.clone(),
-        }
-    };
-
-    let candidate = MilkyConfig {
-        enabled: body.enabled,
-        platform: body.platform,
-        display_name: body.display_name,
-        base_url: body.base_url,
-        access_token,
-        transport: body.transport,
-    };
-
-    // Apply first: it validates as well, and a rejected configuration must leave both the running
-    // adapter and the file on disk exactly as they were.
+    let store = state.system_config().clone();
     adapter
-        .apply(candidate)
+        .update_config(
+            move |stored| {
+                let access_token = if body.clear_access_token {
+                    None
+                } else {
+                    body.access_token
+                        .as_deref()
+                        .map(str::trim)
+                        .filter(|token| !token.is_empty())
+                        .map(str::to_string)
+                        .or(stored.access_token)
+                };
+                MilkyConfig {
+                    enabled: body.enabled.unwrap_or(stored.enabled),
+                    platform: body.platform.unwrap_or(stored.platform),
+                    display_name: body.display_name.or(stored.display_name),
+                    base_url: body.base_url.unwrap_or(stored.base_url),
+                    access_token,
+                    transport: body.transport.unwrap_or(stored.transport),
+                }
+            },
+            move |config| store.save_milky(config),
+        )
         .await
         .map_err(map_configuration_error)?;
-
-    state
-        .system_config()
-        .save_milky(&adapter.config())
-        .map_err(|err| {
-            // The adapter is already running the new settings; saying so explicitly beats a silent
-            // divergence between the live node and the next restart.
-            ApiError::Internal(format!(
-                "The Milky adapter was reconfigured but the change could not be persisted to {}: {err}. \
-                 The running node uses the new settings until it restarts",
-                state.system_config().path().display()
-            ))
-        })?;
 
     tracing::info!(
         platform = %adapter.identity(),

@@ -118,6 +118,14 @@ pub enum AdapterError {
         /// What is missing or invalid.
         reason: String,
     },
+    /// A prepared configuration could not be saved; the running adapter stays unchanged.
+    #[error("adapter '{platform}' configuration could not be persisted: {reason}")]
+    Persistence {
+        /// Platform whose configuration could not be saved.
+        platform: String,
+        /// Storage failure reported by the configuration owner.
+        reason: String,
+    },
     /// No built-in adapter and no plugin declares the requested platform.
     #[error("no adapter is registered for platform '{0}'")]
     UnknownPlatform(String),

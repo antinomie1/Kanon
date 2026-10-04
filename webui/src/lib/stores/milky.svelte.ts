@@ -105,14 +105,7 @@ class MilkyStore {
     this.applyingEnabled = true;
     this.error = null;
     try {
-      const view = await api.updateMilkyConfig({
-        enabled,
-        platform: this.config.platform,
-        display_name: this.config.display_name,
-        base_url: this.config.base_url,
-        transport: this.config.transport,
-        // No credential fields: omitting them keeps the stored token.
-      });
+      const view = await api.updateMilkyConfig({ enabled });
       this.config = view.config;
       this.status = view.status;
       this.tokenConfigured = view.status.token_configured;

@@ -8,9 +8,7 @@ use axum::extract::State;
 use axum::routing::get;
 use serde::{Deserialize, Serialize};
 
-use kanon_adapter_onebot::{
-    DEFAULT_PLATFORM, OneBotAdapter, OneBotConfig, OneBotStatus, TransportKind,
-};
+use kanon_adapter_onebot::{OneBotAdapter, OneBotConfig, OneBotStatus, TransportKind};
 use kanon_core::AdapterError;
 
 use crate::error::ApiError;
@@ -44,29 +42,24 @@ pub struct OneBotConfigView {
 #[derive(Debug, Deserialize)]
 pub struct OneBotConfigRequest {
     /// Whether the adapter should connect to the protocol implementation.
-    pub enabled: bool,
-    /// Platform identifier owned by the adapter (defaults to `onebot`).
-    #[serde(default = "default_platform")]
-    pub platform: String,
-    /// Console-facing name; falls back to the platform identifier.
+    pub enabled: Option<bool>,
+    /// Platform identifier; omitted values retain the current identity.
+    #[serde(default)]
+    pub platform: Option<String>,
+    /// Console-facing name; omitted values retain the current identity.
     #[serde(default)]
     pub display_name: Option<String>,
     /// Forward connection URL or reverse WebSocket listener URL.
-    pub ws_url: String,
+    pub ws_url: Option<String>,
     /// Which side initiates the combined event and API WebSocket.
     #[serde(default)]
-    pub transport: TransportKind,
+    pub transport: Option<TransportKind>,
     /// Replacement credential; omitted or empty keeps the stored one.
     #[serde(default)]
     pub access_token: Option<String>,
     /// Removes the stored credential.
     #[serde(default)]
     pub clear_access_token: bool,
-}
-
-/// Returns the platform identifier used when a request omits one.
-fn default_platform() -> String {
-    DEFAULT_PLATFORM.to_string()
 }
 
 /// Reads the stored configuration and the live status.
@@ -93,45 +86,33 @@ async fn update_config(
         ));
     }
 
-    let stored = adapter.config();
-    let access_token = if body.clear_access_token {
-        None
-    } else {
-        match body.access_token.as_deref().map(str::trim) {
-            Some(token) if !token.is_empty() => Some(token.to_string()),
-            // Omitted or blank: keep whatever is stored, so an unrelated edit cannot drop it.
-            _ => stored.access_token.clone(),
-        }
-    };
-
-    let candidate = OneBotConfig {
-        enabled: body.enabled,
-        platform: body.platform,
-        display_name: body.display_name,
-        ws_url: body.ws_url,
-        access_token,
-        transport: body.transport,
-    };
-
-    // Apply first: it validates as well, and a rejected configuration must leave both the running
-    // adapter and the file on disk exactly as they were.
+    let store = state.system_config().clone();
     adapter
-        .apply(candidate)
+        .update_config(
+            move |stored| {
+                let access_token = if body.clear_access_token {
+                    None
+                } else {
+                    body.access_token
+                        .as_deref()
+                        .map(str::trim)
+                        .filter(|token| !token.is_empty())
+                        .map(str::to_string)
+                        .or(stored.access_token)
+                };
+                OneBotConfig {
+                    enabled: body.enabled.unwrap_or(stored.enabled),
+                    platform: body.platform.unwrap_or(stored.platform),
+                    display_name: body.display_name.or(stored.display_name),
+                    ws_url: body.ws_url.unwrap_or(stored.ws_url),
+                    access_token,
+                    transport: body.transport.unwrap_or(stored.transport),
+                }
+            },
+            move |config| store.save_onebot(config),
+        )
         .await
         .map_err(map_configuration_error)?;
-
-    state
-        .system_config()
-        .save_onebot(&adapter.config())
-        .map_err(|err| {
-            // The adapter is already running the new settings; saying so explicitly beats a silent
-            // divergence between the live node and the next restart.
-            ApiError::Internal(format!(
-                "The OneBot adapter was reconfigured but the change could not be persisted to {}: {err}. \
-                 The running node uses the new settings until it restarts",
-                state.system_config().path().display()
-            ))
-        })?;
 
     tracing::info!(
         platform = %adapter.identity(),

@@ -39,19 +39,19 @@ pub struct QqOfficialConfigView {
 #[derive(Debug, Deserialize)]
 pub struct QqOfficialConfigRequest {
     /// Whether the adapter connects to the QQ gateway.
-    pub enabled: bool,
+    pub enabled: Option<bool>,
     /// Bot AppID.
     #[serde(default)]
-    pub app_id: String,
+    pub app_id: Option<String>,
     /// Replacement AppSecret; omitted or blank keeps the stored one.
     #[serde(default)]
     pub secret: Option<String>,
     /// Use the sandbox API.
     #[serde(default)]
-    pub sandbox: bool,
+    pub sandbox: Option<bool>,
     /// Send replies as native Markdown.
     #[serde(default)]
-    pub markdown: bool,
+    pub markdown: Option<bool>,
 }
 
 /// A new QR binding task.
@@ -96,25 +96,29 @@ async fn read_config(
     Ok(Json(view(require_adapter(&state)?)))
 }
 
-/// Validates, hot-applies and persists a configuration.
+/// Validates and persists a configuration before replacing the live session.
 async fn update_config(
     State(state): State<ApiState>,
     Json(body): Json<QqOfficialConfigRequest>,
 ) -> Result<Json<QqOfficialConfigView>, ApiError> {
     let adapter = require_adapter(&state)?;
-    let secret = match body.secret.as_deref().map(str::trim) {
-        Some(secret) if !secret.is_empty() => Some(secret.to_owned()),
-        // Omitted or blank: keep the stored secret, so an unrelated edit cannot drop it.
-        _ => adapter.config().secret,
-    };
-    let candidate = QqOfficialConfig {
-        enabled: body.enabled,
-        app_id: body.app_id,
-        secret,
-        sandbox: body.sandbox,
-        markdown: body.markdown,
-    };
-    apply_and_save(&state, adapter, candidate).await?;
+    apply_and_save(&state, adapter, move |stored| {
+        let secret = body
+            .secret
+            .as_deref()
+            .map(str::trim)
+            .filter(|secret| !secret.is_empty())
+            .map(str::to_owned)
+            .or(stored.secret);
+        QqOfficialConfig {
+            enabled: body.enabled.unwrap_or(stored.enabled),
+            app_id: body.app_id.unwrap_or(stored.app_id),
+            secret,
+            sandbox: body.sandbox.unwrap_or(stored.sandbox),
+            markdown: body.markdown.unwrap_or(stored.markdown),
+        }
+    })
+    .await?;
     tracing::info!(
         enabled = adapter.config().enabled,
         app_id = %adapter.config().app_id,
@@ -158,13 +162,14 @@ async fn login_poll(
             appid: None,
         },
         LoginStatus::Bound { app_id, secret } => {
-            let candidate = QqOfficialConfig {
+            let bound_app_id = app_id.clone();
+            apply_and_save(&state, adapter, move |stored| QqOfficialConfig {
                 enabled: true,
-                app_id: app_id.clone(),
+                app_id: bound_app_id,
                 secret: Some(secret),
-                ..adapter.config()
-            };
-            apply_and_save(&state, adapter, candidate).await?;
+                ..stored
+            })
+            .await?;
             tracing::info!(app_id = %app_id, "QQ Official credentials bound by QR code");
             QqPollResponse {
                 status: "created",
@@ -176,29 +181,19 @@ async fn login_poll(
     Ok(Json(response))
 }
 
-/// Applies first — it validates too, and a rejected configuration must leave both the running
-/// adapter and the file untouched — then persists.
+/// Reads retained fields, validates, saves and publishes under the adapter lifecycle lock.
 async fn apply_and_save(
     state: &ApiState,
     adapter: &QqOfficialAdapter,
-    candidate: QqOfficialConfig,
+    change: impl FnOnce(QqOfficialConfig) -> QqOfficialConfig + Send + 'static,
 ) -> Result<(), ApiError> {
+    let store = state.system_config().clone();
     adapter
-        .apply(candidate)
+        .update_config(change, move |config| store.save_qqofficial(config))
         .await
         .map_err(|error| match error {
             AdapterError::Configuration { reason, .. } => ApiError::BadRequest(reason),
             other => ApiError::Internal(other.to_string()),
-        })?;
-    state
-        .system_config()
-        .save_qqofficial(&adapter.config())
-        .map_err(|err| {
-            ApiError::Internal(format!(
-                "The QQ Official adapter was reconfigured but the change could not be persisted \
-                 to {}: {err}. The running node uses the new settings until it restarts",
-                state.system_config().path().display()
-            ))
         })
 }
 

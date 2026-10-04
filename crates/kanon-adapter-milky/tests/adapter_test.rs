@@ -12,7 +12,7 @@ use std::time::Duration;
 use common::{FakeMilky, Transport, friend_message_event, group_message_event};
 use kanon_adapter_milky::adapter::{ConnectionState, MilkyAdapter, MilkyStatus};
 use kanon_adapter_milky::config::MilkyConfig;
-use kanon_core::{EventIngress, PlatformAdapter};
+use kanon_core::{AdapterError, EventIngress, PlatformAdapter};
 use kanon_proto::v1::message_segment::Segment;
 use kanon_proto::v1::{DeliverMessageRequest, IngestEventRequest, MessageSegment, TextSegment};
 use serde_json::json;
@@ -379,20 +379,149 @@ async fn apply_swaps_the_endpoint_without_a_restart() {
     );
 
     let current = wait_for_login(&adapter).await;
-    old_login
-        .send(json!({"uin": 19999, "nickname": "Retired account"}))
-        .expect("old identity request should still be waiting");
-    wait_until(|| {
+    let _ = old_login.send(json!({"uin": 19999, "nickname": "Retired account"}));
+    // The retired identity task is cancelled and joined before the new runtime is published.
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    assert!(
         first
             .calls()
             .iter()
-            .any(|call| call.endpoint == "get_impl_info")
-    })
-    .await;
-    // Let the old probe consume its final response; it must not publish over the new endpoint.
-    tokio::time::sleep(Duration::from_millis(200)).await;
+            .all(|call| call.endpoint != "get_impl_info")
+    );
     assert_eq!(adapter.status().login, current.login);
     assert_eq!(adapter.status().implementation, current.implementation);
+}
+
+/// Invalid candidates and failed persistence leave the accepted connection usable.
+#[tokio::test]
+async fn failed_save_preserves_the_running_configuration_and_connection() {
+    let first = FakeMilky::start(Transport::Sse).await;
+    let second = FakeMilky::start(Transport::Sse).await;
+    let original = config_for(&first, true);
+    let adapter = MilkyAdapter::new(original.clone()).unwrap();
+    let (sender, mut receiver) = mpsc::channel(8);
+    adapter.start(EventIngress::new(sender)).await.unwrap();
+    first.wait_for_subscription(0).await;
+    let before = wait_for_login(&adapter).await;
+
+    let candidate = config_for(&second, true);
+    let error = adapter
+        .update_config(move |_| candidate, |_| Err("disk is full".into()))
+        .await
+        .expect_err("a rejected save must not replace the running adapter");
+    assert!(matches!(error, AdapterError::Persistence { .. }));
+    assert_eq!(adapter.config(), original);
+    assert_eq!(adapter.status(), before);
+    assert!(second.calls().is_empty());
+
+    let error = adapter
+        .update_config(
+            |mut config| {
+                config.base_url = "not-an-http-url".into();
+                config
+            },
+            |_| panic!("invalid settings must be rejected before persistence"),
+        )
+        .await
+        .expect_err("invalid configuration must not reach persistence");
+    assert!(matches!(error, AdapterError::Configuration { .. }));
+    assert_eq!(adapter.config(), original);
+
+    first.push_event(friend_message_event(99, 20002, "still live"));
+    assert_eq!(
+        next_ingest(&mut receiver).await.event.unwrap().raw_text,
+        "still live"
+    );
+    adapter
+        .deliver(deliver_request("friend:20002", vec![text("still live")]))
+        .await
+        .unwrap();
+    assert_eq!(first.call("send_private_message").body["user_id"], 20002);
+    adapter.stop().await.unwrap();
+}
+
+/// A caller leaving cannot strand a saved configuration, and stop serializes with its commit.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn cancelled_update_finishes_before_stop_and_later_saves_stay_offline() {
+    use std::sync::{Arc, Mutex};
+
+    let first = FakeMilky::start(Transport::Sse).await;
+    let second = FakeMilky::start(Transport::Sse).await;
+    let adapter = MilkyAdapter::new(config_for(&first, true)).unwrap();
+    let (sender, mut receiver) = mpsc::channel(8);
+    adapter.start(EventIngress::new(sender)).await.unwrap();
+    first.wait_for_subscription(0).await;
+
+    let candidate = MilkyConfig {
+        access_token: Some("new-credential".into()),
+        ..config_for(&second, true)
+    };
+    let saved = Arc::new(Mutex::new(None));
+    let (entered_tx, entered_rx) = tokio::sync::oneshot::channel();
+    let (release_tx, release_rx) = std::sync::mpsc::channel();
+    let updating = {
+        let adapter = adapter.clone();
+        let saved = saved.clone();
+        tokio::spawn(async move {
+            adapter
+                .update_config(
+                    move |_| candidate,
+                    move |config| {
+                        *saved.lock().unwrap() = Some(config.clone());
+                        entered_tx.send(()).unwrap();
+                        release_rx.recv_timeout(SETTLE).unwrap();
+                        Ok(())
+                    },
+                )
+                .await
+        })
+    };
+    tokio::time::timeout(SETTLE, entered_rx)
+        .await
+        .unwrap()
+        .unwrap();
+    updating.abort();
+    assert!(updating.await.unwrap_err().is_cancelled());
+    let mut stopping = {
+        let adapter = adapter.clone();
+        tokio::spawn(async move { adapter.stop().await })
+    };
+    assert!(
+        tokio::time::timeout(Duration::from_millis(100), &mut stopping)
+            .await
+            .is_err()
+    );
+    release_tx.send(()).unwrap();
+    tokio::time::timeout(SETTLE, stopping)
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+    assert_eq!(Some(adapter.config()), *saved.lock().unwrap());
+    assert_eq!(adapter.status().state, ConnectionState::Disabled);
+
+    adapter
+        .update_config(
+            |mut current| {
+                assert_eq!(current.access_token.as_deref(), Some("new-credential"));
+                current.transport = kanon_adapter_milky::TransportKind::Websocket;
+                current
+            },
+            |_| Ok(()),
+        )
+        .await
+        .unwrap();
+    assert!(
+        adapter
+            .deliver(deliver_request("friend:20002", vec![text("offline")]))
+            .await
+            .is_err()
+    );
+    assert_eq!(adapter.status().state, ConnectionState::Disabled);
+    assert!(
+        receiver.recv().await.is_none(),
+        "stop must release every ingress owner"
+    );
 }
 
 /// Identity fields are rejected rather than silently diverging from the registry catalog.
@@ -438,7 +567,8 @@ async fn configuration_before_start_connects_once_started() {
         .apply(config_for(&fake, true))
         .await
         .expect("reconfiguration should succeed");
-    assert_eq!(adapter.status().state, ConnectionState::Connecting);
+    // Saving before start does not claim an active connection attempt.
+    assert_eq!(adapter.status().state, ConnectionState::Disabled);
     assert!(fake.calls().is_empty());
 
     let (sender, mut receiver) = mpsc::channel(8);
@@ -485,17 +615,14 @@ async fn stop_releases_the_stream() {
     assert_eq!(status.state, ConnectionState::Disabled);
     assert!(!adapter.is_connected());
 
-    old_login
-        .send(json!({"uin": 19999, "nickname": "Stopped account"}))
-        .expect("identity request should still be waiting");
-    wait_until(|| {
-        fake.calls()
-            .iter()
-            .any(|call| call.endpoint == "get_impl_info")
-    })
-    .await;
+    let _ = old_login.send(json!({"uin": 19999, "nickname": "Stopped account"}));
     fake.push_event(friend_message_event(1, 20002, "after stop"));
     tokio::time::sleep(Duration::from_millis(200)).await;
+    assert!(
+        fake.calls()
+            .iter()
+            .all(|call| call.endpoint != "get_impl_info")
+    );
     assert!(
         receiver.try_recv().is_err(),
         "a stopped adapter must not ingest"

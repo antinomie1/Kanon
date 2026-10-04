@@ -332,9 +332,9 @@ async fn reverse_listener_can_be_enabled_and_disabled() {
     let address = reserved.local_addr().unwrap();
     drop(reserved);
     let dir = temp_dir();
-    let (state, _adapter, _ingest) = onebot_state(dir.path(), OneBotConfig::default()).await;
+    let (state, adapter, _ingest) = onebot_state(dir.path(), OneBotConfig::default()).await;
     let router: Router = app(state);
-    let mut config = json!({
+    let config = json!({
         "enabled": true,
         "ws_url": format!("ws://{address}/onebot"),
         "transport": "reverse_websocket"
@@ -350,15 +350,41 @@ async fn reverse_listener_can_be_enabled_and_disabled() {
     assert_eq!(body["status"]["connection_state"], "listening");
     assert_eq!(body["status"]["connected"], false);
     assert!(tokio::net::TcpStream::connect(address).await.is_ok());
-    config["enabled"] = json!(false);
+    // A failed durable save must leave the existing listener and its configuration intact.
+    let previous = adapter.config();
+    let path = dir.path().join("system.json");
+    let document = std::fs::read(&path).unwrap();
+    std::fs::remove_file(&path).unwrap();
+    std::fs::create_dir(&path).unwrap();
     let (status, body) = send_json(
         &router,
         Method::PUT,
         "/api/v1/adapters/onebot/config",
-        Some(config),
+        Some(json!({"enabled": false})),
+    )
+    .await;
+    assert_eq!(status, 500, "body: {body}");
+    assert_eq!(adapter.config(), previous);
+    assert!(tokio::net::TcpStream::connect(address).await.is_ok());
+    std::fs::remove_dir(&path).unwrap();
+    std::fs::write(&path, document).unwrap();
+
+    // A switch changes only enablement, even when the console holds stale endpoint fields.
+    let (status, body) = send_json(
+        &router,
+        Method::PUT,
+        "/api/v1/adapters/onebot/config",
+        Some(json!({"enabled": false})),
     )
     .await;
     assert_eq!(status, 200, "body: {body}");
     assert_eq!(body["status"]["connection_state"], "disabled");
+    assert_eq!(
+        adapter.config(),
+        OneBotConfig {
+            enabled: false,
+            ..previous
+        }
+    );
     assert!(tokio::net::TcpStream::connect(address).await.is_err());
 }

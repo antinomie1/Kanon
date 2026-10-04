@@ -178,16 +178,33 @@ impl QqOfficialAdapter {
     ///
     /// A rejected configuration leaves the running adapter untouched.
     pub async fn apply(&self, config: QqOfficialConfig) -> Result<(), AdapterError> {
-        let config = config.prepare().map_err(configuration_error)?;
+        self.update_config(move |_| config, |_| Ok(())).await
+    }
+
+    /// Changes the latest configuration and persists it before replacing the gateway session.
+    ///
+    /// Retained credentials are read under the lifecycle lock. A failed validation or save leaves
+    /// the previous session untouched; a committed update finishes if the caller disconnects.
+    pub async fn update_config(
+        &self,
+        change: impl FnOnce(QqOfficialConfig) -> QqOfficialConfig + Send + 'static,
+        persist: impl FnOnce(&QqOfficialConfig) -> Result<(), String> + Send + 'static,
+    ) -> Result<(), AdapterError> {
         let (state, lifecycle, endpoints, quotes) = self.parts();
         // Run to completion even if the HTTP caller goes away, so a half-applied change can never
         // leave the old gateway stopped without a new one started.
         tokio::spawn(async move {
             let mut lifecycle = lifecycle.lock().await;
-            replace(&state, &mut lifecycle, endpoints, quotes, config).await;
+            let current = state
+                .read()
+                .expect("QQ Official state poisoned")
+                .config
+                .clone();
+            let config = change(current).prepare().map_err(configuration_error)?;
+            replace(&state, &mut lifecycle, endpoints, quotes, config, persist).await
         })
         .await
-        .map_err(|_| configuration_error("QQ Official lifecycle task failed".into()))
+        .map_err(|_| configuration_error("QQ Official lifecycle task failed".into()))?
     }
 
     fn parts(
@@ -224,27 +241,41 @@ impl QqOfficialAdapter {
     }
 }
 
-/// Stops the current gateway task and, when enabled and started, launches one for `config`.
+/// Prepares and saves the candidate before replacing the current gateway task.
 async fn replace(
     state: &Arc<RwLock<Shared>>,
     lifecycle: &mut Lifecycle,
     endpoints: Option<Endpoints>,
     quotes: Arc<StdMutex<QuoteStore>>,
     config: QqOfficialConfig,
-) {
+    persist: impl FnOnce(&QqOfficialConfig) -> Result<(), String>,
+) -> Result<(), AdapterError> {
+    // Saving settings while stopped must not re-enable outbound REST calls before start.
+    let api = match (
+        &config.secret,
+        config.enabled && lifecycle.ingress.is_some(),
+    ) {
+        (Some(secret), true) => Some(Arc::new(
+            Api::new(
+                endpoints.unwrap_or_else(|| Endpoints::official(config.sandbox)),
+                config.app_id.clone(),
+                secret.clone(),
+            )
+            .map_err(configuration_error)?,
+        )),
+        _ => None,
+    };
+    // Both transport initialization and persistence may fail. Neither may retire the working
+    // gateway; after this commit only infallible publication and cancellation joins remain.
+    persist(&config).map_err(|reason| AdapterError::Persistence {
+        platform: PLATFORM.to_string(),
+        reason,
+    })?;
     if let Some(task) = lifecycle.task.take() {
         // Await the abort: the old task must not publish status or ingest after this point.
         task.abort();
         let _ = task.await;
     }
-    let api = match (&config.secret, config.enabled) {
-        (Some(secret), true) => Some(Arc::new(Api::new(
-            endpoints.unwrap_or_else(|| Endpoints::official(config.sandbox)),
-            config.app_id.clone(),
-            secret.clone(),
-        ))),
-        _ => None,
-    };
     {
         let mut shared = state.write().expect("QQ Official state poisoned");
         shared.status.enabled = config.enabled;
@@ -252,10 +283,12 @@ async fn replace(
         shared.status.connected = false;
         shared.status.bot_name = None;
         shared.status.last_error = None;
-        shared.status.connection_state = if api.is_some() {
+        shared.status.connection_state = if !config.enabled {
+            ConnectionState::Disabled
+        } else if api.is_some() {
             ConnectionState::Connecting
         } else {
-            ConnectionState::Disabled
+            ConnectionState::Stopped
         };
         shared.config = config;
         shared.api = api.clone();
@@ -269,6 +302,7 @@ async fn replace(
             quotes,
         )));
     }
+    Ok(())
 }
 
 fn configuration_error(reason: String) -> AdapterError {
@@ -335,16 +369,28 @@ impl PlatformAdapter for QqOfficialAdapter {
         let (state, lifecycle, endpoints, quotes) = self.parts();
         tokio::spawn(async move {
             let mut lifecycle = lifecycle.lock().await;
-            lifecycle.ingress = Some(ingress);
+            let previous_ingress = lifecycle.ingress.replace(ingress);
             let config = state
                 .read()
                 .expect("QQ Official state poisoned")
                 .config
                 .clone();
-            replace(&state, &mut lifecycle, endpoints, quotes, config).await;
+            let result = replace(
+                &state,
+                &mut lifecycle,
+                endpoints,
+                quotes,
+                config,
+                |_| Ok(()),
+            )
+            .await;
+            if result.is_err() {
+                lifecycle.ingress = previous_ingress;
+            }
+            result
         })
         .await
-        .map_err(|_| configuration_error("QQ Official lifecycle task failed".into()))
+        .map_err(|_| configuration_error("QQ Official lifecycle task failed".into()))?
     }
 
     async fn stop(&self) -> Result<(), AdapterError> {

@@ -592,6 +592,8 @@ sequenceDiagram
 - **处理中反馈**：回复策略 `acknowledge` 开启时，流水线决定用模型回答后非阻塞调用内置适配器的 `acknowledge()`（默认无操作）；QQ 官方私聊显示「正在输入」，Milky 群聊对原消息点赞。
 - **好友申请与入群邀请**：适配器以 `friend_request` / `group_invite` 通知入站，并在 `kanon.request_token` 中放入仅自己能解读的凭据；事件策略的 `accept_friend_requests` / `accept_group_invites` 开启时，核心调用该适配器的 `accept_request()`。
 
+**适配器配置提交**：Milky、OneBot 与 QQ 官方适配器共用各自的生命周期锁完成「读取最新配置 → 校验并准备资源 → 保存 → 替换运行连接」，启动与停止也进入同一把锁。省略的字段保留锁内读取的当前值，控制台开关只提交 `enabled`；保存失败保留旧配置和旧连接。已经开始的提交不随 HTTP 请求取消而中断；停止后保存配置不会自行恢复连接。
+
 **适配器能力声明 (Capabilities)**：凡依赖平台差异的功能都走上面的通用契约（元数据键、回复段、`acknowledge()`、`accept_request()`），每个适配器用 `Capability` 声明自己实现了哪些：`sender_name`、`sender_role`、`group_messages`、`quote_reply`、`forward_content`、`acknowledge`、`member_join`、`bot_join`、`friend_add`、`poke`、`recall`、`friend_requests`、`group_invites`、`platform_api`、`send_image`、`send_voice`、`send_video`、`send_file`。内置适配器实现 `PlatformAdapter::capabilities()`，插件在 `plugin.toml` 的 `[adapter] capabilities` 中声明（需要回调的 `acknowledge` / `friend_requests` / `group_invites` 仅内置适配器可用，插件声明即清单错误）。`GET /api/v1/adapters` 返回每个适配器的能力，控制台在每个相关设置旁列出支持它的适配器——新适配器只需如实声明，无需改动控制台。
 
 **命令权限**：节点级 `command_policy`（`/api/v1/system/command-policy`）列出管理员（`<平台>:<用户 ID>`），可选把群主/群管理员（`kanon.sender_role`）视为管理员，并按命令名设定 `everyone` / `admins_in_groups` / `admins`；默认 `/new` 为「群聊仅管理员」、`/model` 为「仅管理员」；`/stop` 未列出时也是「仅管理员」，`/switch`、`/del` 未列出时为「群聊仅管理员」（由核心声明，与插件命令的默认值同理，旧配置里没有这一项时同样生效；共享会话的群里切换或删除对话会影响所有成员），`/ls` 只读，所有人可用，未列出的命令（含插件命令）所有人可用。被拒绝时回复发送者 ID，方便运维加入管理员列表。实例可设置自己的 `command_policy` 覆盖（为 `null` 时继承节点策略），覆盖时整体替换节点策略，包括管理员列表。

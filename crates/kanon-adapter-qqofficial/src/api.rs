@@ -94,15 +94,18 @@ pub struct Api {
 }
 
 impl Api {
-    /// Builds a client; no network I/O happens until the first call.
-    pub fn new(endpoints: Endpoints, app_id: String, secret: String) -> Self {
-        Self {
-            http: reqwest::Client::new(),
+    /// Builds a client, reporting local transport initialization failures before any network I/O.
+    pub fn new(endpoints: Endpoints, app_id: String, secret: String) -> Result<Self, String> {
+        let http = reqwest::Client::builder()
+            .build()
+            .map_err(|error| format!("cannot build QQ HTTP client: {error}"))?;
+        Ok(Self {
+            http,
             endpoints,
             app_id,
             secret,
             token: Mutex::new(None),
-        }
+        })
     }
 
     /// AppID this client authenticates as.

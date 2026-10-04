@@ -180,22 +180,41 @@ impl OneBotAdapter {
 
     /// Hot-applies settings, retaining the live configuration if a new bind fails.
     pub async fn apply(&self, config: OneBotConfig) -> Result<(), AdapterError> {
-        let config = config
-            .prepare()
-            .map_err(|reason| self.configuration_error(reason))?;
-        if config.platform != self.platform || config.effective_display_name() != self.display_name
-        {
-            return Err(
-                self.configuration_error("platform and display_name changes require a restart")
-            );
-        }
+        self.update_config(move |_| config, |_| Ok(())).await
+    }
+
+    /// Changes the current configuration, saving it before replacing the live connection.
+    ///
+    /// The lifecycle lock covers reading retained credentials, preparing a listener, persistence
+    /// and publication. Once started, the operation finishes even if its caller disconnects.
+    pub async fn update_config(
+        &self,
+        change: impl FnOnce(OneBotConfig) -> OneBotConfig + Send + 'static,
+        persist: impl FnOnce(&OneBotConfig) -> Result<(), String> + Send + 'static,
+    ) -> Result<(), AdapterError> {
         let lifecycle = self.lifecycle.clone();
         let state = self.state.clone();
+        let platform = self.platform.clone();
+        let display_name = self.display_name.clone();
         // The short mutation owns its state until it finishes, even if the HTTP caller leaves.
         // Lifecycle still owns and aborts the long-running transport when the adapter is dropped.
         tokio::spawn(async move {
             let mut lifecycle = lifecycle.lock().await;
-            Self::replace(&state, &mut lifecycle, config).await
+            let current = state.read().expect("OneBot state poisoned").config.clone();
+            let config =
+                change(current)
+                    .prepare()
+                    .map_err(|reason| AdapterError::Configuration {
+                        platform: platform.clone(),
+                        reason,
+                    })?;
+            if config.platform != platform || config.effective_display_name() != display_name {
+                return Err(AdapterError::Configuration {
+                    platform,
+                    reason: "platform and display_name changes require a restart".into(),
+                });
+            }
+            Self::replace(&state, &mut lifecycle, config, persist).await
         })
         .await
         .map_err(|_| self.configuration_error("OneBot lifecycle task failed"))?
@@ -206,6 +225,7 @@ impl OneBotAdapter {
         state: &Arc<RwLock<State>>,
         lifecycle: &mut Lifecycle,
         config: OneBotConfig,
+        persist: impl FnOnce(&OneBotConfig) -> Result<(), String>,
     ) -> Result<(), AdapterError> {
         let configuration_error = |reason: String| AdapterError::Configuration {
             platform: config.platform.clone(),
@@ -227,6 +247,11 @@ impl OneBotAdapter {
         } else {
             None
         };
+        // Binding and saving may fail. Neither failure is allowed to stop the old connection.
+        persist(&config).map_err(|reason| AdapterError::Persistence {
+            platform: config.platform.clone(),
+            reason,
+        })?;
         if let Some(task) = lifecycle.task.take() {
             // Await cancellation before publishing a new generation; an old task can no longer
             // overwrite status, retain the listener, or deliver stale replies after this point.
@@ -245,6 +270,8 @@ impl OneBotAdapter {
             state.status.last_error = None;
             state.status.connection_state = if !config.enabled {
                 ConnectionState::Disabled
+            } else if lifecycle.ingress.is_none() {
+                ConnectionState::Stopped
             } else if listener.is_some() {
                 ConnectionState::Listening
             } else {
@@ -337,7 +364,7 @@ impl PlatformAdapter for OneBotAdapter {
             let mut lifecycle = lifecycle.lock().await;
             lifecycle.ingress = Some(ingress);
             let config = state.read().expect("OneBot state poisoned").config.clone();
-            Self::replace(&state, &mut lifecycle, config).await
+            Self::replace(&state, &mut lifecycle, config, |_| Ok(())).await
         })
         .await
         .map_err(|_| self.configuration_error("OneBot lifecycle task failed"))?
