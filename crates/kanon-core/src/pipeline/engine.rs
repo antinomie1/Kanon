@@ -3333,45 +3333,30 @@ impl PipelineEngine {
                     segment_count,
                 });
             }
-            Err(mpsc::error::TrySendError::Full(dropped)) => {
+            Err(error) => {
+                let (dropped, reason) = match error {
+                    mpsc::error::TrySendError::Full(dropped) => (dropped, "outbound queue is full"),
+                    mpsc::error::TrySendError::Closed(dropped) => {
+                        (dropped, "outbound dispatcher is not running")
+                    }
+                };
                 tracing::warn!(
                     platform = %platform,
                     channel_id = %channel_id,
-                    "Outbound queue is full; dropping reply to dead letter to protect pipeline latency"
+                    reason,
+                    "Outbound reply could not be queued; writing it to dead letter"
                 );
+                // The pipeline never waits on disk I/O for a reply it cannot send anyway.
                 let dead_letter = Arc::clone(&self.dead_letter);
                 tokio::spawn(async move {
-                    let _ = dead_letter
-                        .write_record(&dropped.request, "outbound queue is full")
-                        .await;
-                });
-                self.observe(PipelineStage::OutboundFailed {
-                    platform,
-                    channel_id,
-                    reason: "outbound queue is full; reply dropped".to_string(),
-                });
-            }
-            Err(mpsc::error::TrySendError::Closed(dropped)) => {
-                tracing::warn!(
-                    platform = %platform,
-                    channel_id = %channel_id,
-                    "Outbound dispatcher is not running; dropping reply to dead letter"
-                );
-                // Written off the worker, like the full-queue case, so the pipeline never
-                // waits on disk I/O for a reply it cannot send anyway.
-                let dead_letter = Arc::clone(&self.dead_letter);
-                tokio::spawn(async move {
-                    if let Err(err) = dead_letter
-                        .write_record(&dropped.request, "outbound dispatcher is not running")
-                        .await
-                    {
+                    if let Err(err) = dead_letter.write_record(&dropped.request, reason).await {
                         tracing::error!(error = %err, "Failed to persist dead letter record; the reply is lost");
                     }
                 });
                 self.observe(PipelineStage::OutboundFailed {
                     platform,
                     channel_id,
-                    reason: "outbound dispatcher is not running; reply dropped".to_string(),
+                    reason: format!("{reason}; reply dropped"),
                 });
             }
         }

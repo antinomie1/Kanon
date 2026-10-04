@@ -80,7 +80,11 @@ async fn queued_events_are_dead_lettered_on_shutdown() {
                     channel_id: "group:1".to_string(),
                     sender_id: "alice".to_string(),
                     raw_text: "hello".to_string(),
-                    segments: text("hello"),
+                    segments: if id == "evt-1" {
+                        text("hello")
+                    } else {
+                        Vec::new()
+                    },
                     metadata: None,
                 }),
             })
@@ -97,7 +101,9 @@ async fn queued_events_are_dead_lettered_on_shutdown() {
     assert!(
         records
             .iter()
-            .all(|r| r.direction == DeadLetterDirection::Inbound && r.sender_id == "alice")
+            .all(|r| r.direction == DeadLetterDirection::Inbound
+                && r.sender_id == "alice"
+                && r.raw_text == "hello")
     );
     assert!(matches!(
         ingest.try_send(IngestEventRequest::default()),
@@ -178,4 +184,40 @@ async fn cancelled_delivery_releases_half_open_probe() {
     assert!(!breaker.is_available());
     drop(call);
     assert!(breaker.try_acquire().is_some());
+}
+
+#[tokio::test]
+async fn concurrent_large_dead_letters_keep_each_record_whole() {
+    let dir = tempfile::tempdir().unwrap();
+    let writer = DeadLetterWriter::new(dir.path());
+    let start = Arc::new(tokio::sync::Barrier::new(4));
+    let mut writes = tokio::task::JoinSet::new();
+    for index in 0..4 {
+        let writer = writer.clone();
+        let start = start.clone();
+        writes.spawn(async move {
+            // Larger than Tokio's file buffer: append mode alone cannot keep multiple writes
+            // for one record together when other failed messages arrive concurrently.
+            let content = index.to_string().repeat(3 * 1024 * 1024);
+            let event = PipelineEventRequest {
+                event_id: index.to_string(),
+                platform: "test".into(),
+                segments: text(&content),
+                ..Default::default()
+            };
+            start.wait().await;
+            writer.write_inbound(&event, "test failure").await.unwrap();
+        });
+    }
+    while let Some(result) = writes.join_next().await {
+        result.unwrap();
+    }
+    let records = dead_letters(dir.path());
+    assert_eq!(records.len(), 4);
+    for record in records {
+        assert_eq!(
+            record.segments[0]["content"],
+            record.event_id.repeat(3 * 1024 * 1024)
+        );
+    }
 }

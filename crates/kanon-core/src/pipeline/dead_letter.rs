@@ -4,9 +4,11 @@
 //! breakers, dropped replies are serialized to a cold-storage append-only file
 //! (`data/dead_letter/<platform>_<date>.jsonl`). Inbound events the node acknowledged but never
 //! processed (because it shut down first) land in the same file, marked `"direction": "inbound"`.
-//! This guarantees auditability, zero data loss, and post-incident manual or automated replay.
+//! Records retain routing, readable content and the failure cause for post-incident auditing.
 
+use std::io::Write;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use kanon_proto::v1::message_segment::Segment;
@@ -51,6 +53,9 @@ pub struct DeadLetterRecord {
     /// Sender of an inbound event; empty for an outbound reply.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub sender_id: String,
+    /// Original inbound text, including events without structured segments.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub raw_text: String,
     /// Explicit failure reason or circuit breaker state causing the message drop.
     pub reason: String,
     /// Serialized message segments.
@@ -61,6 +66,7 @@ pub struct DeadLetterRecord {
 #[derive(Debug, Clone)]
 pub struct DeadLetterWriter {
     base_dir: PathBuf,
+    append_lock: Arc<tokio::sync::Mutex<()>>,
 }
 
 impl Default for DeadLetterWriter {
@@ -74,6 +80,7 @@ impl DeadLetterWriter {
     pub fn new(base_dir: impl Into<PathBuf>) -> Self {
         Self {
             base_dir: base_dir.into(),
+            append_lock: Arc::default(),
         }
     }
 
@@ -111,6 +118,7 @@ impl DeadLetterWriter {
                 channel_id: request.channel_id.clone(),
                 recipient_id: request.recipient_id.clone(),
                 sender_id: String::new(),
+                raw_text: String::new(),
                 reason: reason.to_string(),
                 segments,
             },
@@ -136,6 +144,7 @@ impl DeadLetterWriter {
                 channel_id: event.channel_id.clone(),
                 recipient_id: String::new(),
                 sender_id: event.sender_id.clone(),
+                raw_text: event.raw_text.clone(),
                 reason: reason.to_string(),
                 segments: event.segments.iter().map(segment_to_json).collect(),
             },
@@ -150,40 +159,37 @@ impl DeadLetterWriter {
         let filename = format!("{safe_platform}_{date_str}.jsonl");
         let file_path = self.base_dir.join(filename);
 
-        // Ensure target directory exists before file creation
-        if let Some(parent) = file_path.parent() {
-            tokio::fs::create_dir_all(parent).await?;
-        }
+        // Append mode protects a single OS write, not a whole record spanning several writes.
+        // Cloned writers share this lock. Move it into the blocking task so caller cancellation
+        // cannot release it while a partial record is still being written.
+        let writing = self.append_lock.clone().lock_owned().await;
+        tokio::task::spawn_blocking(move || {
+            let _writing = writing;
+            if let Some(parent) = file_path.parent() {
+                std::fs::create_dir_all(parent)?;
+            }
+            let mut line = serde_json::to_vec(&record)
+                .map_err(|err| std::io::Error::new(std::io::ErrorKind::InvalidData, err))?;
+            line.push(b'\n');
+            std::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(&file_path)?
+                .write_all(&line)?;
 
-        let serialized = serde_json::to_string(&record).map_err(|err| {
-            std::io::Error::new(
-                std::io::ErrorKind::InvalidData,
-                format!("Failed to serialize dead letter record: {err}"),
-            )
-        })?;
-
-        // Atomic append with newline delimiter
-        let line = format!("{serialized}\n");
-        use tokio::io::AsyncWriteExt;
-        let mut file = tokio::fs::OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(&file_path)
-            .await?;
-        file.write_all(line.as_bytes()).await?;
-        file.flush().await?;
-
-        tracing::warn!(
-            platform = %record.platform,
-            channel_id = %record.channel_id,
-            event_id = %record.event_id,
-            direction = ?record.direction,
-            path = %file_path.display(),
-            reason = %record.reason,
-            "Dropped message written to cold storage dead-letter log"
-        );
-
-        Ok(file_path)
+            tracing::warn!(
+                platform = %record.platform,
+                channel_id = %record.channel_id,
+                event_id = %record.event_id,
+                direction = ?record.direction,
+                path = %file_path.display(),
+                reason = %record.reason,
+                "Dropped message written to cold storage dead-letter log"
+            );
+            Ok(file_path)
+        })
+        .await
+        .map_err(std::io::Error::other)?
     }
 }
 
