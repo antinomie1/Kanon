@@ -483,7 +483,10 @@ async fn empty_streams_complete_without_appending_blank_assistant_history() {
         assert_eq!(finished, 1);
         assert_eq!(
             sessions.get_metadata("s").unwrap().total_tokens_used,
-            kanon_llm::token::estimate_text_tokens("question")
+            kanon_llm::token::estimate_conversation_tokens(&[
+                previous.clone(),
+                ChatMessage::user("question"),
+            ])
         );
         assert_eq!(
             Memory::get_messages(memory.as_ref(), "s").await.unwrap(),

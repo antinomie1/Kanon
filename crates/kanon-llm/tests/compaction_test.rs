@@ -331,7 +331,7 @@ async fn fallback_session_tokens_include_reasoning_but_reported_usage_remains_au
         });
         let memory = Arc::new(InMemory::new());
         let sessions = Arc::new(SessionManager::new(memory.clone()));
-        let agent = BuiltinAgent::builder("accounting", provider)
+        let agent = BuiltinAgent::builder("accounting", provider.clone())
             .memory(memory.clone())
             .session_manager(sessions.clone())
             .max_iterations(0)
@@ -342,10 +342,13 @@ async fn fallback_session_tokens_include_reasoning_but_reported_usage_remains_au
         let messages = Memory::get_messages(memory.as_ref(), "s").await.unwrap();
         assert_eq!(messages.len(), 2);
         assert!(messages[1].reasoning_content.is_some());
-        // Count exactly what was retained, including reasoning in the iteration-limit fallback.
+        // Count the full request and generated response, including a call that the iteration
+        // ceiling prevents from executing. Provider-reported usage remains authoritative.
         let expected = reported.unwrap_or_else(|| {
-            kanon_llm::token::estimate_text_tokens("question")
-                + kanon_llm::token::estimate_message_tokens(&messages[1])
+            kanon_llm::token::estimate_request_tokens(&provider.requests.lock().unwrap()[0])
+                + kanon_llm::token::estimate_message_tokens(
+                    &provider.reply.as_ref().unwrap().assistant_message(),
+                )
         });
         let metadata = sessions.get_metadata("s").unwrap();
         assert_eq!(metadata.turn_count, 1);

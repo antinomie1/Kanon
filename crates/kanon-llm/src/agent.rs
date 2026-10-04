@@ -196,7 +196,7 @@ pub struct TurnOptions {
     pub persona: Option<crate::prompt::Persona>,
     /// Tool rounds allowed in this turn; `None` uses [`AgentConfig::max_iterations`].
     pub max_iterations: Option<usize>,
-    /// Offers the model no tools at all in this turn, the agent's native tools included.
+    /// Disables tool advertisement and execution in this turn, including native tools.
     ///
     /// The tool list heads every request, so a turn without it does not share the conversation's
     /// cached prefix; callers use it for a deliberate one-off (a plugin's tool-less agent run).
@@ -208,6 +208,9 @@ pub struct TurnOptions {
 pub struct AgentConfig {
     /// Maximum tool reasoning loop iterations before forcing termination.
     pub max_iterations: usize,
+    /// Whether the selected model supports tool calling. Disabled models never receive tool
+    /// definitions or execute returned calls, even when a request or response hook adds them.
+    pub tool_calling: bool,
     /// Default model identifier.
     pub default_model: String,
     /// Name of the provider endpoint that serves `default_model`, when the node routes by name.
@@ -248,6 +251,7 @@ impl Default for AgentConfig {
     fn default() -> Self {
         Self {
             max_iterations: 5,
+            tool_calling: true,
             default_model: "gpt-4o-mini".to_string(),
             provider: None,
             context_length: None,

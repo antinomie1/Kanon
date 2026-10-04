@@ -20,7 +20,8 @@ use axum::Router;
 use axum::extract::State;
 use axum::routing::get;
 use kanon_core::mcp::host_id;
-use kanon_llm::tool_router::{ToolHost, resolve_tools};
+use kanon_core::supervisor::filter_plugin_hosts;
+use kanon_llm::tool_router::{ToolHost, ensure_unique_tool_names, resolve_tools};
 
 use crate::error::ApiError;
 use crate::state::ApiState;
@@ -98,16 +99,16 @@ async fn list_tools(State(state): State<ApiState>) -> Result<Json<ToolCatalog>, 
         .collect();
     let builtin = tools.len();
 
-    // Plugin hosts and MCP servers form one slice, exactly as they do for the model. The MCP
-    // filter is applied here as well, so a server switched off in the console disappears from the
-    // catalog along with its tools.
-    let mut hosts: Vec<Arc<dyn ToolHost>> = state
-        .supervisor()
-        .get_all_hosts()
-        .await
-        .into_iter()
-        .map(|host| host as Arc<dyn ToolHost>)
-        .collect();
+    // Both plugin and MCP tools follow the same node-wide switches as model requests.
+    let mut hosts: Vec<Arc<dyn ToolHost>> = filter_plugin_hosts(
+        state.supervisor().get_all_hosts().await,
+        Some(state.plugin_state().as_ref()),
+        None,
+    )
+    .await
+    .into_iter()
+    .map(|host| host as Arc<dyn ToolHost>)
+    .collect();
     let mcp_servers: HashMap<String, String> = state
         .mcp()
         .describe()
@@ -117,7 +118,8 @@ async fn list_tools(State(state): State<ApiState>) -> Result<Json<ToolCatalog>, 
         .collect();
     hosts.extend(state.mcp().hosts_for_instance(None).await);
 
-    let mut provided: Vec<ToolView> = resolve_tools(&hosts)?
+    let mut provided: Vec<ToolView> = resolve_tools(&hosts)
+        .map_err(|error| ApiError::Upstream(error.to_string()))?
         .into_iter()
         .map(|resolved| {
             // A host identifier registered by the pool identifies an MCP server; anything else is
@@ -157,6 +159,10 @@ async fn list_tools(State(state): State<ApiState>) -> Result<Json<ToolCatalog>, 
         .filter(|tool| tool.source == ToolSource::Mcp)
         .count();
     tools.extend(provided);
+    // Match the agent's merged-name validation; the catalog must never advertise a name whose
+    // native/plugin target would be ambiguous during execution.
+    ensure_unique_tool_names(tools.iter().map(|tool| tool.name.as_str()))
+        .map_err(|error| ApiError::Upstream(error.to_string()))?;
 
     Ok(Json(ToolCatalog {
         total: tools.len(),

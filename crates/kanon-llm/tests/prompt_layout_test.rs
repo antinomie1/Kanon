@@ -1050,3 +1050,57 @@ async fn complete_and_streamed_requests_share_the_entire_wire_prefix() {
         assert_eq!(bodies[0], bodies[1]);
     }
 }
+
+/// Request middleware must not override model capabilities while constructing the prefix.
+struct AddToolDefinition;
+
+#[async_trait]
+impl AgentHook for AddToolDefinition {
+    async fn on_llm_request(
+        &self,
+        _: &str,
+        request: &mut ChatRequest,
+    ) -> Result<(), kanon_llm::AgentError> {
+        let definition = ToolDefinition {
+            name: "hook_tool".into(),
+            description: "Added by middleware".into(),
+            parameters: json!({"type":"object"}),
+        };
+        request.tools.extend([definition.clone(), definition]);
+        Ok(())
+    }
+}
+
+#[tokio::test]
+async fn disabled_tools_keep_an_append_only_prefix_through_manual_compaction() {
+    for model_supports_tools in [false, true] {
+        let recorder = Arc::new(Recorder::default());
+        let agent = BuiltinAgent::builder("no-tools", recorder.clone())
+            .system_prompt("Stable instructions.")
+            .tool(tool("native_tool"))
+            .tool_calling(model_supports_tools)
+            .hook(AddToolDefinition)
+            .compaction(None)
+            .build();
+        let options = TurnOptions {
+            without_tools: model_supports_tools,
+            ..Default::default()
+        };
+        for message in ["first", "second"] {
+            agent
+                .run_message_with("s", ChatMessage::user(message), &[], options.clone())
+                .await
+                .unwrap();
+        }
+        assert!(agent.compact_session_with("s", &[], options).await.unwrap());
+        let requests = recorder.requests.lock().unwrap();
+        assert_eq!(requests.len(), 3);
+        assert!(requests.iter().all(|request| request.tools.is_empty()));
+        assert_eq!(
+            requests[0].messages[0].content.as_deref(),
+            Some("Stable instructions.")
+        );
+        assert!(requests[1].messages.starts_with(&requests[0].messages));
+        assert!(requests[2].messages.starts_with(&requests[1].messages));
+    }
+}

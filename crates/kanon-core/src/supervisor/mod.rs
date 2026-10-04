@@ -34,6 +34,36 @@ pub use deps::{DEFAULT_INSTALL_TIMEOUT, DependencyInstaller};
 /// Maximum time a command, trigger or captured reply may occupy an inbound chat lane.
 pub const COMMAND_TIMEOUT: Duration = Duration::from_secs(30);
 
+/// Selects plugin hosts using one snapshot of global toggles and an optional instance policy.
+///
+/// All model and pipeline entry points share this selection: a registered process may still exist
+/// while disabled, but must not supply tools, commands or hooks. Without a toggle store, plugins
+/// default to globally enabled; an explicit instance restriction still applies.
+pub async fn filter_plugin_hosts(
+    hosts: Vec<Arc<ManagedHost>>,
+    toggles: Option<&ToggleStore>,
+    instance: Option<&crate::instance::BotInstance>,
+) -> Vec<Arc<ManagedHost>> {
+    let disabled: HashSet<String> = match toggles {
+        Some(toggles) => toggles
+            .disabled_ids(PLUGIN_SECTION)
+            .await
+            .into_iter()
+            .collect(),
+        None => HashSet::new(),
+    };
+    hosts
+        .into_iter()
+        .filter(|host| {
+            let plugin_id = host.primary_plugin_id().unwrap_or_default();
+            let globally_enabled = !disabled.contains(&plugin_id);
+            instance.map_or(globally_enabled, |instance| {
+                instance.allows_plugin(&plugin_id, globally_enabled)
+            })
+        })
+        .collect()
+}
+
 /// Errors arising during supervisor operations.
 #[derive(Debug, Error)]
 pub enum SupervisorError {

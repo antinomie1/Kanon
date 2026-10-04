@@ -25,8 +25,8 @@ use crate::prompt::Persona;
 use crate::session::{SessionWriteGuard, SessionWriters};
 use crate::stop::{StopSignal, unless_stopped};
 use crate::tool_router::{
-    ExecutedToolCall, ToolAttachment, ToolHost, aggregate_tools, json_to_prost_struct,
-    prost_struct_to_json,
+    ExecutedToolCall, ToolAttachment, ToolHost, ensure_unique_tool_names, json_to_prost_struct,
+    prost_struct_to_json, resolve_tools,
 };
 use dashmap::DashSet;
 use tokio_stream::StreamExt;
@@ -81,6 +81,23 @@ struct PreparedCompaction {
     prefix: Vec<ChatMessage>,
 }
 
+/// The execution target captured with the definition advertised for this turn.
+enum ToolTarget {
+    Native(usize),
+    Plugin {
+        host_index: usize,
+        plugin_id: String,
+        tool_name: String,
+    },
+}
+
+/// Definitions and dispatch share one snapshot even when a host refreshes its metadata mid-turn.
+#[derive(Default)]
+struct TurnTools {
+    definitions: Vec<ToolDefinition>,
+    targets: std::collections::HashMap<String, ToolTarget>,
+}
+
 impl BuiltinAgent {
     /// Returns a new fluent builder for constructing a [`BuiltinAgent`].
     pub fn builder(name: impl Into<String>, provider: Arc<dyn LlmProvider>) -> AgentBuilder {
@@ -116,14 +133,28 @@ impl BuiltinAgent {
     }
 
     /// Merges native and plugin/MCP tools; final normalization follows the request hooks.
-    fn collect_tools(
-        &self,
-        hosts: &[Arc<dyn ToolHost>],
-    ) -> Result<Vec<ToolDefinition>, AgentError> {
-        let mut tools: Vec<ToolDefinition> = self.tools.iter().map(|t| t.definition()).collect();
-        tools.extend(aggregate_tools(hosts).map_err(|error| {
-            AgentError::InvalidRequest(format!("invalid plugin tool schema: {error}"))
-        })?);
+    fn collect_tools(&self, hosts: &[Arc<dyn ToolHost>]) -> Result<TurnTools, AgentError> {
+        let mut tools = TurnTools::default();
+        for (index, native) in self.tools.iter().enumerate() {
+            let definition = native.definition();
+            tools
+                .targets
+                .insert(definition.name.clone(), ToolTarget::Native(index));
+            tools.definitions.push(definition);
+        }
+        for resolved in resolve_tools(hosts)? {
+            tools.targets.insert(
+                resolved.definition.name.clone(),
+                ToolTarget::Plugin {
+                    host_index: resolved.host_index,
+                    plugin_id: resolved.plugin_id,
+                    tool_name: resolved.tool_name,
+                },
+            );
+            tools.definitions.push(resolved.definition);
+        }
+        // Never publish a map in which insertion silently selected one of two same-named tools.
+        ensure_unique_tool_names(tools.definitions.iter().map(|tool| tool.name.as_str()))?;
         Ok(tools)
     }
 
@@ -196,7 +227,7 @@ impl BuiltinAgent {
     async fn build_request(
         &self,
         session_id: &str,
-        tools: &[ToolDefinition],
+        tools: Option<&[ToolDefinition]>,
         system_prompt: &str,
     ) -> Result<ChatRequest, AgentError> {
         let snapshot = self.memory.snapshot(session_id).await?;
@@ -207,12 +238,13 @@ impl BuiltinAgent {
     /// Builds a request from an already-read memory snapshot.
     ///
     /// Compaction reads the snapshot once and builds from it, so the messages it later folds away
-    /// are exactly the ones its summary was written from.
+    /// are exactly the ones its summary was written from. `None` disables tools, including any
+    /// schemas added by hooks; an empty slice still allows ordinary request middleware.
     async fn request_from(
         &self,
         session_id: &str,
         snapshot: MemorySnapshot,
-        tools: &[ToolDefinition],
+        tools: Option<&[ToolDefinition]>,
         system_prompt: &str,
         prepared_prefix: Option<&[ChatMessage]>,
     ) -> Result<ChatRequest, AgentError> {
@@ -221,7 +253,7 @@ impl BuiltinAgent {
         let mut request = ChatRequest {
             model: self.config.default_model.clone(),
             messages,
-            tools: tools.to_vec(),
+            tools: tools.unwrap_or_default().to_vec(),
             temperature: self.config.temperature,
             max_tokens: self.config.max_tokens,
         };
@@ -261,6 +293,12 @@ impl BuiltinAgent {
         for message in &mut request.messages {
             message.separate_reasoning();
         }
+        // Apply policy after hooks but before validation, for ordinary turns and compaction.
+        // Even duplicate hook-added schemas are irrelevant when this request disables tools.
+        if !self.config.tool_calling || tools.is_none() {
+            request.tools.clear();
+        }
+        ensure_unique_tool_names(request.tools.iter().map(|tool| tool.name.as_str()))?;
         normalize_request(&mut request)?;
         Ok(request)
     }
@@ -272,7 +310,7 @@ impl BuiltinAgent {
     async fn compact(
         &self,
         session_id: &str,
-        tools: &[ToolDefinition],
+        tools: Option<&[ToolDefinition]>,
         persona: Option<&Persona>,
         prepared: Option<PreparedCompaction>,
     ) -> Result<bool, AgentError> {
@@ -450,7 +488,7 @@ impl BuiltinAgent {
                 None => None,
             };
             if let Err(err) = agent
-                .compact(&session_id, &tools, None, Some(prepared))
+                .compact(&session_id, Some(&tools), None, Some(prepared))
                 .await
             {
                 tracing::warn!(
@@ -487,21 +525,13 @@ impl BuiltinAgent {
         let system_prompt = self
             .prepare_system_prompt(session_id, options.persona.as_ref())
             .await?;
-        let (user_input, media) = self.start_turn(session_id, message).await?;
+        let media = self.start_turn(session_id, message).await?;
 
         // From here on the turn is part of history. However it ends, the next turn has to find a
         // conversation the provider accepts, and one that does not ask the model to redo the work
         // that just failed.
         match self
-            .answer(
-                session_id,
-                &user_input,
-                media,
-                hosts,
-                options,
-                &system_prompt,
-                None,
-            )
+            .answer(session_id, media, hosts, options, &system_prompt, None)
             .await
         {
             Ok(output) => Ok(output),
@@ -514,11 +544,28 @@ impl BuiltinAgent {
         &self,
         session_id: &str,
         mut message: ChatMessage,
-    ) -> Result<(String, Option<Vec<ContentPart>>), AgentError> {
+    ) -> Result<Option<Vec<ContentPart>>, AgentError> {
         for hook in &self.hooks {
             hook.on_user_message(session_id, &mut message).await?;
         }
-        let user_input = message.content.clone().unwrap_or_default();
+        // A process can stop after persisting tool calls but before their results. Close that
+        // interrupted round under this turn's writer before appending a new user message: results
+        // appended after the new user would leave an invalid tool-call gap in durable history.
+        let needs_recovery = {
+            let history = self.memory.get_messages(session_id).await?;
+            !unanswered_tool_calls(&history).is_empty()
+        };
+        if needs_recovery {
+            self.record_closing(
+                session_id,
+                FAILED_TOOL_RESULT,
+                "[The previous turn was interrupted before its tool calls completed. Unfinished \
+                 calls were not retried. Answer the next message on its own, and redo the previous \
+                 request only if the user asks for it again.]"
+                    .to_string(),
+            )
+            .await?;
+        }
 
         // 1. Push user message to memory, without its media. Platform media URLs are signed and
         // expire within hours (QQ's `rkey`), and a provider that cannot download one rejects the
@@ -528,25 +575,26 @@ impl BuiltinAgent {
         let media = message.parts.take();
         self.memory.push_message(session_id, message).await?;
 
-        Ok((user_input, media))
+        Ok(media)
     }
 
     /// The reasoning and tool loop of [`BuiltinAgent::run_turn`], run once the user message is stored.
     async fn answer(
         &self,
         session_id: &str,
-        user_input: &str,
         media: Option<Vec<ContentPart>>,
         hosts: &[Arc<dyn ToolHost>],
         options: TurnOptions,
         system_prompt: &str,
         stream: Option<&tokio::sync::mpsc::Sender<Result<ChatChunk, AgentError>>>,
     ) -> Result<AgentOutput, AgentError> {
-        // 2. Dynamically aggregate tools from both native tools and active plugin hosts
-        let tools = if options.without_tools {
-            Vec::new()
-        } else {
+        // Model capability and per-turn policy share one execution boundary. The same decision
+        // controls advertisement and dispatch, including calls introduced by middleware.
+        let tools_enabled = self.config.tool_calling && !options.without_tools;
+        let tools = if tools_enabled {
             self.collect_tools(hosts)?
+        } else {
+            TurnTools::default()
         };
         let max_iterations = options.max_iterations.unwrap_or(self.config.max_iterations);
 
@@ -554,18 +602,37 @@ impl BuiltinAgent {
         let mut attachments: Vec<ToolAttachment> = Vec::new();
         let mut reasoning: Vec<String> = Vec::new();
         let mut iterations = 0;
+        // Commit once when the turn completes, retaining the existing convention that failed
+        // or stopped turns do not increment session tallies. Every completed model round costs
+        // tokens, including tool rounds and the response that reaches the iteration ceiling.
+        let mut turn_tokens = 0usize;
         // Set when the caller can stop this turn from outside (see `crate::stop`).
         let stop = crate::stop::current();
 
         // 3. Reasoning and tool execution loop
         loop {
             let mut request = self
-                .build_request(session_id, &tools, system_prompt)
+                .build_request(
+                    session_id,
+                    tools_enabled.then_some(tools.definitions.as_slice()),
+                    system_prompt,
+                )
                 .await?;
             attach_turn_media(&mut request, media.as_ref());
 
             let mut response = self.complete_round(&request, stream, stop.as_ref()).await?;
             response.separate_reasoning();
+            turn_tokens += response.usage.as_ref().map_or_else(
+                || {
+                    crate::token::estimate_request_tokens(&request)
+                        + if response.has_assistant_payload() {
+                            crate::token::estimate_message_tokens(&response.assistant_message())
+                        } else {
+                            0
+                        }
+                },
+                |usage| usage.total_tokens as usize,
+            );
 
             // Recover tool calls a model emitted as text markup instead of structured calls, so the
             // loop executes them instead of sending the markup to the chat platform as an answer.
@@ -594,6 +661,15 @@ impl BuiltinAgent {
                 ));
             }
 
+            // Hidden definitions alone are not an execution policy: a model can replay an old
+            // call or emit textual markup, and a response hook can introduce a new call.
+            if !tools_enabled && !response.tool_calls.is_empty() {
+                return Err(GatewayError::InvalidResponse(
+                    "model returned tool calls while tools are disabled for this turn".into(),
+                )
+                .into());
+            }
+
             response.separate_reasoning();
             if let Some(text) = response
                 .reasoning_content
@@ -613,19 +689,7 @@ impl BuiltinAgent {
                 let final_content = response.content.clone().unwrap_or_default();
 
                 if let Some(ref sm) = self.session_manager {
-                    let tokens_used = response
-                        .usage
-                        .as_ref()
-                        .map(|u| u.total_tokens as usize)
-                        .unwrap_or_else(|| {
-                            crate::token::estimate_text_tokens(&user_input)
-                                + if response.has_assistant_payload() {
-                                    crate::token::estimate_message_tokens(&reply)
-                                } else {
-                                    0
-                                }
-                        });
-                    sm.record_turn(session_id, tokens_used);
+                    sm.record_turn(session_id, turn_tokens);
                 }
 
                 self.schedule_compaction(session_id, &request, response.usage.as_ref(), &reply)
@@ -671,9 +735,7 @@ impl BuiltinAgent {
                     .await?;
 
                 if let Some(ref sm) = self.session_manager {
-                    let tokens_used = crate::token::estimate_text_tokens(&user_input)
-                        + crate::token::estimate_message_tokens(&message);
-                    sm.record_turn(session_id, tokens_used);
+                    sm.record_turn(session_id, turn_tokens);
                 }
 
                 self.schedule_compaction(session_id, &request, None, &message)
@@ -757,10 +819,16 @@ impl BuiltinAgent {
                     continue;
                 }
 
-                // Branch A: Check registered native in-process tools
-                if let Some(native_tool) =
-                    self.tools.iter().find(|t| t.definition().name == call.name)
-                {
+                // Only dispatch a name advertised in this request, using the turn's original
+                // target. A hook may hide a tool, but cannot alias it to a different provider.
+                let target = tools
+                    .targets
+                    .get(&call.name)
+                    .filter(|_| request.tools.iter().any(|tool| tool.name == call.name));
+
+                // Branch A: the captured native tool index is stable for the agent's lifetime.
+                if let Some(ToolTarget::Native(index)) = target {
+                    let native_tool = &self.tools[*index];
                     tracing::debug!(agent = %self.name, tool = %call.name, "Executing native tool in-process");
                     let Some(result) = unless_stopped(
                         stop.as_ref(),
@@ -813,12 +881,14 @@ impl BuiltinAgent {
                     continue;
                 }
 
-                // Branch B: Resolve tool on external gRPC plugin hosts
-                let target = find_tool_target(&call.name, hosts);
-
+                // Branch B: send the original host-local name to its captured provider.
                 let (target_host, plugin_id, actual_tool_name) = match target {
-                    Some((h, pid, tname)) => (h, pid, tname),
-                    None => {
+                    Some(ToolTarget::Plugin {
+                        host_index,
+                        plugin_id,
+                        tool_name,
+                    }) => (&hosts[*host_index], plugin_id, tool_name.clone()),
+                    _ => {
                         tracing::warn!(tool = %call.name, "Requested tool not declared by any native tool or active host");
                         let err_msg = format!("Tool '{}' not registered", call.name);
                         // A call that was attempted is reported finished, failed, so observers
@@ -1021,14 +1091,13 @@ impl BuiltinAgent {
         note: String,
     ) -> Result<(), MemoryError> {
         let history = self.memory.get_messages(session_id).await?;
-        for id in unanswered_tool_calls(&history) {
-            self.memory
-                .push_message(session_id, ChatMessage::tool_response(id, tool_result))
-                .await?;
-        }
-        self.memory
-            .push_message(session_id, ChatMessage::assistant(note))
-            .await
+        let mut closing: Vec<ChatMessage> = unanswered_tool_calls(&history)
+            .into_iter()
+            .map(|id| ChatMessage::tool_response(id, tool_result))
+            .collect();
+        closing.push(ChatMessage::assistant(note));
+        // Transactional backends must retain the old interrupted round if any closing write fails.
+        self.memory.extend_messages(session_id, closing).await
     }
 
     /// Reads one model round, forwarding only text deltas; the shared loop handles complete tools.
@@ -1108,7 +1177,7 @@ impl BuiltinAgent {
         let system_prompt = self
             .prepare_system_prompt(session_id, options.persona.as_ref())
             .await?;
-        let (user_input, media) = self
+        let media = self
             .start_turn(session_id, ChatMessage::user(user_input))
             .await?;
         let stop = crate::stop::current();
@@ -1122,7 +1191,6 @@ impl BuiltinAgent {
             let _writing = writing;
             let turn = agent.answer(
                 &session_id,
-                &user_input,
                 media,
                 &hosts,
                 options,
@@ -1211,13 +1279,19 @@ impl Agent for BuiltinAgent {
             .map(|sessions| sessions.agent_write(session_id))
             .transpose()?;
         let persona = self.resolve_persona(session_id, options.persona)?;
-        let tools = if options.without_tools {
-            Vec::new()
-        } else {
+        let tools_enabled = self.config.tool_calling && !options.without_tools;
+        let tools = if tools_enabled {
             self.collect_tools(hosts)?
+        } else {
+            TurnTools::default()
         };
-        self.compact(session_id, &tools, persona.as_ref(), None)
-            .await
+        self.compact(
+            session_id,
+            tools_enabled.then_some(tools.definitions.as_slice()),
+            persona.as_ref(),
+            None,
+        )
+        .await
     }
 }
 
@@ -1355,66 +1429,6 @@ fn normalize_textual_tool_calls(response: &mut ChatResponse) {
     };
 }
 
-/// Helper locating the owning host, plugin ID, and canonical tool name for an invoked tool name.
-///
-/// Resolves both:
-/// 1. Canonical namespaced names (`<sanitized_plugin_id>__<tool_name>`).
-/// 2. Bare tool names (`<tool_name>`), provided there is exactly one matching plugin.
-///
-/// If multiple plugins offer the same bare name and an ambiguous invocation is received,
-/// returns `None` and logs an error to prevent silent, non-deterministic routing.
-fn find_tool_target(
-    tool_name: &str,
-    hosts: &[Arc<dyn ToolHost>],
-) -> Option<(Arc<dyn ToolHost>, String, String)> {
-    // 1. Check for exact namespaced match first: <plugin_id>__<tool_name>
-    for host in hosts {
-        let metas = host.plugin_metas();
-        for plugin in &metas {
-            let prefix = format!(
-                "{}__{}",
-                crate::tool_router::sanitize_tool_identifier(&plugin.id),
-                ""
-            );
-            if tool_name.starts_with(&prefix) {
-                let base_name = &tool_name[prefix.len()..];
-                for tool in &plugin.tools {
-                    if tool.name == base_name {
-                        return Some((host.clone(), plugin.id.clone(), tool.name.clone()));
-                    }
-                }
-            }
-        }
-    }
-
-    // 2. Search for bare tool name across all plugins
-    let mut matches = Vec::new();
-    for host in hosts {
-        let metas = host.plugin_metas();
-        for plugin in &metas {
-            for tool in &plugin.tools {
-                if tool.name == tool_name {
-                    matches.push((host.clone(), plugin.id.clone(), tool.name.clone()));
-                }
-            }
-        }
-    }
-
-    if matches.len() == 1 {
-        Some(matches.remove(0))
-    } else if matches.len() > 1 {
-        tracing::error!(
-            tool_name = %tool_name,
-            match_count = matches.len(),
-            "Ambiguous tool invocation: multiple plugins declare '{}'; invoke via namespaced name",
-            tool_name
-        );
-        None
-    } else {
-        None
-    }
-}
-
 /// Fluent builder for constructing customizable [`BuiltinAgent`] instances.
 pub struct AgentBuilder {
     name: String,
@@ -1513,6 +1527,12 @@ impl AgentBuilder {
     /// Sets maximum reasoning iterations (default 5).
     pub fn max_iterations(mut self, max: usize) -> Self {
         self.config.max_iterations = max;
+        self
+    }
+
+    /// Allows tool schemas and execution only when the selected model supports tool calling.
+    pub fn tool_calling(mut self, enabled: bool) -> Self {
+        self.config.tool_calling = enabled;
         self
     }
 

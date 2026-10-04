@@ -9,7 +9,6 @@
 use async_trait::async_trait;
 use std::sync::Arc;
 
-use kanon_proto::json::NonFiniteNumber;
 use kanon_proto::v1::{PluginMeta, ToolCallRequest, ToolCallResponse};
 
 pub use kanon_proto::json::{
@@ -136,6 +135,26 @@ pub struct ResolvedTool {
     pub plugin_id: String,
     /// Host process exposing the tool.
     pub host_id: String,
+    /// Original host-local name, before any model-facing collision namespace was added.
+    pub tool_name: String,
+    /// Position in the host slice used for this snapshot; routing never searches mutable metadata.
+    pub(crate) host_index: usize,
+}
+
+/// Rejects ambiguous model-facing names after all native and plugin definitions are combined.
+/// Namespacing can itself collide with a literal name, so validation must inspect final names.
+pub fn ensure_unique_tool_names<'a>(
+    names: impl IntoIterator<Item = &'a str>,
+) -> Result<(), AgentError> {
+    let mut seen = std::collections::HashSet::new();
+    for name in names {
+        if !seen.insert(name) {
+            return Err(AgentError::InvalidRequest(format!(
+                "duplicate tool name '{name}'"
+            )));
+        }
+    }
+    Ok(())
 }
 
 /// Resolves every tool declared across the given hosts, keeping provider attribution.
@@ -144,14 +163,19 @@ pub struct ResolvedTool {
 ///
 /// Prevents name collision: if multiple plugins declare tools with identical names,
 /// they are automatically disambiguated with namespacing (`<plugin_id>__<tool_name>`).
-/// Returns an error if a tool schema contains a non-finite protobuf number.
-pub fn resolve_tools(hosts: &[Arc<dyn ToolHost>]) -> Result<Vec<ResolvedTool>, NonFiniteNumber> {
+/// Returns an error if a schema has a non-finite number or names remain ambiguous after resolution.
+pub fn resolve_tools(hosts: &[Arc<dyn ToolHost>]) -> Result<Vec<ResolvedTool>, AgentError> {
+    // Discovery can refresh between calls. Both counting and naming must see one snapshot,
+    // and each resolved target retains its source rather than parsing a name during dispatch.
+    let snapshots: Vec<_> = hosts
+        .iter()
+        .map(|host| (host.host_id().to_string(), host.plugin_metas()))
+        .collect();
     // 1. First pass: count tool name occurrences across all plugins
     let mut name_counts: std::collections::HashMap<String, usize> =
         std::collections::HashMap::new();
-    for host in hosts {
-        let metas = host.plugin_metas();
-        for plugin in &metas {
+    for (_, metas) in &snapshots {
+        for plugin in metas {
             for tool in &plugin.tools {
                 *name_counts.entry(tool.name.clone()).or_insert(0) += 1;
             }
@@ -160,13 +184,17 @@ pub fn resolve_tools(hosts: &[Arc<dyn ToolHost>]) -> Result<Vec<ResolvedTool>, N
 
     // 2. Second pass: build definitions, namespacing any collided names
     let mut tools = Vec::new();
-    for host in hosts {
-        let host_id = host.host_id().to_string();
-        let metas = host.plugin_metas();
+    for (host_index, (host_id, metas)) in snapshots.into_iter().enumerate() {
         for plugin in &metas {
             for tool in &plugin.tools {
                 let parameters = match &tool.parameters {
-                    Some(s) => crate::layout::canonical_json(prost_struct_to_json(s.clone())?),
+                    Some(s) => crate::layout::canonical_json(
+                        prost_struct_to_json(s.clone()).map_err(|error| {
+                            AgentError::InvalidRequest(format!(
+                                "invalid plugin tool schema: {error}"
+                            ))
+                        })?,
+                    ),
                     None => serde_json::json!({
                         "type": "object",
                         "properties": {}
@@ -198,6 +226,8 @@ pub fn resolve_tools(hosts: &[Arc<dyn ToolHost>]) -> Result<Vec<ResolvedTool>, N
                     },
                     plugin_id: plugin.id.clone(),
                     host_id: host_id.clone(),
+                    tool_name: tool.name.clone(),
+                    host_index,
                 });
             }
         }
@@ -206,6 +236,7 @@ pub fn resolve_tools(hosts: &[Arc<dyn ToolHost>]) -> Result<Vec<ResolvedTool>, N
     // One fixed order, whatever the order hosts registered in: the tool list is the very top of the
     // prompt, so a reshuffle there invalidates the provider's cache for the whole request.
     tools.sort_by(|a, b| a.definition.name.cmp(&b.definition.name));
+    ensure_unique_tool_names(tools.iter().map(|tool| tool.definition.name.as_str()))?;
     Ok(tools)
 }
 
@@ -213,9 +244,7 @@ pub fn resolve_tools(hosts: &[Arc<dyn ToolHost>]) -> Result<Vec<ResolvedTool>, N
 ///
 /// A thin projection of [`resolve_tools`], which owns the collision rule; keeping one
 /// implementation means the console and the model can never disagree about a tool name.
-pub fn aggregate_tools(
-    hosts: &[Arc<dyn ToolHost>],
-) -> Result<Vec<ToolDefinition>, NonFiniteNumber> {
+pub fn aggregate_tools(hosts: &[Arc<dyn ToolHost>]) -> Result<Vec<ToolDefinition>, AgentError> {
     Ok(resolve_tools(hosts)?
         .into_iter()
         .map(|tool| tool.definition)

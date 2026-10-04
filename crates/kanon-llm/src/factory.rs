@@ -232,8 +232,9 @@ impl AgentFactory {
 
     /// Installs a provider client directly and returns the resulting default agent.
     ///
-    /// Used by embedded deployments and tests that hold a client without a persisted directory; the
-    /// directory stays authoritative whenever [`AgentFactory::configure`] has been called.
+    /// Used by embedded deployments and tests that hold a client without a persisted directory.
+    /// Replaces the previous directory so overrides cannot retain an endpoint or model setting
+    /// belonging to an earlier installation.
     pub fn install(
         &self,
         name: impl Into<String>,
@@ -245,6 +246,8 @@ impl AgentFactory {
             .state
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
+        self.providers.replace_with(ProviderRegistry::new());
+        self.models.replace(Vec::new());
         state.direct = Some(DirectProvider {
             name: config
                 .provider
@@ -303,9 +306,10 @@ impl AgentFactory {
             return Some(default_agent);
         }
 
-        // A bare reference naming the node's own model is the node agent, even when a provider
-        // directory is configured: rebuilding it would drop the node's own tuning for no reason.
-        if reference.provider().is_none()
+        // An embedded caller already supplied the endpoint explicitly. Named directories never
+        // infer a provider, even when a bare ID happens to match the global default's model.
+        if state.direct.is_some()
+            && reference.provider().is_none()
             && reference.model() == default_agent.config().default_model
         {
             return Some(default_agent);
@@ -363,15 +367,24 @@ impl AgentFactory {
 
         let model_reference = ModelRef::new(resolved.provider_name.clone(), resolved.model.clone());
         let spec = self.models.settings_for(&model_reference);
-        let mut config = self.agent_config_for(&resolved.provider_name, &resolved.model, &spec);
-        // Preserve the base tuning the node's default agent was given, so a per-instance override
-        // only changes what the model itself dictates.
-        if spec.temperature.is_none() {
-            config.temperature = default_agent.config().temperature;
-        }
-        if spec.max_output_tokens.is_none() {
-            config.max_tokens = default_agent.config().max_tokens;
-        }
+        let config = if state.direct.is_some() {
+            // Direct clients have no endpoint directory: preserve the supplied execution policy
+            // and sampling defaults, while model-specific settings still take precedence.
+            let base = default_agent.config();
+            AgentConfig {
+                provider: Some(resolved.provider_name.clone()),
+                default_model: resolved.model.clone(),
+                context_length: spec.context_length,
+                temperature: spec.temperature.or(base.temperature),
+                max_tokens: spec.max_output_tokens.or(base.max_tokens),
+                tool_calling: spec.capabilities.tool_calling && base.tool_calling,
+                ..base.clone()
+            }
+        } else {
+            // An override uses its own endpoint's settings. Borrowing the default model's
+            // temperature or output limit can exceed this endpoint's bounds or change its answers.
+            self.agent_config_for(&resolved.provider_name, &resolved.model, &spec)
+        };
 
         let agent = Arc::new(self.build_agent(resolved.provider, config));
         if state.overrides.len() == MAX_CACHED_OVERRIDES {
@@ -455,6 +468,7 @@ impl AgentFactory {
             context_length,
             temperature,
             max_tokens,
+            tool_calling: spec.capabilities.tool_calling,
             ..AgentConfig::default()
         }
     }
@@ -491,6 +505,7 @@ impl AgentFactory {
             .model(config.default_model.clone())
             .provider(config.provider.clone())
             .context_length(config.context_length)
+            .tool_calling(config.tool_calling)
             .max_iterations(config.max_iterations)
             .stop_on_tool_failure(config.stop_on_tool_failure)
             .compaction(config.compaction);

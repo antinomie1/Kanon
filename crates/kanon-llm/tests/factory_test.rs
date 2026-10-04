@@ -234,6 +234,10 @@ fn a_reference_that_resolves_to_no_provider_yields_no_agent() {
 
     assert!(factory.agent_for_model(Some("gamma/model-g")).is_none());
     assert!(
+        factory.agent_for_model(Some("model-a")).is_none(),
+        "a bare default model still requires a provider"
+    );
+    assert!(
         factory
             .agent_for_model(Some("model-without-prefix"))
             .is_none(),
@@ -347,4 +351,65 @@ fn an_override_cannot_cache_a_mixture_of_old_and_new_configuration() {
         cached.provider(),
         factory.node_agent().unwrap().provider()
     ));
+}
+
+#[test]
+fn overrides_use_their_own_endpoint_tuning_and_model_specific_settings() {
+    let (factory, _, _, _, _) = factory();
+    let mut runtime = two_providers(Some("alpha/default"));
+    runtime.providers[0].temperature = Some(0.2);
+    runtime.providers[0].max_tokens = Some(8192);
+    runtime.providers[1].temperature = Some(1.3);
+    runtime.providers[1].max_tokens = Some(1024);
+    let mut tuned = kanon_llm::ModelSpec::new("beta", "tuned");
+    tuned.temperature = Some(0.7);
+    tuned.max_output_tokens = Some(512);
+    tuned.capabilities.tool_calling = false;
+    runtime.models.push(tuned);
+    factory.configure("node", runtime.clone()).unwrap();
+    let default = factory.agent_for_model(Some("beta/untuned")).unwrap();
+    assert_eq!(default.config().temperature, Some(1.3));
+    assert_eq!(default.config().max_tokens, Some(1024));
+    let tuned = factory.agent_for_model(Some("beta/tuned")).unwrap();
+    assert_eq!(tuned.config().temperature, Some(0.7));
+    assert_eq!(tuned.config().max_tokens, Some(512));
+    assert!(!tuned.config().tool_calling);
+
+    runtime.providers[1].temperature = None;
+    runtime.providers[1].max_tokens = None;
+    factory.configure("node", runtime).unwrap();
+    let unspecified = factory.agent_for_model(Some("beta/untuned")).unwrap();
+    assert_eq!(unspecified.config().temperature, None);
+    assert_eq!(unspecified.config().max_tokens, None);
+}
+
+#[test]
+fn direct_install_replaces_the_directory_and_keeps_its_execution_policy_for_overrides() {
+    let (factory, provider, _, _, _) = factory();
+    let mut runtime = two_providers(Some("alpha/default"));
+    runtime
+        .models
+        .push(kanon_llm::ModelSpec::new("alpha", "default"));
+    factory.configure("node", runtime).unwrap();
+    let base = AgentConfig {
+        max_iterations: 2,
+        stop_on_tool_failure: true,
+        compaction: None,
+        temperature: Some(0.8),
+        max_tokens: Some(777),
+        tool_calling: false,
+        ..config("direct-default")
+    };
+    factory.install("direct", provider.clone(), base);
+    assert!(factory.providers().names().is_empty());
+    assert!(factory.models().is_empty());
+    let override_agent = factory.agent_for_model(Some("other")).unwrap();
+    assert!(Arc::ptr_eq(override_agent.provider(), &provider));
+    let config = override_agent.config();
+    assert_eq!(config.max_iterations, 2);
+    assert!(config.stop_on_tool_failure);
+    assert!(config.compaction.is_none());
+    assert_eq!(config.temperature, Some(0.8));
+    assert_eq!(config.max_tokens, Some(777));
+    assert!(!config.tool_calling);
 }

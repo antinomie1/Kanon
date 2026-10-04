@@ -110,6 +110,34 @@ async fn builtin_and_plugin_tools_are_listed_with_their_provider() {
 }
 
 #[tokio::test]
+async fn catalog_rejects_the_same_native_plugin_collision_as_the_agent() {
+    let directory = tempfile::tempdir().unwrap();
+    let supervisor = Arc::new(Supervisor::new(Some(directory.path().join("run")), None));
+    common::register_fixture_host(&supervisor).await;
+    let native = kanon_llm::NativeTool::new(
+        kanon_llm::ToolDefinition {
+            name: "fixture_tool".into(),
+            description: "Conflicts with the fixture plugin".into(),
+            parameters: json!({"type":"object"}),
+        },
+        |_, _| async { Ok("unused".into()) },
+    );
+    let state = ApiState::builder(supervisor)
+        .with_config_dir(directory.path().join("config"))
+        .with_native_tools(vec![Arc::new(native)])
+        .build();
+    let (status, body) =
+        common::send_json(&kanon_api::app(state), Method::GET, "/api/v1/tools", None).await;
+    assert_eq!(status, StatusCode::BAD_GATEWAY);
+    assert!(
+        body["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("duplicate tool name 'fixture_tool'")
+    );
+}
+
+#[tokio::test]
 async fn mcp_tools_are_namespaced_and_follow_the_node_switch() {
     let dir = tempfile::tempdir().expect("temp dir");
     let app = kanon_api::app(tools_state(dir.path()).await);
