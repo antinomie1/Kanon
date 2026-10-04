@@ -898,6 +898,16 @@ async fn refresh_identity(state: Arc<RwLock<State>>, client: Arc<MilkyClient>) {
     match probe_identity(&client).await {
         Ok((login, implementation)) => {
             let mut guard = state.write().expect("adapter state poisoned");
+            // A probe can finish after reconfiguration or shutdown. Check its client and the
+            // active stream under the same lock as publication, so retired results stay retired.
+            if guard.source.is_none()
+                || !guard
+                    .client
+                    .as_ref()
+                    .is_some_and(|current| Arc::ptr_eq(current, &client))
+            {
+                return;
+            }
             guard.status.login = Some(login);
             guard.status.implementation = Some(implementation);
         }

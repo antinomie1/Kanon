@@ -313,6 +313,7 @@ async fn stream_reconnects_after_the_connection_drops() {
 async fn apply_swaps_the_endpoint_without_a_restart() {
     let first = FakeMilky::start(Transport::Sse).await;
     let second = FakeMilky::start(Transport::Sse).await;
+    let old_login = first.delay_login_response();
 
     let adapter = MilkyAdapter::new(config_for(&first, true)).expect("adapter should build");
     let (sender, mut receiver) = mpsc::channel(8);
@@ -322,6 +323,13 @@ async fn apply_swaps_the_endpoint_without_a_restart() {
         .expect("adapter should start");
 
     first.wait_for_subscription(0).await;
+    wait_until(|| {
+        first
+            .calls()
+            .iter()
+            .any(|call| call.endpoint == "get_login_info")
+    })
+    .await;
     first.push_event(friend_message_event(1, 20002, "from first"));
     assert_eq!(
         next_ingest(&mut receiver)
@@ -369,6 +377,22 @@ async fn apply_swaps_the_endpoint_without_a_restart() {
             .all(|call| call.endpoint != "send_private_message"),
         "the retired endpoint must not receive deliveries"
     );
+
+    let current = wait_for_login(&adapter).await;
+    old_login
+        .send(json!({"uin": 19999, "nickname": "Retired account"}))
+        .expect("old identity request should still be waiting");
+    wait_until(|| {
+        first
+            .calls()
+            .iter()
+            .any(|call| call.endpoint == "get_impl_info")
+    })
+    .await;
+    // Let the old probe consume its final response; it must not publish over the new endpoint.
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    assert_eq!(adapter.status().login, current.login);
+    assert_eq!(adapter.status().implementation, current.implementation);
 }
 
 /// Identity fields are rejected rather than silently diverging from the registry catalog.
@@ -439,6 +463,7 @@ async fn configuration_before_start_connects_once_started() {
 #[tokio::test]
 async fn stop_releases_the_stream() {
     let fake = FakeMilky::start(Transport::Sse).await;
+    let old_login = fake.delay_login_response();
     let adapter = MilkyAdapter::new(config_for(&fake, true)).expect("adapter should build");
 
     let (sender, mut receiver) = mpsc::channel(8);
@@ -447,6 +472,12 @@ async fn stop_releases_the_stream() {
         .await
         .expect("adapter should start");
     fake.wait_for_subscription(0).await;
+    wait_until(|| {
+        fake.calls()
+            .iter()
+            .any(|call| call.endpoint == "get_login_info")
+    })
+    .await;
 
     adapter.stop().await.expect("stop should succeed");
 
@@ -454,12 +485,64 @@ async fn stop_releases_the_stream() {
     assert_eq!(status.state, ConnectionState::Disabled);
     assert!(!adapter.is_connected());
 
+    old_login
+        .send(json!({"uin": 19999, "nickname": "Stopped account"}))
+        .expect("identity request should still be waiting");
+    wait_until(|| {
+        fake.calls()
+            .iter()
+            .any(|call| call.endpoint == "get_impl_info")
+    })
+    .await;
     fake.push_event(friend_message_event(1, 20002, "after stop"));
     tokio::time::sleep(Duration::from_millis(200)).await;
     assert!(
         receiver.try_recv().is_err(),
         "a stopped adapter must not ingest"
     );
+    assert!(adapter.status().login.is_none());
+    assert!(adapter.status().implementation.is_none());
+}
+
+/// A peer that accepts TCP but never answers the HTTP upgrade must not prevent shutdown.
+#[tokio::test]
+async fn stop_cancels_stalled_sse_and_websocket_handshakes() {
+    use kanon_adapter_milky::config::TransportKind;
+    use tokio::io::AsyncReadExt;
+
+    for transport in [TransportKind::Sse, TransportKind::Websocket] {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let adapter = MilkyAdapter::new(MilkyConfig {
+            enabled: true,
+            base_url: format!("http://{}", listener.local_addr().unwrap()),
+            transport,
+            ..MilkyConfig::default()
+        })
+        .unwrap();
+        let (sender, _receiver) = mpsc::channel(8);
+        adapter.start(EventIngress::new(sender)).await.unwrap();
+
+        let (mut socket, _) = tokio::time::timeout(SETTLE, listener.accept())
+            .await
+            .expect("adapter should open the event connection")
+            .unwrap();
+        // Read the complete request but keep the peer open without sending response headers.
+        // TCP connect_timeout has already succeeded, so it cannot release this handshake.
+        let mut request = Vec::new();
+        tokio::time::timeout(SETTLE, async {
+            while !request.windows(4).any(|end| end == b"\r\n\r\n") {
+                assert!(socket.read_buf(&mut request).await.unwrap() > 0);
+            }
+        })
+        .await
+        .expect("adapter should send event request headers");
+
+        tokio::time::timeout(SETTLE, adapter.stop())
+            .await
+            .unwrap_or_else(|_| panic!("{transport} shutdown waited for stalled handshake"))
+            .expect("stop should succeed");
+        assert_eq!(adapter.status().state, ConnectionState::Disabled);
+    }
 }
 
 /// A platform-side rejection becomes an explicit delivery error and is surfaced in the status.

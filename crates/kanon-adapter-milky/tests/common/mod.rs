@@ -23,7 +23,7 @@ use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
 use serde_json::{Value, json};
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, oneshot};
 
 /// Inbound transport the fake implementation serves on `/event`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -69,6 +69,8 @@ struct FakeState {
     subscriptions: AtomicUsize,
     /// Configured failure, when any.
     failure: Mutex<Option<Failure>>,
+    /// Optional gate for the next login response, to reproduce a delayed identity probe.
+    login_response: Mutex<Option<oneshot::Receiver<Value>>>,
 }
 
 /// Handle to a running fake Milky implementation.
@@ -95,6 +97,7 @@ impl FakeMilky {
             subscribers: Mutex::new(Vec::new()),
             subscriptions: AtomicUsize::new(0),
             failure: Mutex::new(None),
+            login_response: Mutex::new(None),
         });
 
         let router = match transport {
@@ -171,6 +174,17 @@ impl FakeMilky {
         *self.state.failure.lock().expect("failure lock") = None;
     }
 
+    /// Holds the next login response until the test supplies its data payload.
+    pub fn delay_login_response(&self) -> oneshot::Sender<Value> {
+        let (sender, receiver) = oneshot::channel();
+        *self
+            .state
+            .login_response
+            .lock()
+            .expect("login response lock") = Some(receiver);
+        sender
+    }
+
     /// Waits until more than `already_seen` subscriptions have been accepted.
     ///
     /// Tests must not push an event before the adapter has subscribed, because a push with no
@@ -232,6 +246,20 @@ async fn api_handler(
             .and_then(|value| value.to_str().ok())
             .map(str::to_string),
     });
+
+    if endpoint == "get_login_info" {
+        let delayed = state
+            .login_response
+            .lock()
+            .expect("login response lock")
+            .take();
+        if let Some(delayed) = delayed {
+            let data = delayed
+                .await
+                .expect("test should release the login response");
+            return Json(json!({"status": "ok", "retcode": 0, "data": data})).into_response();
+        }
+    }
 
     let failure = state.failure.lock().expect("failure lock").clone();
     match failure {

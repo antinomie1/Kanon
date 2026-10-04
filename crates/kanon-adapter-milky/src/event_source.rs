@@ -88,6 +88,9 @@ impl EventSourceHandle {
     pub async fn shutdown(mut self) {
         let _ = self.stop.send(true);
         if let Some(task) = self.task.take() {
+            // Handshakes and channel sends can wait without observing the stop flag. Cancel
+            // those waits too, then join so no stream task outlives shutdown.
+            task.abort();
             let _ = task.await;
         }
     }
