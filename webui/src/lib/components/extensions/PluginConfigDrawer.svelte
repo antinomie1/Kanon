@@ -43,26 +43,37 @@ const hasForm = $derived(!!current && formSupported(current.schema));
 let loadError = $state<string | null>(null);
 let saveError = $state<string | null>(null);
 let saving = $state(false);
+/** Identifies one opening of the drawer, including reopening the same plugin. */
+let generation = 0;
 
-async function load(id: string) {
-  current = null;
-  loadError = null;
-  saveError = null;
+async function load(id: string, opening: number) {
   try {
     const res = await api.getPluginConfig(id);
+    if (opening !== generation || pluginId !== id) return;
     current = res;
     values = res.values;
     raw = JSON.stringify(res.values, null, 2);
     mode = formSupported(res.schema) ? 'form' : 'json';
   } catch (e) {
-    loadError = errorText(e);
+    if (opening === generation && pluginId === id) loadError = errorText(e);
   }
 }
 
-// Reload whenever the drawer is pointed at a different plugin.
+// The drawer is reused across plugins. Closing or changing it invalidates both success and
+// failure callbacks from the previous opening, even when the next opening selects the same id.
 $effect(() => {
   const id = pluginId;
-  if (id) untrack(() => void load(id));
+  const opening = ++generation;
+  untrack(() => {
+    current = null;
+    loadError = null;
+    saveError = null;
+    saving = false;
+    if (id) void load(id, opening);
+  });
+  return () => {
+    generation++;
+  };
 });
 
 /** Parses the JSON view; `null` (with the reason shown) when it is not an object. */
@@ -94,19 +105,25 @@ function switchMode(next: 'form' | 'json') {
 }
 
 async function save() {
-  if (!pluginId || !current) return;
+  const id = pluginId;
+  const config = current;
+  const opening = generation;
+  const pluginName = name;
+  if (!id || !config || config.plugin_id !== id || saving) return;
   saveError = null;
   const parsed = mode === 'form' ? values : parseRaw();
   if (!parsed) return;
   saving = true;
   try {
-    await api.updatePluginConfig(pluginId, parsed, current.version);
-    toasts.ok(t('extensions.config_saved', { name }));
+    await api.updatePluginConfig(id, parsed, config.version);
+    // A save may finish after navigation unmounts this drawer or opens it on another plugin.
+    if (opening !== generation || pluginId !== id) return;
+    toasts.ok(t('extensions.config_saved', { name: pluginName }));
     onclose();
   } catch (e) {
-    saveError = errorText(e);
+    if (opening === generation && pluginId === id) saveError = errorText(e);
   } finally {
-    saving = false;
+    if (opening === generation && pluginId === id) saving = false;
   }
 }
 </script>
