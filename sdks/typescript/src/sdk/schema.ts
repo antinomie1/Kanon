@@ -67,17 +67,16 @@ function param<T>(schema: JsonSchema, description?: string): Param<T> {
 
 /** The object schema for `spec`: its properties and the names the model must pass. */
 export function objectSchema(spec: ArgsSpec): JsonSchema {
-  const properties: JsonSchema = {};
   const required: string[] = [];
-  for (const [name, arg] of Object.entries(spec)) {
+  const properties = Object.fromEntries(Object.entries(spec).map(([name, arg]) => {
     if (!(arg instanceof Param)) {
       throw new TypeError(`argument '${name}' must be built with s.string(), s.integer(), ...`);
     }
-    properties[name] = arg.schema;
     if (arg.required) {
       required.push(name);
     }
-  }
+    return [name, arg.schema];
+  }));
   return required.length > 0
     ? { type: "object", properties, required }
     : { type: "object", properties };
@@ -126,15 +125,20 @@ export function bindArgs(spec: ArgsSpec, args: Record<string, any>): Record<stri
       `unexpected arguments ${JSON.stringify(unknown)}; expected ${JSON.stringify(names)}`,
     );
   }
-  const missing = names.filter((name) => spec[name].required && args[name] === undefined);
+  const missing = names.filter(
+    (name) => spec[name].required && (!Object.hasOwn(args, name) || args[name] === undefined),
+  );
   if (missing.length > 0) {
     throw new Error(`missing required arguments ${JSON.stringify(missing)}`);
   }
   const bound = { ...args };
   for (const name of names) {
     const fallback = spec[name].fallback;
-    if (bound[name] === undefined && fallback !== undefined) {
-      bound[name] = fallback.value;
+    if ((!Object.hasOwn(bound, name) || bound[name] === undefined) && fallback !== undefined) {
+      // Defaults named __proto__ are values, not requests to change the argument object's prototype.
+      Object.defineProperty(bound, name, {
+        value: fallback.value, enumerable: true, writable: true, configurable: true,
+      });
     }
   }
   return bound;

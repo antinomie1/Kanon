@@ -208,6 +208,28 @@ test("described tools get a schema, defaults, and errors the model can act on", 
   });
 });
 
+test("tool arguments use own properties for required names and defaults", async () => {
+  const plugin = new Features();
+  plugin.context = { dataDir: ".", config: {}, core: { refreshMeta: async () => [plugin.id] } as any };
+  const args = Object.fromEntries([
+    ["constructor", s.string()],
+    ["__proto__", s.any().default({ note: "default" })],
+  ]);
+  await plugin.addTool("special-keys", { args }, (values: any) => {
+    assert.equal(Object.getPrototypeOf(values), Object.prototype);
+    return values;
+  });
+  const meta = plugin.meta().tools!.find((tool) => tool.name === "special-keys")!;
+  const schema = fromProtoStruct(meta.parameters);
+  assert.equal(Object.hasOwn(schema.properties, "__proto__"), true);
+  const missing = await plugin.onCallTool(toolCall("special-keys", {}));
+  assert.equal(missing.success, false);
+  assert.match(missing.error_message, /missing required arguments.*constructor/);
+  const response = await plugin.onCallTool(toolCall("special-keys", { constructor: "value" }));
+  assert.equal(response.success, true, response.error_message);
+  assert.deepEqual(result(response), JSON.parse('{"constructor":"value","__proto__":{"note":"default"}}'));
+});
+
 test("runtime tools are announced and rolled back when the node refuses", async () => {
   const plugin = new Features();
   let refuse = false;
