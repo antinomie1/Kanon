@@ -49,7 +49,7 @@ pub const DEFAULT_SYSTEM_CONFIG: &str = "./data/system.json";
 static SYSTEM_CONFIG_WRITER: Mutex<()> = Mutex::new(());
 
 /// One pre-configured provider template offered by the console.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 pub struct ProviderPresetDef {
     /// Stable preset identifier, also used as the derived provider name.
     pub id: &'static str,
@@ -66,8 +66,8 @@ pub struct ProviderPresetDef {
 /// Exposed as one function (rather than a literal in the route handler) because the provider-name
 /// migration matches a persisted base URL against exactly this list: a legacy single-provider
 /// document must come back under the same name the console would offer.
-pub fn provider_presets() -> Vec<ProviderPresetDef> {
-    vec![
+pub fn provider_presets() -> &'static [ProviderPresetDef] {
+    &[
         ProviderPresetDef {
             id: "openai",
             name: "OpenAI Official",
@@ -380,7 +380,7 @@ impl LlmProviderConfig {
 pub fn derive_provider_name(base_url: &str) -> String {
     let trimmed = base_url.trim().trim_end_matches('/');
     if let Some(preset) = provider_presets()
-        .into_iter()
+        .iter()
         .find(|preset| same_endpoint(preset.base_url, trimmed))
     {
         return preset.id.to_string();

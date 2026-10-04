@@ -153,12 +153,11 @@ fn payload_str<'a>(custom: &'a RawCustomSegment, key: &str) -> Option<&'a str> {
 
 /// Parses a OneBot message in array or CQ string form into Kanon segments.
 fn parse_message(message: &Value) -> Result<Vec<MessageSegment>, String> {
-    let wire = match message {
-        Value::Array(segments) => segments.clone(),
-        Value::String(cq) => parse_cq(cq)?,
-        _ => return Err("OneBot message must be an array or CQ string".into()),
-    };
-    wire.iter().map(incoming).collect()
+    match message {
+        Value::Array(segments) => segments.iter().map(incoming).collect(),
+        Value::String(cq) => parse_cq(cq)?.iter().map(incoming).collect(),
+        _ => Err("OneBot message must be an array or CQ string".into()),
+    }
 }
 
 /// Renders the human-readable text of a message; media becomes a short placeholder.

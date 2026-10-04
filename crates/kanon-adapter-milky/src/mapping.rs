@@ -911,8 +911,6 @@ fn string_field(object: &Map<String, Value>, key: &str) -> Result<String, Mappin
 
 /// Converts a `serde_json` value into a protobuf `Struct` value tree.
 ///
-/// Written locally rather than reusing the LLM crate's converter: the adapter must not depend on
-/// the model gateway, and the conversion is a dozen lines of recursion. Note that a protobuf
 /// `Struct` represents every number as a double, so integers beyond 2^53 would lose precision; the
 /// fields the adapter stores there (QQ numbers, sequence numbers, timestamps) stay far inside that
 /// range.

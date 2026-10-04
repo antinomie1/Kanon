@@ -31,6 +31,9 @@ use crate::error::ApiError;
 use crate::llm_config::{derive_provider_name, provider_presets};
 use crate::state::ApiState;
 
+/// Pre-configured provider template shared with configuration migration.
+pub use crate::llm_config::ProviderPresetDef as ProviderPreset;
+
 /// Registers the providers endpoints.
 pub fn routes() -> Router<ApiState> {
     Router::new()
@@ -49,7 +52,7 @@ pub struct ProvidersCatalogResponse {
     /// Available wire protocols.
     pub available_protocols: Vec<ProtocolDescriptor>,
     /// Popular pre-configured provider templates.
-    pub presets: Vec<ProviderPreset>,
+    pub presets: &'static [ProviderPreset],
     /// Every configured provider endpoint.
     pub providers: Vec<ProviderInfo>,
 }
@@ -133,19 +136,6 @@ pub struct ProtocolDescriptor {
     pub default_base_url: &'static str,
 }
 
-/// Pre-configured provider preset for quick configuration.
-#[derive(Debug, Serialize)]
-pub struct ProviderPreset {
-    /// Preset identifier; also the provider name it creates.
-    pub id: &'static str,
-    /// Display name.
-    pub name: &'static str,
-    /// Protocol identifier.
-    pub protocol: &'static str,
-    /// Provider API base URL.
-    pub base_url: &'static str,
-}
-
 /// Request payload to test provider connectivity.
 ///
 /// Two ways to say *what* to test, and they never mix implicitly:
@@ -223,19 +213,9 @@ async fn list_providers(
         },
     ];
 
-    let presets = provider_presets()
-        .into_iter()
-        .map(|preset| ProviderPreset {
-            id: preset.id,
-            name: preset.name,
-            protocol: preset.protocol,
-            base_url: preset.base_url,
-        })
-        .collect();
-
     Ok(Json(ProvidersCatalogResponse {
         available_protocols,
-        presets,
+        presets: provider_presets(),
         providers: settings
             .providers
             .iter()

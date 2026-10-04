@@ -27,28 +27,14 @@ use crate::gateway::types::{ChatMessage, ChatRequest, Role, ToolDefinition};
 /// Separator placed between the parts of the merged system block.
 const SYSTEM_SEPARATOR: &str = "\n\n";
 
-/// Rebuilds a JSON value with every object's keys in sorted order.
+/// Sorts every object's keys in a JSON value without changing array order.
 ///
 /// `serde_json` orders keys by insertion when its `preserve_order` feature is on (anything in the
-/// dependency tree can enable it), and a schema converted from a protobuf `Struct` arrives in hash
-/// order. Sorting explicitly makes the serialized bytes independent of both.
-pub fn canonical_json(value: serde_json::Value) -> serde_json::Value {
-    use serde_json::Value;
-
-    match value {
-        Value::Object(map) => {
-            let mut entries: Vec<(String, Value)> = map.into_iter().collect();
-            entries.sort_by(|a, b| a.0.cmp(&b.0));
-            Value::Object(
-                entries
-                    .into_iter()
-                    .map(|(key, value)| (key, canonical_json(value)))
-                    .collect(),
-            )
-        }
-        Value::Array(items) => Value::Array(items.into_iter().map(canonical_json).collect()),
-        other => other,
-    }
+/// dependency tree can enable it). Its built-in sorter handles that case in place and skips all
+/// work when maps already keep their keys sorted by default.
+pub fn canonical_json(mut value: serde_json::Value) -> serde_json::Value {
+    value.sort_all_objects();
+    value
 }
 
 /// Puts a tool list into its one canonical form: sorted by name, schemas with sorted keys.
