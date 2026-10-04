@@ -466,6 +466,23 @@ impl AnthropicMessagesProvider {
     }
 }
 
+/// Partial answers may be displayed, but paused, truncated or refused calls cannot execute.
+fn validate_tool_calls(calls: &[ToolCall], stop_reason: Option<&str>) -> Result<(), GatewayError> {
+    if !calls.is_empty()
+        && let Some(reason @ ("max_tokens" | "refusal" | "pause_turn")) = stop_reason
+    {
+        return Err(GatewayError::InvalidResponse(format!(
+            "Anthropic tool calls have unusable stop reason: {reason}"
+        )));
+    }
+    if calls.iter().any(|call| !call.arguments.is_object()) {
+        return Err(GatewayError::InvalidResponse(
+            "Anthropic tool input must be a JSON object".into(),
+        ));
+    }
+    Ok(())
+}
+
 #[async_trait]
 impl LlmProvider for AnthropicMessagesProvider {
     async fn chat(&self, request: &ChatRequest) -> Result<ChatResponse, GatewayError> {
@@ -496,6 +513,7 @@ impl LlmProvider for AnthropicMessagesProvider {
                 wire::AnthropicContentBlock::Image { .. } => {}
             }
         }
+        validate_tool_calls(&tool_calls, wire_resp.stop_reason.as_deref())?;
 
         let content = if text_output.is_empty() {
             None
@@ -575,6 +593,14 @@ impl LlmProvider for AnthropicMessagesProvider {
                                 return;
                             };
                             let block = &value["content_block"];
+                            if !block["input"].is_null() && !block["input"].is_object() {
+                                let _ = tx
+                                    .send(Err(GatewayError::InvalidResponse(
+                                        "Anthropic tool input must be a JSON object".into(),
+                                    )))
+                                    .await;
+                                return;
+                            }
                             // Empty input is a placeholder; input_json_delta carries the actual JSON.
                             let input = block.get("input").filter(|input| {
                                 input.as_object().is_some_and(|object| !object.is_empty())
@@ -624,18 +650,37 @@ impl LlmProvider for AnthropicMessagesProvider {
                             _ => {}
                         },
                         Some("message_delta") => {
-                            finish_reason = value["delta"]["stop_reason"].as_str().map(|reason| {
-                                if reason == "tool_use" {
-                                    "tool_calls"
-                                } else {
-                                    reason
+                            // A metadata-only delta does not clear an earlier terminal reason.
+                            match &value["delta"]["stop_reason"] {
+                                serde_json::Value::String(reason) => {
+                                    finish_reason = Some(if reason == "tool_use" {
+                                        "tool_calls".into()
+                                    } else {
+                                        reason.clone()
+                                    });
                                 }
-                                .to_string()
-                            });
+                                serde_json::Value::Null => {}
+                                _ => {
+                                    let _ = tx
+                                        .send(Err(GatewayError::InvalidResponse(
+                                            "Anthropic stop reason must be a string".into(),
+                                        )))
+                                        .await;
+                                    return;
+                                }
+                            }
                         }
                         Some("message_stop") => {
                             let _ = tx
-                                .send(super::finish_tool_calls(calls, finish_reason))
+                                .send(super::finish_tool_calls(calls, finish_reason).and_then(
+                                    |chunk| {
+                                        validate_tool_calls(
+                                            &chunk.tool_calls,
+                                            chunk.finish_reason.as_deref(),
+                                        )?;
+                                        Ok(chunk)
+                                    },
+                                ))
                                 .await;
                             return;
                         }

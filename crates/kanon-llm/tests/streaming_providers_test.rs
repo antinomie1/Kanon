@@ -339,7 +339,7 @@ async fn streamed_tool_arguments_are_assembled_and_malformed_arguments_fail() {
                     serde_json::json!({"type":"response.completed"}),
                 ],
                 _ => vec![
-                    serde_json::json!({"type":"content_block_start","index":0,"content_block":{"type":"tool_use","id":"call-1","name":"weather","input":{}}}),
+                    serde_json::json!({"type":"content_block_start","index":0,"content_block":{"type":"tool_use","id":"call-1","name":"weather","input":null}}),
                     serde_json::json!({"type":"content_block_delta","index":0,"delta":{"type":"input_json_delta","partial_json":"{\"city\":\""}}),
                     serde_json::json!({"type":"content_block_delta","index":0,"delta":{"type":"input_json_delta","partial_json":tail}}),
                     serde_json::json!({"type":"message_delta","delta":{"stop_reason":"tool_use"}}),
@@ -410,6 +410,133 @@ async fn streamed_tool_arguments_are_assembled_and_malformed_arguments_fail() {
                 assert_eq!(calls[0].name, "weather");
                 assert_eq!(calls[0].arguments, serde_json::json!({"city":"Tokyo"}));
             }
+        }
+    }
+}
+
+/// Completed calls honor Anthropic stop reasons and preserve the object input contract.
+#[tokio::test]
+async fn anthropic_complete_and_streamed_calls_require_usable_output() {
+    use axum::Json;
+    use serde_json::{Value, json};
+
+    for (reason, input, succeeds) in [
+        (Value::Null, Some(json!({})), true),
+        (json!("tool_use"), Some(json!({"city":"Tokyo"})), true),
+        (json!("max_tokens"), Some(json!({})), false),
+        (json!("refusal"), Some(json!({})), false),
+        (json!("pause_turn"), Some(json!({})), false),
+        (json!("max_tokens"), None, true),
+        (json!("refusal"), None, true),
+        (json!("pause_turn"), None, true),
+        (json!(false), Some(json!({})), false),
+        (json!("tool_use"), Some(json!([])), false),
+        (json!("tool_use"), Some(json!("{}")), false),
+        (json!("tool_use"), Some(json!(42)), false),
+    ] {
+        let mut content = vec![json!({"type":"text", "text":"partial answer"})];
+        let mut events = vec![json!({
+            "type":"content_block_delta", "index":0,
+            "delta":{"type":"text_delta", "text":"partial answer"},
+        })];
+        if let Some(input) = &input {
+            let tool = json!({"type":"tool_use", "id":"call-1", "name":"weather", "input":input});
+            content.push(tool.clone());
+            events.push(json!({"type":"content_block_start", "index":1, "content_block":tool}));
+        }
+        events.extend([
+            json!({"type":"message_delta", "delta":{"stop_reason":reason}}),
+            // A later usage update must not erase an explicit refusal or truncation.
+            json!({"type":"message_delta", "delta":{}, "usage":{"output_tokens":10}}),
+            json!({"type":"message_stop"}),
+        ]);
+        let sse: String = events
+            .iter()
+            .map(|event| format!("data: {event}\n\n"))
+            .collect();
+        let body = json!({"role":"assistant", "content":content, "stop_reason":reason});
+        let app = Router::new().route(
+            "/v1/messages",
+            post(move |Json(request): Json<Value>| {
+                let body = body.clone();
+                let sse = sse.clone();
+                async move {
+                    if request["stream"] == true {
+                        ([("content-type", "text/event-stream")], sse).into_response()
+                    } else {
+                        Json(body).into_response()
+                    }
+                }
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base = format!("http://{}/v1", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+        let provider = AnthropicMessagesProvider::new(base, None, "fixture");
+        let request = ChatRequest {
+            model: "fixture".into(),
+            messages: vec![ChatMessage::user("weather?")],
+            tools: vec![],
+            temperature: None,
+            max_tokens: None,
+        };
+        let complete = provider.chat(&request).await;
+        let chunks = provider
+            .chat_stream(&request)
+            .await
+            .unwrap()
+            .collect::<Vec<_>>()
+            .await;
+        server.abort();
+        assert_eq!(
+            complete.is_ok(),
+            succeeds,
+            "reason={reason}, input={input:?}"
+        );
+        assert_eq!(
+            chunks.iter().all(Result::is_ok),
+            succeeds,
+            "reason={reason}, input={input:?}"
+        );
+        if succeeds {
+            let complete = complete.unwrap();
+            let chunks: Vec<_> = chunks.into_iter().map(Result::unwrap).collect();
+            assert_eq!(complete.content.as_deref(), Some("partial answer"));
+            assert_eq!(complete.tool_calls.len(), usize::from(input.is_some()));
+            assert_eq!(
+                chunks
+                    .iter()
+                    .map(|chunk| chunk.delta_text.as_str())
+                    .collect::<String>(),
+                "partial answer"
+            );
+            assert_eq!(
+                chunks
+                    .iter()
+                    .map(|chunk| chunk.tool_calls.len())
+                    .sum::<usize>(),
+                complete.tool_calls.len()
+            );
+            let terminal = chunks.last().unwrap();
+            assert!(terminal.is_finished);
+            assert_eq!(terminal.finish_reason, complete.finish_reason);
+            assert_eq!(
+                complete.finish_reason.as_deref(),
+                reason.as_str().map(|reason| if reason == "tool_use" {
+                    "tool_calls"
+                } else {
+                    reason
+                })
+            );
+        } else {
+            assert!(
+                chunks
+                    .iter()
+                    .filter_map(|chunk| chunk.as_ref().ok())
+                    .all(|chunk| chunk.tool_calls.is_empty() && !chunk.is_finished)
+            );
         }
     }
 }
