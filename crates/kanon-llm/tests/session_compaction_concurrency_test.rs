@@ -1,4 +1,4 @@
-//! Embedded agents keep one compaction writer while any owner or waiter still needs it.
+//! Standalone turns, stream producers and compactions share one writer for each session.
 
 use std::future::{Future, poll_fn};
 use std::sync::Arc;
@@ -21,10 +21,10 @@ struct GatedSummaryProvider {
 #[async_trait]
 impl LlmProvider for GatedSummaryProvider {
     async fn chat(&self, request: &ChatRequest) -> Result<ChatResponse, GatewayError> {
-        assert_eq!(
+        assert!(matches!(
             request.messages.last().unwrap().content.as_deref(),
-            Some(COMPACTION_INSTRUCTION)
-        );
+            Some(COMPACTION_INSTRUCTION | "streaming request")
+        ));
         let call = self.calls.fetch_add(1, Ordering::SeqCst) + 1;
         self.entered.notify_one();
         self.release.acquire().await.unwrap().forget();
@@ -75,6 +75,19 @@ async fn embedded_compactions_serialize_and_do_not_fold_the_same_history_twice()
             "the waiter must not summarize the same snapshot concurrently"
         );
 
+        // Standalone agents obey the same Busy contract as managed sessions, before recording
+        // either a normal or streaming user's message into the history being summarized.
+        let before = memory.snapshot("session").await.unwrap();
+        assert!(matches!(
+            agent.run("session", "overlap", &[]).await,
+            Err(kanon_llm::AgentError::Busy(_))
+        ));
+        assert!(matches!(
+            agent.run_stream("session", "overlap", &[]).await,
+            Err(kanon_llm::AgentError::Busy(_))
+        ));
+        assert_eq!(memory.snapshot("session").await.unwrap(), before);
+
         provider.release.add_permits(1);
         assert!(
             tokio::time::timeout(Duration::from_secs(2), first)
@@ -95,4 +108,40 @@ async fn embedded_compactions_serialize_and_do_not_fold_the_same_history_twice()
         assert!(snapshot.messages.is_empty());
         assert_eq!(provider.calls.load(Ordering::SeqCst), generation);
     }
+
+    // The producer owns a streaming turn's writer even after its consumer disconnects. A
+    // compaction queued behind it must see the completed reply rather than a half-written turn.
+    let stream = agent
+        .run_stream("session", "streaming request", &[])
+        .await
+        .unwrap();
+    tokio::time::timeout(Duration::from_secs(2), provider.entered.notified())
+        .await
+        .unwrap();
+    drop(stream);
+    assert!(matches!(
+        agent.run("session", "overlap", &[]).await,
+        Err(kanon_llm::AgentError::Busy(_))
+    ));
+    let mut queued = Box::pin(agent.compact_session("session", &[]));
+    poll_fn(|cx| {
+        assert!(queued.as_mut().poll(cx).is_pending());
+        Poll::Ready(())
+    })
+    .await;
+    provider.release.add_permits(1);
+    assert!(
+        !tokio::time::timeout(Duration::from_secs(2), queued)
+            .await
+            .unwrap()
+            .unwrap()
+    );
+    let snapshot = memory.snapshot("session").await.unwrap();
+    assert_eq!(snapshot.messages.len(), 2);
+    assert_eq!(
+        snapshot.messages[0].content.as_deref(),
+        Some("streaming request")
+    );
+    assert_eq!(snapshot.messages[1].content.as_deref(), Some("summary-3"));
+    assert_eq!(provider.calls.load(Ordering::SeqCst), 3);
 }

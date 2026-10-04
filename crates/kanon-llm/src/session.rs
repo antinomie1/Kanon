@@ -179,7 +179,7 @@ pub struct SessionMetadata {
     pub turn_count: usize,
     /// Cumulative token usage tracked across this session.
     pub total_tokens_used: usize,
-    /// Identifier of the active persona bound to this session, if configured.
+    /// Saved explicit persona choice, used when the turn has no inherited instance persona.
     pub persona_id: Option<String>,
     /// Arbitrary session-scoped state variables (e.g. user language, preferences).
     pub variables: HashMap<String, String>,
@@ -273,6 +273,16 @@ pub(crate) struct SessionWriters {
 }
 
 impl SessionWriters {
+    /// Acquires a writer immediately, rejecting overlapping external turns before they append.
+    pub(crate) fn try_write(&self, session_id: &str) -> Result<SessionWriteGuard, MemoryError> {
+        self.writer(session_id)
+            .try_lock_owned()
+            .map(|guard| SessionWriteGuard {
+                guard: Arc::new(guard),
+            })
+            .map_err(|_| MemoryError::Busy(session_id.to_string()))
+    }
+
     /// Returns the same writer while any owner or waiter still holds it.
     pub(crate) fn writer(&self, session_id: &str) -> Arc<tokio::sync::Mutex<()>> {
         let mut writers = self
@@ -322,13 +332,7 @@ impl SessionManager {
 
     /// Immediately acquires the session writer; external mutations must never queue behind a turn.
     pub fn try_write(&self, session_id: &str) -> Result<SessionWriteGuard, MemoryError> {
-        self.writers
-            .writer(session_id)
-            .try_lock_owned()
-            .map(|guard| SessionWriteGuard {
-                guard: Arc::new(guard),
-            })
-            .map_err(|_| MemoryError::Busy(session_id.to_string()))
+        self.writers.try_write(session_id)
     }
 
     /// Waits for a prior writer, for ordered inbound turns and background compaction only.

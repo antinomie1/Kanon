@@ -22,7 +22,7 @@ use crate::gateway::{ChatChunk, ChatChunkStream, LlmProvider};
 use crate::layout::normalize_request;
 use crate::memory::{InMemory, Memory, MemorySnapshot};
 use crate::prompt::Persona;
-use crate::session::SessionWriters;
+use crate::session::{SessionWriteGuard, SessionWriters};
 use crate::stop::{StopSignal, unless_stopped};
 use crate::tool_router::{
     ExecutedToolCall, ToolAttachment, ToolHost, aggregate_tools, json_to_prost_struct,
@@ -68,9 +68,9 @@ pub struct BuiltinAgent {
     hooks: Vec<Arc<dyn AgentHook>>,
     /// Operational configuration.
     config: AgentConfig,
-    /// Embedded agents without a session manager still serialize their compactions. Managed
-    /// agents already hold the session writer and need no second lock registry.
-    compaction_locks: Option<Arc<SessionWriters>>,
+    /// Standalone turns, stream producers and compactions share one writer registry. Managed
+    /// agents use the session manager's registry and need no second lock layer.
+    standalone_writers: Option<Arc<SessionWriters>>,
     /// Sessions with a compaction in flight, so a burst of turns schedules one, not many.
     compacting: Arc<DashSet<String>>,
 }
@@ -100,6 +100,19 @@ impl BuiltinAgent {
     /// Registered lifecycle hooks.
     pub fn hooks(&self) -> &[Arc<dyn AgentHook>] {
         &self.hooks
+    }
+
+    /// Claims this turn's writer before any history append, preserving managed delegation.
+    fn turn_writer(&self, session_id: &str) -> Result<SessionWriteGuard, AgentError> {
+        match &self.session_manager {
+            Some(sessions) => sessions.agent_write(session_id),
+            None => self
+                .standalone_writers
+                .as_ref()
+                .expect("standalone agents initialize their writer registry")
+                .try_write(session_id),
+        }
+        .map_err(Into::into)
     }
 
     /// Merges native and plugin/MCP tools; final normalization follows the request hooks.
@@ -247,7 +260,7 @@ impl BuiltinAgent {
     ) -> Result<bool, AgentError> {
         // Both managed callers acquire their session writer before entering here. Embedded
         // callers share weakly retained writers so old session ids do not accumulate mutexes.
-        let _guard = match &self.compaction_locks {
+        let _guard = match &self.standalone_writers {
             Some(writers) => Some(writers.writer(session_id).lock_owned().await),
             None => None,
         };
@@ -1053,11 +1066,7 @@ impl BuiltinAgent {
         user_input: &str,
         hosts: &[Arc<dyn ToolHost>],
     ) -> Result<ChatChunkStream, AgentError> {
-        let writing = self
-            .session_manager
-            .as_ref()
-            .map(|sessions| sessions.agent_write(session_id))
-            .transpose()?;
+        let writing = self.turn_writer(session_id)?;
         let options = TurnOptions {
             persona: self.resolve_persona(session_id, None)?,
             ..TurnOptions::default()
@@ -1130,11 +1139,7 @@ impl Agent for BuiltinAgent {
         hosts: &[Arc<dyn ToolHost>],
         options: TurnOptions,
     ) -> Result<AgentOutput, AgentError> {
-        let _writing = self
-            .session_manager
-            .as_ref()
-            .map(|sessions| sessions.agent_write(session_id))
-            .transpose()?;
+        let _writing = self.turn_writer(session_id)?;
         self.run_turn(session_id, message, hosts, options).await
     }
 
@@ -1498,7 +1503,7 @@ impl AgentBuilder {
             .or_else(|| self.session_manager.as_ref().map(|sm| sm.memory().clone()))
             .unwrap_or_else(|| Arc::new(InMemory::new()));
 
-        let compaction_locks = self
+        let standalone_writers = self
             .session_manager
             .is_none()
             .then(|| Arc::new(SessionWriters::default()));
@@ -1513,7 +1518,7 @@ impl AgentBuilder {
             tools: self.tools,
             hooks: self.hooks,
             config: self.config,
-            compaction_locks,
+            standalone_writers,
             compacting: Arc::new(DashSet::new()),
         }
     }
