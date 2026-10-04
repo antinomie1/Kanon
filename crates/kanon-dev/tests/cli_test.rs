@@ -341,6 +341,77 @@ fn test_plugin_pack_bundle_and_sha256() {
 }
 
 #[test]
+fn failed_checksum_publish_preserves_the_previous_bundle() {
+    let tmp = tempdir().unwrap();
+    let plugin = tmp.path().join("plugin");
+    let output = tmp.path().join("dist");
+    create_plugin_project("pack_retry", "python", Some(&plugin)).unwrap();
+    let checksum_path = output.join("org.kanon.plugin.pack_retry.kpk.sha256");
+    std::fs::create_dir_all(&checksum_path).unwrap();
+    assert!(pack_plugin(&plugin, Some(&output)).is_err());
+    assert!(!output.join("org.kanon.plugin.pack_retry.kpk").exists());
+    std::fs::remove_dir(&checksum_path).unwrap();
+    let original = pack_plugin(&plugin, Some(&output)).unwrap();
+    let bundle = std::fs::read(&original.bundle_path).unwrap();
+
+    // A directory at the checksum destination is a deterministic publication failure on every
+    // platform, even when the tests run with privileges that bypass ordinary file permissions.
+    std::fs::remove_file(&original.checksum_path).unwrap();
+    std::fs::create_dir(&original.checksum_path).unwrap();
+    std::fs::write(original.checksum_path.join("keep"), "unrelated data").unwrap();
+    std::fs::write(plugin.join("main.py"), "print('new version')\n").unwrap();
+    assert!(pack_plugin(&plugin, Some(&output)).is_err());
+    assert_eq!(std::fs::read(&original.bundle_path).unwrap(), bundle);
+    assert_eq!(
+        std::fs::read_to_string(original.checksum_path.join("keep")).unwrap(),
+        "unrelated data"
+    );
+    assert_eq!(std::fs::read_dir(&output).unwrap().count(), 2);
+
+    std::fs::remove_dir_all(&original.checksum_path).unwrap();
+    let retried = pack_plugin(&plugin, Some(&output)).unwrap();
+    assert_ne!(retried.sha256_hex, original.sha256_hex);
+
+    // A directory at the bundle destination must also survive a failed pack unchanged.
+    std::fs::remove_file(&retried.bundle_path).unwrap();
+    std::fs::create_dir(&retried.bundle_path).unwrap();
+    std::fs::write(retried.bundle_path.join("keep"), "unrelated data").unwrap();
+    assert!(pack_plugin(&plugin, Some(&output)).is_err());
+    assert!(retried.bundle_path.join("keep").is_file());
+}
+
+#[cfg(unix)]
+#[test]
+fn package_outputs_do_not_follow_symlinks_into_plugin_sources() {
+    use std::os::unix::fs::symlink;
+
+    let tmp = tempdir().unwrap();
+    let plugin = tmp.path().join("plugin");
+    let output = tmp.path().join("dist");
+    create_plugin_project("pack_links", "python", Some(&plugin)).unwrap();
+    std::fs::create_dir(&output).unwrap();
+    let source = plugin.join("main.py");
+    let manifest = plugin.join("plugin.toml");
+    let source_bytes = std::fs::read(&source).unwrap();
+    let manifest_bytes = std::fs::read(&manifest).unwrap();
+    symlink(&source, output.join("org.kanon.plugin.pack_links.kpk")).unwrap();
+    symlink(
+        &manifest,
+        output.join("org.kanon.plugin.pack_links.kpk.sha256"),
+    )
+    .unwrap();
+
+    let report = pack_plugin(&plugin, Some(&output)).unwrap();
+    assert_eq!(std::fs::read(&source).unwrap(), source_bytes);
+    assert_eq!(std::fs::read(&manifest).unwrap(), manifest_bytes);
+    assert!(archive_names(&report.bundle_path).contains(&"main.py".to_string()));
+    assert_eq!(
+        std::fs::read_to_string(&report.checksum_path).unwrap(),
+        format!("{}  org.kanon.plugin.pack_links.kpk\n", report.sha256_hex)
+    );
+}
+
+#[test]
 fn package_includes_declared_runtime_resources_and_rejects_missing_inputs() {
     use std::io::Read;
 

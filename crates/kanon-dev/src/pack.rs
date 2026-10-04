@@ -149,8 +149,14 @@ pub fn pack_plugin(plugin_path: &Path, output_dir: Option<&Path>) -> Result<Pack
         }
     }
 
-    // 4. Build the ZIP archive
-    let mut zip = ZipWriter::new(File::create(&bundle_path)?);
+    // 4. Finish both outputs before publishing either one. Besides preserving the last good
+    // bundle on failure, staging avoids following an existing output symlink into source files.
+    let staging = tempfile::Builder::new()
+        .prefix(".kanon-pack-")
+        .tempdir_in(out_dir)?;
+    let staged_bundle = staging.path().join(&archive_name);
+    let staged_checksum = staging.path().join(format!("{archive_name}.sha256"));
+    let mut zip = ZipWriter::new(File::create(&staged_bundle)?);
     let options = SimpleFileOptions::default().compression_method(zip::CompressionMethod::Deflated);
     for (name, source) in &contents {
         // Resource directories may include helper executables as well as data. Preserve their
@@ -174,7 +180,7 @@ pub fn pack_plugin(plugin_path: &Path, output_dir: Option<&Path>) -> Result<Pack
 
     // 5. Compute the SHA-256 digest of the bundle
     let mut bundle_bytes = Vec::new();
-    File::open(&bundle_path)?.read_to_end(&mut bundle_bytes)?;
+    File::open(&staged_bundle)?.read_to_end(&mut bundle_bytes)?;
     let digest = ring::digest::digest(&ring::digest::SHA256, &bundle_bytes);
     let sha256_hex: String = digest
         .as_ref()
@@ -183,7 +189,47 @@ pub fn pack_plugin(plugin_path: &Path, output_dir: Option<&Path>) -> Result<Pack
         .collect();
 
     // 6. Write the checksum file in the standard format: `<sha256>  <filename>`
-    fs::write(&checksum_path, format!("{sha256_hex}  {archive_name}\n"))?;
+    fs::write(&staged_checksum, format!("{sha256_hex}  {archive_name}\n"))?;
+
+    // The checksum is the final commit point. Keep the previous bundle next to the staged files
+    // until then, so a failed checksum rename cannot leave a new archive with an old digest.
+    let previous_bundle = staging.path().join("previous.kpk");
+    if fs::symlink_metadata(&bundle_path).is_ok_and(|metadata| metadata.is_dir()) {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            format!("package output is a directory: {}", bundle_path.display()),
+        )
+        .into());
+    }
+    let had_bundle = match fs::rename(&bundle_path, &previous_bundle) {
+        Ok(()) => true,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => false,
+        Err(error) => return Err(error.into()),
+    };
+    let published = fs::rename(&staged_bundle, &bundle_path)
+        .and_then(|()| fs::rename(&staged_checksum, &checksum_path));
+    if let Err(error) = published {
+        let restored = if had_bundle {
+            fs::rename(&previous_bundle, &bundle_path)
+        } else {
+            match fs::remove_file(&bundle_path) {
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+                result => result,
+            }
+        };
+        if let Err(restore_error) = restored {
+            // Keep recovery material when the filesystem also refuses rollback; dropping the
+            // temporary directory here would destroy the only remaining copy of the old bundle.
+            let recovery = staging.keep();
+            return Err(std::io::Error::other(format!(
+                "failed to publish package: {error}; failed to restore the previous bundle: \
+                 {restore_error}; recovery files remain in {}",
+                recovery.display()
+            ))
+            .into());
+        }
+        return Err(error.into());
+    }
 
     Ok(PackReport {
         bundle_path,
