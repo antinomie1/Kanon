@@ -220,23 +220,77 @@ async fn node_dependencies_are_installed_by_the_tool_that_wrote_the_lockfile() {
     assert!(calls(&plain).is_empty());
 }
 
-#[tokio::test]
-async fn a_hung_install_is_stopped_at_the_timeout() {
-    let _turn = SERIAL.lock().await;
-    let root = tempfile::tempdir().unwrap();
-    let bin = root.path().join("bin");
-    tool(
-        &bin,
-        "uv",
-        "echo partial-stdout; echo partial-stderr >&2; exec sleep 30",
-    );
-    let plugin = python_plugin(root.path());
-    let installer = DependencyInstaller::new()
-        .with_search_path(vec![bin])
-        .with_timeout(Duration::from_millis(300));
+/// Prevents a failing regression from leaving its simulated lifecycle script running.
+struct InstallerChildren {
+    parent: i32,
+    descendant: i32,
+}
 
-    let started = std::time::Instant::now();
-    let err = installer.prepare_python(&plugin).await.unwrap_err();
-    assert!(err.contains("did not finish"), "{err}");
-    assert!(started.elapsed() < Duration::from_secs(10));
+impl Drop for InstallerChildren {
+    fn drop(&mut self) {
+        unsafe {
+            libc::kill(-self.parent, libc::SIGKILL);
+            libc::kill(self.parent, libc::SIGKILL);
+            libc::kill(self.descendant, libc::SIGKILL);
+        }
+    }
+}
+
+#[tokio::test]
+async fn timed_out_and_cancelled_installs_stop_their_lifecycle_children() {
+    let _turn = SERIAL.lock().await;
+    for cancel in [false, true] {
+        let root = tempfile::tempdir().unwrap();
+        let bin = root.path().join("bin");
+        tool(
+            &bin,
+            "uv",
+            r#"
+echo $$ > installer.pid
+sh -c 'sleep 1; echo survived > unexpected-write' &
+echo $! > descendant.pid
+wait
+"#,
+        );
+        let plugin = python_plugin(root.path());
+        let installer = DependencyInstaller::new()
+            .with_search_path(vec![bin])
+            .with_timeout(Duration::from_millis(300));
+        let installing_dir = plugin.clone();
+        let installing =
+            tokio::spawn(async move { installer.prepare_python(&installing_dir).await });
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while !plugin.join("descendant.pid").is_file() {
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .unwrap();
+        let _children = InstallerChildren {
+            parent: std::fs::read_to_string(plugin.join("installer.pid"))
+                .unwrap()
+                .trim()
+                .parse()
+                .unwrap(),
+            descendant: std::fs::read_to_string(plugin.join("descendant.pid"))
+                .unwrap()
+                .trim()
+                .parse()
+                .unwrap(),
+        };
+        if cancel {
+            installing.abort();
+            assert!(installing.await.unwrap_err().is_cancelled());
+        } else {
+            let err = installing.await.unwrap().unwrap_err();
+            assert!(err.contains("did not finish"), "{err}");
+        }
+        // The old behavior killed uv/npm but left its lifecycle script writing into the same
+        // directory after the next installer was allowed to acquire that directory's lock.
+        tokio::time::sleep(Duration::from_millis(1100)).await;
+        assert!(
+            !plugin.join("unexpected-write").exists(),
+            "installer child survived (cancel={cancel})"
+        );
+    }
 }

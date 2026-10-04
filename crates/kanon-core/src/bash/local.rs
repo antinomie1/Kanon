@@ -1,6 +1,8 @@
 //! Native host execution with bounded output and process-group cleanup.
 
 use super::MAX_BASH_OUTPUT_BYTES;
+#[cfg(unix)]
+use crate::process::ProcessGroup;
 use std::path::{Path, PathBuf};
 
 pub(super) fn bash_executable() -> Option<PathBuf> {
@@ -52,7 +54,7 @@ pub(super) async fn execute(command: &str, cwd: &Path, timeout: u64) -> Result<S
         .process_group(0)
         .spawn()
         .map_err(|err| format!("Failed to start Bash: {err}"))?;
-    let group = ProcessGroup(child.id().ok_or("Bash started without a process id")? as i32);
+    let group = ProcessGroup(child.id().ok_or("Bash started without a process id")?);
     let mut stdout = child.stdout.take().ok_or("Missing Bash stdout")?;
     let mut stderr = child.stderr.take().ok_or("Missing Bash stderr")?;
     let mut out = Vec::new();
@@ -110,19 +112,5 @@ pub(super) async fn execute(command: &str, cwd: &Path, timeout: u64) -> Result<S
         Ok(output)
     } else {
         Err(output)
-    }
-}
-
-#[cfg(unix)]
-struct ProcessGroup(i32);
-
-#[cfg(unix)]
-impl Drop for ProcessGroup {
-    fn drop(&mut self) {
-        // SAFETY: the child created its own positive process group; a negative pid targets only
-        // that group. ESRCH means it already exited and needs no cleanup.
-        unsafe {
-            libc::kill(-self.0, libc::SIGKILL);
-        }
     }
 }

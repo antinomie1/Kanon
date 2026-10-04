@@ -219,12 +219,20 @@ impl DependencyInstaller {
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
-            // A timed-out install is dropped mid-wait; the child must die with it rather than
-            // keep writing into the environment the next attempt will use.
             .kill_on_drop(true);
+        // Package tools spawn lifecycle scripts. Killing only the immediate tool leaves those
+        // scripts writing into an environment after its install lock has been released.
+        #[cfg(unix)]
+        command.process_group(0);
         let mut child = command
             .spawn()
             .map_err(|err| format!("`{command_line}` could not be started: {err}"))?;
+        #[cfg(unix)]
+        let group = crate::process::ProcessGroup(
+            child
+                .id()
+                .ok_or_else(|| format!("`{command_line}` started without a process id"))?,
+        );
         let stdout = child
             .stdout
             .take()
@@ -243,6 +251,15 @@ impl DependencyInstaller {
             )
         })
         .await;
+        // This guard also runs on cancellation, before the caller releases the directory lock.
+        #[cfg(unix)]
+        drop(group);
+        if !matches!(&output, Ok(Ok(_))) {
+            child
+                .kill()
+                .await
+                .map_err(|error| format!("`{command_line}` cleanup failed: {error}"))?;
+        }
         let (status, stdout, stderr) = match output {
             Ok(Ok(output)) => output,
             Ok(Err(err)) => {

@@ -19,6 +19,8 @@ pub mod manifest;
 pub mod mcp;
 pub mod notice;
 pub mod pipeline;
+#[cfg(unix)]
+mod process;
 pub mod render;
 pub mod shutdown;
 pub mod skill;
