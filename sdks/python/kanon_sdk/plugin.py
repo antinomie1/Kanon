@@ -767,6 +767,7 @@ class Plugin:
         session.turn = _Turn()
         event = CommandEvent(req, self.core, session)
         task = asyncio.create_task(self._run_handler(handler, event, session))
+        session.task = task
         self._tasks.add(task)
         task.add_done_callback(self._tasks.discard)
         return await run_turn(session)
@@ -788,6 +789,12 @@ class Plugin:
                 await event.reply(result)
             if session.turn is not None:
                 session.turn.finish()
+        except asyncio.CancelledError:
+            # Self-cancellation and unload cancellation must finish a still-waiting RPC. When
+            # the RPC itself was cancelled, its done future is already cancelled and this is a no-op.
+            if session.turn is not None:
+                session.turn.finish(success=False, error="CancelledError: command handler was cancelled")
+            raise
         except Exception as exc:  # noqa: BLE001 - reported to Core, or logged when nobody waits
             if isinstance(exc, asyncio.TimeoutError) and session.turn is None:
                 # wait_next already returned its turn to Core. An unrelated timeout while a

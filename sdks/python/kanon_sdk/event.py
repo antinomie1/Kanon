@@ -174,6 +174,7 @@ class _Session:
     def __init__(self, conversations: "Conversations") -> None:
         self.conversations = conversations
         self.turn: Optional[_Turn] = None
+        self.task: Optional[asyncio.Task] = None
 
 
 class CommandEvent(MessageEvent):
@@ -301,7 +302,18 @@ async def run_turn(session: _Session) -> pb.CommandExecuteResponse:
     """Waits for the session's current turn and turns it into a command response."""
     turn = session.turn
     assert turn is not None, "run_turn needs an open turn"
-    success, error, capture_seconds = await turn.done
+    try:
+        success, error, capture_seconds = await turn.done
+    except asyncio.CancelledError:
+        # A successful wait_next deliberately keeps its handler alive across RPCs. A cancelled
+        # RPC has handed no capture or response back to Core, so its handler must stop as well.
+        if session.task is not None:
+            session.task.cancel()
+            try:
+                await session.task
+            except asyncio.CancelledError:
+                pass
+        raise
     # A turn that captures the conversation never hands its message on: the handler is waiting
     # for the next message, so this one is not the model's.
     passing = turn.pass_to_model and capture_seconds == 0

@@ -153,6 +153,70 @@ class TestDispatch(unittest.IsolatedAsyncioTestCase):
         response = await Demo().on_execute_command(request("nope"))
         self.assertFalse(response.success)
 
+    async def test_cancelled_rpc_drains_the_initial_or_continued_handler(self) -> None:
+        """Only a successful capture may leave a command task running after its RPC returns."""
+        for continuation in [False, True]:
+            with self.subTest(continuation=continuation):
+                started = asyncio.Event()
+                cleaning = asyncio.Event()
+                release_cleanup = asyncio.Event()
+                cleaned = asyncio.Event()
+
+                class Waiting(Plugin):
+                    @command("wait")
+                    async def wait(self, event):
+                        if continuation:
+                            await event.reply("continue?")
+                            await event.wait_next(timeout=30)
+                        started.set()
+                        try:
+                            await asyncio.Future()
+                        finally:
+                            cleaning.set()
+                            await release_cleanup.wait()
+                            cleaned.set()
+
+                plugin = Waiting()
+                if continuation:
+                    first = await plugin.on_execute_command(request("wait"))
+                    self.assertEqual(first.capture_seconds, 30)
+                    self.assertEqual(texts(first), ["continue?"])
+                    self.assertEqual(len(plugin._tasks), 1)
+                    self.assertFalse(next(iter(plugin._tasks)).done())
+
+                pending = asyncio.create_task(
+                    plugin.on_execute_command(request("wait", continuation=continuation))
+                )
+                try:
+                    await asyncio.wait_for(started.wait(), timeout=1)
+                    pending.cancel()
+                    await asyncio.wait_for(cleaning.wait(), timeout=1)
+                    self.assertFalse(pending.done(), "the RPC must wait for handler cleanup")
+                    release_cleanup.set()
+                    with self.assertRaises(asyncio.CancelledError):
+                        await asyncio.wait_for(pending, timeout=1)
+                    self.assertTrue(cleaned.is_set())
+                    self.assertFalse(plugin._tasks)
+                    self.assertFalse(plugin._conversations._waiting)
+                finally:
+                    release_cleanup.set()
+                    pending.cancel()
+                    await asyncio.gather(pending, return_exceptions=True)
+                    await plugin.on_unload()
+
+    async def test_a_self_cancelled_handler_finishes_its_rpc_with_failure(self) -> None:
+        """CancelledError is outside Exception and must not strand the caller's turn future."""
+        class Cancelled(Plugin):
+            @command("cancel")
+            async def cancel(self):
+                raise asyncio.CancelledError()
+
+        plugin = Cancelled()
+        response = await asyncio.wait_for(plugin.on_execute_command(request("cancel")), timeout=1)
+        self.assertFalse(response.success)
+        self.assertIn("CancelledError", response.error_message)
+        self.assertTrue(all(task.done() for task in plugin._tasks))
+
     async def test_wait_next_spans_two_rpcs(self) -> None:
         plugin = Demo()
         first = await plugin.on_execute_command(request("ask", ""))
