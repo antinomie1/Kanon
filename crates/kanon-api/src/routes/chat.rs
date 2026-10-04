@@ -140,13 +140,16 @@ async fn completions(
         .collect();
 
     // MCP servers reach the agent through the same slice. A sandbox session carries no instance
-    // identifier, so the node-wide switch alone decides which servers are offered.
-    hosts.extend(
-        state
-            .mcp()
-            .hosts_for_instance(state.plugin_state(), None)
-            .await,
-    );
+    // identifier, so the node-wide switch alone decides which servers are offered. Discovery
+    // connects servers, so skip it when the caller will not expose their tools to the model.
+    if request.tools {
+        hosts.extend(
+            state
+                .mcp()
+                .hosts_for_instance(state.plugin_state(), None)
+                .await,
+        );
+    }
 
     if request.stream {
         writing

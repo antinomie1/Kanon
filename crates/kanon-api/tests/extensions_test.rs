@@ -10,7 +10,9 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use axum::http::{Method, StatusCode};
 use kanon_api::ApiState;
-use kanon_core::{McpConfigStore, McpPool, SkillStore, Supervisor, ToggleStore};
+use kanon_core::{
+    McpConfigStore, McpPool, McpServerConfig, McpTransport, SkillStore, Supervisor, ToggleStore,
+};
 use kanon_llm::gateway::types::{ChatRequest, ChatResponse};
 use kanon_llm::{GatewayError, LlmProvider};
 use serde_json::{Value, json};
@@ -122,6 +124,7 @@ fn write_fixture_mcp_server(dir: &Path) -> PathBuf {
     std::fs::write(
         &path,
         r#"#!/bin/sh
+if [ "$#" -gt 0 ]; then : > "$1"; fi
 while IFS= read -r line; do
   id=$(printf '%s' "$line" | sed -n 's/.*"id":\([0-9]*\).*/\1/p')
   case "$line" in
@@ -365,10 +368,72 @@ async fn a_zip_upload_rejects_an_archive_without_a_skill() {
 }
 
 #[tokio::test]
+async fn chat_without_plugin_tools_does_not_start_mcp_servers() {
+    let dir = tempfile::tempdir().unwrap();
+    let (state, recorder) = extension_state_recording(dir.path()).await;
+    let script = write_fixture_mcp_server(dir.path());
+    let started = dir.path().join("mcp-started");
+    // Load an enabled definition without using the management endpoint, which deliberately
+    // connects enabled servers when saved. This models a pool that has not been reached yet.
+    state
+        .mcp_config()
+        .upsert(McpServerConfig {
+            id: "lazy".into(),
+            name: "Lazy fixture".into(),
+            transport: McpTransport::Stdio {
+                command: "sh".into(),
+                args: vec![
+                    script.to_string_lossy().into_owned(),
+                    started.to_string_lossy().into_owned(),
+                ],
+                env: Default::default(),
+            },
+        })
+        .await
+        .unwrap();
+    state.mcp().sync_from_config(state.mcp_config()).await;
+    let app = kanon_api::app(state.clone());
+
+    for stream in [false, true] {
+        let (status, _) = send(
+            &app,
+            Method::POST,
+            "/api/v1/chat/completions",
+            Some(json!({
+                "session_id": format!("standalone-{stream}"),
+                "message": "hi",
+                "tools": false,
+                "stream": stream,
+            })),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        // The flag controls external tools; native tools retain their existing behavior.
+        assert_eq!(recorder.offered(), vec!["read_skill".to_string()]);
+        assert!(
+            !started.exists(),
+            "MCP discovery must not launch an unused server"
+        );
+        assert!(!state.mcp().get("lazy").await.unwrap().is_connected().await);
+    }
+
+    let (status, _) = send(
+        &app,
+        Method::POST,
+        "/api/v1/chat/completions",
+        Some(json!({ "session_id": "with-tools", "message": "hi", "tools": true })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(started.is_file());
+    assert!(recorder.offered().contains(&"mcp__lazy__echo".to_string()));
+}
+
+#[tokio::test]
 async fn chat_completions_offer_mcp_tools_to_the_model() {
     let dir = tempfile::tempdir().expect("temp dir");
     let (state, recorder) = extension_state_recording(dir.path()).await;
-    let app = kanon_api::app(state);
+    let app = kanon_api::app(state.clone());
 
     let script = write_fixture_mcp_server(dir.path());
     let (status, body) = send(
@@ -413,6 +478,25 @@ async fn chat_completions_offer_mcp_tools_to_the_model() {
     .await;
     assert_eq!(status, StatusCode::OK);
 
+    // Re-saving the same definition and editing it must both preserve the disabled process
+    // state, rather than connecting a server that the catalog still labels disabled.
+    for name in ["Fixture", "Edited Fixture"] {
+        let (status, body) = send(
+            &app,
+            Method::PUT,
+            "/api/v1/mcp/servers/fx",
+            Some(json!({
+                "name": name,
+                "transport": { "type": "stdio", "command": "sh", "args": [script.to_string_lossy()] },
+            })),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert_eq!(body["enabled"], json!(false));
+        assert_eq!(body["health"]["state"], json!("disconnected"));
+        assert!(!state.mcp().get("fx").await.unwrap().is_connected().await);
+    }
+
     let (status, _) = send(
         &app,
         Method::POST,
@@ -429,6 +513,20 @@ async fn chat_completions_offer_mcp_tools_to_the_model() {
         !recorder.offered().contains(&"mcp__fx__echo".to_string()),
         "a disabled server must not offer tools"
     );
+
+    let (status, _) = send(
+        &app,
+        Method::PUT,
+        "/api/v1/mcp/servers/fx/enabled",
+        Some(json!({ "enabled": true })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(state.mcp().get("fx").await.unwrap().is_connected().await);
+    let (_, catalog) = send(&app, Method::GET, "/api/v1/mcp/servers", None).await;
+    assert_eq!(catalog["servers"][0]["name"], json!("Edited Fixture"));
+    assert_eq!(catalog["servers"][0]["enabled"], json!(true));
+    assert_eq!(catalog["servers"][0]["health"]["state"], json!("connected"));
 }
 
 #[tokio::test]

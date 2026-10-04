@@ -137,12 +137,18 @@ async fn upsert_server(
         .map_err(|err| ApiError::BadRequest(err.to_string()))?;
     state.mcp().sync_from_config(state.mcp_config()).await;
 
-    // Bring the definition up right away: reporting "ok" while the server is unreachable would
+    // Bring enabled definitions up right away: reporting "ok" while the server is unreachable would
     // hide the failure until the model's first tool call.
     let view = match state.mcp().get(&id).await {
         Some(server) => {
-            if let Err(err) = server.connect().await {
-                tracing::warn!(server = %id, error = %err, "Configured MCP server could not be reached");
+            // Editing a definition must preserve the operator's switch. A disabled server must
+            // stay disconnected even when the edit creates a fresh pool entry.
+            if state.plugin_state().is_enabled(MCP_SECTION, &id).await {
+                if let Err(err) = server.connect().await {
+                    tracing::warn!(server = %id, error = %err, "Configured MCP server could not be reached");
+                }
+            } else {
+                server.disconnect().await;
             }
             view_of(&state, server.config().clone(), server.health().await).await
         }
