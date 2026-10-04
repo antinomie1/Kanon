@@ -31,13 +31,9 @@ export function toProtoValue(val: any): any {
 export function toProtoStruct(obj: Record<string, any>): {
   fields: Record<string, any>;
 } {
-  const fields: Record<string, any> = {};
-  if (obj && typeof obj === "object") {
-    for (const [k, v] of Object.entries(obj)) {
-      fields[k] = toProtoValue(v);
-    }
-  }
-  return { fields };
+  // Define own properties so a JSON key named __proto__ remains payload data.
+  const entries = obj && typeof obj === "object" ? Object.entries(obj) : [];
+  return { fields: Object.fromEntries(entries.map(([key, value]) => [key, toProtoValue(value)])) };
 }
 
 /** Converts a Protobuf Value descriptor back to a standard JS value. */
@@ -59,11 +55,7 @@ export function fromProtoValue(val: any): any {
 
 /** Converts a google.protobuf.Struct payload back into a standard JS object dictionary. */
 export function fromProtoStruct(structObj: any): Record<string, any> {
-  const res: Record<string, any> = {};
-  if (structObj && structObj.fields) {
-    for (const [k, v] of Object.entries(structObj.fields)) {
-      res[k] = fromProtoValue(v);
-    }
-  }
-  return res;
+  return Object.fromEntries(
+    Object.entries(structObj?.fields ?? {}).map(([key, value]) => [key, fromProtoValue(value)]),
+  );
 }

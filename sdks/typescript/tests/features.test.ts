@@ -247,6 +247,17 @@ test("runtime tools are announced and rolled back when the node refuses", async 
   await assert.rejects(plugin.removeTool("greet"), /declared with @Tool/);
 });
 
+test("structured payloads preserve special object keys without changing prototypes", () => {
+  const input = JSON.parse('{"__proto__":{"marker":"data"},"nested":{"__proto__":"kept","constructor":7}}');
+  const wire = toProtoStruct(input);
+  assert.equal(Object.prototype.hasOwnProperty.call(wire.fields, "__proto__"), true);
+  assert.equal(Object.getPrototypeOf(wire.fields), Object.prototype);
+  const result = fromProtoStruct(wire);
+  assert.deepEqual(result, input);
+  assert.equal(Object.getPrototypeOf(result), Object.prototype);
+  assert.equal(Object.getPrototypeOf(result.nested), Object.prototype);
+});
+
 test("non-finite tool arguments and results fail instead of becoming null", async () => {
   const plugin = new Features();
   plugin.context = {
