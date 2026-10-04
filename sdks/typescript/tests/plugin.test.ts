@@ -50,6 +50,7 @@ const texts = (response: any): string[] => response.replies.map((s: any) => s.te
 class Demo extends Plugin {
   id = "test.plugin";
   seen: string[] = [];
+  commandSignals: Array<AbortSignal | undefined> = [];
 
   @Command("echo", { aliases: ["/e"], access: "admins_in_groups" })
   async echo(event: CommandEvent, args: string[]) {
@@ -58,9 +59,11 @@ class Demo extends Plugin {
 
   @Command("ask")
   async ask(event: CommandEvent) {
+    this.commandSignals.push(event.signal);
     await event.reply("name?");
     try {
       const answer = await event.waitNext(30);
+      this.commandSignals.push(answer.signal);
       await answer.reply(`hello ${answer.text}`);
     } catch (err) {
       if (!(err instanceof WaitTimeoutError)) throw err;
@@ -127,16 +130,120 @@ test("return values become replies and failures are reported", async () => {
 
 test("waitNext spans two RPCs", async () => {
   const plugin = new Demo();
-  const first = await plugin.onExecuteCommand(request("ask"));
+  const firstRpc = new AbortController();
+  const first = await plugin.onExecuteCommand(request("ask"), firstRpc.signal);
   // The first turn ends at waitNext: its reply goes out and Core is asked to capture.
   assert.deepEqual(texts(first), ["name?"]);
   assert.equal(first.capture_seconds, 30);
+  firstRpc.abort();
+  assert.equal(plugin.commandSignals[0]?.aborted, false, "the completed RPC listener is detached");
 
-  const second = await plugin.onExecuteCommand(request("ask", "Ann", [], true));
+  const secondRpc = new AbortController();
+  const second = await plugin.onExecuteCommand(request("ask", "Ann", [], true), secondRpc.signal);
   assert.equal(second.success, true);
   assert.deepEqual(texts(second), ["hello Ann"]);
   assert.equal(second.capture_seconds, 0);
+  assert.equal(plugin.commandSignals[0], plugin.commandSignals[1], "continuations share one command signal");
+  secondRpc.abort();
+  assert.equal(plugin.commandSignals[0]?.aborted, false);
 });
+
+for (const continuation of [false, true]) {
+  test(`cancelling ${continuation ? "a continued" : "an initial"} RPC blocks later command publication`, {
+    timeout: 2000,
+  }, async () => {
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => { release = resolve; });
+    let enter!: (event: CommandEvent) => void;
+    const entered = new Promise<CommandEvent>((resolve) => { enter = resolve; });
+    let finish!: () => void;
+    const finished = new Promise<void>((resolve) => { finish = resolve; });
+    let sent = 0;
+
+    class Waiting extends Plugin {
+      @Command("wait")
+      async wait(event: CommandEvent) {
+        if (continuation) event = await event.waitNext(30);
+        enter(event);
+        try {
+          // JavaScript promises cannot be preempted. This intentionally ignores event.signal;
+          // once released, the SDK must still prevent its late reply from reaching Core.
+          await gate;
+          await event.reply("late reply");
+        } finally {
+          finish();
+        }
+      }
+    }
+
+    const plugin = new Waiting();
+    plugin.context = {
+      dataDir: ".",
+      config: {},
+      core: { replyTo: async () => { sent += 1; } } as unknown as CoreHandle,
+    };
+    if (continuation) {
+      const captured = await plugin.onExecuteCommand(request("wait"));
+      assert.equal(captured.capture_seconds, 30);
+    }
+    const rpc = new AbortController();
+    const pending = plugin.onExecuteCommand(request("wait", "next", [], continuation), rpc.signal);
+    try {
+      const event = await entered;
+      rpc.abort();
+      await assert.rejects(pending, /command RPC was cancelled/);
+      assert.equal(event.signal?.aborted, true);
+      await assert.rejects(event.reply("reply"), /command RPC was cancelled/);
+      await assert.rejects(event.send("send"), /command RPC was cancelled/);
+      await assert.rejects(event.waitNext(600), /command RPC was cancelled/);
+      assert.throws(() => event.passToModel(), /command RPC was cancelled/);
+      assert.equal((plugin as any).conversations.waiting.size, 0);
+    } finally {
+      rpc.abort();
+      release();
+      await finished;
+    }
+    assert.equal(sent, 0);
+    assert.equal((plugin as any).conversations.waiting.size, 0);
+  });
+}
+
+for (const preCancelledContinuation of [false, true]) {
+  test(`cancellation cleans ${preCancelledContinuation ? "an already cancelled continuation" : "a capture before its RPC response"}`, {
+    timeout: 2000,
+  }, async () => {
+    const rpc = new AbortController();
+    let resumed = false;
+    let finish!: () => void;
+    const finished = new Promise<void>((resolve) => { finish = resolve; });
+    class Capturing extends Plugin {
+      @Command("capture")
+      async capture(event: CommandEvent) {
+        const next = event.waitNext(600);
+        if (!preCancelledContinuation) rpc.abort();
+        try {
+          await next;
+          resumed = true;
+        } finally {
+          finish();
+        }
+      }
+    }
+    const plugin = new Capturing();
+    if (preCancelledContinuation) {
+      const captured = await plugin.onExecuteCommand(request("capture"));
+      assert.equal(captured.capture_seconds, 600);
+      rpc.abort();
+    }
+    await assert.rejects(
+      plugin.onExecuteCommand(request("capture", "next", [], preCancelledContinuation), rpc.signal),
+      /command RPC was cancelled/,
+    );
+    await finished;
+    assert.equal(resumed, false);
+    assert.equal((plugin as any).conversations.waiting.size, 0);
+  });
+}
 
 test("a continuation nobody waits for calls the handler afresh", async () => {
   const response = await new Demo().onExecuteCommand(request("echo", "late", ["late"], true));

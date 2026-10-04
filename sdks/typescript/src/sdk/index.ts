@@ -1666,18 +1666,26 @@ export abstract class Plugin {
    * A continuation resumes the handler suspended in `waitNext` for this conversation; if none
    * is waiting (the plugin captured with an explicit `capture_seconds`, or the host restarted),
    * the handler named by `req.command` is called with `continuation` set.
+   * The host supplies the RPC cancellation signal; handlers receive the session's shared signal
+   * as `event.signal` and may use it to cancel their own asynchronous work cooperatively.
    */
-  async onExecuteCommand(req: any): Promise<any> {
+  async onExecuteCommand(req: any, signal?: AbortSignal): Promise<any> {
     if (req.continuation) {
       const key = new MessageEvent(req.context ?? {}).conversationKey;
       const waiting = this.conversations.take(key);
       if (waiting) {
         const [session, next] = waiting;
+        if (signal?.aborted) {
+          // Core already consumed this capture, so its suspended handler must be released.
+          session.cancel();
+          throw session.signal.reason;
+        }
         const turn = (session.turn = new Turn());
         next.resolve(new CommandEvent(req, this.core, session));
-        return runTurn(turn);
+        return runTurn(turn, session, signal);
       }
     }
+    signal?.throwIfAborted();
 
     const declared = this.declared();
     const subcommands = declared.subcommands.filter((c) => c.group === req.command);
@@ -1712,10 +1720,11 @@ export abstract class Plugin {
     const session = new Session(this.conversations);
     const turn = (session.turn = new Turn());
     const event = new CommandEvent(req, this.core, session);
+    const response = runTurn(turn, session, signal);
     // Not awaited: the handler may outlive this RPC by suspending in waitNext. runHandler never
     // rejects, so nothing is left unhandled.
     void this.runHandler(handler.bind(this), event, session);
-    return runTurn(turn);
+    return response;
   }
 
   /** Runs one command handler to completion, across as many turns as it takes. */
@@ -1745,7 +1754,10 @@ export abstract class Plugin {
       }
       session.turn?.finish();
     } catch (err: any) {
-      if (err instanceof WaitTimeoutError) {
+      if (session.signal.aborted) {
+        // The RPC already ended. SDK operations reject late work; user promises may still settle.
+        return;
+      } else if (err instanceof WaitTimeoutError) {
         // The user never answered a waitNext; nothing is waiting for this handler anymore.
         session.turn?.finish();
       } else if (session.turn) {

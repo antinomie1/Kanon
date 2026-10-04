@@ -200,8 +200,16 @@ export class Turn {
 /** A running command handler and the RPC currently waiting on it, if any. */
 export class Session {
   turn?: Turn;
+  private readonly cancellation = new AbortController();
+  /** Shared by every continuation; handlers may pass it to cooperative asynchronous work. */
+  readonly signal: AbortSignal = this.cancellation.signal;
 
   constructor(readonly conversations: Conversations) {}
+
+  /** Invalidates this command's SDK operations; arbitrary user promises cannot be preempted. */
+  cancel(): void {
+    this.cancellation.abort(new Error("command RPC was cancelled"));
+  }
 }
 
 /** A message that invoked a command or trigger, or continued a conversation. */
@@ -237,6 +245,17 @@ export class CommandEvent extends MessageEvent {
     return this.request?.context;
   }
 
+  /** Cancellation of this command across its RPCs; absent for manually constructed events. */
+  get signal(): AbortSignal | undefined {
+    return this.session?.signal;
+  }
+
+  /** Sends only while the command remains active, including after a normal capture timeout. */
+  override async send(content: Replyable): Promise<any> {
+    this.signal?.throwIfAborted();
+    return super.send(content);
+  }
+
   /**
    * Answers this message.
    *
@@ -244,6 +263,7 @@ export class CommandEvent extends MessageEvent {
    * command's answer; otherwise they are delivered immediately.
    */
   async reply(content: Replyable): Promise<void> {
+    this.signal?.throwIfAborted();
     const turn = this.session?.turn;
     if (turn) {
       turn.replies.push(...toSegments(content));
@@ -264,6 +284,7 @@ export class CommandEvent extends MessageEvent {
    * @throws If Core is no longer waiting on this handler (after a `waitNext` timed out).
    */
   passToModel(text?: string): void {
+    this.signal?.throwIfAborted();
     const turn = this.session?.turn;
     if (!turn) {
       throw new Error("Core is no longer waiting on this message; it cannot be passed on");
@@ -288,6 +309,7 @@ export class CommandEvent extends MessageEvent {
     if (!session) {
       throw new Error("waitNext is only available inside a command handler");
     }
+    session.signal.throwIfAborted();
     const seconds = Math.max(1, Math.min(Math.floor(timeoutSeconds), MAX_WAIT_SECONDS));
     const key = this.conversationKey;
     const next = new Deferred<CommandEvent>();
@@ -302,9 +324,16 @@ export class CommandEvent extends MessageEvent {
       () => next.reject(new WaitTimeoutError()),
       seconds * 1000 + WAIT_GRACE_MS,
     );
+    const onCancelled = () => {
+      // Remove immediately even when capture was just prepared but its RPC never reached Core.
+      session.conversations.forget(key, next);
+      next.reject(session.signal.reason);
+    };
+    session.signal.addEventListener("abort", onCancelled, { once: true });
     try {
       return await next.promise;
     } finally {
+      session.signal.removeEventListener("abort", onCancelled);
       clearTimeout(timer);
       session.conversations.forget(key, next);
     }
@@ -345,11 +374,26 @@ export class Conversations {
 /**
  * Waits for `turn` to finish and turns it into a command response.
  *
- * Takes the turn rather than reading `session.turn`: a handler that calls `waitNext` before its
- * first `await` finishes and detaches the turn before this function runs.
+ * Keeps this RPC's turn even when `waitNext` detaches it from the session. Install cancellation
+ * before starting or resuming the handler so a synchronous capture cannot escape cancellation.
  */
-export async function runTurn(turn: Turn): Promise<any> {
-  const outcome = await turn.done.promise;
+export async function runTurn(turn: Turn, session: Session, signal?: AbortSignal): Promise<any> {
+  const onCancelled = () => {
+    session.cancel();
+    if (!turn.done.settled) turn.done.reject(session.signal.reason);
+  };
+  signal?.addEventListener("abort", onCancelled, { once: true });
+  if (signal?.aborted) onCancelled();
+  let outcome: TurnOutcome;
+  try {
+    outcome = await turn.done.promise;
+    // Cancellation can race a handler that just finished its turn with a new capture.
+    session.signal.throwIfAborted();
+  } finally {
+    // A successfully returned capture belongs to the next RPC. Closing the old RPC must not
+    // cancel its suspended handler or poison the signal shared by later continuation events.
+    signal?.removeEventListener("abort", onCancelled);
+  }
   // A turn that captures the conversation never hands its message on: the handler is waiting
   // for the next message, so this one is not the model's.
   const passing = turn.passToModel && outcome.captureSeconds === 0;

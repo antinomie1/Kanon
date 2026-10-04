@@ -355,15 +355,23 @@ async function main(): Promise<void> {
       }
     },
     OnExecuteCommand: async (call: any, callback: any) => {
+      const cancellation = new AbortController();
+      const onCancelled = () => cancellation.abort();
+      call.once("cancelled", onCancelled);
       try {
-        const res = await plugin.onExecuteCommand(call.request);
-        callback(null, res);
+        if (call.cancelled) onCancelled();
+        const res = await plugin.onExecuteCommand(call.request, cancellation.signal);
+        if (!call.cancelled && !cancellation.signal.aborted) callback(null, res);
       } catch (err: any) {
-        callback(null, {
-          success: false,
-          replies: [],
-          error_message: err?.message || "Command error",
-        });
+        if (!call.cancelled && !cancellation.signal.aborted) {
+          callback(null, {
+            success: false,
+            replies: [],
+            error_message: err?.message || "Command error",
+          });
+        }
+      } finally {
+        call.removeListener("cancelled", onCancelled);
       }
     },
     OnCallTool: async (call: any, callback: any) => {
