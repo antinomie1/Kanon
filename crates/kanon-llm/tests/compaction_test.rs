@@ -445,6 +445,10 @@ async fn a_summary_that_is_not_one_leaves_the_history_exactly_as_it_was() {
         ),
         (SummaryMode::ToolCall, "no summary"),
         (
+            SummaryMode::Summary(r#"<tool_call>{"name":"noop","arguments":{}}</tool_call>"#),
+            "no summary",
+        ),
+        (
             SummaryMode::WithReason(Some("length")),
             "incomplete summary",
         ),

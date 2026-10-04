@@ -213,6 +213,11 @@ impl BuiltinAgent {
             hook.on_llm_response(session_id, &mut response).await?;
         }
 
+        // Compatible models may emit tool calls as text. Apply the normal turn's decoding
+        // before accepting a summary, or the call markup would replace the entire history.
+        response.separate_reasoning();
+        normalize_textual_tool_calls(&mut response);
+
         // Partial or refused output cannot replace durable history, even when it contains text.
         // Compatible providers may omit the reason. Any explicit reason must confirm completion;
         // accepting an unknown pause/failure status would permanently discard unsummarized facts.
