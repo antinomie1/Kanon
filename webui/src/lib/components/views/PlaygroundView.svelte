@@ -46,6 +46,7 @@ const speaker = $derived(
 /** Model used when the picker is left on its first entry. */
 const inheritedModel = $derived(instance?.model ?? modelsStore.defaultModel);
 const model = $derived(chat.model || inheritedModel || undefined);
+const canChat = $derived(Boolean(modelsStore.defaultModel && model));
 
 /**
  * Persona sent with every message. An instance's own prompt is published by the node as the
@@ -112,7 +113,7 @@ function fit() {
 
 async function send() {
   const text = draft.trim();
-  if (!text || chat.streaming || !model) return;
+  if (!text || chat.streaming || !canChat) return;
   draft = '';
   stick = true;
   await tick();
@@ -259,7 +260,7 @@ function split(turn: ChatTurn): { reasoning: string; content: string } {
     }}
   >
     <div class="mx-auto flex max-w-[760px] flex-col gap-2.5">
-      {#if !model}
+      {#if !canChat}
         <div class="notice notice-warn items-center">
           <span class="min-w-0 flex-1">{t('chat.no_model')}</span>
           <Button type="button" size="sm" onclick={() => router.navigate('models')}>
@@ -299,7 +300,7 @@ function split(turn: ChatTurn): { reasoning: string; content: string } {
             class="kanon-btn-46 shrink-0"
             title={t('chat.send')}
             aria-label={t('chat.send')}
-            disabled={!draft.trim() || !model}
+            disabled={!draft.trim() || !canChat}
           >
             <ArrowUp size={19} strokeWidth={2.2} />
           </Button>

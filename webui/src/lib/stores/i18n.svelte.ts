@@ -116,7 +116,7 @@ export const dictionaries = {
     'chat.no_text': 'The model replied without any text.',
     'chat.failed': 'The reply stopped: {error}',
     'chat.no_model':
-      'No model to answer with. Pick one above, or set a default model.',
+      'Set a global default model to enable chat, including model overrides.',
     'chat.open_models': 'Open Models',
     'chat.instance_missing': 'There is no instance with ID {id}.',
     // Instances
@@ -1109,7 +1109,8 @@ export const dictionaries = {
     'chat.thought': '思考过程（{n} 字）',
     'chat.no_text': '模型没有返回文字内容。',
     'chat.failed': '回复中断：{error}',
-    'chat.no_model': '没有可用的模型。请在上方选择一个，或设置默认模型。',
+    'chat.no_model':
+      '请先设置全局默认模型以启用聊天；指定其他模型也需要先设置默认模型。',
     'chat.open_models': '前往模型页',
     'chat.instance_missing': '找不到 ID 为 {id} 的实例。',
     // Instances

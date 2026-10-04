@@ -39,6 +39,8 @@ class ChatStore {
 
   private controller: AbortController | null = null;
   private nextId = 1;
+  /** A failed or cancelled reset must be retried even when its failed turn remains visible. */
+  private needsReset = true;
 
   /** Session the node keeps this conversation in. */
   get sessionId(): string {
@@ -52,12 +54,14 @@ class ChatStore {
     this.target = target;
     this.model = '';
     this.turns = [];
+    this.needsReset = true;
   }
 
   /** Starts over; the node forgets the conversation when the next message is sent. */
   clear() {
     this.stop();
     this.turns = [];
+    this.needsReset = true;
   }
 
   stop() {
@@ -68,7 +72,8 @@ class ChatStore {
 
   async send(text: string, options: SendOptions) {
     if (this.streaming) return;
-    const fresh = this.turns.length === 0;
+    const sessionId = this.sessionId;
+    const tools = this.tools;
     this.turns.push(
       {
         id: this.nextId++,
@@ -92,35 +97,41 @@ class ChatStore {
     this.controller = controller;
 
     try {
-      if (fresh) {
+      if (this.needsReset) {
         try {
-          await api.resetSession(this.sessionId);
+          await api.resetSession(sessionId, controller.signal);
         } catch (e) {
           // 404 means the node has never seen this session: it is already empty, as wanted.
           if (!(e instanceof ApiError && e.status === 404)) throw e;
         }
+        // Stop or target changes may have replaced this conversation while reset was pending.
+        if (controller.signal.aborted) return;
+        this.needsReset = false;
       }
       await streamChatCompletion(
         {
-          session_id: this.sessionId,
+          session_id: sessionId,
           message: text,
           model: options.model,
           persona_id: options.personaId,
-          tools: this.tools,
+          tools,
         },
         {
           onChunk: (delta, reasoning) => {
+            if (controller.signal.aborted) return;
             reply.content += delta;
             if (reasoning) reply.reasoning += reasoning;
           },
           onError: (err) => {
-            reply.error = err.message;
+            if (!controller.signal.aborted) reply.error = err.message;
           },
         },
         controller.signal,
       );
     } catch (e) {
-      reply.error = e instanceof Error ? e.message : String(e);
+      if (!controller.signal.aborted) {
+        reply.error = e instanceof Error ? e.message : String(e);
+      }
     } finally {
       // A newer message may have replaced this one's controller; only clear our own.
       if (this.controller === controller) {

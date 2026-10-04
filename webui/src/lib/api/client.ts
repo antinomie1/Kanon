@@ -428,11 +428,12 @@ export const api = {
     request<SessionsResponse>(
       `/api/v1/sessions?page_size=${pageSize}${search ? `&search=${encodeURIComponent(search)}` : ''}`,
     ),
-  resetSession: (sessionId: string) =>
+  resetSession: (sessionId: string, signal?: AbortSignal) =>
     request<{ success: boolean }>(
       `/api/v1/sessions/${encodeURIComponent(sessionId)}/reset`,
       {
         method: 'POST',
+        signal,
       },
     ),
   // `null` removes the binding, after which the session uses the base assistant.

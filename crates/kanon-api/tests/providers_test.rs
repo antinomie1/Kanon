@@ -705,6 +705,31 @@ async fn changed_endpoint_requires_an_explicit_credential_decision() {
         "Bearer sk-new"
     );
 
+    // The remove-key draft is also testable before saving, and takes precedence over a typed key.
+    for key in [None, Some("sk-ignored")] {
+        let (status, body) = common::send_json(
+            &app,
+            Method::POST,
+            "/api/v1/providers/test",
+            Some(json!({
+                "provider": "local", "base_url": target, "model": "probe",
+                "clear_api_key": true, "api_key": key
+            })),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert!(
+            !captured
+                .lock()
+                .unwrap()
+                .last()
+                .unwrap()
+                .0
+                .contains_key("authorization")
+        );
+        assert!(state.node_settings().providers[0].has_api_key());
+    }
+
     let (status, body) = common::send_json(
         &app,
         Method::POST,

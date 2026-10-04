@@ -407,6 +407,8 @@ export interface TestProviderRequest {
   protocol?: string;
   base_url?: string;
   api_key?: string;
+  /** Probe without a credential, matching the editor's remove-key choice. */
+  clear_api_key?: boolean;
   /** Upstream model id exactly as the endpoint expects it (no provider prefix). */
   model?: string;
   prompt?: string;

@@ -77,6 +77,9 @@ init();
 
 const protocols = $derived(providersStore.catalog?.available_protocols ?? []);
 const protocolInfo = $derived(protocols.find((p) => p.id === protocol));
+const resolvedBaseUrl = $derived(
+  baseUrl.trim() || protocolInfo?.default_base_url || '',
+);
 const upstreamModels = $derived(
   modelsStore.models
     .filter((spec) => spec.provider === provider.name)
@@ -114,7 +117,7 @@ async function save() {
     return;
   }
   // A blank address means the protocol's usual one, which the placeholder already shows.
-  const url = baseUrl.trim() || protocolInfo?.default_base_url || '';
+  const url = resolvedBaseUrl;
   if (!url) {
     formError = t('llm.url_required');
     return;
@@ -145,10 +148,15 @@ async function save() {
  * checked before it is saved.
  */
 async function test() {
+  if (!resolvedBaseUrl) {
+    formError = t('llm.url_required');
+    return;
+  }
   const req: TestProviderRequest = {
     prompt: 'ping',
     protocol,
-    base_url: baseUrl.trim() || undefined,
+    base_url: resolvedBaseUrl,
+    clear_api_key: clearKey,
   };
   if (apiKey.trim()) req.api_key = apiKey.trim();
   if (testModel.trim()) req.model = testModel.trim();

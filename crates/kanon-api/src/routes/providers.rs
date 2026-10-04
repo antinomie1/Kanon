@@ -158,6 +158,9 @@ pub struct TestProviderRequest {
     /// API key credential.
     #[serde(default)]
     pub api_key: Option<String>,
+    /// Probe without a credential, matching the endpoint editor's remove-key choice.
+    #[serde(default)]
+    pub clear_api_key: bool,
     /// Upstream model id to query, exactly as the endpoint expects it (no provider prefix).
     ///
     /// Defaults to the global default model when this endpoint serves it, then to the first model
@@ -361,9 +364,14 @@ async fn test_provider(
                 .map(|url| url.trim().to_string())
                 .unwrap_or_else(|| entry.base_url.clone());
             let explicit_key = non_blank(payload.api_key);
-            if base_url != entry.base_url && entry.has_api_key() && explicit_key.is_none() {
+            if !payload.clear_api_key
+                && base_url != entry.base_url
+                && entry.has_api_key()
+                && explicit_key.is_none()
+            {
                 return Err(ApiError::BadRequest(
-                    "Testing a changed base_url requires an explicit api_key".into(),
+                    "Testing a changed base_url requires an explicit api_key or clear_api_key"
+                        .into(),
                 ));
             }
             (
@@ -371,7 +379,11 @@ async fn test_provider(
                     .map(|protocol| protocol.trim().to_lowercase())
                     .unwrap_or(entry.protocol),
                 base_url,
-                explicit_key.or(entry.api_key),
+                if payload.clear_api_key {
+                    None
+                } else {
+                    explicit_key.or(entry.api_key)
+                },
                 candidates,
             )
         }
@@ -387,7 +399,11 @@ async fn test_provider(
             (
                 protocol.trim().to_lowercase(),
                 base_url.trim().to_string(),
-                non_blank(payload.api_key),
+                if payload.clear_api_key {
+                    None
+                } else {
+                    non_blank(payload.api_key)
+                },
                 Vec::new(),
             )
         }
