@@ -338,3 +338,89 @@ async fn failed_persona_deletion_reports_the_failure_and_can_be_retried() {
     assert!(state.personas().get("pirate").is_none());
     assert!(personas.load().unwrap().is_empty());
 }
+
+#[tokio::test]
+async fn generated_persona_cleanup_keeps_the_owner_when_storage_fails() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = Arc::new(RefusingStore::default());
+    let sessions = Arc::new(
+        SessionManager::new(Arc::new(InMemory::new()))
+            .with_store(store.clone())
+            .unwrap(),
+    );
+    let path = dir.path().join("instances.json");
+    let instances = Arc::new(kanon_core::InstanceRegistry::open(&path).await.unwrap());
+    let state = ApiState::builder(Arc::new(kanon_core::supervisor::Supervisor::new(
+        Some(dir.path().join("run")),
+        None,
+    )))
+    .with_sessions(sessions.clone())
+    .with_instances(instances.clone())
+    .build();
+    let app = kanon_api::app(state.clone());
+    let (status, body) = send_json(
+        &app,
+        Method::POST,
+        "/api/v1/instances",
+        Some(json!({"name":"Owner", "system_prompt":"owned prompt"})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    sessions.set_persona("s", "instance:owner").unwrap();
+
+    store.reject.store(true, Ordering::SeqCst);
+    let (status, body) = send_json(
+        &app,
+        Method::PUT,
+        "/api/v1/instances/owner",
+        Some(json!({"name":"Owner"})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR, "{body}");
+    assert!(
+        instances
+            .get("owner")
+            .await
+            .unwrap()
+            .system_prompt
+            .is_some()
+    );
+    assert!(state.personas().get("instance:owner").is_some());
+    assert_eq!(sessions.get_persona("s").as_deref(), Some("instance:owner"));
+
+    // A failed instance document write retains the owner/persona after durable unbinding.
+    store.reject.store(false, Ordering::SeqCst);
+    let saved = dir.path().join("saved-instances.json");
+    std::fs::rename(&path, &saved).unwrap();
+    std::fs::create_dir(&path).unwrap();
+    let (status, body) = send_json(&app, Method::DELETE, "/api/v1/instances/owner", None).await;
+    assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR, "{body}");
+    assert!(instances.get("owner").await.is_some());
+    assert!(state.personas().get("instance:owner").is_some());
+    assert!(sessions.get_persona("s").is_none());
+    assert!(store.rows.lock().unwrap()["s"].persona_id.is_none());
+    std::fs::remove_dir(&path).unwrap();
+    std::fs::rename(saved, &path).unwrap();
+    let (status, body) = send_json(&app, Method::DELETE, "/api/v1/instances/owner", None).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert!(state.personas().get("instance:owner").is_none());
+    assert!(
+        kanon_core::InstanceRegistry::open(&path)
+            .await
+            .unwrap()
+            .is_empty()
+            .await
+    );
+
+    // Startup must fail if a legacy orphan binding cannot be cleaned durably.
+    sessions.set_persona("orphan", "instance:gone").unwrap();
+    store.reject.store(true, Ordering::SeqCst);
+    assert!(kanon_core::restore_instance_personas(&[], state.personas(), &sessions).is_err());
+    assert_eq!(
+        sessions.get_persona("orphan").as_deref(),
+        Some("instance:gone")
+    );
+    store.reject.store(false, Ordering::SeqCst);
+    kanon_core::restore_instance_personas(&[], state.personas(), &sessions).unwrap();
+    assert!(store.rows.lock().unwrap()["orphan"].persona_id.is_none());
+}

@@ -38,7 +38,7 @@ let binding = $state<{
   key: string;
   name: string;
   persona: string;
-  /** The owning instance sets the persona itself, overriding any binding on its next message. */
+  /** Instance settings take precedence while preserving the saved session choice. */
   pinned: boolean;
 } | null>(null);
 let bindError = $state<string | null>(null);
@@ -104,8 +104,8 @@ function parse(key: string): Parsed {
 }
 
 /**
- * Names the persona a session runs with. An instance's own prompt is published as the persona
- * `instance:<id>`, whose name would only repeat the instance's name shown next to it.
+ * Names the saved session choice, which instance settings may take precedence over.
+ * A legacy `instance:<id>` binding repeats the instance name, so label it as its own prompt.
  */
 function personaName(id: string, instanceId: string | null): string {
   if (instanceId !== null && id === `instance:${instanceId}`) {
@@ -159,7 +159,7 @@ async function applyPersona() {
   bindSaving = true;
   bindError = null;
   try {
-    // An empty choice removes the binding, and the session answers as the base assistant.
+    // Clear only the session choice; instance settings still take precedence over the base.
     await api.setSessionPersona(binding.key, binding.persona || null);
     toasts.ok(t('sessions.persona_toast', { name: binding.name }));
     binding = null;
@@ -230,7 +230,9 @@ async function applyPersona() {
           <div class="flex flex-wrap items-center gap-x-2.5 gap-y-1">
             <h2 class="m-0 min-w-0 truncate text-[16px] font-semibold">{info.name}</h2>
             {#if session.persona_id}
-              <span class="chip chip-sm chip-muted">{personaName(session.persona_id, info.instanceId)}</span>
+              <span class="chip chip-sm chip-muted">
+                {t('sessions.persona_saved', { name: personaName(session.persona_id, info.instanceId) })}
+              </span>
             {/if}
           </div>
           <p class="m-0 mt-0.5 flex flex-wrap gap-x-4 gap-y-0.5 text-[13.5px] text-fg2">
@@ -283,6 +285,7 @@ async function applyPersona() {
   onclose={() => (binding = null)}
 >
   {#if binding}
+    {@const savedPersona = sessions.find((session) => session.session_key === binding?.key)?.persona_id}
     <form
       id="session-persona"
       class="flex flex-col gap-3"
@@ -295,6 +298,10 @@ async function applyPersona() {
         <label class="label" for="session-persona-select">{t('nav.personas')}</label>
         <Select id="session-persona-select" bind:value={binding.persona}>
           <option value="">{t('sessions.persona_none')}</option>
+          {#if savedPersona && !personasStore.library.some((persona) => persona.id === savedPersona)}
+            <!-- Keep the saved legacy choice visible without offering other generated personas. -->
+            <option value={savedPersona}>{personaName(savedPersona, parse(binding.key).instanceId)}</option>
+          {/if}
           {#each personasStore.library as persona (persona.id)}
             <option value={persona.id}>{persona.name}</option>
           {/each}

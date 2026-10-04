@@ -53,7 +53,7 @@ use kanon_core::{
     DEFAULT_SKILLS_DIR, DEFAULT_TOGGLE_STATE, EventIngress, HOST_WATCHDOG_INTERVAL,
     InstanceRegistry, MCP_WATCHDOG_INTERVAL, McpConfigStore, McpPool, PLUGIN_SECTION,
     PluginAgentHook, ReadSkillTool, SkillCatalogHook, SkillStore, ToggleStore,
-    sync_instance_personas,
+    restore_instance_personas,
 };
 use kanon_llm::PersonaStore;
 use tokio::sync::{mpsc, oneshot};
@@ -254,7 +254,10 @@ async fn main() -> StartupResult<()> {
         .build();
 
     // Publish instance prompts as personas before the first message can arrive.
-    sync_instance_personas(&instances.list().await, state.personas());
+    restore_instance_personas(&instances.list().await, state.personas(), state.sessions())
+        .map_err(|err| {
+            format!("Failed to restore instance personas and session bindings: {err}")
+        })?;
 
     match state.agent() {
         Some(agent) => tracing::info!(

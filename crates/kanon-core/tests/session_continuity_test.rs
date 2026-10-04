@@ -5,6 +5,7 @@
 //! and generation), the session store (persona binding, counters) and the memory backend (history)
 //! — so the guarantee is tested end to end through the pipeline, over a real database file.
 
+use std::future::Future;
 use std::path::Path;
 use std::sync::{Arc, Mutex};
 
@@ -46,6 +47,7 @@ struct Node {
     provider: Arc<Recorder>,
     sessions: Arc<SessionManager>,
     registry: Arc<InstanceRegistry>,
+    personas: Arc<PersonaRegistry>,
 }
 
 /// Starts a node whose state lives under `dir`, the way the composition root does.
@@ -67,12 +69,17 @@ async fn start(dir: &Path) -> Node {
         .register(Persona::custom("pirate", "Pirate", "", "You talk like a pirate.").unwrap())
         .unwrap();
 
+    personas
+        .register(Persona::custom("concise", "Concise", "", "Be concise.").unwrap())
+        .unwrap();
+    kanon_core::restore_instance_personas(&registry.list().await, &personas, &sessions).unwrap();
+
     let provider = Arc::new(Recorder::default());
     let agent = Arc::new(
         BuiltinAgent::builder("continuity", provider.clone())
             .memory(sessions.memory().clone())
             .session_manager(sessions.clone())
-            .persona_registry(personas)
+            .persona_registry(personas.clone())
             .model("test-model")
             .build(),
     );
@@ -90,6 +97,7 @@ async fn start(dir: &Path) -> Node {
         provider,
         sessions,
         registry,
+        personas,
     }
 }
 
@@ -137,6 +145,120 @@ fn draft(name: &str) -> InstanceDraft {
         adapters: vec!["qq".to_string()],
         ..InstanceDraft::default()
     }
+}
+
+#[tokio::test]
+async fn clearing_instance_personas_restores_the_explicit_session_choice_after_restart() {
+    let dir = tempfile::tempdir().unwrap();
+    let node = start(dir.path()).await;
+    let mut configured = draft("Test Bot");
+    configured.persona_id = Some("pirate".to_string());
+    configured.system_prompt = Some("Instance instructions.".to_string());
+    let instance = node
+        .registry
+        .create(configured.clone(), Some((&node.personas, &node.sessions)))
+        .await
+        .unwrap();
+    let session = instance.conversation_session_id("group:1:user:1");
+    node.sessions.set_persona(&session, "concise").unwrap();
+
+    let first = say(&node, "e1", "first").await;
+    assert_eq!(first[0].content.as_deref(), Some("Instance instructions."));
+    assert_eq!(
+        node.sessions.get_persona(&session).as_deref(),
+        Some("concise")
+    );
+
+    configured.system_prompt = None;
+    node.registry
+        .update(
+            &instance.id,
+            configured.clone(),
+            Some((&node.personas, &node.sessions)),
+        )
+        .await
+        .unwrap();
+    let second = say(&node, "e2", "second").await;
+    assert_eq!(
+        second[0].content.as_deref(),
+        Some("You talk like a pirate.")
+    );
+    assert_eq!(
+        node.sessions.get_persona(&session).as_deref(),
+        Some("concise")
+    );
+
+    configured.persona_id = None;
+    node.registry
+        .update(
+            &instance.id,
+            configured,
+            Some((&node.personas, &node.sessions)),
+        )
+        .await
+        .unwrap();
+    let third = say(&node, "e3", "third").await;
+    assert_eq!(third[0].content.as_deref(), Some("Be concise."));
+    assert_eq!(
+        dialogue(&third),
+        vec!["first", "reply 1", "second", "reply 2", "third"]
+    );
+    drop(node);
+
+    let node = start(dir.path()).await;
+    let fourth = say(&node, "e4", "fourth").await;
+    assert_eq!(fourth[0].content.as_deref(), Some("Be concise."));
+    assert_eq!(
+        node.sessions.get_persona(&session).as_deref(),
+        Some("concise")
+    );
+    node.sessions.clear_persona(&session).unwrap();
+    let fifth = say(&node, "e5", "fifth").await;
+    assert_eq!(
+        fifth[0].content.as_deref(),
+        Some(kanon_llm::BASE_PERSONA_PROMPT)
+    );
+}
+
+#[tokio::test]
+async fn a_queued_turn_reads_the_current_instance_persona_after_acquiring_its_writer() {
+    let dir = tempfile::tempdir().unwrap();
+    let node = start(dir.path()).await;
+    let mut configured = draft("Test Bot");
+    configured.persona_id = Some("pirate".to_string());
+    let instance = node
+        .registry
+        .create(configured.clone(), Some((&node.personas, &node.sessions)))
+        .await
+        .unwrap();
+    let session = instance.conversation_session_id("group:1:user:1");
+    let writing = node.sessions.try_write(&session).unwrap();
+    let turn = node.engine.process_event(event("e1", "hello"));
+    tokio::pin!(turn);
+    // Drive the turn until it waits behind the existing writer, then edit the instance before
+    // releasing it. Reading the earlier routing snapshot would incorrectly keep the old persona.
+    std::future::poll_fn(|cx| {
+        assert!(turn.as_mut().poll(cx).is_pending());
+        std::task::Poll::Ready(())
+    })
+    .await;
+    configured.persona_id = Some("concise".to_string());
+    node.registry
+        .update(
+            &instance.id,
+            configured,
+            Some((&node.personas, &node.sessions)),
+        )
+        .await
+        .unwrap();
+    drop(writing);
+    assert!(matches!(turn.await, PipelineResult::LlmReplied { .. }));
+    let requests = node.provider.requests.lock().unwrap();
+    assert_eq!(requests[0][0].content.as_deref(), Some("Be concise."));
+    assert!(
+        node.sessions.get_persona(&session).is_none(),
+        "inheritance must not create a durable session choice"
+    );
 }
 
 #[tokio::test]

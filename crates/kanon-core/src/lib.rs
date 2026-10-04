@@ -46,7 +46,7 @@ pub use conversation::{
 };
 pub use instance::{
     BashScope, BotInstance, DEFAULT_INSTANCE_CATALOG, InstanceDraft, InstanceError,
-    InstanceRegistry, SessionScope, instance_persona_id, sync_instance_personas,
+    InstanceRegistry, SessionScope, instance_persona_id, restore_instance_personas,
 };
 pub use ipc::{CoreApiService, CoreIpcServer};
 pub use manifest::{

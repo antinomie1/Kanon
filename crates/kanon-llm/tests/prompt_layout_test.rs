@@ -23,9 +23,218 @@ use kanon_llm::gateway::types::{
     ChatMessage, ChatRequest, ChatResponse, ContentPart, Role, ToolCall, ToolDefinition,
 };
 use kanon_llm::memory::{InMemory, Memory};
-use kanon_llm::prompt::{BASE_PERSONA_PROMPT, PersonaRegistry};
+use kanon_llm::prompt::{BASE_PERSONA_PROMPT, Persona, PersonaRegistry};
 use kanon_llm::session::SessionManager;
-use kanon_llm::{canonical_json, canonical_tools, normalize_request};
+use kanon_llm::{TurnOptions, canonical_json, canonical_tools, normalize_request};
+
+/// Simulates a hook whose configuration changes after the turn's final request.
+struct ChangingPrefix(Arc<AtomicBool>);
+
+#[async_trait]
+impl AgentHook for ChangingPrefix {
+    async fn on_llm_request(
+        &self,
+        _session: &str,
+        request: &mut ChatRequest,
+    ) -> Result<(), kanon_llm::AgentError> {
+        let suffix = if self.0.load(Ordering::SeqCst) {
+            "new configuration"
+        } else {
+            "original configuration"
+        };
+        request.messages[0]
+            .content
+            .as_mut()
+            .unwrap()
+            .push_str(&format!("\n\n{suffix}"));
+        request.tools[0].description = suffix.to_string();
+        Ok(())
+    }
+}
+
+/// Changes the persona between tool rounds and the hook configuration before compaction.
+struct PersonaChangeProvider {
+    requests: Mutex<Vec<ChatRequest>>,
+    personas: Arc<PersonaRegistry>,
+    changed: Arc<AtomicBool>,
+    compacted: tokio::sync::Notify,
+}
+
+#[async_trait]
+impl LlmProvider for PersonaChangeProvider {
+    async fn chat(&self, request: &ChatRequest) -> Result<ChatResponse, GatewayError> {
+        let mut requests = self.requests.lock().unwrap();
+        let round = requests.len();
+        requests.push(request.clone());
+        if round == 0 {
+            self.personas.remove("inherited").unwrap();
+            return Ok(ChatResponse {
+                tool_calls: vec![ToolCall {
+                    id: "call-1".to_string(),
+                    name: "inspect".to_string(),
+                    arguments: json!({}),
+                }],
+                finish_reason: Some("tool_calls".to_string()),
+                ..ChatResponse::default()
+            });
+        }
+        if round == 1 {
+            self.changed.store(true, Ordering::SeqCst);
+        } else {
+            self.compacted.notify_one();
+        }
+        Ok(ChatResponse {
+            content: Some(if round == 1 { "answer" } else { "summary" }.to_string()),
+            finish_reason: Some("stop".to_string()),
+            ..ChatResponse::default()
+        })
+    }
+}
+
+#[tokio::test]
+async fn inherited_persona_and_final_hook_prefix_survive_tool_rounds_and_compaction() {
+    let personas = Arc::new(PersonaRegistry::new());
+    let inherited =
+        Persona::custom("inherited", "Inherited", "", "Instance instructions.").unwrap();
+    personas.register(inherited.clone()).unwrap();
+    personas
+        .register(Persona::custom("chosen", "Chosen", "", "Session instructions.").unwrap())
+        .unwrap();
+    let sessions = Arc::new(SessionManager::new(Arc::new(InMemory::new())));
+    sessions.set_persona("s", "chosen").unwrap();
+    let changed = Arc::new(AtomicBool::new(false));
+    let provider = Arc::new(PersonaChangeProvider {
+        requests: Mutex::new(Vec::new()),
+        personas: personas.clone(),
+        changed: changed.clone(),
+        compacted: tokio::sync::Notify::new(),
+    });
+    let agent = BuiltinAgent::builder("snapshot", provider.clone())
+        .session_manager(sessions.clone())
+        .persona_registry(personas)
+        .tool(tool("inspect"))
+        .hook(ChangingPrefix(changed))
+        .compaction(Some(kanon_llm::CompactionPolicy {
+            trigger_ratio: 1.0,
+            default_context_tokens: 1,
+            min_messages: 2,
+        }))
+        .build();
+    let writing = sessions.try_write("s").unwrap();
+    writing
+        .scope(agent.run_message_with(
+            "s",
+            ChatMessage::user("hello"),
+            &[],
+            TurnOptions {
+                persona: Some(inherited),
+                ..TurnOptions::default()
+            },
+        ))
+        .await
+        .unwrap();
+    let later = vec![
+        ChatMessage::user("later turn"),
+        ChatMessage::assistant("later answer"),
+    ];
+    // A subsequent writer may append before the queued compaction gets the mutex. Its messages
+    // belong to another prefix and must remain outside the captured summary's covered boundary.
+    sessions
+        .memory()
+        .extend_messages("s", later.clone())
+        .await
+        .unwrap();
+    drop(writing);
+    tokio::time::timeout(
+        std::time::Duration::from_secs(2),
+        provider.compacted.notified(),
+    )
+    .await
+    .unwrap();
+    let _writing = sessions.write("s").await;
+    assert_eq!(
+        sessions
+            .memory()
+            .snapshot("s")
+            .await
+            .unwrap()
+            .summary
+            .as_deref(),
+        Some("summary")
+    );
+    assert_eq!(sessions.get_persona("s").as_deref(), Some("chosen"));
+    assert_eq!(
+        sessions.memory().snapshot("s").await.unwrap().messages,
+        later
+    );
+    let requests = provider.requests.lock().unwrap();
+    assert_eq!(requests.len(), 3);
+    assert_eq!(
+        requests[0].messages[0].content.as_deref(),
+        Some("Instance instructions.\n\noriginal configuration")
+    );
+    for request in &requests[1..] {
+        assert_eq!(request.messages[0], requests[0].messages[0]);
+        assert_eq!(
+            serde_json::to_value(&request.tools).unwrap(),
+            serde_json::to_value(&requests[0].tools).unwrap()
+        );
+    }
+    assert!(
+        !requests[2]
+            .messages
+            .iter()
+            .any(|message| message.content.as_deref() == Some("later turn"))
+    );
+}
+
+#[tokio::test]
+async fn manual_compaction_uses_explicit_inheritance_without_changing_the_session_choice() {
+    let provider = Arc::new(Recorder::default());
+    let sessions = Arc::new(SessionManager::new(Arc::new(InMemory::new())));
+    let personas = Arc::new(PersonaRegistry::new());
+    personas
+        .register(Persona::custom("chosen", "Chosen", "", "Session instructions.").unwrap())
+        .unwrap();
+    sessions.set_persona("s", "chosen").unwrap();
+    let agent = BuiltinAgent::builder("manual", provider.clone())
+        .session_manager(sessions.clone())
+        .persona_registry(personas)
+        .tool(tool("inspect"))
+        .compaction(None)
+        .build();
+    let options = TurnOptions {
+        persona: Some(
+            Persona::custom("inherited", "Inherited", "", "Instance instructions.").unwrap(),
+        ),
+        without_tools: true,
+        ..TurnOptions::default()
+    };
+    for message in ["first", "second"] {
+        agent
+            .run_message_with("s", ChatMessage::user(message), &[], options.clone())
+            .await
+            .unwrap();
+    }
+    assert!(agent.compact_session_with("s", &[], options).await.unwrap());
+    assert_eq!(sessions.get_persona("s").as_deref(), Some("chosen"));
+    agent.run("s", "third", &[]).await.unwrap();
+    let requests = provider.requests.lock().unwrap();
+    for request in &requests[..3] {
+        assert_eq!(
+            request.messages[0].content.as_deref(),
+            Some("Instance instructions.")
+        );
+        assert!(request.tools.is_empty());
+    }
+    assert!(
+        requests[3].messages[0]
+            .content
+            .as_deref()
+            .unwrap()
+            .starts_with("Session instructions.\n\n")
+    );
+}
 
 /// Host-owned runtime status enriches the originating turn, never tools or the system block.
 struct Availability(Arc<AtomicBool>);

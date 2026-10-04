@@ -268,6 +268,9 @@ fn map_error(err: InstanceError) -> ApiError {
         )),
         InstanceError::Invalid(reason) => ApiError::BadRequest(reason),
         InstanceError::Io(reason) => ApiError::Internal(reason),
+        error @ InstanceError::PersonaInUse { .. } => ApiError::Conflict(error.to_string()),
+        InstanceError::Persona(error) => ApiError::BadRequest(error.to_string()),
+        InstanceError::Session(error) => error.into(),
     }
 }
 
@@ -300,7 +303,7 @@ async fn create_instance(
     let draft: InstanceDraft = payload.into();
     let instance = state
         .instances()
-        .create(draft, Some(state.personas()))
+        .create(draft, Some((state.personas(), state.sessions())))
         .await
         .map_err(map_error)?;
 
@@ -327,7 +330,7 @@ async fn update_instance(
     let draft: InstanceDraft = payload.into();
     let instance = state
         .instances()
-        .update(&id, draft, Some(state.personas()))
+        .update(&id, draft, Some((state.personas(), state.sessions())))
         .await
         .map_err(map_error)?;
 
@@ -353,7 +356,7 @@ async fn delete_instance(
 ) -> Result<Json<InstanceMutationResponse>, ApiError> {
     state
         .instances()
-        .delete(&id, Some(state.personas()))
+        .delete(&id, Some((state.personas(), state.sessions())))
         .await
         .map_err(map_error)?;
 

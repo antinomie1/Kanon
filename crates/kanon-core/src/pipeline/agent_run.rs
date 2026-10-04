@@ -172,6 +172,7 @@ impl PipelineEngine {
         let options = TurnOptions {
             max_iterations: run.max_steps,
             without_tools: !run.use_tools,
+            ..TurnOptions::default()
         };
 
         let result = match (&chat, run.in_conversation, &run.context) {
@@ -180,22 +181,6 @@ impl PipelineEngine {
                     .sessions()
                     .try_write(&session_id)
                     .map_err(|_| ConversationError::Busy(session_id.clone()))?;
-                // The instance decides the persona, as for the pipeline's own turns.
-                if let Some(persona_id) = chat.instance.effective_persona_id()
-                    && let Some(sessions) = agent.session_manager()
-                {
-                    factory
-                        .personas()
-                        .with_persona(&persona_id, |_| {
-                            sessions.set_persona(&session_id, &persona_id)
-                        })
-                        .ok_or_else(|| {
-                            ConversationError::Invalid(format!(
-                                "persona '{persona_id}' no longer exists"
-                            ))
-                        })?
-                        .map_err(|error| ConversationError::Storage(error.to_string()))?;
-                }
                 writing
                     .scope(self.run_conversation_turn(
                         ConversationTurn {

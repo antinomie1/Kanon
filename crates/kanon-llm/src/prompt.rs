@@ -14,15 +14,7 @@
 //! persona is created by the operator ([`PersonaKind::Custom`]) or derived from a bot instance's
 //! own prompt ([`PersonaKind::Instance`]).
 
-use std::sync::Arc;
-
-use async_trait::async_trait;
 use dashmap::DashMap;
-
-use crate::agent::AgentHook;
-use crate::error::AgentError;
-use crate::gateway::types::{ChatMessage, ChatRequest};
-use crate::session::SessionManager;
 
 /// Identifier of the base assistant persona.
 pub const BASE_PERSONA_ID: &str = "assistant";
@@ -226,7 +218,7 @@ impl PersonaRegistry {
     ///
     /// The callback owns an exclusive shard guard and must not re-enter this registry. Catalog
     /// snapshots must be prepared before calling this method; no guard crosses an await point.
-    pub(crate) fn remove_after<E: From<PersonaError>>(
+    pub fn remove_after<E: From<PersonaError>>(
         &self,
         id: &str,
         prepare: impl FnOnce(&Persona) -> Result<(), E>,
@@ -276,56 +268,5 @@ impl PersonaRegistry {
     /// Always `false`: the base assistant is always registered.
     pub fn is_empty(&self) -> bool {
         self.personas.is_empty()
-    }
-}
-
-/// Lifecycle hook that puts the session's persona at the top of every request.
-///
-/// The persona is the most stable part of a prompt, so it goes first. The session's persona is
-/// resolved on every call, which is what makes a console switch effective on the very next turn.
-pub struct PersonaHook {
-    session_manager: Arc<SessionManager>,
-    persona_registry: Arc<PersonaRegistry>,
-}
-
-impl PersonaHook {
-    /// Constructs the hook over the node's sessions and personas.
-    pub fn new(
-        session_manager: Arc<SessionManager>,
-        persona_registry: Arc<PersonaRegistry>,
-    ) -> Self {
-        Self {
-            session_manager,
-            persona_registry,
-        }
-    }
-
-    /// Resolves the bound persona; only sessions without a binding use the base assistant.
-    fn persona_for(&self, session_id: &str) -> Result<Persona, AgentError> {
-        let Some(bound) = self.session_manager.get_persona(session_id) else {
-            return Ok(self.persona_registry.base());
-        };
-        // A stale binding is a configuration failure. Sending the base prompt would change the
-        // conversation's instructions without the operator selecting a different persona.
-        self.persona_registry.get(&bound).ok_or_else(|| {
-            AgentError::InvalidRequest(format!(
-                "session '{session_id}' is bound to missing persona '{bound}'"
-            ))
-        })
-    }
-}
-
-#[async_trait]
-impl AgentHook for PersonaHook {
-    async fn on_llm_request(
-        &self,
-        session_id: &str,
-        request: &mut ChatRequest,
-    ) -> Result<(), AgentError> {
-        // The persona is the first part of the static system block, ahead of anything else placed
-        // there, because it is the part that changes least.
-        let prompt = self.persona_for(session_id)?.prompt;
-        request.messages.insert(0, ChatMessage::system(prompt));
-        Ok(())
     }
 }

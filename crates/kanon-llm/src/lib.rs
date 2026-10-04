@@ -8,7 +8,7 @@
 //! - [`builtin`]: [`BuiltinAgent`], Kanon's own tool-loop agent and the node's only implementation.
 //! - [`error`]: Granular error types for gateway, agent, and tool routing.
 //! - [`gateway`]: Protocol-level LLM client implementations (OpenAI Chat, OpenAI Responses, Anthropic Messages).
-//! - [`prompt`]: Static personas and the hook that places them at the top of every request.
+//! - [`prompt`]: Static personas resolved once per turn before request composition.
 //! - [`layout`]: The static-first request layout and the normalization that keeps prompt prefixes stable.
 //! - [`memory`]: Append-only conversation memory: the [`Memory`] trait and the lock-free [`InMemory`] backend.
 //! - [`compaction`]: Cache-safe context compaction, the only way history gets shorter.
@@ -63,8 +63,8 @@ pub use memory::{InMemory, Memory, MemorySnapshot, SessionMemory, StoredSession}
 pub use model::{ModelCapabilities, ModelCatalog, ModelRef, ModelSettingsSource, ModelSpec};
 pub use persona_store::{DEFAULT_PERSONA_FILE, PersonaChangeError, PersonaStore};
 pub use prompt::{
-    BASE_PERSONA_ID, BASE_PERSONA_PROMPT, Persona, PersonaError, PersonaHook, PersonaKind,
-    PersonaRegistry, is_valid_slug,
+    BASE_PERSONA_ID, BASE_PERSONA_PROMPT, Persona, PersonaError, PersonaKind, PersonaRegistry,
+    is_valid_slug,
 };
 pub use provider::{ProviderEntry, ProviderRegistry, ResolvedProvider};
 pub use session::{

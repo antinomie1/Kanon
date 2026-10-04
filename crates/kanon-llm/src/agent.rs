@@ -129,9 +129,28 @@ pub trait Agent: Send + Sync {
     /// nothing to fold, which is the default.
     async fn compact_session(
         &self,
+        session_id: &str,
+        hosts: &[Arc<dyn ToolHost>],
+    ) -> Result<bool, AgentError> {
+        self.compact_session_with(session_id, hosts, TurnOptions::default())
+            .await
+    }
+
+    /// Compacts with the same inherited persona and tool selection as the conversation's turn.
+    ///
+    /// Callers that supply an instance persona must resolve its current configuration first,
+    /// exactly as they do for a turn. Unsupported overrides fail instead of using another prefix.
+    async fn compact_session_with(
+        &self,
         _session_id: &str,
         _hosts: &[Arc<dyn ToolHost>],
+        options: TurnOptions,
     ) -> Result<bool, AgentError> {
+        if options != TurnOptions::default() {
+            return Err(AgentError::InvalidRequest(
+                "this agent does not support compaction settings".to_string(),
+            ));
+        }
         Ok(false)
     }
 
@@ -167,9 +186,14 @@ pub trait Agent: Send + Sync {
 
 /// Settings that apply to one turn only, on top of the agent's [`AgentConfig`].
 ///
-/// The default changes nothing, which is how the pipeline answers chat messages.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+/// The default uses the session's explicit persona choice and the agent's tool settings.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct TurnOptions {
+    /// Resolved instance persona, overriding the session's explicit choice for this turn only.
+    ///
+    /// This immutable snapshot is reused for tool rounds and background compaction. Inherited
+    /// instance configuration must never be copied into the session's durable persona binding.
+    pub persona: Option<crate::prompt::Persona>,
     /// Tool rounds allowed in this turn; `None` uses [`AgentConfig::max_iterations`].
     pub max_iterations: Option<usize>,
     /// Offers the model no tools at all in this turn, the agent's native tools included.

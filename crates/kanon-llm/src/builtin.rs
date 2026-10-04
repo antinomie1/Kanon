@@ -5,7 +5,7 @@
 //! - conversational memory implementing [`Memory`] (append-only, compacted into summaries);
 //! - native in-process tools implementing [`AgentTool`] (zero IPC overhead);
 //! - cross-process tool calling via [`ToolHost`];
-//! - lifecycle hooks via [`AgentHook`] for personas, skill catalogs, guardrails and tracing.
+//! - static persona composition and lifecycle hooks for skills, guardrails and tracing.
 
 use async_trait::async_trait;
 use std::sync::Arc;
@@ -21,6 +21,7 @@ use crate::gateway::types::{
 use crate::gateway::{ChatChunk, ChatChunkStream, LlmProvider};
 use crate::layout::normalize_request;
 use crate::memory::{InMemory, Memory, MemorySnapshot};
+use crate::prompt::Persona;
 use crate::session::SessionWriters;
 use crate::stop::{StopSignal, unless_stopped};
 use crate::tool_router::{
@@ -51,7 +52,7 @@ pub const FAILED_TOOL_RESULT: &str =
 pub struct BuiltinAgent {
     /// Identifier or role name of this agent.
     name: String,
-    /// Static instructions placed at the top of the system block, before the persona.
+    /// Static instructions placed after the persona and before ordinary lifecycle hooks.
     system_prompt: Option<String>,
     /// Provider backend for LLM completions.
     provider: Arc<dyn LlmProvider>,
@@ -72,6 +73,12 @@ pub struct BuiltinAgent {
     compaction_locks: Option<Arc<SessionWriters>>,
     /// Sessions with a compaction in flight, so a burst of turns schedules one, not many.
     compacting: Arc<DashSet<String>>,
+}
+
+/// A completed turn's exact history and effective system prefix, captured while it owns the writer.
+struct PreparedCompaction {
+    snapshot: MemorySnapshot,
+    prefix: Vec<ChatMessage>,
 }
 
 impl BuiltinAgent {
@@ -107,10 +114,46 @@ impl BuiltinAgent {
         Ok(tools)
     }
 
+    /// Resolves one immutable persona before recording a turn or beginning manual compaction.
+    ///
+    /// Instance inheritance overrides an explicit session choice without mutating it. Unknown
+    /// bindings fail before history changes; tool rounds never look up a different persona later.
+    fn resolve_persona(
+        &self,
+        session_id: &str,
+        inherited: Option<Persona>,
+    ) -> Result<Option<Persona>, AgentError> {
+        if let Some(persona) = inherited {
+            persona
+                .validate()
+                .map_err(|error| AgentError::InvalidRequest(error.to_string()))?;
+            return Ok(Some(persona));
+        }
+        let Some(sessions) = &self.session_manager else {
+            return Ok(None);
+        };
+        let Some(bound) = sessions.get_persona(session_id) else {
+            return Ok(self
+                .persona_registry
+                .as_ref()
+                .map(|personas| personas.base()));
+        };
+        let personas = self.persona_registry.as_ref().ok_or_else(|| {
+            AgentError::InvalidRequest(format!(
+                "session '{session_id}' is bound to persona '{bound}' without a persona catalog"
+            ))
+        })?;
+        personas.get(&bound).map(Some).ok_or_else(|| {
+            AgentError::InvalidRequest(format!(
+                "session '{session_id}' is bound to missing persona '{bound}'"
+            ))
+        })
+    }
+
     /// Builds the request for one model call, laid out static-first.
     ///
     /// The messages start as the session history (append-only). The agent's own instructions go
-    /// first, hooks then add the persona and skill catalog, the conversation summary (when there is
+    /// after the resolved persona, hooks then add the skill catalog, and the summary (when there is
     /// one) follows them, and [`normalize_request`] merges that whole static block into one system
     /// message. The result is `[tools] [system] [history…] [current turn]`: only the tail changes
     /// from one call to the next, so the provider serves everything before it from its prompt cache.
@@ -118,9 +161,11 @@ impl BuiltinAgent {
         &self,
         session_id: &str,
         tools: &[ToolDefinition],
+        persona: Option<&Persona>,
     ) -> Result<ChatRequest, AgentError> {
         let snapshot = self.memory.snapshot(session_id).await?;
-        self.request_from(session_id, snapshot, tools).await
+        self.request_from(session_id, snapshot, tools, persona, None)
+            .await
     }
 
     /// Builds a request from an already-read memory snapshot.
@@ -132,6 +177,8 @@ impl BuiltinAgent {
         session_id: &str,
         snapshot: MemorySnapshot,
         tools: &[ToolDefinition],
+        persona: Option<&Persona>,
+        prepared_prefix: Option<&[ChatMessage]>,
     ) -> Result<ChatRequest, AgentError> {
         let MemorySnapshot { summary, messages } = snapshot;
 
@@ -143,29 +190,41 @@ impl BuiltinAgent {
             max_tokens: self.config.max_tokens,
         };
 
-        if let Some(prompt) = &self.system_prompt {
-            request
-                .messages
-                .insert(0, ChatMessage::system(prompt.clone()));
-        }
+        if let Some(prefix) = prepared_prefix {
+            // Automatic compaction must reuse the final prefix, including plugin rewrites and
+            // its summary, even if configuration or a hook's cache changed after this turn.
+            request.messages.splice(..0, prefix.iter().cloned());
+        } else {
+            if let Some(prompt) = &self.system_prompt {
+                request
+                    .messages
+                    .insert(0, ChatMessage::system(prompt.clone()));
+            }
 
-        // Lifecycle Hook: before LLM request (persona, skill catalog, RAG, tracing, ...)
-        for hook in &self.hooks {
-            hook.on_llm_request(session_id, &mut request).await?;
-        }
+            if let Some(persona) = persona {
+                request
+                    .messages
+                    .insert(0, ChatMessage::system(persona.prompt.clone()));
+            }
 
-        // The summary changes only when the history is compacted, so it sits *after* the persona
-        // and skill catalog (which change less often still) and just before the history it stands in
-        // for.
-        if let Some(summary) = summary {
-            let position = request
-                .messages
-                .iter()
-                .take_while(|message| message.role == Role::System)
-                .count();
-            request
-                .messages
-                .insert(position, ChatMessage::system(summary_block(&summary)));
+            // Ordinary hooks see the selected persona before appending skills or rewriting the prefix.
+            for hook in &self.hooks {
+                hook.on_llm_request(session_id, &mut request).await?;
+            }
+
+            // The summary changes only when the history is compacted, so it sits *after* the persona
+            // and skill catalog (which change less often still) and just before the history it stands in
+            // for.
+            if let Some(summary) = summary {
+                let position = request
+                    .messages
+                    .iter()
+                    .take_while(|message| message.role == Role::System)
+                    .count();
+                request
+                    .messages
+                    .insert(position, ChatMessage::system(summary_block(&summary)));
+            }
         }
 
         for message in &mut request.messages {
@@ -183,6 +242,8 @@ impl BuiltinAgent {
         &self,
         session_id: &str,
         tools: &[ToolDefinition],
+        persona: Option<&Persona>,
+        prepared: Option<PreparedCompaction>,
     ) -> Result<bool, AgentError> {
         // Both managed callers acquire their session writer before entering here. Embedded
         // callers share weakly retained writers so old session ids do not accumulate mutexes.
@@ -191,7 +252,22 @@ impl BuiltinAgent {
             None => None,
         };
 
-        let snapshot = self.memory.snapshot(session_id).await?;
+        let mut snapshot = self.memory.snapshot(session_id).await?;
+        let prepared_prefix = if let Some(prepared) = prepared {
+            if snapshot.summary != prepared.snapshot.summary
+                || !snapshot.messages.starts_with(&prepared.snapshot.messages)
+            {
+                // A reset or another compaction replaced the captured history. Its prefix must
+                // never be used to summarize unrelated messages; dropping this task allows retry.
+                return Ok(false);
+            }
+            // A later turn may have appended a suffix while this task waited. Summarize only the
+            // captured prefix; compact_history preserves that suffix after the covered boundary.
+            snapshot = prepared.snapshot;
+            Some(prepared.prefix)
+        } else {
+            None
+        };
         let min_messages = self
             .config
             .compaction
@@ -203,7 +279,15 @@ impl BuiltinAgent {
         }
         let covered = snapshot.messages.len();
 
-        let mut request = self.request_from(session_id, snapshot, tools).await?;
+        let mut request = self
+            .request_from(
+                session_id,
+                snapshot,
+                tools,
+                persona,
+                prepared_prefix.as_deref(),
+            )
+            .await?;
         request
             .messages
             .push(ChatMessage::user(COMPACTION_INSTRUCTION));
@@ -263,10 +347,9 @@ impl BuiltinAgent {
     /// waits for it. The size comes from the provider's own token count when it reports one (it
     /// includes the system block and tools) and from an estimate otherwise; the reply is added
     /// because it becomes part of the next request, including reasoning replayed with tools.
-    fn schedule_compaction(
+    async fn schedule_compaction(
         &self,
         session_id: &str,
-        tools: &[ToolDefinition],
         request: &ChatRequest,
         usage: Option<&TokenUsage>,
         reply: &ChatMessage,
@@ -290,20 +373,50 @@ impl BuiltinAgent {
 
         // One compaction per session at a time; a second scheduled meanwhile would only summarize
         // what the first is already summarizing.
-        if !self.compacting.insert(session_id.to_string()) {
+        if self.compacting.contains(session_id) {
             return;
         }
 
+        // Capture only when compaction is needed, before this turn releases its writer. The
+        // background task verifies this exact snapshot rather than guessing from message counts.
+        let snapshot = match self.memory.snapshot(session_id).await {
+            Ok(snapshot) => snapshot,
+            Err(error) => {
+                tracing::warn!(session_id, %error, "Could not prepare conversation compaction");
+                return;
+            }
+        };
+        if snapshot.messages.len() < policy.min_messages.max(1) || !ends_cleanly(&snapshot.messages)
+        {
+            return;
+        }
+        // Publish only after the last await before spawning. Cancelling the turn while reading
+        // memory must not leave a permanent in-flight marker with no task that can clear it.
+        if !self.compacting.insert(session_id.to_string()) {
+            return;
+        }
+        let prepared = PreparedCompaction {
+            snapshot,
+            prefix: request
+                .messages
+                .iter()
+                .take_while(|message| message.role == Role::System)
+                .cloned()
+                .collect(),
+        };
         let agent = self.clone();
         let session_id = session_id.to_string();
-        let tools = tools.to_vec();
+        let tools = request.tools.clone();
         tokio::spawn(async move {
             // A queued compaction must never outlive a reset and restore its old summary.
             let _writing = match agent.session_manager.as_ref() {
                 Some(sessions) => Some(sessions.write(&session_id).await),
                 None => None,
             };
-            if let Err(err) = agent.compact(&session_id, &tools).await {
+            if let Err(err) = agent
+                .compact(&session_id, &tools, None, Some(prepared))
+                .await
+            {
                 tracing::warn!(
                     session_id = %session_id,
                     error = %err,
@@ -332,8 +445,9 @@ impl BuiltinAgent {
         session_id: &str,
         message: ChatMessage,
         hosts: &[Arc<dyn ToolHost>],
-        options: TurnOptions,
+        mut options: TurnOptions,
     ) -> Result<AgentOutput, AgentError> {
+        options.persona = self.resolve_persona(session_id, options.persona)?;
         let (user_input, media) = self.start_turn(session_id, message).await?;
 
         // From here on the turn is part of history. However it ends, the next turn has to find a
@@ -397,7 +511,9 @@ impl BuiltinAgent {
 
         // 3. Reasoning and tool execution loop
         loop {
-            let mut request = self.build_request(session_id, &tools).await?;
+            let mut request = self
+                .build_request(session_id, &tools, options.persona.as_ref())
+                .await?;
             attach_turn_media(&mut request, media.as_ref());
 
             let mut response = self.complete_round(&request, stream, stop.as_ref()).await?;
@@ -465,13 +581,8 @@ impl BuiltinAgent {
                     sm.record_turn(session_id, tokens_used);
                 }
 
-                self.schedule_compaction(
-                    session_id,
-                    &tools,
-                    &request,
-                    response.usage.as_ref(),
-                    &reply,
-                );
+                self.schedule_compaction(session_id, &request, response.usage.as_ref(), &reply)
+                    .await;
 
                 return Ok(AgentOutput {
                     content: final_content,
@@ -518,7 +629,8 @@ impl BuiltinAgent {
                     sm.record_turn(session_id, tokens_used);
                 }
 
-                self.schedule_compaction(session_id, &tools, &request, None, &message);
+                self.schedule_compaction(session_id, &request, None, &message)
+                    .await;
 
                 return Ok(AgentOutput {
                     content: fallback,
@@ -946,6 +1058,10 @@ impl BuiltinAgent {
             .as_ref()
             .map(|sessions| sessions.agent_write(session_id))
             .transpose()?;
+        let options = TurnOptions {
+            persona: self.resolve_persona(session_id, None)?,
+            ..TurnOptions::default()
+        };
         let (user_input, media) = self
             .start_turn(session_id, ChatMessage::user(user_input))
             .await?;
@@ -958,14 +1074,7 @@ impl BuiltinAgent {
             // The producer, not the SSE reader, owns the writer through failure recovery and
             // the final commit. Tokio does not inherit task locals, so carry the stop explicitly.
             let _writing = writing;
-            let turn = agent.answer(
-                &session_id,
-                &user_input,
-                media,
-                &hosts,
-                TurnOptions::default(),
-                Some(&tx),
-            );
+            let turn = agent.answer(&session_id, &user_input, media, &hosts, options, Some(&tx));
             let result = match stop {
                 Some(stop) => crate::with_stop_signal(stop, turn).await,
                 None => turn.await,
@@ -1044,18 +1153,25 @@ impl Agent for BuiltinAgent {
     /// nothing to compact (too short, or not at a clean stopping point — see [`ends_cleanly`]). The
     /// tools of `hosts` are part of the summarization request so its prefix matches the
     /// conversation's own requests and the provider's cache is reused.
-    async fn compact_session(
+    async fn compact_session_with(
         &self,
         session_id: &str,
         hosts: &[Arc<dyn ToolHost>],
+        options: TurnOptions,
     ) -> Result<bool, AgentError> {
         let _writing = self
             .session_manager
             .as_ref()
             .map(|sessions| sessions.agent_write(session_id))
             .transpose()?;
-        let tools = self.collect_tools(hosts)?;
-        self.compact(session_id, &tools).await
+        let persona = self.resolve_persona(session_id, options.persona)?;
+        let tools = if options.without_tools {
+            Vec::new()
+        } else {
+            self.collect_tools(hosts)?
+        };
+        self.compact(session_id, &tools, persona.as_ref(), None)
+            .await
     }
 }
 
@@ -1376,26 +1492,11 @@ impl AgentBuilder {
     }
 
     /// Builds the configured [`BuiltinAgent`].
-    pub fn build(mut self) -> BuiltinAgent {
+    pub fn build(self) -> BuiltinAgent {
         let memory = self
             .memory
             .or_else(|| self.session_manager.as_ref().map(|sm| sm.memory().clone()))
             .unwrap_or_else(|| Arc::new(InMemory::new()));
-
-        if let Some(ref session_mgr) = self.session_manager
-            && let Some(ref persona_reg) = self.persona_registry
-        {
-            // The persona hook puts the persona at the very top of the system block. Registered
-            // first, it runs before every other hook, so hooks that append context (the skill
-            // catalog, RAG, ...) always land after it.
-            self.hooks.insert(
-                0,
-                Arc::new(crate::prompt::PersonaHook::new(
-                    session_mgr.clone(),
-                    persona_reg.clone(),
-                )),
-            );
-        }
 
         let compaction_locks = self
             .session_manager

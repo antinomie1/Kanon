@@ -147,7 +147,7 @@ async fn unknown_persona_is_rejected_before_anything_is_stored() {
 async fn custom_prompt_is_published_as_a_persona_and_survives_deletion_cleanup() {
     let dir = tempfile::tempdir().expect("temp dir");
     let state = common::fixture_state(PathBuf::from(dir.path()), true).await;
-    let app = kanon_api::app(state);
+    let app = kanon_api::app(state.clone());
 
     let (status, created) = common::send_json(
         &app,
@@ -194,6 +194,23 @@ async fn custom_prompt_is_published_as_a_persona_and_survives_deletion_cleanup()
     assert_eq!(status, StatusCode::OK);
     assert_eq!(updated["instance"]["model"], json!("deepseek-flash"));
 
+    // Explicit selections of a generated persona are also unbound, but never during a busy turn.
+    state
+        .sessions()
+        .set_persona("debug", &expected_persona)
+        .unwrap();
+    let writer = state.sessions().try_write("debug").unwrap();
+    let (status, _) = common::send_json(
+        &app,
+        Method::DELETE,
+        &format!("/api/v1/instances/{instance_id}"),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::CONFLICT);
+    assert!(state.instances().get(&instance_id).await.is_some());
+    drop(writer);
+
     // Deleting the instance removes its generated persona again.
     let (status, deleted) = common::send_json(
         &app,
@@ -205,6 +222,7 @@ async fn custom_prompt_is_published_as_a_persona_and_survives_deletion_cleanup()
     assert_eq!(status, StatusCode::OK);
     assert_eq!(deleted["applied"], json!(true));
     assert_eq!(list(&app).await["total"], json!(0));
+    assert!(state.sessions().get_persona("debug").is_none());
 
     let (_, personas) = common::send_json(&app, Method::GET, "/api/v1/personas", None).await;
     assert!(
@@ -215,6 +233,68 @@ async fn custom_prompt_is_published_as_a_persona_and_survives_deletion_cleanup()
             .any(|persona| persona["id"] == json!(expected_persona)),
         "stale instance persona survived deletion: {personas}"
     );
+}
+
+#[tokio::test]
+async fn clearing_an_instance_prompt_rejects_surviving_references_before_unbinding() {
+    let dir = tempfile::tempdir().unwrap();
+    let state = common::empty_state(dir.path().to_path_buf()).await;
+    let app = kanon_api::app(state.clone());
+    for body in [
+        json!({"name":"Owner", "system_prompt":"owned prompt"}),
+        json!({"name":"Reader", "persona_id":"instance:owner"}),
+    ] {
+        let (status, body) =
+            common::send_json(&app, Method::POST, "/api/v1/instances", Some(body)).await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+    }
+    state
+        .sessions()
+        .set_persona("debug", "instance:owner")
+        .unwrap();
+    for (method, body) in [
+        (Method::DELETE, None),
+        (Method::PUT, Some(json!({"name":"Owner"}))),
+    ] {
+        let (status, body) = common::send_json(&app, method, "/api/v1/instances/owner", body).await;
+        assert_eq!(status, StatusCode::CONFLICT, "{body}");
+        assert_eq!(
+            state.sessions().get_persona("debug").as_deref(),
+            Some("instance:owner")
+        );
+    }
+    let (status, _) =
+        common::send_json(&app, Method::DELETE, "/api/v1/instances/reader", None).await;
+    assert_eq!(status, StatusCode::OK);
+
+    // A surviving self-reference is invalid too: clearing the prompt would delete its target.
+    let (status, body) = common::send_json(
+        &app,
+        Method::PUT,
+        "/api/v1/instances/owner",
+        Some(json!({"name":"Owner", "persona_id":"instance:owner"})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CONFLICT, "{body}");
+    let (status, body) = common::send_json(
+        &app,
+        Method::PUT,
+        "/api/v1/instances/owner",
+        Some(json!({"name":"Owner"})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert!(
+        state
+            .instances()
+            .get("owner")
+            .await
+            .unwrap()
+            .system_prompt
+            .is_none()
+    );
+    assert!(state.personas().get("instance:owner").is_none());
+    assert!(state.sessions().get_persona("debug").is_none());
 }
 
 #[tokio::test]

@@ -1034,8 +1034,27 @@ impl PipelineEngine {
             hosts,
             tool_hosts,
             bash_caller,
-            options,
+            mut options,
         } = turn;
+        if let Some(instance_id) =
+            crate::instance::BotInstance::instance_id_from_session(session_id)
+            && let Some(instances) = self.instances()
+        {
+            // Resolve after waiting for this session's writer. The routing snapshot may predate
+            // an instance edit; the current catalog owns inheritance, never session metadata.
+            let personas = self
+                .agent_factory()
+                .map(|factory| factory.personas())
+                .or_else(|| agent.persona_registry());
+            options.persona = instances
+                .persona_for_instance(instance_id, personas.map(Arc::as_ref))
+                .await
+                .map_err(|error| {
+                    kanon_llm::ToolRouterError::Gateway(kanon_llm::GatewayError::InvalidResponse(
+                        error.to_string(),
+                    ))
+                })?;
+        }
         hooks::emit_event(
             hosts,
             EventKind::AgentBegin,
@@ -2223,46 +2242,6 @@ impl PipelineEngine {
                 }),
                 None => None,
             };
-            // The instance decides the persona; sessions without one keep whatever the console
-            // (or the default catalog) assigned to them.
-            if let Some(instance) = instance.as_ref()
-                && let Some(persona_id) = instance.effective_persona_id()
-                && let Some(sessions) = agent.session_manager()
-            {
-                let personas = self
-                    .agent_factory()
-                    .map(|factory| factory.personas())
-                    .or_else(|| agent.persona_registry());
-                let binding = if let Some(personas) = personas {
-                    personas
-                        .with_persona(&persona_id, |_| {
-                            sessions.set_persona(&session_id, &persona_id)
-                        })
-                        .unwrap_or_else(|| {
-                            Err(kanon_llm::error::MemoryError::Backend(format!(
-                                "persona '{persona_id}' no longer exists"
-                            )))
-                        })
-                } else {
-                    // Embedded pipelines may own standalone sessions without a persona catalog.
-                    sessions.set_persona(&session_id, persona_id)
-                };
-                if let Err(error) = binding {
-                    tracing::error!(session_id = %session_id, %error, "Failed to persist the instance persona");
-                    // Do not send a turn with the previous persona when the instance requested
-                    // another one. Unsolicited group turns keep the usual quiet failure policy.
-                    let asked = notice.is_none()
-                        && (!kind.is_policy_governed()
-                            || bot_mentioned(filtered_event.metadata.as_ref()));
-                    if asked {
-                        return PipelineResult::LlmFailed {
-                            error: error.to_string(),
-                            replies: vec![text_reply("会话设置保存失败，本轮未执行，请稍后重试。")],
-                        };
-                    }
-                    return PipelineResult::Passed(filtered_event);
-                }
-            }
             // A model the catalog marks as not tool-capable is offered no external tools. Native
             // in-process tools stay available: they never leave the node and cost nothing to offer.
             let tool_hosts = if capabilities.tool_calling {

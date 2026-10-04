@@ -23,7 +23,8 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
-use kanon_llm::prompt::{Persona, PersonaKind, PersonaRegistry};
+use kanon_llm::prompt::{Persona, PersonaError, PersonaRegistry};
+use kanon_llm::{SessionManager, error::MemoryError};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use tokio::sync::RwLock;
@@ -36,8 +37,8 @@ pub const DEFAULT_INSTANCE_CATALOG: &str = "./data/instances.json";
 
 /// Prefix of personas generated from an instance's custom prompt.
 ///
-/// The prefix is the contract between [`sync_instance_personas`] (which writes them) and the
-/// pipeline (which points sessions at them).
+/// The prefix is the contract between [`restore_instance_personas`] (which writes them) and the
+/// pipeline (which resolves them for individual turns).
 pub const INSTANCE_PERSONA_PREFIX: &str = "instance:";
 
 /// Failures raised while reading or mutating the instance catalog.
@@ -68,6 +69,22 @@ pub enum InstanceError {
     /// The catalog could not be read or written.
     #[error("instance catalog I/O failed: {0}")]
     Io(String),
+    /// A generated persona is still selected by another surviving instance.
+    #[error(
+        "persona '{persona}' is used by instance(s) {instances:?}; select another persona first"
+    )]
+    PersonaInUse {
+        /// Generated persona that would be removed.
+        persona: String,
+        /// Surviving instances that still select it.
+        instances: Vec<String>,
+    },
+    /// Persona publication or lookup failed.
+    #[error(transparent)]
+    Persona(#[from] PersonaError),
+    /// A bound session is busy or its binding could not be durably cleared.
+    #[error(transparent)]
+    Session(#[from] MemoryError),
 }
 
 /// Per-instance override for a toggleable item (plugin, skill or MCP server).
@@ -357,47 +374,74 @@ pub fn instance_persona_id(instance_id: &str) -> String {
     format!("{INSTANCE_PERSONA_PREFIX}{instance_id}")
 }
 
-/// Registers a persona for every instance that carries a custom prompt, and drops generated
-/// personas that no longer correspond to one.
+/// Restores generated personas and validates bindings before the node starts serving requests.
 ///
-/// Called at startup and after every catalog mutation so the persona catalog always mirrors the
-/// instance catalog; the console therefore shows instance prompts alongside built-in personas.
-pub fn sync_instance_personas(instances: &[BotInstance], personas: &PersonaRegistry) {
-    let mut desired: HashMap<String, (&str, &str)> = HashMap::new();
+/// All generated personas are published before checking cross-instance references. Missing
+/// generated targets in legacy sessions follow deleted-owner semantics and are durably unbound;
+/// valid bindings are preserved without guessing whether an older node inherited or selected them.
+/// Unknown custom references and failed cleanup stop startup rather than silently changing prompts.
+pub fn restore_instance_personas(
+    instances: &[BotInstance],
+    personas: &PersonaRegistry,
+    sessions: &SessionManager,
+) -> Result<(), InstanceError> {
+    let generated = instances
+        .iter()
+        .filter_map(generated_persona)
+        .collect::<Vec<_>>();
+    for persona in &generated {
+        persona.validate()?;
+    }
+    for persona in generated {
+        personas.register(persona)?;
+    }
     for instance in instances {
-        if let Some(prompt) = instance
-            .system_prompt
-            .as_deref()
-            .map(str::trim)
-            .filter(|p| !p.is_empty())
-        {
-            desired.insert(
+        InstanceRegistry::validate_persona(instance, Some(personas))?;
+    }
+
+    let mut missing_generated = std::collections::BTreeSet::new();
+    for session in sessions.list_sessions() {
+        let Some(id) = session.persona_id else {
+            continue;
+        };
+        if personas.get(&id).is_some() {
+            continue;
+        }
+        if id.starts_with(INSTANCE_PERSONA_PREFIX) {
+            missing_generated.insert(id);
+        } else {
+            return Err(InstanceError::Invalid(format!(
+                "session '{}' refers to unknown persona '{id}'",
+                session.session_key
+            )));
+        }
+    }
+    for id in missing_generated {
+        let unbound = sessions.unbind_persona(&id)?;
+        tracing::warn!(persona_id = %id, unbound_sessions = unbound,
+            "Removed stale session bindings to a deleted instance persona during startup");
+    }
+    Ok(())
+}
+
+/// Builds the generated persona owned by one instance, when it has its own prompt.
+fn generated_persona(instance: &BotInstance) -> Option<Persona> {
+    instance
+        .system_prompt
+        .as_deref()
+        .map(str::trim)
+        .filter(|prompt| !prompt.is_empty())
+        .map(|prompt| {
+            Persona::instance(
                 instance_persona_id(&instance.id),
-                (instance.name.as_str(), prompt),
-            );
-        }
-    }
-
-    for (id, (name, prompt)) in &desired {
-        if let Err(err) = personas.register(Persona::instance(
-            id.clone(),
-            format!("{name} (instance)"),
-            format!("Persona prompt configured on bot instance '{name}'"),
-            *prompt,
-        )) {
-            tracing::error!(persona_id = %id, error = %err, "Failed to publish an instance persona");
-        }
-    }
-
-    // A prompt that was cleared must not linger as a selectable persona.
-    for persona in personas.list() {
-        if persona.kind == PersonaKind::Instance
-            && !desired.contains_key(&persona.id)
-            && let Ok(stale) = personas.remove(&persona.id)
-        {
-            tracing::debug!(persona_id = %stale.id, "Removed generated instance persona");
-        }
-    }
+                format!("{} (instance)", instance.name),
+                format!(
+                    "Persona prompt configured on bot instance '{}'",
+                    instance.name
+                ),
+                prompt,
+            )
+        })
 }
 
 /// Document persisted at the catalog path.
@@ -498,6 +542,34 @@ impl InstanceRegistry {
         self.instances.read().await.get(id).cloned()
     }
 
+    /// Snapshots the current instance persona while its configuration cannot change.
+    ///
+    /// The owned persona keeps a turn's prefix stable after this short read lock is released.
+    /// Standalone instances need no catalog when they select no persona; a configured persona
+    /// must resolve explicitly, never through an earlier instance snapshot or implicit fallback.
+    pub async fn persona_for_instance(
+        &self,
+        id: &str,
+        personas: Option<&PersonaRegistry>,
+    ) -> Result<Option<Persona>, InstanceError> {
+        let instances = self.instances.read().await;
+        let instance = instances
+            .get(id)
+            .ok_or_else(|| InstanceError::NotFound(id.to_string()))?;
+        let Some(persona_id) = instance.effective_persona_id() else {
+            return Ok(None);
+        };
+        let personas = personas.ok_or_else(|| {
+            InstanceError::Invalid(format!(
+                "instance '{id}' selects persona '{persona_id}' but has no persona catalog"
+            ))
+        })?;
+        personas
+            .get(&persona_id)
+            .map(Some)
+            .ok_or_else(|| PersonaError::NotFound(persona_id).into())
+    }
+
     /// Number of configured instances.
     pub async fn len(&self) -> usize {
         self.instances.read().await.len()
@@ -514,7 +586,7 @@ impl InstanceRegistry {
     pub async fn create(
         &self,
         draft: InstanceDraft,
-        personas: Option<&PersonaRegistry>,
+        runtime: Option<(&PersonaRegistry, &SessionManager)>,
     ) -> Result<BotInstance, InstanceError> {
         let mut instances = self.instances.write().await;
 
@@ -522,12 +594,11 @@ impl InstanceRegistry {
         let id = unique_id(&instances, &name);
         let candidate = build_instance(id, name, draft)?;
 
-        Self::validate_persona(&candidate, personas)?;
+        Self::validate_persona(&candidate, runtime.map(|(personas, _)| personas))?;
         Self::validate_claims(&instances, &candidate)?;
         let mut next = instances.clone();
         next.insert(candidate.id.clone(), candidate.clone());
-        self.commit(&mut instances, next)?;
-        Self::publish_personas(&instances, personas);
+        self.commit_instance_change(&mut instances, next, &candidate.id, runtime)?;
 
         Ok(candidate)
     }
@@ -537,7 +608,7 @@ impl InstanceRegistry {
         &self,
         id: &str,
         draft: InstanceDraft,
-        personas: Option<&PersonaRegistry>,
+        runtime: Option<(&PersonaRegistry, &SessionManager)>,
     ) -> Result<BotInstance, InstanceError> {
         let mut instances = self.instances.write().await;
 
@@ -553,12 +624,11 @@ impl InstanceRegistry {
             .map(|existing| existing.session_generations.clone())
             .unwrap_or_default();
 
-        Self::validate_persona(&candidate, personas)?;
+        Self::validate_persona(&candidate, runtime.map(|(personas, _)| personas))?;
         Self::validate_claims(&instances, &candidate)?;
         let mut next = instances.clone();
         next.insert(candidate.id.clone(), candidate.clone());
-        self.commit(&mut instances, next)?;
-        Self::publish_personas(&instances, personas);
+        self.commit_instance_change(&mut instances, next, &candidate.id, runtime)?;
 
         Ok(candidate)
     }
@@ -567,16 +637,14 @@ impl InstanceRegistry {
     pub async fn delete(
         &self,
         id: &str,
-        personas: Option<&PersonaRegistry>,
+        runtime: Option<(&PersonaRegistry, &SessionManager)>,
     ) -> Result<(), InstanceError> {
         let mut instances = self.instances.write().await;
         let mut next = instances.clone();
         if next.remove(id).is_none() {
             return Err(InstanceError::NotFound(id.to_string()));
         }
-        self.commit(&mut instances, next)?;
-        Self::publish_personas(&instances, personas);
-        Ok(())
+        self.commit_instance_change(&mut instances, next, id, runtime)
     }
 
     /// Resolves the enabled instance that serves `platform`.
@@ -652,14 +720,54 @@ impl InstanceRegistry {
         Ok(())
     }
 
-    /// Publishes the exact committed snapshot before another catalog writer can overtake it.
-    fn publish_personas(
-        instances: &HashMap<String, BotInstance>,
-        personas: Option<&PersonaRegistry>,
-    ) {
-        if let Some(personas) = personas {
-            sync_instance_personas(&instances.values().cloned().collect::<Vec<_>>(), personas);
+    /// Commits one instance mutation together with its generated persona's lifecycle.
+    ///
+    /// Lock order is instance write lock -> generated persona shard -> session writers (try only)
+    /// -> session storage -> instance document. No callback re-enters the persona registry. A later
+    /// failure retains the old instance/persona, but earlier durable unbindings remain committed.
+    fn commit_instance_change(
+        &self,
+        live: &mut HashMap<String, BotInstance>,
+        next: HashMap<String, BotInstance>,
+        id: &str,
+        runtime: Option<(&PersonaRegistry, &SessionManager)>,
+    ) -> Result<(), InstanceError> {
+        let Some((personas, sessions)) = runtime else {
+            return self.commit(live, next);
+        };
+        let previous = live.get(id).and_then(generated_persona);
+        let generated = next.get(id).and_then(generated_persona);
+        if let Some(persona) = &generated {
+            persona.validate()?;
         }
+        if let Some(previous) = previous.filter(|_| generated.is_none()) {
+            let mut users: Vec<String> = next
+                .values()
+                .filter(|instance| instance.persona_id.as_deref() == Some(previous.id.as_str()))
+                .map(|instance| instance.id.clone())
+                .collect();
+            users.sort();
+            if !users.is_empty() {
+                return Err(InstanceError::PersonaInUse {
+                    persona: previous.id,
+                    instances: users,
+                });
+            }
+            personas.remove_after(&previous.id, |_| {
+                sessions.unbind_persona(&previous.id)?;
+                self.commit(live, next)
+            })?;
+        } else {
+            self.commit(live, next)?;
+            if let Some(persona) = generated {
+                // Validation finished before committing. The generated `instance:` namespace can
+                // never replace the built-in `assistant`, the only other register rejection.
+                personas
+                    .register(persona)
+                    .expect("validated generated persona cannot replace the base assistant");
+            }
+        }
+        Ok(())
     }
 
     /// Makes `generation` the current session of one conversation and returns its identifier.

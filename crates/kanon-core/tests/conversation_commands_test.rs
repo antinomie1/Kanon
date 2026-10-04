@@ -555,7 +555,7 @@ async fn plugins_manage_the_operators_personas_through_the_shared_store() {
         .process_event(event("stale-persona", "hello"))
         .await;
     assert!(
-        matches!(&result, PipelineResult::LlmFailed { error, .. } if error.contains("no longer exists")),
+        matches!(&result, PipelineResult::LlmFailed { error, .. } if error.contains("persona 'pirate' does not exist")),
         "{result:?}"
     );
     assert!(node.sessions.get_persona(&session).is_none());

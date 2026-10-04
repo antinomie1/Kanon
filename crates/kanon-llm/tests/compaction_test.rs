@@ -4,6 +4,7 @@
 //! request must be the conversation's own request plus one appended message (so the provider's cache
 //! serves it), and after it the prompt prefix must be stable again.
 
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -21,6 +22,130 @@ use kanon_llm::memory::{InMemory, Memory};
 use kanon_llm::prompt::{BASE_PERSONA_PROMPT, PersonaRegistry};
 use kanon_llm::session::SessionManager;
 use kanon_llm::{COMPACTION_INSTRUCTION, CompactionPolicy};
+
+/// Signals one armed snapshot read so a test can observe a queued compaction without sleeps.
+struct ObservedMemory {
+    inner: InMemory,
+    armed: AtomicBool,
+    read: Notify,
+}
+
+#[async_trait]
+impl Memory for ObservedMemory {
+    async fn push_message(
+        &self,
+        session: &str,
+        message: ChatMessage,
+    ) -> Result<(), kanon_llm::MemoryError> {
+        Memory::push_message(&self.inner, session, message).await
+    }
+
+    async fn snapshot(
+        &self,
+        session: &str,
+    ) -> Result<kanon_llm::MemorySnapshot, kanon_llm::MemoryError> {
+        let snapshot = self.inner.snapshot(session).await?;
+        if self.armed.swap(false, Ordering::SeqCst) {
+            self.read.notify_one();
+        }
+        Ok(snapshot)
+    }
+
+    async fn compact_history(
+        &self,
+        session: &str,
+        covered: usize,
+        summary: String,
+    ) -> Result<(), kanon_llm::MemoryError> {
+        self.inner.compact_history(session, covered, summary).await
+    }
+
+    async fn clear(&self, session: &str) -> Result<(), kanon_llm::MemoryError> {
+        Memory::clear(&self.inner, session).await
+    }
+
+    async fn session_count(&self) -> Result<usize, kanon_llm::MemoryError> {
+        Memory::session_count(&self.inner).await
+    }
+
+    async fn list_sessions(
+        &self,
+        prefix: &str,
+    ) -> Result<Vec<kanon_llm::StoredSession>, kanon_llm::MemoryError> {
+        self.inner.list_sessions(prefix).await
+    }
+}
+
+#[tokio::test]
+async fn resetting_a_queued_compaction_discards_its_prefix_and_allows_the_next_job() {
+    let memory = Arc::new(ObservedMemory {
+        inner: InMemory::new(),
+        armed: AtomicBool::new(false),
+        read: Notify::new(),
+    });
+    let sessions = Arc::new(SessionManager::new(memory.clone()));
+    let provider = Arc::new(ScriptedProvider::new(
+        800,
+        SummaryMode::Summary("SUMMARY-TEXT"),
+    ));
+    let agent = BuiltinAgent::builder("queued-reset", provider.clone())
+        .session_manager(sessions.clone())
+        .system_prompt("Original instructions.")
+        .context_length(Some(1_000))
+        .compaction(Some(CompactionPolicy {
+            min_messages: 2,
+            ..CompactionPolicy::default()
+        }))
+        .build();
+    let writing = sessions.try_write("s").unwrap();
+    writing
+        .scope(agent.run("s", "old conversation", &[]))
+        .await
+        .unwrap();
+    // Hold the writer beyond the turn so the scheduled job cannot inspect memory before reset.
+    // Recreate the same number of messages to ensure a count-only guard would be insufficient.
+    memory.clear("s").await.unwrap();
+    memory
+        .extend_messages(
+            "s",
+            vec![
+                ChatMessage::user("replacement"),
+                ChatMessage::assistant("new answer"),
+            ],
+        )
+        .await
+        .unwrap();
+    memory.armed.store(true, Ordering::SeqCst);
+    drop(writing);
+    tokio::time::timeout(Duration::from_secs(2), memory.read.notified())
+        .await
+        .unwrap();
+    let writing = sessions.write("s").await;
+    assert!(provider.compaction_requests().is_empty());
+    assert!(memory.inner.snapshot("s").await.unwrap().summary.is_none());
+
+    // The skipped job must release its in-flight marker, otherwise this new turn never compacts.
+    writing
+        .scope(agent.run("s", "continue replacement", &[]))
+        .await
+        .unwrap();
+    drop(writing);
+    wait_for_summary(&memory.inner, "s").await;
+    let requests = provider.compaction_requests();
+    assert_eq!(requests.len(), 1);
+    assert!(
+        requests[0]
+            .messages
+            .iter()
+            .any(|message| message.content.as_deref() == Some("replacement"))
+    );
+    assert!(
+        !requests[0]
+            .messages
+            .iter()
+            .any(|message| message.content.as_deref() == Some("old conversation"))
+    );
+}
 
 /// What the provider answers when asked to summarize.
 #[derive(Clone)]

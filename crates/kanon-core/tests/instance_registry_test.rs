@@ -1,6 +1,9 @@
 //! Tests for the bot-instance catalog: persistence, adapter ownership and session rotation.
 
 use kanon_core::instance::{BotInstance, InstanceDraft, InstanceError, InstanceRegistry};
+use kanon_llm::memory::InMemory;
+use kanon_llm::{Persona, PersonaRegistry, SessionManager, SqliteSessionStore};
+use std::sync::Arc;
 
 fn draft(name: &str, enabled: bool, adapters: &[&str]) -> InstanceDraft {
     InstanceDraft {
@@ -17,6 +20,85 @@ fn draft(name: &str, enabled: bool, adapters: &[&str]) -> InstanceDraft {
         mcp: Default::default(),
         ..Default::default()
     }
+}
+
+#[tokio::test]
+async fn startup_restores_generated_personas_without_guessing_binding_ownership() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("instances.json");
+    let db = Arc::new(SqliteSessionStore::open(dir.path().join("sessions.db")).unwrap());
+    let sessions = SessionManager::new(Arc::new(InMemory::new()))
+        .with_store(db.clone())
+        .unwrap();
+    let personas = PersonaRegistry::new();
+    personas
+        .register(Persona::custom("custom", "Custom", "", "custom prompt").unwrap())
+        .unwrap();
+    let instances = InstanceRegistry::open(&path).await.unwrap();
+    let mut owner = draft("Owner", false, &[]);
+    owner.system_prompt = Some("owned prompt".into());
+    instances
+        .create(owner, Some((&personas, &sessions)))
+        .await
+        .unwrap();
+    let mut reader = draft("Reader", false, &[]);
+    reader.persona_id = Some("instance:owner".into());
+    instances
+        .create(reader, Some((&personas, &sessions)))
+        .await
+        .unwrap();
+    for (key, persona) in [
+        ("instance:owner:chat#0", "instance:owner"),
+        ("instance:reader:chat#0", "custom"),
+        ("old", "instance:gone"),
+    ] {
+        sessions.set_persona(key, persona).unwrap();
+    }
+
+    let restored = InstanceRegistry::open(&path).await.unwrap();
+    let catalog = PersonaRegistry::new();
+    catalog
+        .register(Persona::custom("custom", "Custom", "", "custom prompt").unwrap())
+        .unwrap();
+    kanon_core::restore_instance_personas(&restored.list().await, &catalog, &sessions).unwrap();
+    assert_eq!(
+        restored
+            .persona_for_instance("reader", Some(&catalog))
+            .await
+            .unwrap()
+            .unwrap()
+            .prompt,
+        "owned prompt"
+    );
+    let reloaded = SessionManager::new(Arc::new(InMemory::new()))
+        .with_store(db)
+        .unwrap();
+    assert_eq!(
+        reloaded.get_persona("instance:owner:chat#0").as_deref(),
+        Some("instance:owner")
+    );
+    assert_eq!(
+        reloaded.get_persona("instance:reader:chat#0").as_deref(),
+        Some("custom")
+    );
+    assert!(reloaded.get_persona("old").is_none());
+
+    // Valid legacy rows remain explicit choices; invalid custom references are not reset to base.
+    sessions.set_persona("invalid", "missing-custom").unwrap();
+    let error = kanon_core::restore_instance_personas(&restored.list().await, &catalog, &sessions)
+        .unwrap_err();
+    assert!(error.to_string().contains("missing-custom"));
+    assert_eq!(
+        sessions.get_persona("invalid").as_deref(),
+        Some("missing-custom")
+    );
+    sessions.clear_persona("invalid").unwrap();
+    let mut broken = draft("Broken", false, &[]);
+    broken.persona_id = Some("missing-custom".into());
+    restored.create(broken, None).await.unwrap();
+    assert!(
+        kanon_core::restore_instance_personas(&restored.list().await, &catalog, &sessions).is_err()
+    );
 }
 
 #[tokio::test]

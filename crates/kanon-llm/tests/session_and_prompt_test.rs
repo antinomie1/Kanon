@@ -13,8 +13,7 @@ use kanon_llm::gateway::LlmProvider;
 use kanon_llm::gateway::types::{ChatMessage, ChatRequest, ChatResponse, Role};
 use kanon_llm::memory::InMemory;
 use kanon_llm::prompt::{
-    BASE_PERSONA_ID, BASE_PERSONA_PROMPT, Persona, PersonaError, PersonaHook, PersonaKind,
-    PersonaRegistry,
+    BASE_PERSONA_ID, BASE_PERSONA_PROMPT, Persona, PersonaError, PersonaKind, PersonaRegistry,
 };
 use kanon_llm::session::{SessionKey, SessionManager, SessionScope, SessionStatus};
 
@@ -58,11 +57,9 @@ impl LlmProvider for RecordingProvider {
 }
 
 #[tokio::test]
-async fn injected_system_context_survives_the_persona_hook() {
-    // The persona hook rewrites the first system message in place. If it ran *after* a hook that
-    // appends context, the injected context would be overwritten — which is exactly how the skill
-    // catalog silently disappeared for sessions that had no system prompt yet. Persona and context
-    // end up in one static system block, persona first.
+async fn persona_composition_preserves_injected_hook_context() {
+    // Persona composition runs before ordinary hooks, so appended skill or RAG context cannot
+    // be replaced by persona selection. Both belong to one static system block, persona first.
     let seen = Arc::new(std::sync::Mutex::new(Vec::new()));
     let memory = Arc::new(InMemory::new());
     let sessions = Arc::new(SessionManager::new(memory.clone()));
@@ -351,7 +348,7 @@ fn instance_personas_keep_their_prefixed_ids_and_are_listed_in_stable_order() {
 }
 
 // =========================================================================
-// 3. Persona Hook & Agent Integration Tests
+// 3. Persona & Agent Integration Tests
 // =========================================================================
 
 struct RequestCapturingProvider {
@@ -373,7 +370,7 @@ impl LlmProvider for RequestCapturingProvider {
 }
 
 #[tokio::test]
-async fn test_agent_persona_hook_integration() {
+async fn agent_resolves_persona_before_each_turn() {
     let captured = Arc::new(RwLock::new(Vec::new()));
     let provider = Arc::new(RequestCapturingProvider {
         captured_requests: captured.clone(),
@@ -435,6 +432,7 @@ async fn test_agent_persona_hook_integration() {
 
     // 3. A stale binding must fail before the provider sees different instructions.
     persona_reg.remove("coder").expect("removed");
+    let before_failure = session_mgr.memory().snapshot(session_id).await.unwrap();
     let error = agent
         .run_standalone(session_id, "And now?")
         .await
@@ -446,6 +444,29 @@ async fn test_agent_persona_hook_integration() {
     ));
     assert_eq!(captured.read().await.len(), 2);
     assert_eq!(session_mgr.get_metadata(session_id).unwrap().turn_count, 2);
+
+    let without_catalog = BuiltinAgent::builder(
+        "missing-catalog",
+        Arc::new(RequestCapturingProvider {
+            captured_requests: captured.clone(),
+        }),
+    )
+    .session_manager(session_mgr.clone())
+    .build();
+    let error = without_catalog
+        .run(session_id, "Still the same persona?", &[])
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(error, kanon_llm::AgentError::InvalidRequest(ref message)
+        if message.contains("without a persona catalog") && message.contains("coder"))
+    );
+    assert_eq!(captured.read().await.len(), 2);
+    assert_eq!(
+        session_mgr.memory().snapshot(session_id).await.unwrap(),
+        before_failure,
+        "invalid persona configuration must fail before appending a user message"
+    );
 }
 
 #[tokio::test]
@@ -466,7 +487,7 @@ async fn deleting_a_persona_unbinds_the_sessions_that_use_it() {
 }
 
 #[tokio::test]
-async fn the_persona_hook_owns_the_first_system_message() {
+async fn the_persona_starts_the_single_system_block() {
     let captured = Arc::new(RwLock::new(Vec::new()));
     let provider = Arc::new(RequestCapturingProvider {
         captured_requests: captured.clone(),
@@ -482,10 +503,10 @@ async fn the_persona_hook_owns_the_first_system_message() {
         .expect("registered");
     session_mgr.set_persona("sess_1", "custom-bot").unwrap();
 
-    let hook = Arc::new(PersonaHook::new(session_mgr.clone(), persona_reg));
     let agent = BuiltinAgent::builder("hook_agent", provider)
         .memory(session_mgr.memory().clone())
-        .hook_arc(hook)
+        .session_manager(session_mgr.clone())
+        .persona_registry(persona_reg)
         .build();
 
     agent

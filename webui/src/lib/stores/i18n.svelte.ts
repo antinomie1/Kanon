@@ -191,12 +191,12 @@ export const dictionaries = {
     'instances.model_inherit_named': 'Default model ({model})',
     'instances.model_catalog_empty': 'No models are listed yet. Add them on',
     'instances.field_persona': 'Persona',
-    'instances.persona_none': 'Base assistant',
+    'instances.persona_none': 'Use session persona (or base assistant)',
     'instances.field_prompt': 'Own prompt (optional)',
     'instances.prompt_placeholder':
       'For example: You are Black Pig, a cheerful assistant that answers in Chinese.',
     'instances.prompt_hint':
-      'When filled in, it replaces the persona for every conversation of this instance.',
+      'Takes priority over the instance and session persona for every conversation of this instance.',
     'instances.sec_groups': 'When to answer in groups',
     'instances.sec_groups_hint':
       'Private chats are always answered. This only affects groups and channels.',
@@ -266,14 +266,15 @@ export const dictionaries = {
     'sessions.active_ago': 'active {time} ago',
     'sessions.restarted': 'started over {n}× with /new',
     'sessions.persona_btn': 'Persona',
-    'sessions.persona_title': 'Persona for {name}',
-    'sessions.persona_none': 'Base assistant',
+    'sessions.persona_title': 'Session persona for {name}',
+    'sessions.persona_saved': 'Session persona: {name}',
+    'sessions.persona_none': 'Use instance or base assistant',
     'sessions.persona_hint':
-      "Applies from the next message. The conversation's memory is kept.",
+      'Applies from the next message when the instance has no prompt or selected persona. Conversation memory is kept.',
     'sessions.persona_pinned':
-      "This instance sets its own persona, which comes back with the next message. Change it in the instance's settings instead.",
-    'sessions.persona_apply': 'Use this persona',
-    'sessions.persona_toast': 'Persona changed for {name}',
+      "The instance's own prompt takes priority, then its selected persona. Your session choice stays saved and applies when neither is set.",
+    'sessions.persona_apply': 'Save session choice',
+    'sessions.persona_toast': 'Session persona choice saved for {name}',
     'sessions.reset': 'Clear memory',
     'sessions.reset_title': 'Clear what {name} remembers here?',
     'sessions.reset_text':
@@ -1169,11 +1170,12 @@ export const dictionaries = {
     'instances.model_inherit_named': '默认模型（{model}）',
     'instances.model_catalog_empty': '还没有可选的模型。先去这里添加：',
     'instances.field_persona': '人设',
-    'instances.persona_none': '基础助手',
+    'instances.persona_none': '使用会话人设（未选则用基础助手）',
     'instances.field_prompt': '自己的提示词（可选）',
     'instances.prompt_placeholder':
       '例如：你是黑猪AI，一个活泼、用中文回答的助手。',
-    'instances.prompt_hint': '填写后会代替所选人设，用于这个实例的所有对话。',
+    'instances.prompt_hint':
+      '填写后优先于实例和会话所选的人设，用于这个实例的所有对话。',
     'instances.sec_groups': '群聊里怎么回答',
     'instances.sec_groups_hint': '私聊总是会回答。这里只管群和频道。',
     'instances.use_global_rule': '使用全局规则',
@@ -1241,13 +1243,15 @@ export const dictionaries = {
     'sessions.active_ago': '{time}前活跃',
     'sessions.restarted': '用 /new 重开过 {n} 次',
     'sessions.persona_btn': '人设',
-    'sessions.persona_title': '{name} 使用的人设',
-    'sessions.persona_none': '基础助手',
-    'sessions.persona_hint': '从下一条消息开始生效，对话记忆会保留。',
+    'sessions.persona_title': '{name} 的会话人设',
+    'sessions.persona_saved': '会话人设：{name}',
+    'sessions.persona_none': '使用实例设置或基础助手',
+    'sessions.persona_hint':
+      '实例未填写提示词、也未选择人设时，从下一条消息开始生效。对话记忆会保留。',
     'sessions.persona_pinned':
-      '这个实例设置了自己的人设，下一条消息时会改回去。请在实例设置里修改。',
-    'sessions.persona_apply': '使用这个人设',
-    'sessions.persona_toast': '已更换 {name} 的人设',
+      '实例自己的提示词优先，其次是实例所选人设。会话选择仍会保存，两项实例设置都留空时才生效。',
+    'sessions.persona_apply': '保存会话选择',
+    'sessions.persona_toast': '已保存 {name} 的会话人设选择',
     'sessions.reset': '清空记忆',
     'sessions.reset_title': '清空 {name} 在这段对话中的记忆？',
     'sessions.reset_text': '下一条消息将开始全新的对话，人设保持不变。',
