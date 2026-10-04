@@ -133,6 +133,47 @@ async fn markup_tool_calls_are_executed_and_the_turn_continues() {
     );
 }
 
+/// Text recovery must not bypass provider refusal or incomplete-generation status.
+#[tokio::test]
+async fn unfinished_or_refused_markup_never_executes() {
+    for reason in [
+        "length",
+        "max_tokens",
+        "incomplete",
+        "refusal",
+        "content_filter",
+        "pause_turn",
+    ] {
+        let (provider, _) = ScriptedProvider::new(vec![ChatResponse {
+            content: Some(
+                r#"<tool_call>{"name":"play_score","arguments":{"song_name":"test"}}</tool_call>"#
+                    .into(),
+            ),
+            finish_reason: Some(reason.into()),
+            ..ChatResponse::default()
+        }]);
+        let memory: Arc<dyn Memory> = Arc::new(InMemory::new());
+        let agent = BuiltinAgent::builder("test", Arc::new(provider))
+            .memory(memory.clone())
+            .tool(NativeTool::new(tool_definition(), |_, _| async {
+                panic!("unfinished or refused text must never execute a tool");
+            }))
+            .build();
+
+        let error = agent.run("session", "play a song", &[]).await.unwrap_err();
+        assert!(error.to_string().contains(reason), "{reason}: {error}");
+        assert!(
+            memory
+                .get_messages("session")
+                .await
+                .unwrap()
+                .iter()
+                .all(|message| { message.tool_calls.as_ref().is_none_or(Vec::is_empty) }),
+            "unusable calls must not enter history"
+        );
+    }
+}
+
 #[tokio::test]
 async fn plain_text_without_markup_is_returned_unchanged() {
     let (provider, _requests) = ScriptedProvider::new(vec![ChatResponse {

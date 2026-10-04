@@ -11,7 +11,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use axum::Router;
-use axum::http::Method;
+use axum::http::{HeaderMap, Method};
 use axum::response::sse::{Event as SseEvent, Sse};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
@@ -35,6 +35,8 @@ struct FakeEndpoint {
     base_url: String,
     /// Server task, aborted when the handle drops.
     handle: tokio::task::JoinHandle<()>,
+    /// Authentication actually sent to the protocol implementation.
+    tokens: Arc<std::sync::Mutex<Vec<Option<String>>>>,
 }
 
 impl Drop for FakeEndpoint {
@@ -46,9 +48,21 @@ impl Drop for FakeEndpoint {
 impl FakeEndpoint {
     /// Starts the fake endpoint on an ephemeral port.
     async fn start() -> Self {
+        let tokens = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let captured = tokens.clone();
         let router = Router::new()
             .route("/event", get(never_ending_stream))
-            .route("/api/:endpoint", post(api_handler));
+            .route(
+                "/api/:endpoint",
+                post(move |path, headers: HeaderMap| {
+                    captured.lock().unwrap().push(
+                        headers
+                            .get("authorization")
+                            .map(|value| value.to_str().unwrap().to_string()),
+                    );
+                    api_handler(path)
+                }),
+            );
 
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
             .await
@@ -62,6 +76,7 @@ impl FakeEndpoint {
         Self {
             base_url: format!("http://{address}"),
             handle,
+            tokens,
         }
     }
 }
@@ -357,50 +372,77 @@ async fn contradictory_credential_instructions_are_refused() {
     let (state, _adapter, _ingest) = milky_state(dir.path(), MilkyConfig::default()).await;
     let router: Router = app(state);
 
-    let (status, body) = send_json(
-        &router,
-        Method::PUT,
-        "/api/v1/adapters/milky/config",
-        Some(json!({
-            "enabled": false,
-            "platform": "milky",
-            "base_url": "http://127.0.0.1:3010",
-            "access_token": "new",
-            "clear_access_token": true,
-        })),
-    )
-    .await;
+    for (method, path) in [
+        (Method::PUT, "/api/v1/adapters/milky/config"),
+        (Method::POST, "/api/v1/adapters/milky/config/test"),
+    ] {
+        let (status, body) = send_json(
+            &router,
+            method,
+            path,
+            Some(json!({
+                "enabled": false,
+                "platform": "milky",
+                "base_url": "http://127.0.0.1:3010",
+                "access_token": "new",
+                "clear_access_token": true,
+            })),
+        )
+        .await;
 
-    assert_eq!(status, 400);
-    assert!(
-        body["error"]["message"]
-            .as_str()
-            .expect("message")
-            .contains("not both")
-    );
+        assert_eq!(status, 400);
+        assert!(
+            body["error"]["message"]
+                .as_str()
+                .expect("message")
+                .contains("not both")
+        );
+    }
 }
 
 /// The probe reports the account identity without saving or enabling anything.
 #[tokio::test]
 async fn probe_reports_identity_without_saving() {
     let dir = temp_dir();
-    let (state, adapter, _ingest) = milky_state(dir.path(), MilkyConfig::default()).await;
+    let config = MilkyConfig {
+        access_token: Some("saved-token".into()),
+        ..MilkyConfig::default()
+    };
+    let (state, adapter, _ingest) = milky_state(dir.path(), config.clone()).await;
     let router: Router = app(state);
     let fake = FakeEndpoint::start().await;
 
-    let (status, body) = send_json(
+    for (token, clear, expected) in [
+        (None, false, Some("Bearer saved-token")),
+        (Some("  "), false, Some("Bearer saved-token")),
+        (Some(" replacement "), false, Some("Bearer replacement")),
+        (None, true, None),
+        (Some("  "), true, None),
+    ] {
+        fake.tokens.lock().unwrap().clear();
+        let (status, body) = send_json(
         &router,
         Method::POST,
         "/api/v1/adapters/milky/config/test",
-        Some(json!({ "base_url": fake.base_url })),
+        Some(json!({ "base_url": fake.base_url, "access_token": token, "clear_access_token": clear })),
     )
     .await;
 
-    assert_eq!(status, 200, "body: {body}");
-    assert_eq!(body["login"]["uin"], 10001);
-    assert_eq!(body["login"]["nickname"], "Kanon Test");
-    assert_eq!(body["implementation"]["impl_name"], "FakeMilky");
-    assert!(body["latency_ms"].is_u64());
+        assert_eq!(status, 200, "body: {body}");
+        assert_eq!(body["login"]["uin"], 10001);
+        assert_eq!(body["login"]["nickname"], "Kanon Test");
+        assert_eq!(body["implementation"]["impl_name"], "FakeMilky");
+        assert!(body["latency_ms"].is_u64());
+        assert_eq!(
+            *fake.tokens.lock().unwrap(),
+            vec![expected.map(str::to_string); 2]
+        );
+        assert_eq!(
+            adapter.config(),
+            config,
+            "probing must not change the live credential"
+        );
+    }
 
     assert!(!adapter.config().enabled);
     assert!(

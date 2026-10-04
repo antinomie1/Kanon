@@ -384,7 +384,7 @@ impl BuiltinAgent {
         // Compatible models may emit tool calls as text. Apply the normal turn's decoding
         // before accepting a summary, or the call markup would replace the entire history.
         response.separate_reasoning();
-        normalize_textual_tool_calls(&mut response);
+        normalize_textual_tool_calls(&mut response)?;
 
         // Partial or refused output cannot replace durable history, even when it contains text.
         // Compatible providers may omit the reason. Any explicit reason must confirm completion;
@@ -653,7 +653,7 @@ impl BuiltinAgent {
             // Recover tool calls a model emitted as text markup instead of structured calls, so the
             // loop executes them instead of sending the markup to the chat platform as an answer.
             let had_structured_calls = !response.tool_calls.is_empty();
-            normalize_textual_tool_calls(&mut response);
+            normalize_textual_tool_calls(&mut response)?;
             if stream.is_some() && !had_structured_calls && !response.tool_calls.is_empty() {
                 // Text has already been delivered. Never reinterpret it as an executable command
                 // afterward; providers used for streaming must emit structured tool calls.
@@ -1416,17 +1416,31 @@ fn closing_note(err: &AgentError) -> String {
 /// Some endpoints ignore the `tools` request field and answer with `<tool_call>...` text. Turning
 /// that text back into real calls is what makes the reasoning loop execute the tool and continue;
 /// without it the markup is returned to the user as the assistant's answer.
-fn normalize_textual_tool_calls(response: &mut ChatResponse) {
+fn normalize_textual_tool_calls(response: &mut ChatResponse) -> Result<(), GatewayError> {
     if !response.tool_calls.is_empty() {
-        return;
+        return Ok(());
     }
     let Some(content) = response.content.as_deref() else {
-        return;
+        return Ok(());
     };
 
     let (recovered, cleaned) = crate::tool_call_text::extract_textual_tool_calls(content);
     if recovered.is_empty() {
-        return;
+        return Ok(());
+    }
+
+    // A complete-looking block can precede a truncated or refused remainder. Text recovery
+    // must not turn such a response into executable calls after the wire parser accepted its
+    // partial text. Gate before changing the reply or committing any call to durable history.
+    if let Some(reason) = response.finish_reason.as_deref()
+        && !matches!(
+            reason,
+            "stop" | "end_turn" | "stop_sequence" | "completed" | "tool_calls" | "tool_use"
+        )
+    {
+        return Err(GatewayError::InvalidResponse(format!(
+            "textual tool calls have unusable finish reason: {reason}"
+        )));
     }
 
     tracing::info!(
@@ -1441,6 +1455,7 @@ fn normalize_textual_tool_calls(response: &mut ChatResponse) {
     } else {
         Some(cleaned)
     };
+    Ok(())
 }
 
 /// Fluent builder for constructing customizable [`BuiltinAgent`] instances.

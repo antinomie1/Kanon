@@ -83,7 +83,7 @@ pub struct MilkyConfigRequest {
 ///
 /// The probe runs against the values in the form rather than the saved ones, so an operator can
 /// verify an endpoint before committing to it. Credential handling matches the update payload:
-/// omitted or empty means "use the stored token".
+/// omitted or empty means "use the stored token", unless removal is requested explicitly.
 #[derive(Debug, Deserialize)]
 pub struct MilkyTestRequest {
     /// Base URL to probe.
@@ -91,6 +91,20 @@ pub struct MilkyTestRequest {
     /// Credential to probe with, overriding the stored one when supplied.
     #[serde(default)]
     pub access_token: Option<String>,
+    /// Probes without the stored credential, matching an explicit removal in the form.
+    #[serde(default)]
+    pub clear_access_token: bool,
+}
+
+/// Normalizes a replacement credential and rejects contradictory edits before any I/O.
+fn replacement_token(token: Option<&str>, clear: bool) -> Result<Option<String>, ApiError> {
+    let token = token.map(str::trim).filter(|token| !token.is_empty());
+    if clear && token.is_some() {
+        return Err(ApiError::BadRequest(
+            "Provide either 'access_token' or 'clear_access_token', not both".to_string(),
+        ));
+    }
+    Ok(token.map(str::to_string))
 }
 
 /// Reads the stored configuration and the live status.
@@ -106,16 +120,7 @@ async fn update_config(
 ) -> Result<Json<MilkyConfigView>, ApiError> {
     let adapter = require_adapter(&state)?;
 
-    if body.clear_access_token
-        && body
-            .access_token
-            .as_deref()
-            .is_some_and(|token| !token.trim().is_empty())
-    {
-        return Err(ApiError::BadRequest(
-            "Provide either 'access_token' or 'clear_access_token', not both".to_string(),
-        ));
-    }
+    let token = replacement_token(body.access_token.as_deref(), body.clear_access_token)?;
 
     let store = state.system_config().clone();
     adapter
@@ -124,12 +129,7 @@ async fn update_config(
                 let access_token = if body.clear_access_token {
                     None
                 } else {
-                    body.access_token
-                        .as_deref()
-                        .map(str::trim)
-                        .filter(|token| !token.is_empty())
-                        .map(str::to_string)
-                        .or(stored.access_token)
+                    token.or(stored.access_token)
                 };
                 MilkyConfig {
                     enabled: body.enabled.unwrap_or(stored.enabled),
@@ -161,11 +161,13 @@ async fn test_config(
     Json(body): Json<MilkyTestRequest>,
 ) -> Result<Json<MilkyTestReport>, ApiError> {
     let adapter = require_adapter(&state)?;
+    let token = replacement_token(body.access_token.as_deref(), body.clear_access_token)?;
     let stored = adapter.config();
 
-    let access_token = match body.access_token.as_deref().map(str::trim) {
-        Some(token) if !token.is_empty() => Some(token.to_string()),
-        _ => stored.access_token.clone(),
+    let access_token = if body.clear_access_token {
+        None
+    } else {
+        token.or(stored.access_token.clone())
     };
 
     // Probing never needs the connection to be enabled, but it does need the same identity fields

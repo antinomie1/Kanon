@@ -52,7 +52,9 @@ function report() {
 }
 </script>
 
+<!-- Keep the track at its intrinsic width when a settings column stretches its children. -->
 <md-gb-switch
+  class="w-max shrink-0"
   bind:this={element}
   selected={checked}
   {disabled}

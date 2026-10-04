@@ -817,6 +817,8 @@ export interface MilkyConfigRequest {
 export interface MilkyTestRequest {
   base_url: string;
   access_token?: string;
+  /** Probes without the saved credential, matching the pending removal. */
+  clear_access_token?: boolean;
 }
 
 export interface MilkyTestReport {

@@ -4,6 +4,7 @@ import type {
   MilkyConfigView,
   MilkyStatus,
   MilkyTestReport,
+  MilkyTestRequest,
   MilkyTransport,
 } from '../types';
 
@@ -182,6 +183,15 @@ class MilkyStore {
     }
   }
 
+  /** Save and probe must use the same endpoint and explicit credential-removal intent. */
+  private get connectionDraft(): MilkyTestRequest {
+    return {
+      base_url: this.formBaseUrl,
+      access_token: this.formClearToken ? undefined : this.formToken || undefined,
+      clear_access_token: this.formClearToken,
+    };
+  }
+
   /** Saves the form, applying and persisting it on the node. */
   async save() {
     if (!this.config) return;
@@ -194,13 +204,8 @@ class MilkyStore {
         enabled: this.formEnabled,
         platform: this.config.platform,
         display_name: this.config.display_name,
-        base_url: this.formBaseUrl,
+        ...this.connectionDraft,
         transport: this.formTransport,
-        // An empty form field keeps the stored credential; removal is requested explicitly.
-        access_token: this.formClearToken
-          ? undefined
-          : this.formToken || undefined,
-        clear_access_token: this.formClearToken,
       });
       this.applyView(view);
       this.message = 'saved';
@@ -218,10 +223,7 @@ class MilkyStore {
     this.testResult = null;
 
     try {
-      this.testResult = await api.testMilkyConfig({
-        base_url: this.formBaseUrl,
-        access_token: this.formToken || undefined,
-      });
+      this.testResult = await api.testMilkyConfig(this.connectionDraft);
     } catch (err) {
       this.error = err instanceof Error ? err.message : String(err);
     } finally {
