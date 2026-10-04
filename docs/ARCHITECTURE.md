@@ -490,6 +490,8 @@ sequenceDiagram
 | `POST` | `/api/v1/skills` | 安装技能（上传 zip 压缩包或指定本地目录，目录内必须含 `SKILL.md`） |
 | `DELETE` | `/api/v1/skills/{id}` | 卸载技能 |
 | `PUT` | `/api/v1/skills/{id}/enabled` | 全局启用/停用技能（实例级覆盖见 `/api/v1/instances`） |
+
+技能替换与插件安装共用目录提交逻辑：先校验并暂存完整候选，再替换旧版本，提交失败恢复旧目录。技能正文在安装、目录扫描和读取时共用 64 KiB 上限；本地安装只接受普通文件和目录，拒绝符号链接及包含技能存储目录的源目录，避免递归复制。重新安装保留已有启用状态。
 | `GET` | `/api/v1/mcp/servers` | 查询已配置的 MCP 服务器及其连接健康度与工具数量 |
 | `PUT` | `/api/v1/mcp/servers/{id}` | 新增或替换 MCP 服务器定义（`stdio` 子进程或 `http` 端点），保存后立即同步连接池 |
 | `DELETE` | `/api/v1/mcp/servers/{id}` | 删除 MCP 服务器定义并断开连接 |

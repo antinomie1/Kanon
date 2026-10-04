@@ -75,12 +75,82 @@ async fn install_read_and_remove_round_trip() {
 
     assert_eq!(store.list().expect("list").len(), 1);
 
+    // Replacing from the installed directory itself must stage a copy before moving it.
+    let installed = store.root().join("installed");
+    store.install_from_dir(&installed, "installed").unwrap();
+    assert!(store.read("installed").unwrap().contains("Body text"));
+
+    write_skill(dir.path(), "source", "Updated skill", "Updated body");
+    store.install_from_dir(&source, "installed").unwrap();
+    assert!(store.read("installed").unwrap().contains("Updated body"));
+    assert_eq!(store.list().unwrap().len(), 1);
+
     store.remove("installed").expect("remove");
     assert_eq!(store.list().expect("list").len(), 0);
     assert!(matches!(
         store.read("installed").err(),
         Some(SkillError::NotFound(_))
     ));
+}
+
+#[test]
+fn failed_skill_replacement_preserves_the_installed_body_and_resources() {
+    let dir = tempfile::tempdir().unwrap();
+    let source = dir.path().join("source");
+    write_skill(dir.path(), "source", "Original", "Original body");
+    std::fs::write(source.join("resource.txt"), "original resource").unwrap();
+    let store = SkillStore::new(dir.path().join("skills"));
+    store.install_from_dir(&source, "installed").unwrap();
+    let original = store.read("installed").unwrap();
+
+    for invalid in [vec![0xff], vec![b'x'; MAX_SKILL_BYTES + 1]] {
+        std::fs::write(source.join("SKILL.md"), invalid).unwrap();
+        assert!(store.install_from_dir(&source, "installed").is_err());
+        assert_eq!(store.read("installed").unwrap(), original);
+        assert_eq!(
+            std::fs::read_to_string(store.root().join("installed/resource.txt")).unwrap(),
+            "original resource"
+        );
+        assert_eq!(store.list().unwrap().len(), 1);
+    }
+
+    // A source containing its destination would recursively copy its own staging directory.
+    std::fs::write(store.root().join("SKILL.md"), "ancestor source").unwrap();
+    assert!(matches!(
+        store.install_from_dir(store.root(), "installed"),
+        Err(SkillError::InvalidSource(_))
+    ));
+    assert_eq!(store.read("installed").unwrap(), original);
+
+    #[cfg(unix)]
+    {
+        write_skill(dir.path(), "source", "Replacement", "Replacement body");
+        std::os::unix::fs::symlink(&source, source.join("recursive-link")).unwrap();
+        assert!(matches!(
+            store.install_from_dir(&source, "installed"),
+            Err(SkillError::InvalidSource(_))
+        ));
+        assert_eq!(store.read("installed").unwrap(), original);
+        assert_eq!(store.list().unwrap().len(), 1);
+    }
+}
+
+#[test]
+fn directory_commit_failure_restores_the_previous_installation() {
+    let root = tempfile::tempdir().unwrap();
+    let target = root.path().join("installed");
+    std::fs::create_dir(&target).unwrap();
+    std::fs::write(target.join("SKILL.md"), "original").unwrap();
+    let staged = tempfile::tempdir_in(root.path()).unwrap();
+    // Simulate a candidate disappearing after validation but before the commit rename.
+    std::fs::remove_dir(staged.path()).unwrap();
+    let error = kanon_core::directory::swap_into_place(staged, &target, root.path()).unwrap_err();
+    assert!(error.previous_in_place);
+    assert_eq!(
+        std::fs::read_to_string(target.join("SKILL.md")).unwrap(),
+        "original"
+    );
+    assert_eq!(std::fs::read_dir(root.path()).unwrap().count(), 1);
 }
 
 #[tokio::test]

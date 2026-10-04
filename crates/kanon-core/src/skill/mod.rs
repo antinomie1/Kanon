@@ -15,8 +15,9 @@
 //! here, keyed off the instance identifier encoded in the session key, so a shared agent cannot
 //! leak one instance's skills into another's conversation.
 
+use std::io::Read;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, RwLock};
 
 use async_trait::async_trait;
 use kanon_llm::agent::{AgentTool, ToolOutput};
@@ -51,11 +52,11 @@ pub enum SkillError {
     #[error("{0}")]
     InvalidSource(String),
     /// The skill body is too large to hand to the model.
-    #[error("skill '{id}' is {size} bytes, above the {limit} byte limit")]
+    #[error("skill '{id}' exceeds the {limit} byte limit ({size} bytes read)")]
     TooLarge {
         /// Skill identifier.
         id: String,
-        /// Actual size in bytes.
+        /// Observed bytes; reading stops once the limit has been exceeded.
         size: usize,
         /// Configured limit.
         limit: usize,
@@ -83,12 +84,17 @@ pub struct SkillMeta {
 pub struct SkillStore {
     /// Directory holding one sub-directory per skill.
     root: PathBuf,
+    /// Readers must not observe the gap between parking the old directory and publishing its replacement.
+    files: RwLock<()>,
 }
 
 impl SkillStore {
     /// Creates a store rooted at `root`.
     pub fn new(root: impl Into<PathBuf>) -> Self {
-        Self { root: root.into() }
+        Self {
+            root: root.into(),
+            files: RwLock::new(()),
+        }
     }
 
     /// Root directory of the store.
@@ -98,16 +104,23 @@ impl SkillStore {
 
     /// Lists every installed skill, ordered by identifier.
     ///
-    /// A skill directory without a readable `SKILL.md` is reported as an explicit error rather
-    /// than silently skipped: an operator who just uploaded it needs to know it is unusable.
+    /// Unreadable skills are logged and skipped. Hidden staging directories and unusable identifiers
+    /// are never advertised as callable skills.
     pub fn list(&self) -> Result<Vec<SkillMeta>, SkillError> {
-        if !self.root.exists() {
-            return Ok(Vec::new());
-        }
-
-        let entries = std::fs::read_dir(&self.root).map_err(|err| {
-            SkillError::Io(format!("failed to read {}: {err}", self.root.display()))
-        })?;
+        let _reading = self
+            .files
+            .read()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let entries = match std::fs::read_dir(&self.root) {
+            Ok(entries) => entries,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+            Err(error) => {
+                return Err(SkillError::Io(format!(
+                    "failed to read {}: {error}",
+                    self.root.display()
+                )));
+            }
+        };
 
         let mut skills = Vec::new();
         for entry in entries {
@@ -121,6 +134,9 @@ impl SkillStore {
             let Some(id) = path.file_name().and_then(|name| name.to_str()) else {
                 continue;
             };
+            if !matches!(Self::validate_id(id), Ok(valid) if valid == id) {
+                continue;
+            }
 
             match read_skill(&path, id) {
                 Ok((name, description)) => skills.push(SkillMeta {
@@ -144,27 +160,11 @@ impl SkillStore {
     /// Reads the full body of one skill.
     pub fn read(&self, id: &str) -> Result<String, SkillError> {
         let path = self.skill_path(id)?;
-        if !path.is_dir() {
-            return Err(SkillError::NotFound(id.to_string()));
-        }
-
-        let body = std::fs::read_to_string(path.join("SKILL.md")).map_err(|err| {
-            if err.kind() == std::io::ErrorKind::NotFound {
-                SkillError::NotFound(id.to_string())
-            } else {
-                SkillError::Io(format!("failed to read skill '{id}': {err}"))
-            }
-        })?;
-
-        if body.len() > MAX_SKILL_BYTES {
-            return Err(SkillError::TooLarge {
-                id: id.to_string(),
-                size: body.len(),
-                limit: MAX_SKILL_BYTES,
-            });
-        }
-
-        Ok(body)
+        let _reading = self
+            .files
+            .read()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        read_body(&path, id)
     }
 
     /// Validates and normalizes a skill identifier supplied by a client.
@@ -185,11 +185,17 @@ impl SkillStore {
     /// Removes an installed skill.
     pub fn remove(&self, id: &str) -> Result<(), SkillError> {
         let path = self.skill_path(id)?;
-        if !path.is_dir() {
-            return Err(SkillError::NotFound(id.to_string()));
-        }
-        std::fs::remove_dir_all(&path)
-            .map_err(|err| SkillError::Io(format!("failed to remove skill '{id}': {err}")))
+        let _writing = self
+            .files
+            .write()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        std::fs::remove_dir_all(&path).map_err(|err| {
+            if err.kind() == std::io::ErrorKind::NotFound {
+                SkillError::NotFound(id.to_string())
+            } else {
+                SkillError::Io(format!("failed to remove skill '{id}': {err}"))
+            }
+        })
     }
 
     /// Installs a skill by copying a prepared directory into the store.
@@ -198,6 +204,10 @@ impl SkillStore {
     /// so the store only has to accept a directory that already contains `SKILL.md`.
     pub fn install_from_dir(&self, source: &Path, id: &str) -> Result<SkillMeta, SkillError> {
         let id = Self::validate_id(id)?;
+        let _writing = self
+            .files
+            .write()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         if !source.join("SKILL.md").is_file() {
             return Err(SkillError::InvalidSource(format!(
                 "'{}' does not contain a SKILL.md file",
@@ -205,15 +215,31 @@ impl SkillStore {
             )));
         }
 
-        let target = self.root.join(&id);
-        if target.exists() {
-            // Re-installing replaces the previous copy: an upload is an explicit intent.
-            std::fs::remove_dir_all(&target)
-                .map_err(|err| SkillError::Io(format!("failed to replace skill '{id}': {err}")))?;
+        // Validate before copying, and again from the finished candidate: a mutable source may
+        // change during the copy. No candidate failure may delete a working installed version.
+        read_skill(source, &id)?;
+        std::fs::create_dir_all(&self.root)
+            .map_err(|err| SkillError::Io(format!("failed to create skills directory: {err}")))?;
+        let source = source
+            .canonicalize()
+            .map_err(|err| SkillError::Io(err.to_string()))?;
+        let root = self
+            .root
+            .canonicalize()
+            .map_err(|err| SkillError::Io(err.to_string()))?;
+        if root.starts_with(&source) {
+            return Err(SkillError::InvalidSource(
+                "skill source must not contain the destination store".into(),
+            ));
         }
-
-        copy_dir(source, &target)?;
-        let (name, description) = read_skill(&target, &id)?;
+        let staging = tempfile::Builder::new()
+            .prefix(".kanon-skill-")
+            .tempdir_in(&root)
+            .map_err(|err| SkillError::Io(format!("failed to stage skill '{id}': {err}")))?;
+        copy_dir(&source, staging.path())?;
+        let (name, description) = read_skill(staging.path(), &id)?;
+        crate::directory::swap_into_place(staging, &root.join(&id), &root)
+            .map_err(|err| SkillError::Io(err.to_string()))?;
         Ok(SkillMeta {
             id,
             name,
@@ -228,10 +254,33 @@ impl SkillStore {
     }
 }
 
+/// Reads the same bounded UTF-8 body for installation, discovery and tool calls.
+fn read_body(dir: &Path, id: &str) -> Result<String, SkillError> {
+    let file = std::fs::File::open(dir.join("SKILL.md")).map_err(|err| {
+        if err.kind() == std::io::ErrorKind::NotFound {
+            SkillError::NotFound(id.to_string())
+        } else {
+            SkillError::Io(format!("failed to read skill '{id}': {err}"))
+        }
+    })?;
+    let mut bytes = Vec::new();
+    file.take(MAX_SKILL_BYTES as u64 + 1)
+        .read_to_end(&mut bytes)
+        .map_err(|err| SkillError::Io(format!("failed to read skill '{id}': {err}")))?;
+    if bytes.len() > MAX_SKILL_BYTES {
+        return Err(SkillError::TooLarge {
+            id: id.to_string(),
+            size: bytes.len(),
+            limit: MAX_SKILL_BYTES,
+        });
+    }
+    String::from_utf8(bytes)
+        .map_err(|err| SkillError::InvalidSource(format!("skill '{id}' is not UTF-8: {err}")))
+}
+
 /// Reads the front matter of a skill, falling back to sensible defaults.
 fn read_skill(dir: &Path, id: &str) -> Result<(String, String), SkillError> {
-    let body = std::fs::read_to_string(dir.join("SKILL.md"))
-        .map_err(|err| SkillError::Io(format!("failed to read skill '{id}': {err}")))?;
+    let body = read_body(dir, id)?;
 
     let mut name = id.to_string();
     let mut description = String::new();
@@ -293,12 +342,21 @@ fn copy_dir(source: &Path, target: &Path) -> Result<(), SkillError> {
         let path = entry.path();
         let destination = target.join(entry.file_name());
 
-        if path.is_dir() {
+        let kind = entry
+            .file_type()
+            .map_err(|err| SkillError::Io(format!("failed to read {}: {err}", path.display())))?;
+        if kind.is_dir() {
             copy_dir(&path, &destination)?;
-        } else {
+        } else if kind.is_file() {
             std::fs::copy(&path, &destination).map_err(|err| {
                 SkillError::Io(format!("failed to copy {}: {err}", path.display()))
             })?;
+        } else {
+            // Following a directory symlink could recursively copy the staging directory itself.
+            return Err(SkillError::InvalidSource(format!(
+                "skill source contains a symlink or special file: {}",
+                path.display()
+            )));
         }
     }
 

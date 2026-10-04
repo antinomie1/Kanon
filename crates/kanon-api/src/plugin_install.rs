@@ -26,6 +26,7 @@
 
 use std::path::{Component, Path, PathBuf};
 
+use kanon_core::directory::swap_into_place;
 use kanon_core::{
     DiscoveredPlugin, LaunchSpec, ManagedHost, PluginManifest, PluginScanner, SupervisorError,
 };
@@ -358,7 +359,7 @@ async fn install_from_dir(
                         }
                     )));
                 }
-                return Err(failure.error);
+                return Err(ApiError::Internal(failure.error.to_string()));
             }
 
             ensure_entrypoint_executable(&dest_dir, &manifest.plugin.entrypoint);
@@ -583,67 +584,6 @@ fn check_collisions(
         )));
     }
 
-    Ok(())
-}
-
-/// A failed swap distinguishes a recoverable old installation from a missing directory.
-struct SwapFailure {
-    error: ApiError,
-    previous_in_place: bool,
-}
-
-/// Moves a fully staged plugin folder to `dest_dir`, keeping the old one until the swap succeeded.
-fn swap_into_place(
-    staging: tempfile::TempDir,
-    dest_dir: &Path,
-    plugins_root: &Path,
-) -> Result<(), SwapFailure> {
-    if !dest_dir.exists() {
-        std::fs::rename(staging.path(), dest_dir).map_err(|err| SwapFailure {
-            error: ApiError::Internal(format!(
-                "Failed to move the plugin into {}: {err}",
-                dest_dir.display()
-            )),
-            previous_in_place: false,
-        })?;
-        return Ok(());
-    }
-
-    // The previous version is parked in a hidden folder (the scanner skips dot-folders) and only
-    // deleted — by the guard's drop — once the new version is in place.
-    let parking = tempfile::Builder::new()
-        .prefix(".kanon-replaced-")
-        .tempdir_in(plugins_root)
-        .map_err(|error| SwapFailure {
-            error: error.into(),
-            previous_in_place: true,
-        })?;
-    let previous = parking.path().join("previous");
-    std::fs::rename(dest_dir, &previous).map_err(|err| SwapFailure {
-        error: ApiError::Internal(format!(
-            "Failed to move the installed version out of {}: {err}",
-            dest_dir.display()
-        )),
-        previous_in_place: true,
-    })?;
-    if let Err(err) = std::fs::rename(staging.path(), dest_dir) {
-        // Put the old version back so a failed upgrade leaves a working plugin behind.
-        let restored = std::fs::rename(&previous, dest_dir);
-        return Err(SwapFailure {
-            previous_in_place: restored.is_ok(),
-            error: ApiError::Internal(format!(
-                "Failed to move the new version into {}: {err}{}",
-                dest_dir.display(),
-                match restored {
-                    Ok(()) => "; the previous version was restored".to_string(),
-                    Err(restore) => format!(
-                        "; restoring the previous version also failed ({restore}), it is kept in {}",
-                        parking.keep().join("previous").display()
-                    ),
-                }
-            )),
-        });
-    }
     Ok(())
 }
 

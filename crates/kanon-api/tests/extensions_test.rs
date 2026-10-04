@@ -215,6 +215,29 @@ async fn skills_round_trip_through_install_enable_and_remove() {
     let (_, body) = send(&app, Method::GET, "/api/v1/skills", None).await;
     assert_eq!(body["skills"][0]["enabled"], json!(false));
 
+    // A file replacement preserves the disabled setting in both its response and the catalog.
+    let (status, body) = send(
+        &app,
+        Method::POST,
+        "/api/v1/skills",
+        Some(json!({ "path": source.to_string_lossy(), "id": "demo" })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["enabled"], json!(false));
+    std::fs::write(source.join("SKILL.md"), [0xff]).unwrap();
+    let (status, body) = send(
+        &app,
+        Method::POST,
+        "/api/v1/skills",
+        Some(json!({ "path": source.to_string_lossy(), "id": "demo" })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    let (_, body) = send(&app, Method::GET, "/api/v1/skills", None).await;
+    assert_eq!(body["skills"][0]["description"], json!("Explains the demo"));
+    assert_eq!(body["skills"][0]["enabled"], json!(false));
+
     let (status, _) = send(&app, Method::DELETE, "/api/v1/skills/demo", None).await;
     assert_eq!(status, StatusCode::OK);
 

@@ -242,7 +242,7 @@ async fn install_skill(
             let view = install_from_archive(&state, &bytes, requested_id.as_deref()).await?;
             Ok(Json(view))
         } else if let Some(path) = path {
-            let view = install_from_path(&state, Path::new(&path), requested_id.as_deref())?;
+            let view = install_from_path(&state, Path::new(&path), requested_id.as_deref()).await?;
             Ok(Json(view))
         } else {
             Err(ApiError::BadRequest(
@@ -255,7 +255,8 @@ async fn install_skill(
             .map_err(|err| ApiError::BadRequest(format!("Failed to read request body: {err}")))?;
         let payload: InstallPathRequest = serde_json::from_slice(&bytes)
             .map_err(|err| ApiError::BadRequest(format!("Invalid JSON request body: {err}")))?;
-        let view = install_from_path(&state, Path::new(&payload.path), payload.id.as_deref())?;
+        let view =
+            install_from_path(&state, Path::new(&payload.path), payload.id.as_deref()).await?;
         Ok(Json(view))
     } else {
         Err(ApiError::BadRequest(format!(
@@ -275,7 +276,7 @@ pub struct InstallPathRequest {
 }
 
 /// Installs from a local directory, requiring an identifier when the directory name is unusable.
-fn install_from_path(
+async fn install_from_path(
     state: &ApiState,
     source: &Path,
     requested_id: Option<&str>,
@@ -289,7 +290,9 @@ fn install_from_path(
         .install_from_dir(source, &id)
         .map_err(skill_error)?;
     tracing::info!(skill_id = %meta.id, "Skill installed by the control plane");
-    Ok(SkillView::new(meta, true))
+    // Replacing files does not change the operator's existing enablement choice.
+    let enabled = state.plugin_state().is_enabled(SKILL_SECTION, &id).await;
+    Ok(SkillView::new(meta, enabled))
 }
 
 /// Installs from a zip archive extracted into a scratch directory.
@@ -318,12 +321,7 @@ async fn install_from_archive(
 
     let fallback = root.file_name().and_then(|name| name.to_str());
     let id = resolve_id(requested_id, fallback)?;
-    let meta = state
-        .skills()
-        .install_from_dir(&root, &id)
-        .map_err(skill_error)?;
-    tracing::info!(skill_id = %meta.id, "Skill installed by the control plane");
-    Ok(SkillView::new(meta, true))
+    install_from_path(state, &root, Some(&id)).await
 }
 
 /// Resolves the identifier to install under, validating whatever the client supplied.

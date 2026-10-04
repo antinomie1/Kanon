@@ -13,6 +13,7 @@ pub mod access;
 pub mod adapter;
 pub mod bash;
 pub mod conversation;
+pub mod directory;
 pub mod instance;
 pub mod ipc;
 pub mod manifest;
