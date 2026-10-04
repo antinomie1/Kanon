@@ -132,6 +132,23 @@ class TestDispatch(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(response.success)
         self.assertIn("bad input", response.error_message)
 
+    async def test_invalid_reply_and_handler_timeout_finish_with_failure(self) -> None:
+        class Broken(Plugin):
+            @command("invalid")
+            def invalid(self):
+                return [42]
+
+            @command("timeout")
+            def timeout(self):
+                raise asyncio.TimeoutError("upstream timed out")
+
+        plugin = Broken()
+        for name, error in [("invalid", "cannot send int"), ("timeout", "upstream timed out")]:
+            with self.subTest(command=name):
+                response = await asyncio.wait_for(plugin.on_execute_command(request(name)), timeout=1)
+                self.assertFalse(response.success)
+                self.assertIn(error, response.error_message)
+
     async def test_unknown_command_fails(self) -> None:
         response = await Demo().on_execute_command(request("nope"))
         self.assertFalse(response.success)
@@ -255,6 +272,23 @@ class TestHandover(unittest.IsolatedAsyncioTestCase):
     def test_unknown_conversation_kind_is_rejected(self) -> None:
         with self.assertRaises(ValueError):
             command("x", conversation_kinds=["dm"])
+
+    async def test_explicit_response_preserves_model_handover(self) -> None:
+        class Explicit(Plugin):
+            @command("explicit")
+            def explicit(self):
+                return self.result
+
+        plugin = Explicit()
+        for text in (None, "", "remember tea"):
+            with self.subTest(text=text):
+                plugin.result = pb.CommandExecuteResponse(
+                    success=True, pass_to_model=True, replies=[MessageSegment.text("noted")]
+                )
+                if text is not None:
+                    plugin.result.model_text = text
+                response = await plugin.on_execute_command(request("explicit"))
+                self.assertEqual(response, plugin.result)
 
     async def test_a_handler_can_pass_the_message_on(self) -> None:
         response = await Handover().on_execute_command(request("note", "tea", ["tea"]))

@@ -772,28 +772,28 @@ class Plugin:
         """Runs one command handler to completion, across as many turns as it takes."""
         try:
             result = await _call(handler, event, event.args)
-        except asyncio.TimeoutError:
-            # The user never answered a wait_next; nothing is waiting for this handler anymore.
+            # Reply conversion is part of command execution: invalid return values must finish
+            # the waiting RPC with an error, just like exceptions raised inside the handler.
+            if isinstance(result, pb.CommandExecuteResponse):
+                await event.reply(list(result.replies))
+                if result.pass_to_model:
+                    event.pass_to_model(result.model_text if result.HasField("model_text") else None)
+                if session.turn is not None:
+                    session.turn.finish(result.capture_seconds, result.success, result.error_message)
+                return
+            if result is not None:
+                await event.reply(result)
             if session.turn is not None:
                 session.turn.finish()
-            return
         except Exception as exc:  # noqa: BLE001 - reported to Core, or logged when nobody waits
+            if isinstance(exc, asyncio.TimeoutError) and session.turn is None:
+                # wait_next already returned its turn to Core. An unrelated timeout while a
+                # turn is still active is a command failure and must not report success.
+                return
             if session.turn is not None:
                 session.turn.finish(success=False, error=f"{type(exc).__name__}: {exc}")
             else:
                 print(f"[kanon-sdk] command '{event.command}' failed: {exc!r}", file=sys.stderr)
-            return
-
-        if isinstance(result, pb.CommandExecuteResponse):
-            # An explicit response: its replies join the turn and its fields are honoured.
-            await event.reply(list(result.replies))
-            if session.turn is not None:
-                session.turn.finish(result.capture_seconds, result.success, result.error_message)
-            return
-        if result is not None:
-            await event.reply(result)
-        if session.turn is not None:
-            session.turn.finish()
 
     async def on_invoke_action(
         self,
