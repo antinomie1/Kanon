@@ -24,6 +24,7 @@ pub mod pipeline;
 mod process;
 pub mod render;
 pub mod shutdown;
+pub mod simulation;
 pub mod skill;
 pub mod supervisor;
 mod time;

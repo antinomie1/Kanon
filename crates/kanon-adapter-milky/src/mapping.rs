@@ -361,6 +361,19 @@ fn translate_incoming_message(message: &IncomingMessage, self_id: i64) -> Incomi
     for (key, value) in extra {
         metadata_fields.insert(key, value);
     }
+    // Preserve identifier semantics even when the operator renames the adapter's platform.
+    use kanon_core::pipeline::identity;
+    metadata_fields.insert(identity::META_IDENTITY_KIND.into(), json!("qq"));
+    metadata_fields.insert(identity::META_CHANNEL_ID.into(), json!(peer_id.to_string()));
+    for (source, target) in [
+        (META_GROUP_NAME, identity::META_CHANNEL_NAME),
+        (META_SENDER_NAME, identity::META_SENDER_NICKNAME),
+        (META_SENDER_CARD, identity::META_SENDER_CARD),
+    ] {
+        if let Some(value) = metadata_fields.get(source).cloned() {
+            metadata_fields.insert(target.into(), value);
+        }
+    }
     // Platform-neutral name (group card first) and role, read by the core for speaker labels and
     // command access.
     let generic_name = [META_SENDER_CARD, META_SENDER_NAME]

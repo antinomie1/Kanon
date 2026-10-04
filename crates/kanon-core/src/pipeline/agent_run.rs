@@ -185,7 +185,7 @@ impl PipelineEngine {
                     .scope(self.run_conversation_turn(
                         ConversationTurn {
                             agent,
-                            running: self.running_turns().begin(Some(chat.instance.id.clone())),
+                            running: &self.running_turns().begin(Some(chat.instance.id.clone())),
                             session_id: &session_id,
                             event,
                             hosts: &hosts,

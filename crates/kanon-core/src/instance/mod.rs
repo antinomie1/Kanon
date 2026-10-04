@@ -31,6 +31,7 @@ use tokio::sync::RwLock;
 
 use crate::access::CommandPolicy;
 use crate::conversation::{ContextPolicy, ReplyPolicy};
+use crate::simulation::{ConversationMode, SimulationPolicy};
 
 /// Default location of the instance catalog, relative to the node working directory.
 pub const DEFAULT_INSTANCE_CATALOG: &str = "./data/instances.json";
@@ -155,6 +156,15 @@ pub struct BotInstance {
     pub name: String,
     /// Whether the instance accepts messages. A disabled instance processes nothing.
     pub enabled: bool,
+    /// Conversation behavior, independent of the selected model and persona.
+    #[serde(default)]
+    pub conversation_mode: ConversationMode,
+    /// Optional social guidance, independent of simulation and persona.
+    #[serde(default)]
+    pub conversation_rules: bool,
+    /// Bounded participation settings used in simulation mode.
+    #[serde(default)]
+    pub simulation: SimulationPolicy,
     /// Platform identifiers served by this instance.
     #[serde(default)]
     pub adapters: Vec<String>,
@@ -170,7 +180,7 @@ pub struct BotInstance {
     /// Model override; `None` means "use the node's default model".
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model: Option<String>,
-    /// Reply policy override; `None` inherits the node-wide policy.
+    /// Reply policy override; `None` uses the simulation preset or the node-wide assistant policy.
     ///
     /// Kept per instance because "answer only when mentioned" is a property of a bot, not of the
     /// platform: the same group may host a chatty bot and a quiet one.
@@ -222,6 +232,15 @@ pub struct InstanceDraft {
     /// Whether the instance should accept messages.
     #[serde(default)]
     pub enabled: bool,
+    /// Assistant or simulation behavior; older documents remain assistant instances.
+    #[serde(default)]
+    pub conversation_mode: ConversationMode,
+    /// Omission enables rules on entry to simulation; other updates preserve the switch.
+    #[serde(default)]
+    pub conversation_rules: Option<bool>,
+    /// Simulation timing and participation bounds.
+    #[serde(default)]
+    pub simulation: SimulationPolicy,
     /// Platform identifiers to claim.
     #[serde(default)]
     pub adapters: Vec<String>,
@@ -354,7 +373,13 @@ impl BotInstance {
 
     /// Reply policy that governs this instance, given the node-wide default.
     pub fn effective_reply_policy(&self, node_policy: ReplyPolicy) -> ReplyPolicy {
-        self.reply_policy.unwrap_or(node_policy)
+        self.reply_policy.unwrap_or_else(|| {
+            if self.conversation_mode == ConversationMode::Simulation {
+                crate::simulation::default_reply_policy()
+            } else {
+                node_policy
+            }
+        })
     }
 
     /// Context-extras policy that governs this instance, given the node-wide default.
@@ -623,6 +648,15 @@ impl InstanceRegistry {
             return Err(InstanceError::NotFound(id.to_string()));
         }
 
+        let mut draft = draft;
+        if draft.conversation_rules.is_none() {
+            let existing = &instances[id];
+            draft.conversation_rules = Some(
+                existing.conversation_rules
+                    || (existing.conversation_mode != ConversationMode::Simulation
+                        && draft.conversation_mode == ConversationMode::Simulation),
+            );
+        }
         let name = normalize_name(&draft.name)?;
         let mut candidate = build_instance(id.to_string(), name, draft)?;
         // Session generations are runtime state owned by the instance, never by a form submit.
@@ -939,7 +973,34 @@ impl InstanceRegistry {
                 )));
             }
         };
-        let document: InstanceCatalogDocument = serde_json::from_str(&raw).map_err(|err| {
+        let mut value: serde_json::Value = serde_json::from_str(&raw).map_err(|err| {
+            InstanceError::Io(format!("failed to parse {}: {err}", path.display()))
+        })?;
+        // The first simulation preview stored guidance inside its timing policy. Migrate it
+        // at the file boundary: its dormant assistant-mode default must not opt old assistants
+        // into new behavior. New writes only contain the independent top-level switch.
+        if let Some(instances) = value
+            .get_mut("instances")
+            .and_then(serde_json::Value::as_array_mut)
+        {
+            for instance in instances {
+                let legacy = instance
+                    .get_mut("simulation")
+                    .and_then(serde_json::Value::as_object_mut)
+                    .and_then(|policy| policy.remove("behavior_prompt"));
+                if let Some(legacy) = legacy {
+                    let enabled = legacy.as_bool().ok_or_else(|| {
+                        InstanceError::Invalid("simulation.behavior_prompt must be boolean".into())
+                    })?;
+                    if instance.get("conversation_rules").is_none() {
+                        instance["conversation_rules"] = serde_json::Value::Bool(
+                            enabled && instance["conversation_mode"] == "simulation",
+                        );
+                    }
+                }
+            }
+        }
+        let document: InstanceCatalogDocument = serde_json::from_value(value).map_err(|err| {
             InstanceError::Io(format!("failed to parse {}: {err}", path.display()))
         })?;
 
@@ -1020,6 +1081,11 @@ fn build_instance(
         id,
         name,
         enabled: draft.enabled,
+        conversation_mode: draft.conversation_mode,
+        conversation_rules: draft
+            .conversation_rules
+            .unwrap_or(draft.conversation_mode == ConversationMode::Simulation),
+        simulation: draft.simulation,
         adapters: draft.adapters,
         persona_id: draft.persona_id,
         system_prompt: draft.system_prompt,
@@ -1052,6 +1118,10 @@ fn prepare_instance(mut instance: BotInstance) -> Result<BotInstance, InstanceEr
         )));
     }
     instance.name = normalize_name(&instance.name)?;
+    instance
+        .simulation
+        .validate()
+        .map_err(InstanceError::Invalid)?;
     let mut adapters: Vec<String> = Vec::new();
     for adapter in std::mem::take(&mut instance.adapters) {
         let platform = adapter.trim();

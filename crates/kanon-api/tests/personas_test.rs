@@ -230,7 +230,7 @@ async fn editing_keeps_the_id_and_the_base_assistant_is_read_only() {
     assert_eq!(status, StatusCode::CONFLICT, "unexpected body: {body}");
     assert_eq!(
         state.personas().base().prompt,
-        "You are a helpful assistant."
+        kanon_llm::prompt::BASE_PERSONA_PROMPT
     );
 
     let (status, _) = send_json(

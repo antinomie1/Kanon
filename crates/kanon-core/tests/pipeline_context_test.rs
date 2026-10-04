@@ -477,8 +477,8 @@ fn the_sender_id_and_time_are_included_only_when_the_policy_asks() {
         },
     );
     let content = on.unwrap().content.unwrap_or_default();
-    assert!(content.contains("[群号: group:1]"), "{content}");
-    assert!(content.contains("[发送者: 1705702687]"), "{content}");
+    assert!(content.contains("会话ID=\"group:1\""), "{content}");
+    assert!(content.contains("用户ID=\"1705702687\""), "{content}");
 
     // The timestamp is rendered in the host's local timezone, so the exact value depends on the
     // machine running the test; the shape (`YYYY-MM-DD HH:MM:SS`) and the label are what matter.

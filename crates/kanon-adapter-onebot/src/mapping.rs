@@ -3,6 +3,9 @@
 //! stays custom because a OneBot cache filename is not a file on the Kanon host.
 
 use base64::Engine;
+use kanon_core::pipeline::identity::{
+    META_CHANNEL_ID, META_CHANNEL_NAME, META_IDENTITY_KIND, META_SENDER_CARD, META_SENDER_NICKNAME,
+};
 use kanon_proto::prost_types::{self, value::Kind};
 use kanon_proto::v1::message_segment::Segment;
 use kanon_proto::v1::{
@@ -50,7 +53,18 @@ pub fn map_event(platform: &str, value: Value) -> Result<Option<PipelineEventReq
         kanon_core::META_CONVERSATION_KIND: scene,
         kanon_core::META_BOT_MENTIONED: mentioned,
         kanon_core::META_TIMESTAMP: timestamp,
+        META_IDENTITY_KIND: "qq",
+        META_CHANNEL_ID: peer_id,
     });
+    if let Some(name) = value.get("group_name").and_then(Value::as_str) {
+        metadata[META_CHANNEL_NAME] = json!(name);
+    }
+    if let Some(name) = value["sender"]["nickname"].as_str() {
+        metadata[META_SENDER_NICKNAME] = json!(name);
+    }
+    if let Some(card) = value["sender"]["card"].as_str() {
+        metadata[META_SENDER_CARD] = json!(card);
+    }
     if scene == "group" {
         metadata["onebot.group_id"] = json!(peer_id);
     }
@@ -739,12 +753,24 @@ pub fn attach_forward(
 
 /// Users @-mentioned in a group message whose display name is still unknown.
 pub fn unnamed_mentions(event: &PipelineEventRequest) -> Vec<i64> {
+    // The core already knows when the bot itself was addressed. Looking up our own account
+    // adds no participant identity and can delay an @bot /new or /stop behind later chatter.
+    let self_id = event
+        .metadata
+        .as_ref()
+        .and_then(|metadata| metadata.fields.get("onebot.self_id"))
+        .and_then(|value| match &value.kind {
+            Some(Kind::StringValue(id)) => Some(id.as_str()),
+            _ => None,
+        });
     let mut ids: Vec<i64> = event
         .segments
         .iter()
         .filter_map(|segment| match &segment.segment {
             Some(Segment::Mention(mention))
-                if !mention.is_all && mention.display_name.is_empty() =>
+                if !mention.is_all
+                    && mention.display_name.is_empty()
+                    && Some(mention.target_user_id.as_str()) != self_id =>
             {
                 parse_id(&mention.target_user_id).ok()
             }

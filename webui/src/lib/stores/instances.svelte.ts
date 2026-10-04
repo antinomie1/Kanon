@@ -5,6 +5,7 @@ import type {
   BotInstanceView,
   CommandPolicy,
   ContextPolicy,
+  ConversationMode,
   InstanceRequest,
   InstancesResponse,
   ItemPolicy,
@@ -12,6 +13,7 @@ import type {
   ReplyMode,
   ReplyPolicy,
   SessionScope,
+  SimulationPolicy,
 } from '../types';
 import { agentsStore } from './agents.svelte';
 import {
@@ -20,6 +22,17 @@ import {
   draftOfCommandPolicy,
 } from './commandPolicy.svelte';
 import { modelsStore } from './models.svelte';
+
+/** Each new editor owns its settings; never share mutable defaults across drafts. */
+function defaultSimulation(): SimulationPolicy {
+  return {
+    quiet_ms: 2500,
+    max_batch_ms: 10000,
+    listen_seconds: 30,
+    max_participation_seconds: 180,
+    max_messages: 3,
+  };
+}
 
 /** One toggleable item an instance may opt in or out of. */
 export interface PolicyItem {
@@ -84,6 +97,9 @@ class InstancesStore {
   // Form fields
   formName = $state('');
   formEnabled = $state(true);
+  formConversationMode = $state<ConversationMode>('assistant');
+  formConversationRules = $state(false);
+  formSimulation = $state<SimulationPolicy>(defaultSimulation());
   formAdapters = $state<string[]>([]);
   formPersonaId = $state('');
   formSystemPrompt = $state('');
@@ -378,6 +394,9 @@ class InstancesStore {
     this.editingId = null;
     this.formName = '';
     this.formEnabled = true;
+    this.formConversationMode = 'assistant';
+    this.formConversationRules = false;
+    this.formSimulation = defaultSimulation();
     this.formAdapters = [];
     this.formPersonaId = '';
     this.formSystemPrompt = '';
@@ -408,10 +427,24 @@ class InstancesStore {
     this.baseline = this.payload();
   }
 
+  /** Enabling simulation opts into guidance; disabling it preserves that independent choice. */
+  setSimulationEnabled(enabled: boolean) {
+    this.formConversationMode = enabled ? 'simulation' : 'assistant';
+    if (enabled) this.formConversationRules = true;
+  }
+
+  /** Restores the ready-to-use timing preset without changing either switch. */
+  resetSimulationTiming() {
+    this.formSimulation = defaultSimulation();
+  }
+
   openEdit(instance: BotInstanceView) {
     this.editingId = instance.id;
     this.formName = instance.name;
     this.formEnabled = instance.enabled;
+    this.formConversationMode = instance.conversation_mode ?? 'assistant';
+    this.formConversationRules = instance.conversation_rules ?? false;
+    this.formSimulation = { ...defaultSimulation(), ...instance.simulation };
     this.formAdapters = [...instance.adapters];
     this.formPersonaId = instance.persona_id ?? '';
     this.formSystemPrompt = instance.system_prompt ?? '';
@@ -485,6 +518,9 @@ class InstancesStore {
     return {
       name: this.formName.trim(),
       enabled: this.formEnabled,
+      conversation_mode: this.formConversationMode,
+      conversation_rules: this.formConversationRules,
+      simulation: { ...this.formSimulation },
       adapters: this.formAdapters,
       persona_id: this.formPersonaId || null,
       system_prompt: this.formSystemPrompt.trim() || null,
@@ -570,6 +606,9 @@ class InstancesStore {
       const res = await api.updateInstance(instance.id, {
         name: instance.name,
         enabled,
+        conversation_mode: instance.conversation_mode ?? 'assistant',
+        conversation_rules: instance.conversation_rules ?? false,
+        simulation: instance.simulation ?? defaultSimulation(),
         adapters: instance.adapters,
         persona_id: instance.persona_id,
         system_prompt: instance.system_prompt,

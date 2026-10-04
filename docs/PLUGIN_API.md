@@ -477,3 +477,18 @@ Supervisor 启动宿主时注入的**启动契约**（插件不得把其他环�
 - 删除的字段一律 `reserved` 字段号与名称，不得复用。
 - 新增字段必须对旧客户端无害：未设置时的默认值须等于“旧行为”（如 `capture_seconds = 0`、`continuation = false`、空的 `events`）。
 - 修改 proto 后需同步：Rust 由 `kanon-proto` 构建时生成；Python 需重新生成 `kanon_sdk/proto/plugin_pb2*.py`；TypeScript 运行时动态加载 IDL，无需生成。
+
+
+### Model-visible platform identity metadata
+
+Adapters can supply these string fields in `PipelineEventRequest.metadata`. They describe current-turn context and must never be interpolated into system prompts:
+
+| Field | Meaning |
+| --- | --- |
+| `kanon.channel_name` | Human-readable group/channel name, when the platform provides it |
+| `kanon.channel_id` | Raw platform conversation ID, without the routing prefix |
+| `kanon.sender_nickname` | Account nickname |
+| `kanon.sender_card` | Group-specific card, distinct from the nickname |
+| `kanon.identity_kind` | `qq` for QQ numbers, `openid` for QQ Official OpenIDs, `opaque` for other platform identifiers |
+
+`kanon.sender_name` remains the compatibility display-name fallback. Names are quoted and bounded in model context; IDs remain governed by the sender/channel context switches. See [simulation mode](./SIMULATION.md) for conversation action semantics. The tool names `conversation_say`, `conversation_wait`, and `conversation_leave` are reserved during simulation; an extension collision is an explicit configuration error.

@@ -194,6 +194,9 @@ pub struct TurnOptions {
     /// This immutable snapshot is reused for tool rounds and background compaction. Inherited
     /// instance configuration must never be copied into the session's durable persona binding.
     pub persona: Option<crate::prompt::Persona>,
+    /// Stable mode instructions appended independently of the selected persona.
+    /// Callers must keep runtime facts in the user message to preserve the cached prefix.
+    pub instructions: Option<String>,
     /// Tool rounds allowed in this turn; `None` uses [`AgentConfig::max_iterations`].
     pub max_iterations: Option<usize>,
     /// Disables tool advertisement and execution in this turn, including native tools.

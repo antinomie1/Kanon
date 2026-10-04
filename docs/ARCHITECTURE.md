@@ -300,6 +300,7 @@ SDK 只是协议的封装：三语言提供同一套能力（命令、正则触�
 
 ### 8.1 核心职责与架构定位
 Rust 核心全权主导 LLM 的生命周期与推理编排，确保高并发下的 Token 预算控制与流式吞吐：
+- **对话参与模式**：实例可在助手模式与[仿真对话模式](./SIMULATION.md)之间选择。仿真模式独立于人设，按批观察消息，通过 `conversation_say` / `conversation_wait` / `conversation_leave` 决定发言、监听或退出，复用原有 Agent、会话写锁与停止信号。群会话共享，普通模型结束语不直接发送，时限与发言数可配置。
 - **Agent 抽象**：流水线、控制台聊天与插件网关从不直接驱动模型，而是把一轮对话交给 `kanon_llm::Agent`（trait：`run_message_with` / `run_stream` / `compact_session`，以及 `config`、`provider`、`memory`；`run_message` 是不带 `TurnOptions` 的便捷形式，`TurnOptions` 可限制工具轮次或不提供工具），并只依据其 `AgentOutput` 行事。节点目前只有一个实现——内置的 `BuiltinAgent`（`kanon-llm/src/builtin.rs`，基于 `LlmProvider` 的工具循环）；将来换用外部 Agent SDK 时只需新增实现并在 `AgentFactory` 中构建，流水线不变。实现必须遵守同一会话契约：历史仅追加、失败轮次留下可续接的历史、停止信号触发时及时结束、在每次模型请求前与每次工具调用前后调用 `AgentHook`。
 - **插件进入智能体的轮次**：流水线回答一条消息的每一轮都由 `PipelineEngine::run_conversation_turn` 驱动——发出 `AGENT_BEGIN` / `AGENT_DONE` 事件、登记 `/stop`，并在 `with_turn` 任务作用域内运行，作用域记录入站消息与该实例启用的插件宿主。节点为每个 Agent 注册 `PluginAgentHook`（`kanon-core/src/pipeline/agent_hook.rs`），它从作用域中找到插件：模型请求前调用 `OnLlmRequest` 改写系统提示（见 8.6），工具调用前后发出 `TOOL_CALL` / `TOOL_RESULT`。作用域是任务本地的而不是 Agent 的字段，因为同一个 Agent 同时服务多个聊天的轮次；作用域之外（控制台聊天、插件的私有运行、后台压缩）从不调用插件，插件在钩子里调用模型因此不会递归。
 - **插件调用智能体 (`RunAgent`)**：插件可以让节点的智能体回答一个提示（`kanon-core/src/pipeline/agent_run.rs`）。在某个聊天的对话中运行时，它就是该对话的一轮，同样经 `run_conversation_turn`，且像其他外部写入者一样只在能立即拿到会话写锁时进行；默认则用 `AgentFactory::private_agent` 构建一次性 Agent（独立的内存记忆、不压缩、无插件钩子作用域），会话名为 `plugin:<plugin_id>:<n>`，结束即丢弃。两种运行都不执行 Bash。

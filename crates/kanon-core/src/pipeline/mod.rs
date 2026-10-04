@@ -22,6 +22,7 @@ pub mod dead_letter;
 pub mod engine;
 pub mod group_log;
 pub mod hooks;
+pub mod identity;
 pub mod media;
 pub mod observer;
 pub mod pre_filter;

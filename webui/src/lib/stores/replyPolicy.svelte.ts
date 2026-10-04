@@ -8,7 +8,9 @@ import { t } from './i18n.svelte';
  * Shared by the node editor and the instance form so the same policy is never described two
  * different ways. The node's own `description` string is preferred where it is available.
  */
-export function describeReplyPolicy(policy: ReplyPolicy | null): string {
+export function describeReplyPolicy(
+  policy: Pick<ReplyPolicy, 'mode' | 'probability'> | null,
+): string {
   if (!policy) return '-';
   switch (policy.mode) {
     case 'always':

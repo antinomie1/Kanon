@@ -27,7 +27,7 @@ use kanon_proto::v1::{
     PipelineEventRequest, ReplySource,
 };
 
-use crate::access::{CommandAccess, CommandPolicyStore, META_SENDER_NAME};
+use crate::access::{CommandAccess, CommandPolicyStore};
 use crate::adapter::{AdapterDescriptor, AdapterError, AdapterKind};
 use crate::conversation::{ContextPolicyStore, ConversationKind, ReplyPolicyStore, bot_mentioned};
 use crate::instance::InstanceRegistry;
@@ -51,6 +51,9 @@ use crate::toggle::ToggleStore;
 
 /// Maximum independently running inbound chats; queued work remains bounded by ingest capacity.
 pub const MAX_CONCURRENT_CHATS: usize = 16;
+
+#[path = "simulation_runtime.rs"]
+mod simulation_runtime;
 
 /// Default depth of the outbound delivery queue.
 ///
@@ -140,6 +143,8 @@ impl From<DeliverMessageRequest> for OutboundMessage {
 /// Result produced after processing an event through the pipeline engine.
 #[derive(Debug, Clone)]
 pub enum PipelineResult {
+    /// A simulation owner or its mailbox accepted the event; speech uses explicit tools.
+    SimulationHandled,
     /// Inbound event was intercepted and blocked by a PreFilter plugin.
     Blocked {
         /// Identifier of the host that blocked the event.
@@ -260,7 +265,8 @@ impl PipelineResult {
             | Self::ModelListed { replies, .. }
             | Self::BuiltinReplied { replies, .. }
             | Self::CommandDenied { replies, .. } => replies,
-            Self::CommandNotFound { .. }
+            Self::SimulationHandled
+            | Self::CommandNotFound { .. }
             | Self::ReplySuppressed { .. }
             | Self::Notice { .. }
             | Self::NoInstance { .. }
@@ -375,13 +381,36 @@ pub(crate) fn conversation_key(event: &PipelineEventRequest, shared: bool) -> St
     }
 }
 
+/// Resolves the conversation once for commands, history access, workers and model turns.
+/// Simulation has its own platform-qualified namespace; identical group IDs on two adapters
+/// must never share a mailbox or transcript. Existing assistant session IDs remain unchanged.
+pub(crate) fn instance_conversation_key(
+    event: &PipelineEventRequest,
+    instance: Option<&crate::instance::BotInstance>,
+) -> String {
+    let key = conversation_key(event, shares_session(instance, event));
+    if instance.is_some_and(|instance| {
+        instance.conversation_mode == crate::simulation::ConversationMode::Simulation
+    }) {
+        format!(
+            "simulation:{}:{}:{key}",
+            event.platform.len(),
+            event.platform
+        )
+    } else {
+        key
+    }
+}
+
 /// Whether an event's conversation is one session shared by the whole group.
 pub(crate) fn shares_session(
     instance: Option<&crate::instance::BotInstance>,
     event: &PipelineEventRequest,
 ) -> bool {
-    instance.is_some_and(|instance| instance.session_scope == SessionScope::Group)
-        && ConversationKind::from_metadata(event.metadata.as_ref()).is_policy_governed()
+    instance.is_some_and(|instance| {
+        instance.session_scope == SessionScope::Group
+            || instance.conversation_mode == crate::simulation::ConversationMode::Simulation
+    }) && ConversationKind::from_metadata(event.metadata.as_ref()).is_policy_governed()
 }
 
 /// Result produced after delivering an outbound message through a platform adapter.
@@ -636,7 +665,7 @@ pub(crate) struct ConversationTurn<'a> {
     /// The agent answering the turn.
     pub(crate) agent: Arc<dyn kanon_llm::Agent>,
     /// Registration created before waiting for the session writer, so `/stop` reaches that wait.
-    pub(crate) running: super::turns::TurnGuard<'a>,
+    pub(crate) running: &'a super::turns::TurnGuard<'a>,
     /// The conversation's session.
     pub(crate) session_id: &'a str,
     /// The inbound message the turn answers.
@@ -693,6 +722,8 @@ pub struct PipelineEngine {
     captures: CaptureRegistry,
     /// Model turns in progress, which `/stop` can end.
     turns: super::turns::RunningTurns,
+    /// Bounded mailboxes for active conversational participation.
+    simulation: simulation_runtime::SimulationHub,
     /// MCP servers contributing tools alongside plugin hosts.
     mcp: Option<Arc<McpPool>>,
     /// Optional lifecycle observer used by the management control plane for tracing.
@@ -731,6 +762,7 @@ impl PipelineEngine {
             triggers: TriggerMatcher::default(),
             captures: CaptureRegistry::default(),
             turns: Default::default(),
+            simulation: Default::default(),
             mcp: None,
             observer: None,
             dead_letter: Arc::new(DeadLetterWriter::default()),
@@ -996,6 +1028,17 @@ impl PipelineEngine {
                     .agent_factory()
                     .map(|factory| factory.personas())
                     .or_else(|| agent.persona_registry());
+                if instances
+                    .get(instance_id)
+                    .await
+                    .is_some_and(|instance| instance.conversation_rules)
+                {
+                    let instructions = options.instructions.get_or_insert_with(String::new);
+                    if !instructions.is_empty() {
+                        instructions.push_str("\n\n");
+                    }
+                    instructions.push_str(crate::simulation::CONVERSATION_RULES);
+                }
                 options.persona = instances
                     .persona_for_instance(instance_id, personas.map(Arc::as_ref))
                     .await
@@ -1018,7 +1061,6 @@ impl PipelineEngine {
             .await
         }
         .await;
-        drop(running);
 
         let done = match &result {
             Ok(output) => AgentDoneEvent {
@@ -1972,9 +2014,39 @@ impl PipelineEngine {
             && kind.is_policy_governed()
             && notice.is_none();
         let group_key = format!("{platform}\u{1f}{}", filtered_event.channel_id);
-        let speaker = metadata_str(filtered_event.metadata.as_ref(), META_SENDER_NAME)
-            .map(str::to_owned)
-            .unwrap_or_else(|| filtered_event.sender_id.clone());
+        let context_policy = instance.as_ref().map_or_else(
+            || {
+                self.context_policy
+                    .as_ref()
+                    .map(|store| store.get())
+                    .unwrap_or_default()
+            },
+            |instance| {
+                instance.effective_context_policy(
+                    self.context_policy
+                        .as_ref()
+                        .map(|store| store.get())
+                        .unwrap_or_default(),
+                )
+            },
+        );
+        let speaker =
+            super::identity::speaker_label(&filtered_event, context_policy.include_sender_id);
+
+        if let Some(instance) = instance.as_ref()
+            && instance.conversation_mode == crate::simulation::ConversationMode::Simulation
+            && notice.is_none()
+        {
+            return self
+                .process_simulation(
+                    instance,
+                    filtered_event,
+                    &hosts,
+                    reply_policy,
+                    context_policy,
+                )
+                .await;
+        }
 
         if let Some(instance) = instance.as_ref()
             && notice.is_none()
@@ -2008,7 +2080,7 @@ impl PipelineEngine {
         // Phase 3: Conversational message (unmatched by command router, routed to LLM if enabled)
         // The agent is resolved per event so a provider configured or cleared at runtime is
         // honoured immediately; an empty slot means "no conversational LLM" and passes through.
-        let conversation = conversation_key(&filtered_event, shared);
+        let conversation = instance_conversation_key(&filtered_event, instance.as_ref());
 
         // The agent is resolved per event: the node provider comes from the shared slot (so a
         // provider configured at runtime is honoured immediately) and a per-instance model
@@ -2031,23 +2103,6 @@ impl PipelineEngine {
             }
             _ => ModelCapabilities::default(),
         };
-        // The instance may override whether the sender id and the message time are prepended.
-        let context_policy = instance.as_ref().map_or_else(
-            || {
-                self.context_policy
-                    .as_ref()
-                    .map(|store| store.get())
-                    .unwrap_or_default()
-            },
-            |instance| {
-                instance.effective_context_policy(
-                    self.context_policy
-                        .as_ref()
-                        .map(|store| store.get())
-                        .unwrap_or_default(),
-                )
-            },
-        );
         // Recall notes waiting for this conversation ride on its next model turn, as leading text
         // of the current user message: runtime facts belong to the current turn, never to the
         // cached prefix. They are only taken when a model will actually read them.
@@ -2211,7 +2266,7 @@ impl PipelineEngine {
             let turn = self.run_conversation_turn(
                 ConversationTurn {
                     agent,
-                    running,
+                    running: &running,
                     session_id: &session_id,
                     event: &filtered_event,
                     hosts: &hosts,
@@ -2399,7 +2454,7 @@ impl PipelineEngine {
         }
         .ok_or(ConversationError::NoModel)?;
 
-        let conversation = conversation_key(event, shares_session(instance.as_ref(), event));
+        let conversation = instance_conversation_key(event, instance.as_ref());
         let session_id = match instance.as_ref() {
             Some(instance) => instance.conversation_session_id(&conversation),
             None => conversation,
@@ -2556,7 +2611,7 @@ impl PipelineEngine {
     ) -> PipelineResult {
         let chat = super::conversations::Chat {
             instance: instance.clone(),
-            conversation: conversation_key(event, shares_session(Some(instance), event)),
+            conversation: instance_conversation_key(event, Some(instance)),
         };
         match self.start_conversation(&chat).await {
             Ok(session_id) => {
@@ -2599,7 +2654,7 @@ impl PipelineEngine {
     ) -> PipelineResult {
         let chat = super::conversations::Chat {
             instance: instance.clone(),
-            conversation: conversation_key(event, shares_session(Some(instance), event)),
+            conversation: instance_conversation_key(event, Some(instance)),
         };
         let reply = match self.conversation_command_reply(command, &chat, args).await {
             Ok(reply) => reply,
@@ -2995,8 +3050,9 @@ impl PipelineEngine {
         let mut phase = self.shutdown.subscribe();
         let draining = |p| p != ShutdownPhase::Running;
         let mut waiting: VecDeque<(String, IngestEventRequest)> = VecDeque::new();
-        let mut active = HashMap::<String, Option<PipelineEventRequest>>::new();
-        let mut running: FuturesUnordered<BoxFuture<'_, String>> = FuturesUnordered::new();
+        let mut active = HashMap::<u64, (String, Option<PipelineEventRequest>)>::new();
+        let mut next_task = 0_u64;
+        let mut running: FuturesUnordered<BoxFuture<'_, u64>> = FuturesUnordered::new();
         let read_ahead = event_receiver.max_capacity();
         let mut queue_open = true;
 
@@ -3007,18 +3063,40 @@ impl PipelineEngine {
             // A lane key excludes the generation: /new and /switch must finish before the next
             // event resolves the live session. Removing only eligible entries preserves FIFO
             // within a lane while allowing a different chat past a blocked one.
-            while running.len() < MAX_CONCURRENT_CHATS {
-                let Some(index) = waiting
-                    .iter()
-                    .position(|(key, _)| !active.contains_key(key))
-                else {
+            // A simulation owner occupies its lane while listening. Admit at most one
+            // additional ingress task for that lane, so post-filter deposits stay ordered.
+            // Only the first waiting item of a lane is considered: slash commands are barriers
+            // and cannot be overtaken by later chatter. Reserve ingress capacity for listeners.
+            while running.len() < MAX_CONCURRENT_CHATS * 2 {
+                let mut seen = std::collections::HashSet::new();
+                let index = waiting.iter().position(|(key, req)| {
+                    if !seen.insert(key) {
+                        return false;
+                    }
+                    let count = active.values().filter(|(lane, _)| lane == key).count();
+                    if count == 0 {
+                        return running.len() < MAX_CONCURRENT_CHATS;
+                    }
+                    count == 1
+                        && self.simulation.active(key)
+                        && req.event.as_ref().is_some_and(|event| {
+                            CommandRouter::parse_command(strip_leading_mentions(&message_text(
+                                event,
+                            )))
+                            .is_none()
+                                && NoticeKind::from_metadata(event.metadata.as_ref()).is_none()
+                        })
+                });
+                let Some(index) = index else {
                     break;
                 };
                 let (key, req) = waiting.remove(index).expect("eligible queued chat");
-                active.insert(key.clone(), req.event.clone());
+                let id = next_task;
+                next_task = next_task.wrapping_add(1);
+                active.insert(id, (key, req.event.clone()));
                 running.push(Box::pin(async move {
                     self.handle_ingested(req).await;
-                    key
+                    id
                 }));
             }
             if !queue_open && waiting.is_empty() && running.is_empty() {
@@ -3028,6 +3106,7 @@ impl PipelineEngine {
                 biased;
                 _ = wait_for_phase(&mut phase, draining) => break,
                 Some(key) = running.next(), if !running.is_empty() => { active.remove(&key); }
+                () = self.simulation.changed.notified() => {},
                 req = event_receiver.recv(), if queue_open => {
                     match req {
                         Some(req) if is_stop_request(&req) => self.handle_ingested(req).await,
@@ -3068,11 +3147,17 @@ impl PipelineEngine {
             }
         }
         // Drop futures before recording their events so no canceled lane can append a late reply.
-        drop(running);
-        for event in active.into_values().flatten() {
+        for event in active.into_values().filter_map(|(_, event)| event) {
             self.dead_letter_event(
                 &event,
                 "node shut down while the event was being processed; its reply may be missing",
+            )
+            .await;
+        }
+        for event in self.simulation.drain() {
+            self.dead_letter_event(
+                &event,
+                "node shut down before simulation consumed this event",
             )
             .await;
         }
@@ -3138,6 +3223,9 @@ impl PipelineEngine {
         let result = self.process_event(event).await;
 
         match &result {
+            PipelineResult::SimulationHandled => {
+                tracing::info!(platform = %platform, channel_id = %channel_id, "Simulation accepted event; explicit actions control speech");
+            }
             PipelineResult::LlmReplied { content, .. } => {
                 tracing::info!(
                     platform = %platform,
@@ -3151,7 +3239,7 @@ impl PipelineEngine {
                     platform = %platform,
                     channel_id = %channel_id,
                     error = %error,
-                    "Pipeline told the sender the model turn failed"
+                    "Pipeline model turn failed"
                 );
             }
             PipelineResult::CommandExecuted {

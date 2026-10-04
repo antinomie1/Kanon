@@ -52,7 +52,10 @@ const contextSwitches = [
 </script>
 
 <div class="mt-4 divide-y divide-line border-t border-line">
-  <Section title={t('group.title')} hint={t('group.hint')}>
+  <Section collapsible title={t('group.title')} hint={t('group.hint')}>
+    {#if store.formConversationMode === 'simulation'}
+      <p class="m-0 hint">{t('instances.simulation_memory')}</p>
+    {:else}
     <div>
       <Seg
         label={t('group.title')}
@@ -79,9 +82,10 @@ const contextSwitches = [
         onchange={(next) => (store.formObserveGroup = next)}
       />
     </div>
+    {/if}
   </Section>
 
-  <Section title={t('context.title')} hint={t('context.hint')}>
+  <Section collapsible title={t('context.title')} hint={t('context.hint')}>
     <div class="flex flex-wrap items-center gap-x-3 gap-y-1 text-[14.5px]">
       <span class="flex-1 font-medium">{t('instances.use_global_setting')}</span>
       {#if store.nodeContextPolicy}
@@ -109,7 +113,7 @@ const contextSwitches = [
     {/if}
   </Section>
 
-  <Section title={t('commands.title')} hint={t('instances.commands_hint')}>
+  <Section collapsible title={t('commands.title')} hint={t('instances.commands_hint')}>
     <div class="flex flex-wrap items-center gap-x-3 gap-y-1 text-[14.5px]">
       <span class="flex-1 font-medium">{t('instances.use_global_setting')}</span>
       <Switch
@@ -129,7 +133,10 @@ const contextSwitches = [
     {/if}
   </Section>
 
-  <Section title={t('bash.title')} hint={t('instances.bash_hint')}>
+  <Section collapsible title={t('bash.title')} hint={t('instances.bash_hint')}>
+    {#if store.formConversationMode === 'simulation'}
+      <p class="m-0 hint">{t('instances.simulation_bash')}</p>
+    {:else}
     <div class="flex flex-col gap-2" role="radiogroup" aria-label={t('bash.title')}>
       {#each bashScopes as scope (scope.value)}
         {@const on = store.formBash === scope.value}
@@ -175,9 +182,10 @@ const contextSwitches = [
         </button>
       </p>
     {/if}
+    {/if}
   </Section>
 
-  <Section title={t('instances.items_title')} hint={t('instances.items_hint')}>
+  <Section collapsible title={t('instances.items_title')} hint={t('instances.items_hint')}>
     {#each kinds as { kind, titleKey } (kind)}
       {@const items = store.itemsOf(kind)}
       <div>

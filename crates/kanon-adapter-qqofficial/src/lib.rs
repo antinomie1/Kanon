@@ -453,6 +453,57 @@ impl PlatformAdapter for QqOfficialAdapter {
         budget.saturating_sub(media).max(1)
     }
 
+    fn conversation_delivery_limits(
+        &self,
+        event: &PipelineEventRequest,
+    ) -> Result<kanon_core::adapter::ConversationDeliveryLimits, AdapterError> {
+        use std::time::{Duration, UNIX_EPOCH};
+        use time::{OffsetDateTime, format_description::well_known::Rfc3339};
+
+        if event.event_id.is_empty() {
+            return Err(self.delivery_error("simulation requires a passive reply message ID"));
+        }
+        let (scene, _) = event
+            .channel_id
+            .split_once(':')
+            .filter(|(scene, _)| matches!(*scene, "group" | "c2c" | "guild" | "guild_dm"))
+            .ok_or_else(|| self.delivery_error("unsupported simulation conversation"))?;
+        let timestamp = event
+            .metadata
+            .as_ref()
+            .and_then(|metadata| metadata.fields.get(kanon_core::META_TIMESTAMP_TEXT))
+            .and_then(|value| match &value.kind {
+                Some(kanon_proto::prost_types::value::Kind::StringValue(text)) => Some(text),
+                _ => None,
+            })
+            .ok_or_else(|| self.delivery_error("passive reply has no source timestamp"))?;
+        let timestamp = OffsetDateTime::parse(timestamp, &Rfc3339)
+            .map_err(|error| {
+                self.delivery_error(format!("invalid passive reply timestamp: {error}"))
+            })?
+            .unix_timestamp();
+        let timestamp = u64::try_from(timestamp)
+            .map_err(|_| self.delivery_error("passive reply timestamp predates Unix epoch"))?;
+        // QQ's current API allows 60 minutes for C2C and five minutes elsewhere. Leave
+        // five seconds for outbound queuing and HTTP; never substitute receive time for an
+        // old gateway event's timestamp. Typing is disabled by simulation, so all five
+        // passive replies remain available before any speech or media is sent.
+        // https://github.com/tencent-connect/bot-docs/blob/main/docs/develop/api-v2/server-inter/message/send-receive/send.md
+        let window = if scene == "c2c" { 3600 } else { 300 };
+        Ok(kanon_core::adapter::ConversationDeliveryLimits {
+            // Guilds have a rate limit instead of this per-message quota. Five is a
+            // conservative burst bound there, including text and individual attachments.
+            max_messages: 5,
+            expires_at: Some(UNIX_EPOCH + Duration::from_secs(timestamp + window - 5)),
+            separate_media: true,
+            min_interval: if scene == "guild" {
+                Duration::from_secs(1)
+            } else {
+                Duration::ZERO
+            },
+        })
+    }
+
     /// Shows "typing…" in a C2C chat; QQ has no indicator for other chats.
     ///
     /// QQ counts the indicator as one of the few passive replies a message allows, which is why

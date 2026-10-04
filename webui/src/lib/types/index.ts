@@ -203,10 +203,25 @@ export interface AdapterStatus {
  */
 export type ItemPolicy = 'inherit' | 'enable' | 'disable';
 
+/** Participation behavior, independent of model and persona. */
+export type ConversationMode = 'assistant' | 'simulation';
+
+/** Bounded observation, listening and speech settings. */
+export interface SimulationPolicy {
+  quiet_ms: number;
+  max_batch_ms: number;
+  listen_seconds: number;
+  max_participation_seconds: number;
+  max_messages: number;
+}
+
 export interface BotInstanceView {
   id: string;
   name: string;
   enabled: boolean;
+  conversation_mode?: ConversationMode;
+  conversation_rules?: boolean;
+  simulation?: SimulationPolicy;
   adapters: string[];
   persona_id: string | null;
   system_prompt: string | null;
@@ -245,6 +260,9 @@ export interface InstancesResponse {
 export interface InstanceRequest {
   name: string;
   enabled: boolean;
+  conversation_mode?: ConversationMode;
+  conversation_rules?: boolean;
+  simulation?: SimulationPolicy;
   adapters: string[];
   persona_id?: string | null;
   system_prompt?: string | null;

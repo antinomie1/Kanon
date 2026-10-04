@@ -62,6 +62,12 @@ pub struct InstanceView {
     pub name: String,
     /// Whether the instance answers messages.
     pub enabled: bool,
+    /// Conversation behavior chosen independently of persona and model.
+    pub conversation_mode: kanon_core::simulation::ConversationMode,
+    /// Optional conversation rules, independent of simulation.
+    pub conversation_rules: bool,
+    /// Simulation timing and participation bounds.
+    pub simulation: kanon_core::simulation::SimulationPolicy,
     /// Claimed platform identifiers.
     pub adapters: Vec<String>,
     /// Selected persona from the node catalog.
@@ -132,6 +138,15 @@ pub struct InstanceRequest {
     /// Whether the instance should answer messages.
     #[serde(default)]
     pub enabled: bool,
+    /// Assistant (default) or simulation behavior.
+    #[serde(default)]
+    pub conversation_mode: kanon_core::simulation::ConversationMode,
+    /// Omission enables rules on entry to simulation and preserves them on other updates.
+    #[serde(default)]
+    pub conversation_rules: Option<bool>,
+    /// Simulation timing and participation bounds.
+    #[serde(default)]
+    pub simulation: kanon_core::simulation::SimulationPolicy,
     /// Platform identifiers to claim.
     #[serde(default)]
     pub adapters: Vec<String>,
@@ -181,6 +196,9 @@ impl From<InstanceRequest> for InstanceDraft {
         Self {
             name: request.name,
             enabled: request.enabled,
+            conversation_mode: request.conversation_mode,
+            conversation_rules: request.conversation_rules,
+            simulation: request.simulation,
             adapters: request.adapters,
             persona_id: request.persona_id,
             system_prompt: request.system_prompt,
@@ -232,6 +250,9 @@ async fn view(state: &ApiState, instance: &BotInstance) -> InstanceView {
         id: instance.id.clone(),
         name: instance.name.clone(),
         enabled: instance.enabled,
+        conversation_mode: instance.conversation_mode,
+        conversation_rules: instance.conversation_rules,
+        simulation: instance.simulation.clone(),
         adapters: instance.adapters.clone(),
         persona_id: instance.persona_id.clone(),
         system_prompt: instance.system_prompt.clone(),

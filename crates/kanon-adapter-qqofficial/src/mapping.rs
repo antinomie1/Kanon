@@ -458,6 +458,8 @@ pub fn map_event(
         "qqofficial.msg_id": event.id,
         kanon_core::META_CONVERSATION_KIND: kind,
         kanon_core::META_BOT_MENTIONED: mentioned,
+        kanon_core::pipeline::identity::META_IDENTITY_KIND: if scene == "guild" { "opaque" } else { "openid" },
+        kanon_core::pipeline::identity::META_CHANNEL_ID: peer,
     });
     if !event.timestamp.is_empty() {
         metadata[kanon_core::META_TIMESTAMP_TEXT] = json!(event.timestamp);
@@ -465,6 +467,8 @@ pub fn map_event(
     if !event.author.username.is_empty() {
         metadata["qqofficial.sender_name"] = json!(event.author.username);
         metadata[kanon_core::META_SENDER_NAME] = json!(event.author.username);
+        metadata[kanon_core::pipeline::identity::META_SENDER_NICKNAME] =
+            json!(event.author.username);
     }
     if scene == "guild" && !event.guild_id.is_empty() {
         metadata["qqofficial.guild_id"] = json!(event.guild_id);

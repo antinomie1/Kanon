@@ -18,7 +18,7 @@ use kanon_proto::v1::PipelineEventRequest;
 
 use crate::instance::{BotInstance, InstanceError};
 
-use super::engine::{PipelineEngine, conversation_key, shares_session};
+use super::engine::{PipelineEngine, instance_conversation_key};
 
 /// Longest title shown for a conversation, in characters.
 const TITLE_CHARS: usize = 24;
@@ -127,7 +127,7 @@ impl PipelineEngine {
             Ok(None) => return Err(ConversationError::NoInstance(event.platform.clone())),
             Err(err) => return Err(ConversationError::Ambiguous(err.to_string())),
         };
-        let conversation = conversation_key(event, shares_session(Some(&instance), event));
+        let conversation = instance_conversation_key(event, Some(&instance));
         Ok(Chat {
             instance,
             conversation,

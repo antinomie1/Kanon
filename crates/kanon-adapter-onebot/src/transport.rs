@@ -183,6 +183,11 @@ where
     // disconnect drops every pending lookup. Each task yields the event to ingest, if any.
     let api = sender.clone();
     let mut lookups: JoinSet<Option<PipelineEventRequest>> = JoinSet::new();
+    // Name lookups never delay ingress. Missing names remain missing on the first message;
+    // later events use a bounded five-minute cache, including failed lookups to avoid retries
+    // on every message when an implementation does not expose get_group_info.
+    let mut group_names: HashMap<i64, (Instant, Option<String>)> = HashMap::new();
+    let mut group_lookups = JoinSet::new();
     {
         let mut state = state.write().expect("OneBot state poisoned");
         state.sender = Some(sender);
@@ -235,12 +240,40 @@ where
                             Err(err) => record_error(state, format!("OneBot request mapping failed: {err}")),
                         },
                         _ => match mapping::map_event(&config.platform, value) {
-                            // Plain messages go straight in, keeping their order; only a message
-                            // that needs a lookup waits for it.
-                            Ok(Some(event)) if mapping::needs_lookup(&event) => {
-                                lookups.spawn(enrich(api.clone(), event));
+                            Ok(Some(mut event)) => {
+                                if let Some(group_id) = mapping::group_of(&event)
+                                    && !event.metadata.as_ref().is_some_and(|metadata| metadata.fields.contains_key(kanon_core::pipeline::identity::META_CHANNEL_NAME))
+                                {
+                                    if let Some((at, name)) = group_names.get(&group_id)
+                                        && at.elapsed() < Duration::from_secs(300)
+                                    {
+                                        if let Some(name) = name
+                                            && let Some(metadata) = event.metadata.as_mut()
+                                            && !metadata.fields.contains_key(kanon_core::pipeline::identity::META_CHANNEL_NAME)
+                                        {
+                                            metadata.fields.insert(kanon_core::pipeline::identity::META_CHANNEL_NAME.into(), kanon_proto::prost_types::Value {
+                                                kind: Some(kanon_proto::prost_types::value::Kind::StringValue(name.clone())),
+                                            });
+                                        }
+                                    } else {
+                                        if group_names.len() >= 256
+                                            && let Some(oldest) = group_names.iter().min_by_key(|(_, (at, _))| *at).map(|(id, _)| *id)
+                                        { group_names.remove(&oldest); }
+                                        group_names.insert(group_id, (Instant::now(), None));
+                                        if group_lookups.len() < 64 {
+                                            let api = api.clone();
+                                            group_lookups.spawn(async move {
+                                                let result = OneBotClient::call_on::<_, Value>(api, "get_group_info", &json!({"group_id":group_id,"no_cache":false})).await;
+                                                (group_id, result)
+                                            });
+                                        } else {
+                                            tracing::warn!(group_id, "Group name lookup capacity reached; name remains unavailable");
+                                        }
+                                    }
+                                }
+                                if mapping::needs_lookup(&event) { lookups.spawn(enrich(api.clone(), event)); }
+                                else { ingest(state, config, ingress, event); }
                             }
-                            Ok(Some(event)) => ingest(state, config, ingress, event),
                             Ok(None) => {}
                             Err(err) => record_error(state, format!("OneBot message mapping failed: {err}")),
                         },
@@ -250,6 +283,17 @@ where
                         // The client interprets success/error envelopes and typed or void data.
                         let _ = command.reply.send(Ok(value));
                     }
+                }
+            }
+            Some(joined) = group_lookups.join_next() => {
+                match joined {
+                    Ok((id, Ok(data))) => {
+                        if let Some(entry) = group_names.get_mut(&id) {
+                            entry.1 = data.get("group_name").and_then(Value::as_str).filter(|name| !name.trim().is_empty()).map(str::to_owned);
+                        }
+                    }
+                    Ok((id, Err(error))) => tracing::warn!(group_id = id, %error, "OneBot group name unavailable"),
+                    Err(error) => tracing::warn!(%error, "OneBot group name lookup task failed"),
                 }
             }
             Some(joined) = lookups.join_next() => {

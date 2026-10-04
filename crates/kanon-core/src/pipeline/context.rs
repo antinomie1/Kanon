@@ -59,12 +59,7 @@ pub fn build_user_message(
     let mut images: Vec<ContentPart> = Vec::new();
 
     if capabilities.text {
-        if context_policy.include_channel_id && !event.channel_id.trim().is_empty() {
-            metadata.push(&format!("[群号: {}]", event.channel_id.trim()));
-        }
-        if context_policy.include_sender_id && !event.sender_id.trim().is_empty() {
-            metadata.push(&format!("[发送者: {}]", event.sender_id.trim()));
-        }
+        metadata.push(&super::identity::context_labels(event, context_policy));
         if context_policy.include_timestamp
             && let Some(timestamp) = event_timestamp(event.metadata.as_ref())
         {

@@ -34,7 +34,7 @@ fn delivery(text: &str) -> DeliverMessageRequest {
 }
 
 fn event(id: i64) -> Value {
-    json!({"post_type":"message", "message_type":"group", "self_id":100, "user_id":200, "group_id":123, "message_id":id, "time":1234567, "message":[{"type":"text","data":{"text":"hello"}}]})
+    json!({"post_type":"message", "message_type":"group", "self_id":100, "user_id":200, "group_id":123, "group_name":"Known group", "message_id":id, "time":1234567, "message":[{"type":"text","data":{"text":"hello"}}]})
 }
 
 async fn connected(adapter: &OneBotAdapter) {

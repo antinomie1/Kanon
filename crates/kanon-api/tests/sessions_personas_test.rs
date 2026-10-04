@@ -186,7 +186,10 @@ async fn persona_catalog_ships_only_the_base_assistant() {
     assert_eq!(personas.len(), 1);
     assert_eq!(personas[0]["id"], "assistant");
     assert_eq!(personas[0]["kind"], "builtin");
-    assert_eq!(personas[0]["prompt"], "You are a helpful assistant.");
+    assert_eq!(
+        personas[0]["prompt"],
+        kanon_llm::prompt::BASE_PERSONA_PROMPT
+    );
     assert!(
         personas[0].get("template").is_none() && personas[0].get("variables").is_none(),
         "personas are plain static text: {body}"

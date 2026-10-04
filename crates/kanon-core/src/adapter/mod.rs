@@ -257,6 +257,33 @@ pub struct AdapterDescriptor {
     pub capabilities: Vec<Capability>,
 }
 
+/// Platform limits for explicit conversational speech replying to one inbound event.
+///
+/// These are native message limits, independent of the instance's participation limit.
+/// The adapter owns platform knowledge; the runtime never branches on platform identifiers.
+#[derive(Debug, Clone)]
+pub struct ConversationDeliveryLimits {
+    /// Maximum native messages attempted against this source event.
+    pub max_messages: usize,
+    /// Absolute expiry of its passive reply permission, if the platform requires one.
+    pub expires_at: Option<std::time::SystemTime>,
+    /// Whether every media segment costs another native message in addition to text.
+    pub separate_media: bool,
+    /// Minimum delay after a completed delivery before the next one in this participation.
+    pub min_interval: std::time::Duration,
+}
+
+impl Default for ConversationDeliveryLimits {
+    fn default() -> Self {
+        Self {
+            max_messages: usize::MAX,
+            expires_at: None,
+            separate_media: false,
+            min_interval: std::time::Duration::ZERO,
+        }
+    }
+}
+
 /// Contract implemented by in-process platform adapters.
 ///
 /// Implementations must be cheap to share (`&self` methods only) because a single instance serves
@@ -295,6 +322,17 @@ pub trait PlatformAdapter: Send + Sync {
     /// content. Returning one disables extra deliveries; the default imposes no limit.
     fn reply_message_limit(&self, _request: &DeliverMessageRequest) -> usize {
         usize::MAX
+    }
+
+    /// Limits for simulation speech, evaluated again for each new source event.
+    ///
+    /// Invalid or missing passive-reply context must fail explicitly. Unrestricted adapters
+    /// use the default; group visibility still comes from [`Capability::GroupMessages`].
+    fn conversation_delivery_limits(
+        &self,
+        _event: &PipelineEventRequest,
+    ) -> Result<ConversationDeliveryLimits, AdapterError> {
+        Ok(ConversationDeliveryLimits::default())
     }
 
     /// Delivers one outbound message to the platform.

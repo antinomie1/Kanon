@@ -32,6 +32,8 @@ export const dictionaries = {
     'common.cancel': 'Cancel',
     'common.loading': 'Loading…',
     'common.error': 'Something went wrong',
+    'common.on': 'On',
+    'common.off': 'Off',
     // Home
     'home.title_none': 'No instance running',
     'home.stat_per_minute': 'messages / min',
@@ -180,6 +182,47 @@ export const dictionaries = {
       'No platform is set up on this node yet. Connect one on',
     'instances.warn_no_adapter':
       "It's on but has no platform, so it won't answer anything.",
+    'instances.conversation_mode': 'Conversation mode',
+    'instances.conversation_summary':
+      'Simulation: {simulation} · Rules: {rules}',
+    'instances.mode_assistant': 'Assistant',
+    'instances.mode_simulation': 'Simulation mode',
+    'instances.simulation_hint':
+      'Assistant answers each admitted message. Simulation observes a batch and chooses whether to speak, listen, or leave.',
+    'instances.simulation_scope':
+      'Requires tool calling. Groups share history. Group reply rules control waking; listening accepts any messages the platform delivers. Speech is sent as complete messages, without typing, line splitting, or reasoning. Persona below remains independent. Timing changes take effect next participation.',
+    'instances.simulation_details': 'Preset and platform behavior',
+    'instances.simulation_preview':
+      'The sandbox previews the persona; test listening and participation on the connected platform.',
+    'instances.simulation_memory':
+      'Simulation shares one group history and observes incoming group messages.',
+    'instances.simulation_bash':
+      'Bash is unavailable during simulation participation. These settings apply in assistant mode.',
+    'instances.simulation_wake': 'When to join group conversations',
+    'instances.simulation_wake_hint':
+      'These rules start a participation. The model can still choose silence, including in private chats.',
+    'instances.simulation_behavior': 'Supplementary conversation rules',
+    'instances.simulation_qqofficial':
+      'QQ Official groups require another @ to deliver a follow-up. Replies use the latest delivered message: up to 5 native messages per source, valid for 5 minutes in groups/channels and 60 minutes in C2C. Media uses this budget too; no proactive push.',
+    'instances.simulation_limited_platform':
+      'Some connected platforms do not deliver every group message. Listening can only continue from messages they actually deliver.',
+    'instances.simulation_reset': 'Restore preset',
+    'instances.use_simulation_rule': 'Use simulation preset',
+    'instances.simulation_attention_summary':
+      '@ + participation chance ({percent}%)',
+    'instances.simulation_probability': 'Participation chance',
+    'instances.simulation_attention':
+      'Adjust from 0% to 100%; the preset is 15%. This controls attention to new group messages without a mention. Mentions and follow-ups during listening are not sampled; the model still decides whether to speak.',
+    'instances.simulation_tuning': 'Timing and limits (optional)',
+    'instances.simulation_preset':
+      'Ready to use: collect messages for 2.5 seconds of quiet (up to 10 seconds), listen for 30 seconds, participate for up to 3 minutes and send at most 3 messages. One short contribution per batch, up to 120 characters for casual speech; expand only when requested.',
+    'instances.conversation_rules_hint':
+      'Enabling simulation also enables these rules. Turning simulation off keeps the rules available independently; they guide conversational style without changing your persona.',
+    'instances.simulation_quiet': 'Quiet period before composing (ms)',
+    'instances.simulation_batch': 'Maximum batching delay (ms)',
+    'instances.simulation_listen': 'Maximum listen per action (seconds)',
+    'instances.simulation_duration': 'Maximum participation (seconds)',
+    'instances.simulation_messages': 'Maximum messages per participation',
     'instances.sec_brain': 'Model and persona',
     'instances.sec_brain_hint':
       'Which model it thinks with, and who it speaks as.',
@@ -1031,6 +1074,8 @@ export const dictionaries = {
     'common.cancel': '取消',
     'common.loading': '正在加载…',
     'common.error': '出错了',
+    'common.on': '开',
+    'common.off': '关',
     // Home
     'home.title_none': '没有实例在运行',
     'home.stat_per_minute': '条消息 / 分钟',
@@ -1168,6 +1213,44 @@ export const dictionaries = {
     'instances.adapter_taken': '{name} 正在使用；先停用 {name} 或在那里移除',
     'instances.no_adapters_hint': '节点上还没有平台。先去这里接入一个：',
     'instances.warn_no_adapter': '它开启了但没有接入平台，不会回答任何消息。',
+    'instances.conversation_mode': '对话模式',
+    'instances.conversation_summary': '仿真：{simulation} · 附加规则：{rules}',
+    'instances.mode_assistant': '助手模式',
+    'instances.mode_simulation': '仿真模式',
+    'instances.simulation_hint':
+      '助手逐条回应；仿真先观察一批消息，再决定发言、继续听或退出。',
+    'instances.simulation_scope':
+      '需要模型支持工具调用。群内共享历史；群回复规则控制唤醒，监听期间接收平台实际投递的后续消息。每次发言完整发送，不模拟打字、不拆行、不发送思考过程。下方人设独立生效，时限修改在下次参与时生效。',
+    'instances.simulation_details': '预设与平台说明',
+    'instances.simulation_preview':
+      '沙盒用于预览人设；监听和参与行为需在已连接的平台中验证。',
+    'instances.simulation_memory': '仿真模式固定共享群会话，并观察群内消息。',
+    'instances.simulation_bash':
+      '仿真参与期间无法使用 Bash；这些设置在助手模式下适用。',
+    'instances.simulation_wake': '何时参与群聊',
+    'instances.simulation_wake_hint':
+      '这些规则控制开始参与的时机。模型仍可选择沉默，私聊中也一样。',
+    'instances.simulation_behavior': '附加对话规则',
+    'instances.simulation_qqofficial':
+      'QQ 官方群聊的后续消息仍需 @ 才能收到。回复绑定最新入站消息；群聊和单聊每条最多回复 5 次，媒体也占额度。群聊／频道有效期 5 分钟，单聊 60 分钟；不主动推送。',
+    'instances.simulation_limited_platform':
+      '所选平台中有平台不提供完整群消息；倾听只能接续平台实际投递的消息。',
+    'instances.simulation_reset': '恢复预设',
+    'instances.use_simulation_rule': '使用仿真预设',
+    'instances.simulation_attention_summary': '@ + 参与概率（{percent}%）',
+    'instances.simulation_probability': '主动参与概率',
+    'instances.simulation_attention':
+      '可调 0%–100%，预设为 15%。控制未被 @ 时关注新群消息的概率；被 @ 和倾听中的接话不受抽样影响，模型仍会判断是否值得发言。',
+    'instances.simulation_tuning': '时间与条数（可选）',
+    'instances.simulation_preset':
+      '预设开箱即用：安静 2.5 秒后思考，最多合并等待 10 秒；每次倾听 30 秒，一次参与最长 3 分钟、最多发 3 条消息。每批只接一个短想法，日常发言最多 120 字；明确要求详解时可展开。',
+    'instances.conversation_rules_hint':
+      '开启仿真会一并开启附加规则；关闭仿真后规则保持当前状态，也可单独开关。规则调整对话习惯，不替换人设。',
+    'instances.simulation_quiet': '等消息说完再思考（毫秒）',
+    'instances.simulation_batch': '最多合并等待（毫秒）',
+    'instances.simulation_listen': '每次最多监听（秒）',
+    'instances.simulation_duration': '一次参与最长时间（秒）',
+    'instances.simulation_messages': '一次参与最多发言条数',
     'instances.sec_brain': '模型和人设',
     'instances.sec_brain_hint': '它用哪个模型思考，用什么身份说话。',
     'instances.field_agent': 'Agent',
@@ -1840,9 +1923,11 @@ export const dictionaries = {
     'context.expand_forward_hint':
       '把合并转发里的每条消息（以及其中的图片，供识图模型查看）交给模型，而不是只给一个标题。',
     'context.channel_id': '群号 / 频道 ID',
-    'context.channel_id_hint': '在提示词中加入会话 ID（群号 / 频道 ID）。',
+    'context.channel_id_hint':
+      '附加群号、群 OpenID 或频道 ID，按平台明确标注；群名有数据时始终显示。',
     'context.sender_id': '发送者 ID',
-    'context.sender_id_hint': '在提示词中加入平台发送者 ID（QQ 号 / openid）。',
+    'context.sender_id_hint':
+      '附加 QQ 号或用户 OpenID，按平台明确标注；昵称和群名片有数据时始终显示。',
     'context.timestamp': '消息时间',
     'context.timestamp_hint': '在提示词中加入消息时间戳。',
     'context.none': '不附加',

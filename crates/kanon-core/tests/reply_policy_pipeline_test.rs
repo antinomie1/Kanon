@@ -701,7 +701,7 @@ async fn the_node_context_policy_is_applied_from_the_first_event() {
     );
 
     let prompt = last_user_prompt(&requests);
-    assert!(prompt.contains("[群号: group:1]"), "{prompt}");
+    assert!(prompt.contains("群ID=\"group:1\""), "{prompt}");
     assert!(!prompt.contains("[发送者"), "{prompt}");
     assert!(!prompt.contains("[时间"), "{prompt}");
 }
@@ -735,6 +735,6 @@ async fn the_instance_context_policy_overrides_the_node_one() {
         .await;
 
     let prompt = last_user_prompt(&requests);
-    assert!(prompt.contains("[发送者: user:1]"), "{prompt}");
+    assert!(prompt.contains("用户ID=\"user:1\""), "{prompt}");
     assert!(!prompt.contains("[群号"), "{prompt}");
 }

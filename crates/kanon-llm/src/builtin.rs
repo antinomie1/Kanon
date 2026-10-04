@@ -210,6 +210,7 @@ impl BuiltinAgent {
         session_id: &str,
         persona: Option<&Persona>,
         tools: &[ToolDefinition],
+        instructions: Option<&str>,
     ) -> Result<String, AgentError> {
         let mut parts = Vec::new();
         if let Some(persona) = persona {
@@ -217,6 +218,9 @@ impl BuiltinAgent {
         }
         if let Some(prompt) = &self.system_prompt {
             parts.push(ChatMessage::system(prompt.clone()));
+        }
+        if let Some(instructions) = instructions {
+            parts.push(ChatMessage::system(instructions));
         }
         let mut prompt = crate::layout::system_text(&parts);
         for hook in &self.hooks {
@@ -322,6 +326,7 @@ impl BuiltinAgent {
         tools: Option<&[ToolDefinition]>,
         persona: Option<&Persona>,
         prepared: Option<PreparedCompaction>,
+        instructions: Option<&str>,
     ) -> Result<bool, AgentError> {
         // Both managed callers acquire their session writer before entering here. Embedded
         // callers share weakly retained writers so old session ids do not accumulate mutexes.
@@ -357,7 +362,7 @@ impl BuiltinAgent {
         }
         let covered = snapshot.messages.len();
         let system_prompt = if prepared_prefix.is_none() {
-            self.prepare_system_prompt(session_id, persona, tools.unwrap_or_default())
+            self.prepare_system_prompt(session_id, persona, tools.unwrap_or_default(), instructions)
                 .await?
         } else {
             String::new()
@@ -498,7 +503,7 @@ impl BuiltinAgent {
                 None => None,
             };
             if let Err(err) = agent
-                .compact(&session_id, Some(&tools), None, Some(prepared))
+                .compact(&session_id, Some(&tools), None, Some(prepared), None)
                 .await
             {
                 tracing::warn!(
@@ -534,7 +539,12 @@ impl BuiltinAgent {
         options.persona = self.resolve_persona(session_id, options.persona)?;
         let tools = self.collect_tools(hosts, options.without_tools)?;
         let system_prompt = self
-            .prepare_system_prompt(session_id, options.persona.as_ref(), &tools.definitions)
+            .prepare_system_prompt(
+                session_id,
+                options.persona.as_ref(),
+                &tools.definitions,
+                options.instructions.as_deref(),
+            )
             .await?;
         let media = self.start_turn(session_id, message).await?;
 
@@ -1192,7 +1202,12 @@ impl BuiltinAgent {
         };
         let tools = self.collect_tools(hosts, options.without_tools)?;
         let system_prompt = self
-            .prepare_system_prompt(session_id, options.persona.as_ref(), &tools.definitions)
+            .prepare_system_prompt(
+                session_id,
+                options.persona.as_ref(),
+                &tools.definitions,
+                options.instructions.as_deref(),
+            )
             .await?;
         let media = self
             .start_turn(session_id, ChatMessage::user(user_input))
@@ -1304,6 +1319,7 @@ impl Agent for BuiltinAgent {
             tools_enabled.then_some(tools.definitions.as_slice()),
             persona.as_ref(),
             None,
+            options.instructions.as_deref(),
         )
         .await
     }

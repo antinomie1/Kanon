@@ -26,18 +26,10 @@ const instance = $derived(store.find(store.editingId));
 
 let showAdvanced = $state(false);
 
-// Advanced settings stay open if this instance already changes any of them, so an override is
-// never hidden behind a closed section.
+// Reset disclosures when selecting another instance, without reacting to unsaved field edits.
 $effect(() => {
-  const current = instance;
-  showAdvanced = current
-    ? current.context_policy !== null ||
-      current.command_policy !== null ||
-      current.session_scope !== 'user' ||
-      current.observe_group ||
-      current.bash !== 'own_context' ||
-      store.overrideCount(current) > 0
-    : false;
+  store.editingId;
+  showAdvanced = false;
 });
 
 /** Status of each claimed platform, from the node's view of the saved instance or the adapter list. */
@@ -61,6 +53,28 @@ const available = $derived(
 );
 
 const replyInherit = $derived(store.formReplyPolicyMode === 'inherit');
+const simulationProbability = $derived(
+  store.formConversationMode === 'simulation' &&
+    (replyInherit || store.formReplyPolicyMode === 'probability'),
+);
+const replyProbability = $derived(
+  replyInherit && simulationProbability ? 0.15 : store.formReplyProbability,
+);
+const replySummary = $derived(
+  simulationProbability
+    ? t('instances.simulation_attention_summary', { percent: Math.round(replyProbability * 100) })
+    : describeReplyPolicy(replyInherit ? store.nodeReplyPolicy : {
+        mode: store.formReplyPolicyMode as ReplyMode,
+        probability: store.formReplyProbability,
+      }),
+);
+
+/** Editing the preset starts an explicit instance override through the existing reply policy. */
+function setReplyProbability(probability: number) {
+  if (replyInherit) setReplyInherit(false);
+  store.formReplyProbability = probability;
+}
+
 
 function setReplyInherit(inherit: boolean) {
   if (inherit) {
@@ -69,7 +83,9 @@ function setReplyInherit(inherit: boolean) {
   }
   // Start the override from what currently applies, so switching the global rule off changes
   // nothing until the operator picks something else.
-  const node = store.nodeReplyPolicy;
+  const node = store.formConversationMode === 'simulation'
+    ? { mode: 'probability' as const, probability: 0.15, quote_message: false, acknowledge: false, split_lines: false, send_reasoning: false }
+    : store.nodeReplyPolicy;
   store.formReplyPolicyMode = node?.mode ?? 'mention';
   store.formReplyProbability = node?.probability ?? 0.5;
   store.formReplyQuote = node?.quote_message ?? false;
@@ -172,8 +188,143 @@ function testChat() {
     <div class="notice notice-bad mb-2" role="alert">{store.error}</div>
   {/if}
 
+  {#key store.editingId}
   <div class="divide-y divide-line border-t border-line">
-    <Section title={t('instances.sec_platforms')} hint={t('instances.sec_platforms_hint')}>
+    <Section title={t('instances.conversation_mode')} hint={t('instances.simulation_hint')} collapsible summary={t('instances.conversation_summary', { simulation: t(store.formConversationMode === 'simulation' ? 'common.on' : 'common.off'), rules: t(store.formConversationRules ? 'common.on' : 'common.off') })}>
+      <div class="flex items-center gap-3">
+        <span class="flex-1">{t('instances.mode_simulation')}</span>
+        <Switch checked={store.formConversationMode === 'simulation'}
+          label={t('instances.mode_simulation')}
+          onchange={(next) => store.setSimulationEnabled(next)} />
+      </div>
+      <div class="flex items-center gap-3">
+        <span class="flex-1">{t('instances.simulation_behavior')}</span>
+        <Switch checked={store.formConversationRules}
+          label={t('instances.simulation_behavior')}
+          onchange={(next) => (store.formConversationRules = next)} />
+      </div>
+      <p class="m-0 hint">{t('instances.conversation_rules_hint')}</p>
+      {#if store.formConversationMode === 'simulation'}
+        <details class="space-y-3">
+          <summary class="cursor-pointer text-sm">{t('instances.simulation_details')}</summary>
+        <p class="m-0 hint">{t('instances.simulation_preset')}</p>
+        <p class="m-0 hint">{t('instances.simulation_scope')}</p>
+        {#if store.formAdapters.some((platform) => !store.adapters.find((a) => a.platform === platform)?.capabilities.includes('group_messages'))}
+          <p class="m-0 hint">{t('instances.simulation_limited_platform')}</p>
+        {/if}
+        {#if store.formAdapters.includes('qqofficial')}
+          <p class="m-0 hint">{t('instances.simulation_qqofficial')}</p>
+        {/if}
+        <p class="m-0 hint">{t('instances.simulation_preview')}</p>
+        </details>
+        <details class="space-y-3">
+          <summary class="cursor-pointer text-sm">{t('instances.simulation_tuning')}</summary>
+        <div class="grid gap-3 sm:grid-cols-2">
+          <label><span class="label">{t('instances.simulation_quiet')}</span>
+            <input class="input" type="number" min="0" max="30000" step="100" bind:value={store.formSimulation.quiet_ms} /></label>
+          <label><span class="label">{t('instances.simulation_batch')}</span>
+            <input class="input" type="number" min="100" max="60000" step="100" bind:value={store.formSimulation.max_batch_ms} /></label>
+          <label><span class="label">{t('instances.simulation_listen')}</span>
+            <input class="input" type="number" min="1" max="120" bind:value={store.formSimulation.listen_seconds} /></label>
+          <label><span class="label">{t('instances.simulation_duration')}</span>
+            <input class="input" type="number" min="10" max="600" bind:value={store.formSimulation.max_participation_seconds} /></label>
+          <label><span class="label">{t('instances.simulation_messages')}</span>
+            <input class="input" type="number" min="1" max="20" bind:value={store.formSimulation.max_messages} /></label>
+        </div>
+          <Button variant="text" size="sm" onclick={() => store.resetSimulationTiming()}>{t('instances.simulation_reset')}</Button>
+        </details>
+      {/if}
+    </Section>
+
+    <Section title={t(store.formConversationMode === 'simulation' ? 'instances.simulation_wake' : 'instances.sec_groups')} hint={t(store.formConversationMode === 'simulation' ? 'instances.simulation_wake_hint' : 'instances.sec_groups_hint')} collapsible summary={replySummary}>
+      <div class="flex flex-wrap items-center gap-x-3 gap-y-1 text-[14.5px]">
+        <span class="flex-1 font-medium">{t(store.formConversationMode === 'simulation' ? 'instances.use_simulation_rule' : 'instances.use_global_rule')}</span>
+        {#if store.formConversationMode !== 'simulation' && store.nodeReplyPolicy}
+          <span class="text-[13px] text-fg2">
+            {t('instances.global_is', { policy: describeReplyPolicy(store.nodeReplyPolicy) })}
+          </span>
+        {/if}
+        <Switch
+          checked={replyInherit}
+          label={t(store.formConversationMode === 'simulation' ? 'instances.use_simulation_rule' : 'instances.use_global_rule')}
+          onchange={setReplyInherit}
+        />
+      </div>
+
+      {#if simulationProbability || store.formReplyPolicyMode === 'probability'}
+        <label class="flex items-center gap-3 text-[14.5px]">
+          <span class="whitespace-nowrap">{t(simulationProbability ? 'instances.simulation_probability' : 'instances.reply_about')}</span>
+          <input
+            type="range"
+            min="0"
+            max="1"
+            step="0.01"
+            value={replyProbability}
+            aria-valuetext={`${Math.round(replyProbability * 100)}%`}
+            oninput={(event) => setReplyProbability(event.currentTarget.valueAsNumber)}
+            class="min-w-0 max-w-[360px] flex-1"
+          />
+          <span class="w-11 font-semibold tabular-nums">{Math.round(replyProbability * 100)}%</span>
+        </label>
+        {#if simulationProbability}
+          <p class="m-0 hint">{t('instances.simulation_attention')}</p>
+        {/if}
+      {/if}
+
+      {#if !replyInherit}
+        <div>
+          <Seg
+            label={t('instances.reply_mode')}
+            value={store.formReplyPolicyMode as ReplyMode}
+            onchange={(next: ReplyMode) => (store.formReplyPolicyMode = next)}
+            options={[
+              { value: 'always', label: t('instances.reply_always') },
+              { value: 'mention', label: t('instances.reply_mention') },
+              { value: 'probability', label: t('instances.reply_random') },
+              { value: 'never', label: t('instances.reply_never') },
+            ]}
+          />
+        </div>
+        {#if store.formConversationMode === 'assistant'}
+          <div class="flex items-center gap-3 text-[14.5px]">
+            <span class="flex-1">{t('reply.quote')}</span>
+            <Switch
+              checked={store.formReplyQuote}
+              label={t('reply.quote')}
+              onchange={(next) => (store.formReplyQuote = next)}
+            />
+          </div>
+          <div class="flex items-start gap-3 text-[14.5px]">
+            <span class="min-w-0 flex-1">
+              <span class="block">{t('reply.split_lines')}</span>
+              <span class="block hint">{t('reply.split_lines_hint')}</span>
+            </span>
+            <Switch
+              checked={store.formReplySplitLines}
+              label={t('reply.split_lines')}
+              onchange={(next) => (store.formReplySplitLines = next)}
+            />
+          </div>
+          <div class="flex items-center gap-3 text-[14.5px]">
+            <span class="flex-1">{t('reply.acknowledge')}</span>
+            <Switch
+              checked={store.formReplyAck}
+              label={t('reply.acknowledge')}
+              onchange={(next) => (store.formReplyAck = next)}
+            />
+          </div>
+          <div class="flex items-center gap-3 text-[14.5px]">
+            <span class="flex-1">{t('reply.reasoning')}</span>
+            <Switch
+              checked={store.formReplyReasoning}
+              label={t('reply.reasoning')}
+              onchange={(next) => (store.formReplyReasoning = next)}
+            />
+          </div>
+        {/if}
+      {/if}
+    </Section>
+    <Section title={t('instances.sec_platforms')} hint={t('instances.sec_platforms_hint')} collapsible summary={store.formAdapters.map(platformName).join(' · ')}>
       {#each store.formAdapters as platform (platform)}
         {@const state = platformState(platform)}
         <div
@@ -244,7 +395,7 @@ function testChat() {
       {/if}
     </Section>
 
-    <Section title={t('instances.sec_brain')} hint={t('instances.sec_brain_hint')}>
+    <Section title={t('instances.sec_brain')} hint={t('instances.sec_brain_hint')} collapsible summary={`${store.formModel || store.nodeDefaultModel || t('instances.model_inherit')} · ${store.formSystemPrompt.trim() ? t('instances.field_prompt') : store.personas.find((persona) => persona.id === store.formPersonaId)?.name || t('instances.persona_none')}`}>
       <div class="grid gap-3.5 sm:grid-cols-2">
         <label class="min-w-0">
           <span class="label">{t('instances.field_agent')}</span>
@@ -303,87 +454,6 @@ function testChat() {
         <span class="mt-1.5 block hint">{t('instances.prompt_hint')}</span>
       </label>
     </Section>
-
-    <Section title={t('instances.sec_groups')} hint={t('instances.sec_groups_hint')}>
-      <div class="flex flex-wrap items-center gap-x-3 gap-y-1 text-[14.5px]">
-        <span class="flex-1 font-medium">{t('instances.use_global_rule')}</span>
-        {#if store.nodeReplyPolicy}
-          <span class="text-[13px] text-fg2">
-            {t('instances.global_is', { policy: describeReplyPolicy(store.nodeReplyPolicy) })}
-          </span>
-        {/if}
-        <Switch
-          checked={replyInherit}
-          label={t('instances.use_global_rule')}
-          onchange={setReplyInherit}
-        />
-      </div>
-
-      {#if !replyInherit}
-        <div>
-          <Seg
-            label={t('instances.reply_mode')}
-            value={store.formReplyPolicyMode as ReplyMode}
-            onchange={(next: ReplyMode) => (store.formReplyPolicyMode = next)}
-            options={[
-              { value: 'always', label: t('instances.reply_always') },
-              { value: 'mention', label: t('instances.reply_mention') },
-              { value: 'probability', label: t('instances.reply_random') },
-              { value: 'never', label: t('instances.reply_never') },
-            ]}
-          />
-        </div>
-        {#if store.formReplyPolicyMode === 'probability'}
-          <label class="flex items-center gap-3 text-[14.5px]">
-            <span class="whitespace-nowrap">{t('instances.reply_about')}</span>
-            <input
-              type="range"
-              min="0"
-              max="1"
-              step="0.05"
-              bind:value={store.formReplyProbability}
-              class="max-w-[360px] flex-1"
-            />
-            <span class="w-11 font-semibold tabular-nums">{Math.round(store.formReplyProbability * 100)}%</span>
-          </label>
-        {/if}
-        <div class="flex items-center gap-3 text-[14.5px]">
-          <span class="flex-1">{t('reply.quote')}</span>
-          <Switch
-            checked={store.formReplyQuote}
-            label={t('reply.quote')}
-            onchange={(next) => (store.formReplyQuote = next)}
-          />
-        </div>
-        <div class="flex items-start gap-3 text-[14.5px]">
-          <span class="min-w-0 flex-1">
-            <span class="block">{t('reply.split_lines')}</span>
-            <span class="block hint">{t('reply.split_lines_hint')}</span>
-          </span>
-          <Switch
-            checked={store.formReplySplitLines}
-            label={t('reply.split_lines')}
-            onchange={(next) => (store.formReplySplitLines = next)}
-          />
-        </div>
-        <div class="flex items-center gap-3 text-[14.5px]">
-          <span class="flex-1">{t('reply.acknowledge')}</span>
-          <Switch
-            checked={store.formReplyAck}
-            label={t('reply.acknowledge')}
-            onchange={(next) => (store.formReplyAck = next)}
-          />
-        </div>
-        <div class="flex items-center gap-3 text-[14.5px]">
-          <span class="flex-1">{t('reply.reasoning')}</span>
-          <Switch
-            checked={store.formReplyReasoning}
-            label={t('reply.reasoning')}
-            onchange={(next) => (store.formReplyReasoning = next)}
-          />
-        </div>
-      {/if}
-    </Section>
   </div>
 
   <div class="flex flex-wrap items-center gap-x-3.5 gap-y-1 border-t border-line pt-5 pb-1">
@@ -406,6 +476,7 @@ function testChat() {
   {#if showAdvanced}
     <InstanceAdvanced />
   {/if}
+  {/key}
 
   {#if creating || store.changeCount > 0}
     <div class="sticky bottom-4 z-10 mt-6 flex justify-center">

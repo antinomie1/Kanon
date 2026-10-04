@@ -162,12 +162,12 @@ async fn an_observing_shared_session_sees_each_line_once_and_keeps_its_prefix() 
     assert_eq!(requests.len(), 2);
     assert_eq!(
         last_user_text(&requests[0]),
-        "[群聊记录]\n小红: 今天吃什么\n小刚: 火锅\n[当前消息] 小明: @bot 你们在聊啥"
+        "[会话信息：平台=\"qq\"，会话类型=群聊；显示名=\"小明\"] [群聊记录]\n显示名=\"小红\": 今天吃什么\n显示名=\"小刚\": 火锅\n[当前消息] 显示名=\"小明\": @bot 你们在聊啥"
     );
     // Only what happened since: not m3 (already history), not the bot's own reply.
     assert_eq!(
         last_user_text(&requests[1]),
-        "[群聊记录]\n小红: 好耶\n[当前消息] 小明: 再说说"
+        "[会话信息：平台=\"qq\"，会话类型=群聊；显示名=\"小明\"] [群聊记录]\n显示名=\"小红\": 好耶\n[当前消息] 显示名=\"小明\": 再说说"
     );
     // Append-only: the second request is the first plus the reply and the new turn.
     let first = &requests[0];
@@ -192,13 +192,13 @@ async fn per_member_sessions_each_catch_up_on_what_they_missed() {
     let requests = requests.lock().unwrap();
     assert_eq!(
         last_user_text(&requests[0]),
-        "[群聊记录]\n小红: 有人吗\n[当前消息] 小明: @bot 在吗"
+        "[会话信息：平台=\"qq\"，会话类型=群聊；显示名=\"小明\"] [群聊记录]\n显示名=\"小红\": 有人吗\n[当前消息] 显示名=\"小明\": @bot 在吗"
     );
     // 小红's own session never saw 小明's turn or the bot's answer to it; her own m1 is included
     // because her session never saw it either.
     assert_eq!(
         last_user_text(&requests[1]),
-        "[群聊记录]\n小红: 有人吗\n小明: @bot 在吗\n你: 好的\n[当前消息] 小红: @bot 我也在"
+        "[会话信息：平台=\"qq\"，会话类型=群聊；显示名=\"小红\"] [群聊记录]\n显示名=\"小红\": 有人吗\n显示名=\"小明\": @bot 在吗\n你: 好的\n[当前消息] 显示名=\"小红\": @bot 我也在"
     );
     assert_eq!(
         requests[1].len(),
@@ -223,8 +223,14 @@ async fn a_shared_session_without_observation_labels_speakers() {
 
     let requests = requests.lock().unwrap();
     assert_eq!(requests.len(), 2, "unaddressed and unobserved: not a turn");
-    assert_eq!(last_user_text(&requests[0]), "小明: @bot 你好");
-    assert_eq!(last_user_text(&requests[1]), "小红: @bot 他是谁");
+    assert_eq!(
+        last_user_text(&requests[0]),
+        "[会话信息：平台=\"qq\"，会话类型=群聊；显示名=\"小明\"] 显示名=\"小明\": @bot 你好"
+    );
+    assert_eq!(
+        last_user_text(&requests[1]),
+        "[会话信息：平台=\"qq\"，会话类型=群聊；显示名=\"小红\"] 显示名=\"小红\": @bot 他是谁"
+    );
     assert_eq!(
         &requests[1][..requests[0].len()],
         requests[0].as_slice(),
