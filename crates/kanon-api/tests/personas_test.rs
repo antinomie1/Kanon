@@ -129,6 +129,55 @@ async fn an_explicit_id_is_honoured_but_never_reused() {
     assert_eq!(status, StatusCode::CONFLICT);
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn concurrent_creates_never_overwrite_a_persona() {
+    for explicit_id in [true, false] {
+        let dir = tempfile::tempdir().expect("dir");
+        let (state, store) = isolated_state(dir.path().to_path_buf());
+        let app = kanon_api::app(state.clone());
+        let ready = Arc::new(tokio::sync::Barrier::new(4));
+        let mut tasks = Vec::new();
+        for index in 0..4 {
+            let app = app.clone();
+            let ready = ready.clone();
+            tasks.push(tokio::spawn(async move {
+                let prompt = format!("prompt-{index}");
+                let mut body = json!({"name": "Concurrent", "prompt": prompt});
+                if explicit_id {
+                    body["id"] = json!("concurrent");
+                }
+                ready.wait().await;
+                let (status, body) = create(&app, body).await;
+                (prompt, status, body)
+            }));
+        }
+
+        let mut created = Vec::new();
+        for task in tasks {
+            let (prompt, status, body) = task.await.unwrap();
+            if status == StatusCode::OK {
+                created.push(prompt);
+            } else {
+                assert!(
+                    explicit_id,
+                    "generated identifiers must retry collisions: {body}"
+                );
+                assert_eq!(status, StatusCode::CONFLICT, "{body}");
+            }
+        }
+        assert_eq!(created.len(), if explicit_id { 1 } else { 4 });
+        let persisted = store.load().unwrap();
+        assert_eq!(persisted.len(), created.len());
+        for persona in persisted {
+            assert!(
+                created.contains(&persona.prompt),
+                "only successful creates may persist"
+            );
+            assert_eq!(state.personas().get(&persona.id).unwrap(), persona);
+        }
+    }
+}
+
 #[tokio::test]
 async fn invalid_personas_are_rejected_before_anything_is_stored() {
     let dir = tempfile::tempdir().expect("dir");

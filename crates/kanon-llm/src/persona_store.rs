@@ -8,8 +8,8 @@
 //! crash mid-write can never leave a truncated file that would block the next startup.
 //!
 //! The console and plugins (through the core's persona RPCs) both change personas. Every change
-//! goes through [`PersonaStore::upsert`] or [`PersonaStore::remove`], which follow
-//! *validate → persist → apply* under one lock: two writers can never interleave their
+//! goes through [`PersonaStore::create`], [`PersonaStore::upsert`] or [`PersonaStore::remove`].
+//! They follow *validate → persist → apply* under one lock: two writers can never interleave their
 //! read-modify-write of the document, and the running registry never holds a persona the file
 //! does not.
 
@@ -147,6 +147,23 @@ impl PersonaStore {
         Ok(registry)
     }
 
+    /// Creates an operator-defined persona only if its identifier is unused.
+    ///
+    /// Returns `false` on a collision without changing the registry or file. The existence check
+    /// shares the write lock with updates and removals, so concurrent creates cannot overwrite.
+    pub fn create(
+        &self,
+        registry: &PersonaRegistry,
+        persona: Persona,
+    ) -> Result<bool, PersonaChangeError> {
+        let _change = self.lock();
+        if registry.get(&persona.id).is_some() {
+            return Ok(false);
+        }
+        self.upsert_locked(registry, persona)?;
+        Ok(true)
+    }
+
     /// Creates or replaces an operator-defined persona and returns whether one was replaced.
     ///
     /// The persona must be [`PersonaKind::Custom`] (build it with [`Persona::custom`]); the
@@ -158,6 +175,15 @@ impl PersonaStore {
         persona: Persona,
     ) -> Result<bool, PersonaChangeError> {
         let _change = self.lock();
+        self.upsert_locked(registry, persona)
+    }
+
+    /// Writes a persona while the caller holds the change lock.
+    fn upsert_locked(
+        &self,
+        registry: &PersonaRegistry,
+        persona: Persona,
+    ) -> Result<bool, PersonaChangeError> {
         match persona.kind {
             PersonaKind::Custom => persona.validate()?,
             PersonaKind::Builtin => return Err(PersonaError::ReadOnly(persona.id).into()),

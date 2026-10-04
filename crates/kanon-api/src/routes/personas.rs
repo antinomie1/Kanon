@@ -194,29 +194,31 @@ async fn create_persona(
     State(state): State<ApiState>,
     Json(payload): Json<CreatePersonaRequest>,
 ) -> Result<Json<PersonaCatalog>, ApiError> {
-    let id = match payload
+    let explicit_id = payload
         .id
         .as_deref()
         .map(str::trim)
-        .filter(|id| !id.is_empty())
-    {
-        Some(id) => id.to_string(),
-        None => unique_id(&state, &payload.name),
-    };
-
-    if state.personas().get(&id).is_some() {
-        return Err(ApiError::Conflict(format!(
-            "persona '{id}' already exists; edit it instead"
-        )));
-    }
-
-    let persona = Persona::custom(id, payload.name, payload.description, payload.prompt)
+        .filter(|id| !id.is_empty());
+    let id = explicit_id
+        .map(str::to_string)
+        .unwrap_or_else(|| unique_id(&state, &payload.name));
+    let mut persona = Persona::custom(id, payload.name, payload.description, payload.prompt)
         .map_err(map_error)?;
 
-    state
+    while !state
         .persona_store()
-        .upsert(state.personas(), persona.clone())
-        .map_err(map_change_error)?;
+        .create(state.personas(), persona.clone())
+        .map_err(map_change_error)?
+    {
+        if explicit_id.is_some() {
+            return Err(ApiError::Conflict(format!(
+                "persona '{}' already exists; edit it instead",
+                persona.id
+            )));
+        }
+        // Another create may have claimed the generated slug since it was selected.
+        persona.id = unique_id(&state, &persona.name);
+    }
 
     tracing::info!(persona_id = %persona.id, "Persona created through the control plane");
     Ok(Json(catalog(&state).await))
