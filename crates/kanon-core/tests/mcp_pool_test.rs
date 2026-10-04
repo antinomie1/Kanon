@@ -78,7 +78,7 @@ fn fixture_config(script: &Path, id: &str) -> McpServerConfig {
 async fn connect_handshakes_and_exposes_qualified_tools() {
     let dir = tempfile::tempdir().expect("temp dir");
     let script = write_fixture_server(dir.path());
-    let server = McpServer::new(fixture_config(&script, "fake"));
+    let server = standalone(fixture_config(&script, "fake"));
 
     server.connect().await.expect("handshake");
 
@@ -130,7 +130,7 @@ async fn connect_handshakes_and_exposes_qualified_tools() {
 #[tokio::test]
 async fn a_missing_server_records_the_concrete_failure() {
     let dir = tempfile::tempdir().expect("temp dir");
-    let server = McpServer::new(McpServerConfig {
+    let server = standalone(McpServerConfig {
         id: "absent".to_string(),
         name: "Absent".to_string(),
         transport: McpTransport::Stdio {
@@ -239,7 +239,7 @@ async fn stale_attachments_are_swept_but_fresh_ones_survive() {
 async fn the_watchdog_connects_an_unused_server_instead_of_failing_it() {
     let dir = tempfile::tempdir().expect("temp dir");
     let script = write_fixture_server(dir.path());
-    let server = McpServer::new(fixture_config(&script, "fake"))
+    let server = standalone(fixture_config(&script, "fake"))
         .with_attachment_dir(dir.path().join("attachments"));
 
     // A node that just started has not needed any server yet: the first watchdog pass must
@@ -261,7 +261,7 @@ async fn image_content_becomes_a_file_the_platform_can_send() {
     let script = write_fixture_server(dir.path());
     let attachments = dir.path().join("attachments");
     let server =
-        McpServer::new(fixture_config(&script, "fake")).with_attachment_dir(attachments.clone());
+        standalone(fixture_config(&script, "fake")).with_attachment_dir(attachments.clone());
 
     let response = server
         .call_tool(ToolCallRequest {
@@ -303,7 +303,7 @@ async fn image_content_becomes_a_file_the_platform_can_send() {
 async fn an_undecodable_image_is_reported_instead_of_vanishing() {
     let dir = tempfile::tempdir().expect("temp dir");
     let script = write_fixture_server(dir.path());
-    let server = McpServer::new(fixture_config(&script, "fake"))
+    let server = standalone(fixture_config(&script, "fake"))
         .with_attachment_dir(dir.path().join("attachments"));
 
     let outcome = server
@@ -325,7 +325,7 @@ async fn audio_and_file_resources_become_attachments_under_their_own_names() {
     let script = write_fixture_server(dir.path());
     let attachments = dir.path().join("attachments");
     let server =
-        McpServer::new(fixture_config(&script, "fake")).with_attachment_dir(attachments.clone());
+        standalone(fixture_config(&script, "fake")).with_attachment_dir(attachments.clone());
 
     let outcome = server
         .call("files", serde_json::json!({}))
@@ -378,9 +378,9 @@ async fn pool_honours_the_global_switch_and_the_instance_policy() {
         .await
         .expect("upsert");
 
-    let pool = Arc::new(McpPool::new());
-    pool.sync_from_config(&config).await;
     let toggles = Arc::new(ToggleStore::in_memory());
+    let pool = Arc::new(McpPool::new(toggles.clone()));
+    pool.sync_from_config(&config).await;
     let registry = Arc::new(InstanceRegistry::default());
 
     // Node-wide switch off: no host is offered, even though the server would connect fine.
@@ -389,7 +389,7 @@ async fn pool_honours_the_global_switch_and_the_instance_policy() {
         .await
         .expect("disable");
     assert!(
-        pool.hosts_for_instance(&toggles, None).await.is_empty(),
+        pool.hosts_for_instance(None).await.is_empty(),
         "a globally disabled server must not be offered"
     );
 
@@ -401,9 +401,7 @@ async fn pool_honours_the_global_switch_and_the_instance_policy() {
         instance_with_policy(&registry, "fake", ItemPolicy::Disable, "qqofficial").await;
     let instance = registry.get(&instance_id).await.expect("instance");
     assert!(
-        pool.hosts_for_instance(&toggles, Some(&instance))
-            .await
-            .is_empty(),
+        pool.hosts_for_instance(Some(&instance)).await.is_empty(),
         "an instance that disabled the server must not receive it"
     );
 
@@ -411,15 +409,13 @@ async fn pool_honours_the_global_switch_and_the_instance_policy() {
     let enabled_id = instance_with_policy(&registry, "fake", ItemPolicy::Enable, "telegram").await;
     let enabled_instance = registry.get(&enabled_id).await.expect("instance");
     assert_eq!(
-        pool.hosts_for_instance(&toggles, Some(&enabled_instance))
-            .await
-            .len(),
+        pool.hosts_for_instance(Some(&enabled_instance)).await.len(),
         1
     );
 
     // With no instance (console sandbox) the node-wide switch alone decides.
     assert_eq!(
-        pool.hosts_for_instance(&toggles, None).await.len(),
+        pool.hosts_for_instance(None).await.len(),
         1,
         "with no instance the node-wide switch alone decides"
     );
@@ -430,7 +426,7 @@ async fn pool_honours_the_global_switch_and_the_instance_policy() {
 async fn a_connected_server_reuses_its_transport() {
     let dir = tempfile::tempdir().expect("temp dir");
     let script = write_fixture_server(dir.path());
-    let server = McpServer::new(fixture_config(&script, "fake"));
+    let server = standalone(fixture_config(&script, "fake"));
 
     server.connect().await.expect("first connect");
     // A second connect must be a no-op: spawning a new child process per call would leak one
@@ -438,4 +434,44 @@ async fn a_connected_server_reuses_its_transport() {
     server.connect().await.expect("second connect");
     assert_eq!(server.health().await.state, "connected");
     assert_eq!(server.health().await.tools, 3);
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn disconnect_stops_descendants_of_the_stdio_launcher() {
+    let dir = tempfile::tempdir().unwrap();
+    let script = write_fixture_server(dir.path());
+    let original = std::fs::read_to_string(&script).unwrap();
+    std::fs::write(
+        &script,
+        original.replacen(
+            "#!/bin/sh\n",
+            "#!/bin/sh\nsh -c 'sleep 1; echo survived > \"$1\"' _ \"$MCP_DESCENDANT_MARKER\" &\n",
+            1,
+        ),
+    )
+    .unwrap();
+    let marker = dir.path().join("unexpected-write");
+    let mut config = fixture_config(&script, "descendant");
+    let McpTransport::Stdio { env, .. } = &mut config.transport else {
+        unreachable!();
+    };
+    env.insert(
+        "MCP_DESCENDANT_MARKER".to_string(),
+        marker.to_string_lossy().into_owned(),
+    );
+    let server = standalone(config);
+    server.connect().await.unwrap();
+    server.disconnect().await;
+    // Killing only an npx/bun-style wrapper leaves its server child alive after disconnect.
+    tokio::time::sleep(std::time::Duration::from_millis(1100)).await;
+    assert!(
+        !marker.exists(),
+        "the launcher's descendant survived disconnect"
+    );
+}
+
+/// Standalone fixture servers use one isolated, initially enabled toggle store.
+fn standalone(config: McpServerConfig) -> McpServer {
+    McpServer::new(config, Arc::new(ToggleStore::in_memory()))
 }

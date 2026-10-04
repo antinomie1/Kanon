@@ -92,7 +92,7 @@ async fn extension_state_recording(root: &Path) -> (ApiState, Arc<ToolRecorder>)
             instances.clone(),
         ))])
         .with_mcp_config(mcp_config)
-        .with_mcp_pool(Arc::new(McpPool::new()))
+        .with_mcp_pool(Arc::new(McpPool::new(toggles.clone())))
         .with_llm_provider(
             "recorder",
             recorder.clone(),
@@ -579,6 +579,121 @@ async fn mcp_servers_round_trip_through_save_enable_and_remove() {
 
     let (_, body) = send(&app, Method::GET, "/api/v1/mcp/servers", None).await;
     assert_eq!(body["servers"], json!([]));
+}
+
+/// A failed definition write keeps the process running; later cleanup failure is partial success.
+#[tokio::test]
+async fn mcp_removal_commits_before_disconnect_and_reports_cleanup_failure() {
+    let dir = tempfile::tempdir().unwrap();
+    let state = extension_state(dir.path()).await;
+    let app = kanon_api::app(state.clone());
+    let script = write_fixture_mcp_server(dir.path());
+    let (status, body) = send(
+        &app,
+        Method::PUT,
+        "/api/v1/mcp/servers/fx",
+        Some(json!({
+            "transport": {"type": "stdio", "command": "sh", "args": [script.to_string_lossy()]}
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let server = state.mcp().get("fx").await.unwrap();
+    assert!(server.is_connected().await);
+
+    let path = dir.path().join("mcp.json");
+    let document = std::fs::read(&path).unwrap();
+    std::fs::remove_file(&path).unwrap();
+    std::fs::create_dir(&path).unwrap();
+    let (status, _) = send(
+        &app,
+        Method::PUT,
+        "/api/v1/mcp/servers/fx",
+        Some(json!({ "name": "replacement", "transport": server.config().transport })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
+    assert_eq!(
+        state.mcp_config().get("fx").await.unwrap(),
+        *server.config()
+    );
+    let (status, _) = send(&app, Method::DELETE, "/api/v1/mcp/servers/fx", None).await;
+    assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
+    assert!(state.mcp_config().get("fx").await.is_some());
+    assert!(server.is_connected().await);
+    std::fs::remove_dir(&path).unwrap();
+    std::fs::write(&path, document).unwrap();
+
+    let (status, _) = send(
+        &app,
+        Method::PUT,
+        "/api/v1/mcp/servers/fx/enabled",
+        Some(json!({"enabled": false})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let toggle_path = dir.path().join("toggles.json");
+    std::fs::remove_file(&toggle_path).unwrap();
+    std::fs::create_dir(&toggle_path).unwrap();
+    let (status, body) = send(&app, Method::DELETE, "/api/v1/mcp/servers/fx", None).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["applied"], true);
+    assert!(body["warning"].as_str().unwrap().contains("was removed"));
+    assert!(state.mcp_config().get("fx").await.is_none());
+    assert!(state.mcp().get("fx").await.is_none());
+    assert!(!server.is_connected().await);
+    let persisted: Value = serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap();
+    assert_eq!(persisted["servers"], json!([]));
+}
+
+/// Closing the HTTP waiter must not strand a durable definition outside the runtime pool.
+#[tokio::test]
+async fn canceled_mcp_save_still_publishes_the_definition() {
+    let dir = tempfile::tempdir().unwrap();
+    let state = extension_state(dir.path()).await;
+    let app = kanon_api::app(state.clone());
+    let guard = state.mcp_config().lock_server("canceled").await;
+    let mut request = Box::pin(send(
+        &app,
+        Method::PUT,
+        "/api/v1/mcp/servers/canceled",
+        Some(json!({
+            "transport": {"type": "stdio", "command": "kanon-no-such-command"}
+        })),
+    ));
+    assert!(futures_util::poll!(&mut request).is_pending());
+    drop(request);
+
+    // Another identifier can finish while the canceled request still waits for its own lock.
+    let (status, _) = send(
+        &app,
+        Method::PUT,
+        "/api/v1/mcp/servers/independent",
+        Some(json!({
+            "transport": {"type": "stdio", "command": "kanon-no-such-command"}
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(state.mcp_config().get("canceled").await.is_none());
+    drop(guard);
+
+    tokio::time::timeout(std::time::Duration::from_secs(3), async {
+        loop {
+            if let Some(server) = state.mcp().get("canceled").await {
+                if server.health().await.last_error.is_some() {
+                    break;
+                }
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
+    assert!(state.mcp_config().get("canceled").await.is_some());
+    let persisted: Value =
+        serde_json::from_slice(&std::fs::read(dir.path().join("mcp.json")).unwrap()).unwrap();
+    assert_eq!(persisted["servers"][0]["id"], "canceled");
 }
 
 #[tokio::test]

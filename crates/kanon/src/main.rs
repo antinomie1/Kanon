@@ -138,7 +138,7 @@ async fn main() -> StartupResult<()> {
         Err(err) => tracing::warn!(error = %err, "Failed to sweep stale tool attachments"),
     }
 
-    let mcp_pool = Arc::new(McpPool::new());
+    let mcp_pool = Arc::new(McpPool::new(plugin_state.clone()));
     mcp_pool.sync_from_config(&mcp_config).await;
     let mcp_server_count = mcp_pool.describe().await.len();
     if mcp_server_count > 0 {
@@ -372,11 +372,7 @@ async fn main() -> StartupResult<()> {
     // as healthy and route events into a closed socket. The watchdog prunes and restarts it.
     let host_watchdog =
         supervisor.spawn_host_watchdog(plugin_state.clone(), HOST_WATCHDOG_INTERVAL);
-    let mcp_watchdog = mcp_pool.spawn_watchdog(
-        mcp_config.clone(),
-        plugin_state.clone(),
-        MCP_WATCHDOG_INTERVAL,
-    );
+    let mcp_watchdog = mcp_pool.spawn_watchdog(mcp_config.clone(), MCP_WATCHDOG_INTERVAL);
     tracing::info!(
         interval_secs = HOST_WATCHDOG_INTERVAL.as_secs(),
         "Plugin host watchdog started"

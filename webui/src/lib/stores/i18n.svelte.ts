@@ -698,6 +698,8 @@ export const dictionaries = {
     'extensions.mcp_edit_title': 'Edit {name}',
     'extensions.mcp_save': 'Save server',
     'extensions.mcp_saved': 'Saved {name} ({n} tools)',
+    'extensions.mcp_saved_unreachable':
+      'Saved {name}, but connection failed: {error}',
     'extensions.mcp_name': 'Name',
     'extensions.mcp_id': 'ID',
     'extensions.mcp_transport': 'Connect by',
@@ -705,12 +707,17 @@ export const dictionaries = {
     'extensions.mcp_http': 'HTTP address',
     'extensions.mcp_command': 'Command',
     'extensions.mcp_args': 'Arguments',
-    'extensions.mcp_args_hint': 'Separated by spaces, passed in order.',
+    'extensions.mcp_args_hint':
+      'A JSON array of strings, passed in order. Leave blank for no arguments.',
+    'extensions.mcp_bad_args':
+      'Enter a JSON array of strings, for example ["--path", "./my files"].',
     'extensions.mcp_url': 'Address',
     'extensions.mcp_env': 'Environment variables',
     'extensions.mcp_headers': 'Request headers',
-    'extensions.mcp_pairs_hint': 'One KEY=VALUE per line.',
-    'extensions.mcp_bad_pair': "“{line}” isn't a KEY=VALUE pair.",
+    'extensions.mcp_pairs_hint':
+      'A JSON object with string values. Leave blank for none.',
+    'extensions.mcp_bad_pairs':
+      'Enter a JSON object of strings, for example {"API_KEY": "value"}.',
     'extensions.mcp_need_id': 'Give the server an ID.',
     'extensions.mcp_need_command': 'Enter the command to run.',
     'extensions.mcp_need_url': "Enter the server's address.",
@@ -1648,6 +1655,7 @@ export const dictionaries = {
     'extensions.mcp_edit_title': '编辑 {name}',
     'extensions.mcp_save': '保存',
     'extensions.mcp_saved': '已保存 {name}（{n} 个工具）',
+    'extensions.mcp_saved_unreachable': '已保存 {name}，但连接失败：{error}',
     'extensions.mcp_name': '名称',
     'extensions.mcp_id': '标识',
     'extensions.mcp_transport': '连接方式',
@@ -1655,12 +1663,17 @@ export const dictionaries = {
     'extensions.mcp_http': 'HTTP 地址',
     'extensions.mcp_command': '命令',
     'extensions.mcp_args': '参数',
-    'extensions.mcp_args_hint': '用空格分隔，按顺序传给命令。',
+    'extensions.mcp_args_hint':
+      '填写 JSON 字符串数组，按顺序传给命令；留空表示无参数。',
+    'extensions.mcp_bad_args':
+      '请填写 JSON 字符串数组，例如 ["--path", "./my files"]。',
     'extensions.mcp_url': '地址',
     'extensions.mcp_env': '环境变量',
     'extensions.mcp_headers': '请求头',
-    'extensions.mcp_pairs_hint': '每行一个 KEY=VALUE。',
-    'extensions.mcp_bad_pair': '“{line}” 不是 KEY=VALUE 格式。',
+    'extensions.mcp_pairs_hint':
+      '填写值均为字符串的 JSON 对象，留空表示不设置。',
+    'extensions.mcp_bad_pairs':
+      '请填写值均为字符串的 JSON 对象，例如 {"API_KEY": "value"}。',
     'extensions.mcp_need_id': '请填写标识。',
     'extensions.mcp_need_command': '请填写要运行的命令。',
     'extensions.mcp_need_url': '请填写服务地址。',

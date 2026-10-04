@@ -951,8 +951,8 @@ impl PipelineEngine {
         }
 
         // MCP servers contribute their tools under the same policy rules as plugins.
-        if let (Some(mcp), Some(toggles)) = (&self.mcp, &self.toggles) {
-            active.extend(mcp.hosts_for_instance(toggles, instance).await);
+        if let Some(mcp) = &self.mcp {
+            active.extend(mcp.hosts_for_instance(instance).await);
         }
         active
     }

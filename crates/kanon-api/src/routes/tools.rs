@@ -115,12 +115,7 @@ async fn list_tools(State(state): State<ApiState>) -> Result<Json<ToolCatalog>, 
         .into_iter()
         .map(|(config, _health)| (host_id(&config.id), config.id))
         .collect();
-    hosts.extend(
-        state
-            .mcp()
-            .hosts_for_instance(state.plugin_state(), None)
-            .await,
-    );
+    hosts.extend(state.mcp().hosts_for_instance(None).await);
 
     let mut provided: Vec<ToolView> = resolve_tools(&hosts)?
         .into_iter()

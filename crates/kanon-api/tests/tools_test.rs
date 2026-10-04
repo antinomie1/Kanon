@@ -35,14 +35,16 @@ async fn tools_state(root: &Path) -> ApiState {
         .with_plugin_state(toggles.clone())
         .with_skill_store(skills.clone())
         .with_native_tools(vec![Arc::new(ReadSkillTool::new(
-            skills, toggles, instances,
+            skills,
+            toggles.clone(),
+            instances,
         ))])
         .with_mcp_config(Arc::new(
             McpConfigStore::open(root.join("mcp.json"))
                 .await
                 .expect("mcp config"),
         ))
-        .with_mcp_pool(Arc::new(McpPool::new()))
+        .with_mcp_pool(Arc::new(McpPool::new(toggles.clone())))
         .build()
 }
 

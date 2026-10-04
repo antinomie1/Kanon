@@ -79,6 +79,9 @@ pub enum McpError {
     /// The configuration document could not be read or written.
     #[error("MCP configuration failed: {0}")]
     Config(String),
+    /// A supplied server definition violates the configuration contract.
+    #[error("Invalid MCP configuration: {0}")]
+    InvalidConfig(String),
     /// The transport could not be established.
     #[error("MCP transport failed: {0}")]
     Transport(String),
@@ -156,6 +159,8 @@ pub struct McpConfigStore {
     path: Option<PathBuf>,
     /// Configured servers by identifier.
     servers: RwLock<HashMap<String, McpServerConfig>>,
+    /// Complete API mutations of the same server share one guard, including runtime effects.
+    operations: std::sync::Mutex<HashMap<String, std::sync::Weak<Mutex<()>>>>,
 }
 
 impl Default for McpConfigStore {
@@ -170,6 +175,7 @@ impl McpConfigStore {
         Self {
             path: None,
             servers: RwLock::new(HashMap::new()),
+            operations: std::sync::Mutex::new(HashMap::new()),
         }
     }
 
@@ -190,7 +196,28 @@ impl McpConfigStore {
         Ok(Self {
             path: Some(path),
             servers: RwLock::new(servers),
+            operations: std::sync::Mutex::new(HashMap::new()),
         })
+    }
+
+    /// Serializes one server's configuration, toggle and runtime update until its caller commits.
+    pub async fn lock_server(&self, id: &str) -> tokio::sync::OwnedMutexGuard<()> {
+        let operation = {
+            let mut operations = self
+                .operations
+                .lock()
+                .unwrap_or_else(|error| error.into_inner());
+            operations.retain(|_, operation| operation.strong_count() > 0);
+            match operations.get(id).and_then(std::sync::Weak::upgrade) {
+                Some(operation) => operation,
+                None => {
+                    let operation = Arc::new(Mutex::new(()));
+                    operations.insert(id.to_string(), Arc::downgrade(&operation));
+                    operation
+                }
+            }
+        };
+        operation.lock_owned().await
     }
 
     /// Lists configured servers, ordered by identifier.
@@ -289,22 +316,24 @@ fn validate_config(config: &McpServerConfig) -> Result<(), McpError> {
             .chars()
             .all(|ch| ch.is_ascii_alphanumeric() || ch == '-' || ch == '_')
     {
-        return Err(McpError::Config(format!(
+        return Err(McpError::InvalidConfig(format!(
             "invalid MCP server id '{}': use letters, digits, '-' or '_'",
             config.id
         )));
     }
     if config.name.trim().is_empty() {
-        return Err(McpError::Config("server name must not be empty".into()));
+        return Err(McpError::InvalidConfig(
+            "server name must not be empty".into(),
+        ));
     }
     match &config.transport {
-        McpTransport::Stdio { command, .. } if command.trim().is_empty() => {
-            Err(McpError::Config("stdio command must not be empty".into()))
-        }
+        McpTransport::Stdio { command, .. } if command.trim().is_empty() => Err(
+            McpError::InvalidConfig("stdio command must not be empty".into()),
+        ),
         McpTransport::Http { url, .. }
             if !url.starts_with("http://") && !url.starts_with("https://") =>
         {
-            Err(McpError::Config(
+            Err(McpError::InvalidConfig(
                 "HTTP MCP url must start with http:// or https://".into(),
             ))
         }
@@ -328,6 +357,9 @@ fn read_document(path: &Path) -> Result<Option<McpDocument>, McpError> {
 enum Connection {
     /// Child process speaking JSON-RPC on stdio.
     Stdio {
+        /// Kill wrappers and their server descendants before dropping the direct child handle.
+        #[cfg(unix)]
+        _process_group: crate::process::ProcessGroup,
         /// Child process handle.
         ///
         /// Never read directly, but it must stay alive: dropping it closes the pipes and, with
@@ -347,6 +379,8 @@ enum Connection {
         url: String,
         /// Extra headers.
         headers: HashMap<String, String>,
+        /// Session assigned by `initialize`, sent on every subsequent request and notification.
+        session_id: Option<String>,
     },
 }
 
@@ -387,10 +421,14 @@ pub struct McpToolOutcome {
 pub struct McpServer {
     /// Static configuration.
     config: McpServerConfig,
+    /// The pool and control plane share this single source of global enablement.
+    toggles: Arc<ToggleStore>,
     /// Host identifier used in tool metadata (`mcp_<server>`), stable for the server's lifetime.
     host_id: String,
     /// Live connection, absent until the first successful connect.
     connection: Mutex<Option<Connection>>,
+    /// Removed or replaced definitions never reconnect through an old turn's retained handle.
+    retired: std::sync::atomic::AtomicBool,
     /// Synthetic plugin metadata advertised to the tool router.
     ///
     /// A synchronous lock: [`ToolHost::plugin_metas`] is a synchronous trait method, so the
@@ -414,12 +452,14 @@ impl std::fmt::Debug for McpServer {
 
 impl McpServer {
     /// Creates a server handle from its configuration.
-    pub fn new(config: McpServerConfig) -> Self {
+    pub fn new(config: McpServerConfig, toggles: Arc<ToggleStore>) -> Self {
         let host_id = host_id(&config.id);
         Self {
             config,
+            toggles,
             host_id,
             connection: Mutex::new(None),
+            retired: std::sync::atomic::AtomicBool::new(false),
             meta: std::sync::RwLock::new(Vec::new()),
             health: Mutex::new(McpHealth::default()),
             next_request_id: std::sync::atomic::AtomicU64::new(1),
@@ -458,78 +498,115 @@ impl McpServer {
     /// as broken simply because no conversation had needed it yet. Health bookkeeping happens
     /// exactly once per pass, inside [`McpServer::connect`] or here.
     pub async fn probe(&self) -> Result<(), McpError> {
-        if !self.is_connected().await {
-            return self.connect().await;
+        self.connect_or_refresh(true).await
+    }
+
+    /// Connects (if needed), performs the MCP handshake and refreshes the tool list.
+    pub async fn connect(&self) -> Result<(), McpError> {
+        self.connect_or_refresh(false).await
+    }
+
+    /// Serializes initialization, probes and disconnection on the transport's existing lock.
+    /// A candidate stays local until its handshake and tool discovery succeed; cancellation
+    /// therefore drops its child instead of leaving a half-initialized connection published.
+    async fn connect_or_refresh(&self, refresh: bool) -> Result<(), McpError> {
+        let mut current = self.connection.lock().await;
+        self.ensure_available().await?;
+        if current.is_some() && !refresh {
+            return Ok(());
         }
 
-        match self.refresh_tools().await {
-            Ok(()) => {
-                self.record_success().await;
+        let attempt = if let Some(connection) = current.as_mut() {
+            // A probe refreshes an already initialized transport. Keep its committed metadata
+            // while the RPC runs so concurrent tool discovery never sees an empty catalog.
+            // Cancelling this read leaves the previous connected state intact.
+            self.read_tools(connection)
+                .await
+                .map(|metadata| (None, metadata))
+        } else {
+            let mut health = self.health.lock().await;
+            // No transport is published yet. This remains truthful even when the caller drops
+            // the initialization future, with no detached cleanup task or extra state machine.
+            health.state = "disconnected".to_string();
+            health.tools = 0;
+            drop(health);
+            self.clear_metadata();
+            async {
+                let mut connection = self.open_transport().await?;
+                self.handshake(&mut connection).await?;
+                let metadata = self.read_tools(&mut connection).await?;
+                Ok::<_, McpError>((Some(connection), metadata))
+            }
+            .await
+        };
+
+        let mut health = self.health.lock().await;
+        // A pool edit can retire this handle during the RPC. Check again at the commit boundary;
+        // there is no await between this check and publication of transport, metadata and health.
+        let attempt = match attempt {
+            Ok(ready) => self.ensure_available().await.map(|()| ready),
+            Err(error) => Err(error),
+        };
+        match attempt {
+            Ok((connection, metadata)) => {
+                health.state = "connected".to_string();
+                health.failures = 0;
+                health.last_error = None;
+                health.tools = metadata.first().map_or(0, |meta| meta.tools.len());
+                *self
+                    .meta
+                    .write()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner()) = metadata;
+                if let Some(connection) = connection {
+                    *current = Some(connection);
+                }
                 Ok(())
             }
             Err(err) => {
-                self.disconnect().await;
-                self.record_failure(&err).await;
+                *current = None;
+                self.clear_metadata();
+                health.failures += 1;
+                health.state = if health.failures >= MCP_MAX_FAILURES {
+                    "failed".to_string()
+                } else {
+                    "reconnecting".to_string()
+                };
+                health.last_error = Some(err.to_string());
+                health.tools = 0;
                 Err(err)
             }
         }
     }
 
-    /// Connects (if needed), performs the MCP handshake and refreshes the tool list.
-    pub async fn connect(&self) -> Result<(), McpError> {
-        // Fast path: already connected and no refresh requested.
-        if self.connection.lock().await.is_some() {
-            return Ok(());
+    /// Refuses stale handles retained by a turn after their definition was replaced or removed.
+    fn ensure_active(&self) -> Result<(), McpError> {
+        if self.retired.load(std::sync::atomic::Ordering::Acquire) {
+            return Err(McpError::Transport(format!(
+                "MCP server '{}' was removed or replaced",
+                self.config.id
+            )));
         }
-
-        let attempt = async {
-            let connection = self.open_transport().await?;
-            *self.connection.lock().await = Some(connection);
-
-            if let Err(err) = self.handshake().await {
-                // A server that cannot complete the handshake is unusable: drop the transport so
-                // the next attempt starts clean instead of reusing a half-initialized process.
-                *self.connection.lock().await = None;
-                return Err(err);
-            }
-
-            self.refresh_tools().await
-        }
-        .await;
-
-        // The health snapshot is the console's only view of this server, so it is updated on both
-        // outcomes here rather than left at its initial value.
-        match &attempt {
-            Ok(()) => self.record_success().await,
-            Err(err) => {
-                self.record_failure(err).await;
-            }
-        }
-        attempt
+        Ok(())
     }
 
-    /// Records a live server in the health snapshot.
-    async fn record_success(&self) {
-        // Read the tool count before taking the health lock so two locks are never held at once.
-        let tools = self.tool_count();
-        let mut health = self.health.lock().await;
-        health.state = "connected".to_string();
-        health.failures = 0;
-        health.last_error = None;
-        health.tools = tools;
+    /// Rechecks the shared switch inside the connection boundary, including for retained tools.
+    async fn ensure_available(&self) -> Result<(), McpError> {
+        self.ensure_active()?;
+        if !self.toggles.is_enabled(MCP_SECTION, &self.config.id).await {
+            return Err(McpError::Transport(format!(
+                "MCP server '{}' is disabled",
+                self.config.id
+            )));
+        }
+        self.ensure_active()
     }
 
-    /// Records a failed attempt, preserving the concrete cause for the console.
-    async fn record_failure(&self, err: &McpError) {
-        let mut health = self.health.lock().await;
-        health.failures += 1;
-        health.state = if health.failures >= MCP_MAX_FAILURES {
-            "failed".to_string()
-        } else {
-            "reconnecting".to_string()
-        };
-        health.last_error = Some(err.to_string());
-        health.tools = 0;
+    /// Clears tool advertisement whenever no initialized transport is published.
+    fn clear_metadata(&self) {
+        self.meta
+            .write()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clear();
     }
 
     /// Drops the live connection and marks the server as not currently connected.
@@ -537,8 +614,10 @@ impl McpServer {
     /// Used by the watchdog before reconnecting and by the console when a server is switched off;
     /// the connection is genuinely gone either way, so the health snapshot must say so.
     pub async fn disconnect(&self) {
-        *self.connection.lock().await = None;
+        let mut connection = self.connection.lock().await;
         let mut health = self.health.lock().await;
+        *connection = None;
+        self.clear_metadata();
         health.state = "disconnected".to_string();
         health.tools = 0;
     }
@@ -556,6 +635,8 @@ impl McpServer {
                 for (key, value) in env {
                     cmd.env(key, value);
                 }
+                #[cfg(unix)]
+                cmd.process_group(0);
 
                 let mut child = cmd.spawn().map_err(|err| {
                     McpError::Transport(format!(
@@ -563,6 +644,10 @@ impl McpServer {
                         self.config.id, command
                     ))
                 })?;
+                #[cfg(unix)]
+                let process_group = crate::process::ProcessGroup(
+                    child.id().expect("a newly spawned MCP process has a PID"),
+                );
 
                 let stdin = child
                     .stdin
@@ -574,6 +659,8 @@ impl McpServer {
                     .ok_or_else(|| McpError::Transport("child stdout unavailable".into()))?;
 
                 Ok(Connection::Stdio {
+                    #[cfg(unix)]
+                    _process_group: process_group,
                     child,
                     stdout: BufReader::new(stdout),
                     stdin,
@@ -583,13 +670,15 @@ impl McpServer {
                 client: reqwest::Client::new(),
                 url: url.clone(),
                 headers: headers.clone(),
+                session_id: None,
             }),
         }
     }
 
     /// Performs the MCP `initialize` handshake.
-    async fn handshake(&self) -> Result<(), McpError> {
-        self.request(
+    async fn handshake(&self, connection: &mut Connection) -> Result<(), McpError> {
+        self.request_on(
+            connection,
             "initialize",
             serde_json::json!({
                 "protocolVersion": "2024-11-05",
@@ -599,16 +688,26 @@ impl McpServer {
         )
         .await?;
 
-        // Fire-and-forget: the specification only requires the notification, not a response.
-        let _ = self
-            .notify("notifications/initialized", serde_json::json!({}))
-            .await;
+        // No JSON-RPC response is expected, but delivery must still succeed before tools are used.
+        self.notify(
+            connection,
+            "notifications/initialized",
+            serde_json::json!({}),
+        )
+        .await?;
         Ok(())
     }
 
     /// Refreshes the advertised tool list and rebuilds the synthetic metadata.
     pub async fn refresh_tools(&self) -> Result<(), McpError> {
-        let response = self.request("tools/list", serde_json::json!({})).await?;
+        self.connect_or_refresh(true).await
+    }
+
+    /// Reads candidate metadata without exposing it before the connection commit.
+    async fn read_tools(&self, connection: &mut Connection) -> Result<Vec<PluginMeta>, McpError> {
+        let response = self
+            .request_on(connection, "tools/list", serde_json::json!({}))
+            .await?;
         let tools = response
             .get("tools")
             .and_then(|tools| tools.as_array())
@@ -637,10 +736,7 @@ impl McpServer {
             });
         }
 
-        *self
-            .meta
-            .write()
-            .unwrap_or_else(|poisoned| poisoned.into_inner()) = vec![PluginMeta {
+        Ok(vec![PluginMeta {
             id: host_id(&self.config.id),
             name: self.config.name.clone(),
             version: "mcp".to_string(),
@@ -654,9 +750,7 @@ impl McpServer {
             prepares_turns: false,
             rewrites_system_prompt: false,
             serves_http: false,
-        }];
-
-        Ok(())
+        }])
     }
 
     /// Calls one tool by its *MCP* name (unqualified).
@@ -831,6 +925,21 @@ impl McpServer {
         method: &str,
         params: serde_json::Value,
     ) -> Result<serde_json::Value, McpError> {
+        let mut guard = self.connection.lock().await;
+        self.ensure_available().await?;
+        let connection = guard.as_mut().ok_or_else(|| {
+            McpError::Transport(format!("MCP server '{}' is not connected", self.config.id))
+        })?;
+        self.request_on(connection, method, params).await
+    }
+
+    /// Uses a transport already exclusively owned by an initialization or live request.
+    async fn request_on(
+        &self,
+        connection: &mut Connection,
+        method: &str,
+        params: serde_json::Value,
+    ) -> Result<serde_json::Value, McpError> {
         let id = self
             .next_request_id
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
@@ -841,109 +950,114 @@ impl McpServer {
             "params": params,
         });
 
-        let mut guard = self.connection.lock().await;
-        let Some(connection) = guard.as_mut() else {
-            return Err(McpError::Transport(format!(
-                "MCP server '{}' is not connected",
-                self.config.id
-            )));
-        };
+        // One deadline covers writes, every ignored stdio line, HTTP headers and the entire body.
+        // Resetting it for each read lets a noisy server keep this exclusive connection forever.
+        let response = tokio::time::timeout(MCP_REQUEST_TIMEOUT, async {
+            match connection {
+                Connection::Stdio { stdout, stdin, .. } => {
+                    let mut line = serde_json::to_vec(&payload).map_err(|err| {
+                        McpError::Transport(format!("failed to encode request: {err}"))
+                    })?;
+                    line.push(b'\n');
+                    stdin.write_all(&line).await.map_err(|err| {
+                        McpError::Transport(format!("failed to write request: {err}"))
+                    })?;
+                    stdin.flush().await.map_err(|err| {
+                        McpError::Transport(format!("failed to flush request: {err}"))
+                    })?;
 
-        let response = match connection {
-            Connection::Stdio { stdout, stdin, .. } => {
-                let mut line = serde_json::to_vec(&payload).map_err(|err| {
-                    McpError::Transport(format!("failed to encode request: {err}"))
-                })?;
-                line.push(b'\n');
-                stdin.write_all(&line).await.map_err(|err| {
-                    McpError::Transport(format!("failed to write request: {err}"))
-                })?;
-                stdin.flush().await.map_err(|err| {
-                    McpError::Transport(format!("failed to flush request: {err}"))
-                })?;
+                    // Read until the matching response id; notifications are ignored.
+                    let mut buffer = String::new();
+                    loop {
+                        buffer.clear();
+                        let read = stdout.read_line(&mut buffer).await.map_err(|err| {
+                            McpError::Transport(format!("failed to read response: {err}"))
+                        })?;
 
-                // Read until the matching response id; notifications are ignored.
-                let mut buffer = String::new();
-                loop {
-                    buffer.clear();
-                    let read =
-                        tokio::time::timeout(MCP_REQUEST_TIMEOUT, stdout.read_line(&mut buffer))
-                            .await
-                            .map_err(|_| {
-                                McpError::Transport(format!(
-                                    "MCP server '{}' did not answer '{method}' in time",
-                                    self.config.id
-                                ))
-                            })?
+                        if read == 0 {
+                            return Err(McpError::Transport(format!(
+                                "MCP server '{}' closed its output while answering '{method}'",
+                                self.config.id
+                            )));
+                        }
+
+                        let trimmed = buffer.trim();
+                        if trimmed.is_empty() {
+                            continue;
+                        }
+                        let Ok(message) = serde_json::from_str::<serde_json::Value>(trimmed) else {
+                            // Servers may log to stdout; ignore anything that is not JSON-RPC.
+                            continue;
+                        };
+                        if message.get("id").and_then(|value| value.as_u64()) != Some(id) {
+                            continue;
+                        }
+                        break Ok(message);
+                    }
+                }
+                Connection::Http {
+                    client,
+                    url,
+                    headers,
+                    session_id,
+                } => {
+                    let mut request = client
+                        .post(url.as_str())
+                        .json(&payload)
+                        .header("accept", "application/json, text/event-stream");
+                    for (key, value) in headers {
+                        request = request.header(key.as_str(), value.as_str());
+                    }
+                    if let Some(session_id) = session_id.as_deref() {
+                        request = request.header("mcp-session-id", session_id);
+                    }
+                    let response = request.send().await.map_err(|err| {
+                        McpError::Transport(format!("HTTP request failed: {err}"))
+                    })?;
+
+                    let status = response.status();
+                    if method == "initialize" && status.is_success() {
+                        *session_id = response
+                            .headers()
+                            .get("mcp-session-id")
+                            .map(|value| value.to_str().map(str::to_string))
+                            .transpose()
                             .map_err(|err| {
-                                McpError::Transport(format!("failed to read response: {err}"))
+                                McpError::Transport(format!("invalid MCP session header: {err}"))
                             })?;
+                    }
+                    let body = response.text().await.map_err(|err| {
+                        McpError::Transport(format!("failed to read HTTP response: {err}"))
+                    })?;
 
-                    if read == 0 {
+                    if !status.is_success() {
                         return Err(McpError::Transport(format!(
-                            "MCP server '{}' closed its output while answering '{method}'",
+                            "MCP server '{}' answered HTTP {status}",
                             self.config.id
                         )));
                     }
 
-                    let trimmed = buffer.trim();
-                    if trimmed.is_empty() {
-                        continue;
-                    }
-                    let Ok(message) = serde_json::from_str::<serde_json::Value>(trimmed) else {
-                        // Servers may log to stdout; ignore anything that is not JSON-RPC.
-                        continue;
-                    };
-                    if message.get("id").and_then(|value| value.as_u64()) != Some(id) {
-                        continue;
-                    }
-                    break message;
+                    // Streamable HTTP servers may answer with an SSE stream; take the last data line.
+                    let json = body
+                        .lines()
+                        .filter_map(|line| line.strip_prefix("data:"))
+                        .map(str::trim)
+                        .filter(|line| !line.is_empty())
+                        .next_back()
+                        .unwrap_or(body.trim());
+                    serde_json::from_str::<serde_json::Value>(json).map_err(|err| {
+                        McpError::Transport(format!("failed to decode HTTP response: {err}"))
+                    })
                 }
             }
-            Connection::Http {
-                client,
-                url,
-                headers,
-            } => {
-                let mut request = client.post(url.as_str()).json(&payload);
-                for (key, value) in headers {
-                    request = request.header(key.as_str(), value.as_str());
-                }
-                let response = tokio::time::timeout(MCP_REQUEST_TIMEOUT, request.send())
-                    .await
-                    .map_err(|_| {
-                        McpError::Transport(format!(
-                            "MCP server '{}' did not answer '{method}' in time",
-                            self.config.id
-                        ))
-                    })?
-                    .map_err(|err| McpError::Transport(format!("HTTP request failed: {err}")))?;
-
-                let status = response.status();
-                let body = response.text().await.map_err(|err| {
-                    McpError::Transport(format!("failed to read HTTP response: {err}"))
-                })?;
-
-                if !status.is_success() {
-                    return Err(McpError::Transport(format!(
-                        "MCP server '{}' answered HTTP {status}",
-                        self.config.id
-                    )));
-                }
-
-                // Streamable HTTP servers may answer with an SSE stream; take the last data line.
-                let json = body
-                    .lines()
-                    .filter_map(|line| line.strip_prefix("data:"))
-                    .map(str::trim)
-                    .filter(|line| !line.is_empty())
-                    .next_back()
-                    .unwrap_or(body.trim());
-                serde_json::from_str::<serde_json::Value>(json).map_err(|err| {
-                    McpError::Transport(format!("failed to decode HTTP response: {err}"))
-                })?
-            }
-        };
+        })
+        .await
+        .map_err(|_| {
+            McpError::Transport(format!(
+                "MCP server '{}' did not answer '{method}' in time",
+                self.config.id
+            ))
+        })??;
 
         if let Some(error) = response.get("error") {
             let message = error
@@ -964,27 +1078,64 @@ impl McpServer {
     }
 
     /// Sends one JSON-RPC notification (no response expected).
-    async fn notify(&self, method: &str, params: serde_json::Value) -> Result<(), McpError> {
+    async fn notify(
+        &self,
+        connection: &mut Connection,
+        method: &str,
+        params: serde_json::Value,
+    ) -> Result<(), McpError> {
         let payload = serde_json::json!({ "jsonrpc": "2.0", "method": method, "params": params });
-        let mut guard = self.connection.lock().await;
-        match guard.as_mut() {
-            Some(Connection::Stdio { stdin, .. }) => {
-                let mut line = serde_json::to_vec(&payload).map_err(|err| {
-                    McpError::Transport(format!("failed to encode notice: {err}"))
-                })?;
-                line.push(b'\n');
-                stdin
-                    .write_all(&line)
-                    .await
-                    .map_err(|err| McpError::Transport(format!("failed to write notice: {err}")))?;
-                stdin
-                    .flush()
-                    .await
-                    .map_err(|err| McpError::Transport(format!("failed to flush notice: {err}")))?;
+        tokio::time::timeout(MCP_REQUEST_TIMEOUT, async {
+            match connection {
+                Connection::Stdio { stdin, .. } => {
+                    let mut line = serde_json::to_vec(&payload).map_err(|err| {
+                        McpError::Transport(format!("failed to encode notice: {err}"))
+                    })?;
+                    line.push(b'\n');
+                    stdin.write_all(&line).await.map_err(|err| {
+                        McpError::Transport(format!("failed to write notice: {err}"))
+                    })?;
+                    stdin.flush().await.map_err(|err| {
+                        McpError::Transport(format!("failed to flush notice: {err}"))
+                    })?;
+                }
+                Connection::Http {
+                    client,
+                    url,
+                    headers,
+                    session_id,
+                } => {
+                    let mut request = client
+                        .post(url.as_str())
+                        .json(&payload)
+                        .header("accept", "application/json, text/event-stream");
+                    for (key, value) in headers {
+                        request = request.header(key.as_str(), value.as_str());
+                    }
+                    if let Some(session_id) = session_id.as_deref() {
+                        request = request.header("mcp-session-id", session_id);
+                    }
+                    let response = request.send().await.map_err(|err| {
+                        McpError::Transport(format!("HTTP notification failed: {err}"))
+                    })?;
+                    if !response.status().is_success() {
+                        return Err(McpError::Transport(format!(
+                            "MCP server '{}' rejected notification '{method}' with HTTP {}",
+                            self.config.id,
+                            response.status()
+                        )));
+                    }
+                }
             }
-            Some(Connection::Http { .. }) | None => {}
-        }
-        Ok(())
+            Ok(())
+        })
+        .await
+        .map_err(|_| {
+            McpError::Transport(format!(
+                "MCP server '{}' did not accept notification '{method}' in time",
+                self.config.id
+            ))
+        })?
     }
 }
 
@@ -1080,23 +1231,25 @@ impl ToolHost for McpServer {
 pub struct McpPool {
     /// Servers by identifier.
     servers: RwLock<HashMap<String, Arc<McpServer>>>,
+    /// The same persistent enablement store used by the node's control plane.
+    toggles: Arc<ToggleStore>,
     /// Directory receiving attachments materialized from tool results.
     attachment_dir: PathBuf,
 }
 
-impl Default for McpPool {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
 impl McpPool {
     /// Creates an empty pool writing attachments under the node's data directory.
-    pub fn new() -> Self {
+    pub fn new(toggles: Arc<ToggleStore>) -> Self {
         Self {
             servers: RwLock::new(HashMap::new()),
+            toggles,
             attachment_dir: PathBuf::from(DEFAULT_ATTACHMENT_DIR),
         }
+    }
+
+    /// Shared global switches; the API must use this same store when changing MCP enablement.
+    pub fn toggle_store(&self) -> &Arc<ToggleStore> {
+        &self.toggles
     }
 
     /// Overrides where tool attachments are materialized.
@@ -1107,19 +1260,54 @@ impl McpPool {
 
     /// Rebuilds the pool from the configuration document.
     pub async fn sync_from_config(&self, config: &McpConfigStore) {
-        let configured = config.list().await;
         let mut servers = self.servers.write().await;
+        // Read after taking the publication lock: concurrent edits must not apply an older
+        // snapshot after a newer sync has already installed its server handles.
+        let configured = config.list().await;
+        let mut retired = Vec::new();
 
-        // Drop servers that were removed, keep the rest so live connections survive a config edit.
-        servers.retain(|id, _| configured.iter().any(|server| &server.id == id));
+        // A turn can retain an Arc after it leaves the pool. Retire that identity before making
+        // the new map visible so old handles cannot recreate a deleted server's child process.
+        servers.retain(|id, server| {
+            if configured.iter().any(|config| &config.id == id) {
+                true
+            } else {
+                server
+                    .retired
+                    .store(true, std::sync::atomic::Ordering::Release);
+                retired.push(server.clone());
+                false
+            }
+        });
         for server in configured {
             match servers.get(&server.id) {
                 Some(existing) if existing.config() == &server => {}
                 _ => {
-                    let handle =
-                        McpServer::new(server).with_attachment_dir(self.attachment_dir.clone());
-                    servers.insert(handle.config().id.clone(), Arc::new(handle));
+                    let handle = McpServer::new(server, self.toggles.clone())
+                        .with_attachment_dir(self.attachment_dir.clone());
+                    if let Some(previous) =
+                        servers.insert(handle.config().id.clone(), Arc::new(handle))
+                    {
+                        previous
+                            .retired
+                            .store(true, std::sync::atomic::Ordering::Release);
+                        retired.push(previous);
+                    }
                 }
+            }
+        }
+        drop(servers);
+
+        if !retired.is_empty() {
+            // The new map is committed. Cleanup owns the retired handles even if the API caller
+            // disconnects while an old RPC is finishing, and never blocks unrelated pool reads.
+            let cleanup = tokio::spawn(async move {
+                for server in retired {
+                    server.disconnect().await;
+                }
+            });
+            if let Err(error) = cleanup.await {
+                tracing::error!(%error, "Retired MCP connection cleanup failed");
             }
         }
     }
@@ -1146,7 +1334,6 @@ impl McpPool {
     /// is only connected when an instance actually reaches it, so an unused server costs nothing.
     pub async fn hosts_for_instance(
         &self,
-        toggles: &ToggleStore,
         instance: Option<&BotInstance>,
     ) -> Vec<Arc<dyn ToolHost>> {
         let servers: Vec<Arc<McpServer>> = self.servers.read().await.values().cloned().collect();
@@ -1154,7 +1341,7 @@ impl McpPool {
         let mut hosts: Vec<Arc<dyn ToolHost>> = Vec::new();
         for server in servers {
             let id = server.config().id.clone();
-            let globally_enabled = toggles.is_enabled(MCP_SECTION, &id).await;
+            let globally_enabled = self.toggles.is_enabled(MCP_SECTION, &id).await;
             if !globally_enabled {
                 continue;
             }
@@ -1178,7 +1365,6 @@ impl McpPool {
     pub fn spawn_watchdog(
         self: &Arc<Self>,
         config: Arc<McpConfigStore>,
-        toggles: Arc<ToggleStore>,
         interval: Duration,
     ) -> tokio::task::JoinHandle<()> {
         let pool = Arc::clone(self);
@@ -1194,7 +1380,11 @@ impl McpPool {
                 for server in servers {
                     // A server switched off in the console is not probed: it holds no connection
                     // worth keeping, and the toggle store is the single source of that decision.
-                    if !toggles.is_enabled(MCP_SECTION, &server.config().id).await {
+                    if !pool
+                        .toggles
+                        .is_enabled(MCP_SECTION, &server.config().id)
+                        .await
+                    {
                         continue;
                     }
 

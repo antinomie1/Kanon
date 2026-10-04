@@ -897,8 +897,20 @@ impl ApiStateBuilder {
         bash_policy.set(node_settings.bash_policy.clone());
 
         let instances = self.instances.unwrap_or_default();
-        let plugin_state = self.plugin_state.unwrap_or_default();
-        let mcp = self.mcp.unwrap_or_default();
+        let plugin_state = self.plugin_state.unwrap_or_else(|| {
+            self.mcp
+                .as_ref()
+                .map(|pool| pool.toggle_store().clone())
+                .unwrap_or_default()
+        });
+        let mcp = self
+            .mcp
+            .unwrap_or_else(|| Arc::new(McpPool::new(plugin_state.clone())));
+        // The API, pipeline and retained MCP handles must enforce the same enablement source.
+        assert!(
+            Arc::ptr_eq(mcp.toggle_store(), &plugin_state),
+            "MCP pool and API state must share the same ToggleStore"
+        );
         let mcp_config = self.mcp_config.unwrap_or_default();
         let skills = self
             .skills

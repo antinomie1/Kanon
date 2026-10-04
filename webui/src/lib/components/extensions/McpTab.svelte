@@ -57,27 +57,35 @@ $effect(() => {
   untrack(() => void load());
 });
 
-/** Parses `KEY=VALUE` (or `Key: Value`) lines; a malformed line is an error, never skipped. */
-function parsePairs(raw: string): Record<string, string> {
-  const parsed: Record<string, string> = {};
-  for (const line of raw.split('\n')) {
-    const trimmed = line.trim();
-    if (!trimmed) continue;
-    const separator = trimmed.includes('=') ? '=' : ':';
-    const index = trimmed.indexOf(separator);
-    const key = index > 0 ? trimmed.slice(0, index).trim() : '';
-    const value = index > 0 ? trimmed.slice(index + 1).trim() : '';
-    if (!key || !value)
-      throw new Error(t('extensions.mcp_bad_pair', { line: trimmed }));
-    parsed[key] = value;
+/** Parses exact string values without changing whitespace, newlines or empty entries. */
+function parseStringMap(raw: string): Record<string, string> {
+  try {
+    const values: unknown = raw.trim() ? JSON.parse(raw) : {};
+    if (
+      values !== null &&
+      typeof values === 'object' &&
+      !Array.isArray(values) &&
+      Object.values(values).every((value) => typeof value === 'string')
+    ) {
+      return values as Record<string, string>;
+    }
+  } catch {
+    // Invalid JSON and non-string values share one actionable format requirement.
   }
-  return parsed;
+  throw new Error(t('extensions.mcp_bad_pairs'));
 }
 
-function formatPairs(values: Record<string, string>): string {
-  return Object.entries(values)
-    .map(([key, value]) => `${key}=${value}`)
-    .join('\n');
+/** Keeps argument boundaries exact, including spaces, quotes and empty arguments. */
+function parseArguments(raw: string): string[] {
+  try {
+    const args: unknown = raw.trim() ? JSON.parse(raw) : [];
+    if (Array.isArray(args) && args.every((arg) => typeof arg === 'string')) {
+      return args;
+    }
+  } catch {
+    // Report the same actionable format for invalid JSON and invalid array members.
+  }
+  throw new Error(t('extensions.mcp_bad_args'));
 }
 
 function openCreate() {
@@ -103,11 +111,11 @@ function openEdit(server: McpServerView) {
   formUrl = '';
   if (server.transport.type === 'stdio') {
     formCommand = server.transport.command;
-    formArgs = server.transport.args.join(' ');
-    formPairs = formatPairs(server.transport.env);
+    formArgs = JSON.stringify(server.transport.args);
+    formPairs = JSON.stringify(server.transport.env, null, 2);
   } else {
     formUrl = server.transport.url;
-    formPairs = formatPairs(server.transport.headers);
+    formPairs = JSON.stringify(server.transport.headers, null, 2);
   }
   formError = null;
   editorOpen = true;
@@ -126,13 +134,13 @@ async function save() {
       transport = {
         type: 'stdio',
         command,
-        args: formArgs.trim() ? formArgs.trim().split(/\s+/) : [],
-        env: parsePairs(formPairs),
+        args: parseArguments(formArgs),
+        env: parseStringMap(formPairs),
       };
     } else {
       const url = formUrl.trim();
       if (!url) throw new Error(t('extensions.mcp_need_url'));
-      transport = { type: 'http', url, headers: parsePairs(formPairs) };
+      transport = { type: 'http', url, headers: parseStringMap(formPairs) };
     }
   } catch (e) {
     formError = errorText(e);
@@ -145,9 +153,18 @@ async function save() {
       name: formName.trim() || null,
       transport,
     });
-    toasts.ok(
-      t('extensions.mcp_saved', { name: saved.name, n: saved.health.tools }),
-    );
+    if (saved.enabled && saved.health.state !== 'connected') {
+      toasts.error(
+        t('extensions.mcp_saved_unreachable', {
+          name: saved.name,
+          error: saved.health.last_error ?? t('extensions.mcp_connecting'),
+        }),
+      );
+    } else {
+      toasts.ok(
+        t('extensions.mcp_saved', { name: saved.name, n: saved.health.tools }),
+      );
+    }
     editorOpen = false;
     await load();
   } catch (e) {
@@ -161,12 +178,25 @@ async function setEnabled(server: McpServerView, next: boolean) {
   busy = { ...busy, [server.id]: true };
   try {
     await api.setMcpServerEnabled(server.id, next);
-    toasts.ok(
-      t(next ? 'extensions.on_toast' : 'extensions.off_toast', {
-        name: server.name,
-      }),
-    );
     await load();
+    const current = servers.find((entry) => entry.id === server.id);
+    if (next && current?.health.state !== 'connected') {
+      toasts.error(
+        t('extensions.mcp_saved_unreachable', {
+          name: server.name,
+          error:
+            current?.health.last_error ??
+            error ??
+            t('extensions.mcp_connecting'),
+        }),
+      );
+    } else {
+      toasts.ok(
+        t(next ? 'extensions.on_toast' : 'extensions.off_toast', {
+          name: server.name,
+        }),
+      );
+    }
   } catch (e) {
     toasts.error(
       t('extensions.toggle_failed', { name: server.name, error: errorText(e) }),
@@ -186,8 +216,12 @@ async function remove(server: McpServerView) {
   if (!yes) return;
   busy = { ...busy, [server.id]: true };
   try {
-    await api.removeMcpServer(server.id);
-    toasts.ok(t('extensions.removed_toast', { name: server.name }));
+    const result = await api.removeMcpServer(server.id);
+    if (result.warning) {
+      toasts.error(result.warning);
+    } else {
+      toasts.ok(t('extensions.removed_toast', { name: server.name }));
+    }
     await load();
   } catch (e) {
     toasts.error(errorText(e));
@@ -375,7 +409,7 @@ const CHIP: Record<Tone, string> = {
           id="mcp-args"
           mono
           spellcheck="false"
-          placeholder="-y @modelcontextprotocol/server-filesystem ./files"
+          placeholder={'["-y", "@modelcontextprotocol/server-filesystem", "./files"]'}
           bind:value={formArgs}
         />
         <p class="m-0 mt-2 hint">{t('extensions.mcp_args_hint')}</p>
@@ -401,7 +435,7 @@ const CHIP: Record<Tone, string> = {
         class="input mono"
         rows="3"
         spellcheck="false"
-        placeholder="API_KEY=…"
+        placeholder={formKind === 'stdio' ? '{"API_KEY": "…"}' : '{"Authorization": "Bearer …"}'}
         bind:value={formPairs}
       ></textarea>
       <p class="m-0 mt-2 hint">{t('extensions.mcp_pairs_hint')}</p>

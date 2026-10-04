@@ -573,6 +573,8 @@ export interface McpStateResponse {
   message: string;
   server_id: string;
   enabled: boolean;
+  /** Cleanup failed after the requested durable change already succeeded. */
+  warning?: string;
 }
 
 export interface UpsertMcpServerRequest {

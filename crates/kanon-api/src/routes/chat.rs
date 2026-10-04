@@ -143,12 +143,7 @@ async fn completions(
     // identifier, so the node-wide switch alone decides which servers are offered. Discovery
     // connects servers, so skip it when the caller will not expose their tools to the model.
     if request.tools {
-        hosts.extend(
-            state
-                .mcp()
-                .hosts_for_instance(state.plugin_state(), None)
-                .await,
-        );
+        hosts.extend(state.mcp().hosts_for_instance(None).await);
     }
 
     if request.stream {

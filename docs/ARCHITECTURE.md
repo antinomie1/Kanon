@@ -328,6 +328,9 @@ Rust 核心全权主导 LLM 的生命周期与推理编排，确保高并发下�
 核心自身不内置任何业务工具，但允许两类**外部能力来源**与插件工具共用同一套 Tool Calling 状态机：
 
 - **MCP 服务器**：核心内置 MCP 客户端（`stdio` 子进程与 `http` 端点两种传输），在 `tools/list` 后把每个工具注册为 `mcp__<server>__<tool>`。工具返回的图片等富媒体由核心落盘到 `data/attachments/`（单文件上限 8 MiB、单次上限 4 个），作为**附件**沿 `ToolCallResponse.attachments` 传到流水线，最终成为出站消息里的 `ImageSegment`——因此「出图」类工具（如 maimai B50）能把图片真正发到群里，而不是只把文件路径当文本交给模型；图片无法解码或超限时会把原因写回工具结果文本，绝不静默丢弃。MCP 服务器与插件宿主一样实现 `ToolHost`，因此路由、审计追踪与熔断逻辑完全复用；连接按需建立，独立看门狗每 30 秒以 `tools/list` 作为存活探针，连续失败则标记为 `failed` 并在下一轮重连。
+
+  MCP 连接依次完成 `initialize → notifications/initialized → tools/list` 后才发布；失败或取消初始化不保留半成品连接。HTTP 传输沿用服务器返回的 `MCP-Session-Id`，请求时限覆盖写入、响应头和完整响应体。正常存活探测保留上一份工具目录，避免等待探测期间工具列表暂时变空、扰动请求前缀。连接与工具调用直接检查共享的 `ToggleStore`；已被删除或替换的句柄不可重连，运行中对话也不能借旧句柄复活全局停用的服务。
+
 - **技能 (Skills)**：`data/skills/<id>/SKILL.md` 中的指令包。**只有 `name` 与 `description` 进入系统提示词**（`SkillCatalogHook`），完整正文由模型通过内置 `read_skill` 工具按需读取——这样上下文开销与实际需要成正比，而不是把全部技能塞进每次请求。单个技能正文上限 64 KiB。
 
 两类能力与插件共享**同一套开关模型**，且全局开关优先：

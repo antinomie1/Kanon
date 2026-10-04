@@ -15,7 +15,7 @@ use axum::Json;
 use axum::Router;
 use axum::extract::{Path as AxumPath, State};
 use axum::routing::{get, put};
-use kanon_core::{MCP_SECTION, McpHealth, McpServerConfig, McpTransport};
+use kanon_core::{MCP_SECTION, McpError, McpHealth, McpServerConfig, McpTransport};
 use serde::{Deserialize, Serialize};
 
 use crate::error::ApiError;
@@ -84,6 +84,9 @@ pub struct McpStateResponse {
     pub server_id: String,
     /// Resulting node-wide state.
     pub enabled: bool,
+    /// Optional cleanup failure after the requested durable change already succeeded.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub warning: Option<String>,
 }
 
 /// Lists configured servers with their node-wide switch and live health.
@@ -117,50 +120,61 @@ async fn upsert_server(
     AxumPath(server_id): AxumPath<String>,
     Json(body): Json<UpsertServerRequest>,
 ) -> Result<Json<McpServerView>, ApiError> {
-    let id = validate_server_id(&server_id)?;
-    let name = body
-        .name
-        .map(|name| name.trim().to_string())
-        .filter(|name| !name.is_empty())
-        .unwrap_or_else(|| id.clone());
+    // Own the durable change and its runtime publication even if the HTTP request is canceled.
+    tokio::spawn(async move {
+        let id = validate_server_id(&server_id)?;
+        // Serialize one identifier through durable changes and runtime publication; unrelated
+        // servers remain independently editable while a slow connection is being established.
+        let _mutation = state.mcp_config().lock_server(&id).await;
+        let name = body
+            .name
+            .map(|name| name.trim().to_string())
+            .filter(|name| !name.is_empty())
+            .unwrap_or_else(|| id.clone());
 
-    let config = McpServerConfig {
-        id: id.clone(),
-        name,
-        transport: body.transport,
-    };
+        let config = McpServerConfig {
+            id: id.clone(),
+            name,
+            transport: body.transport,
+        };
 
-    state
-        .mcp_config()
-        .upsert(config)
-        .await
-        .map_err(|err| ApiError::BadRequest(err.to_string()))?;
-    state.mcp().sync_from_config(state.mcp_config()).await;
+        state
+            .mcp_config()
+            .upsert(config)
+            .await
+            .map_err(|err| match err {
+                McpError::InvalidConfig(_) => ApiError::BadRequest(err.to_string()),
+                _ => ApiError::Internal(err.to_string()),
+            })?;
+        state.mcp().sync_from_config(state.mcp_config()).await;
 
-    // Bring enabled definitions up right away: reporting "ok" while the server is unreachable would
-    // hide the failure until the model's first tool call.
-    let view = match state.mcp().get(&id).await {
-        Some(server) => {
-            // Editing a definition must preserve the operator's switch. A disabled server must
-            // stay disconnected even when the edit creates a fresh pool entry.
-            if state.plugin_state().is_enabled(MCP_SECTION, &id).await {
-                if let Err(err) = server.connect().await {
-                    tracing::warn!(server = %id, error = %err, "Configured MCP server could not be reached");
+        // Bring enabled definitions up right away: reporting "ok" while the server is unreachable would
+        // hide the failure until the model's first tool call.
+        let view = match state.mcp().get(&id).await {
+            Some(server) => {
+                // Editing a definition must preserve the operator's switch. A disabled server must
+                // stay disconnected even when the edit creates a fresh pool entry.
+                if state.plugin_state().is_enabled(MCP_SECTION, &id).await {
+                    if let Err(err) = server.connect().await {
+                        tracing::warn!(server = %id, error = %err, "Configured MCP server could not be reached");
+                    }
+                } else {
+                    server.disconnect().await;
                 }
-            } else {
-                server.disconnect().await;
+                view_of(&state, server.config().clone(), server.health().await).await
             }
-            view_of(&state, server.config().clone(), server.health().await).await
-        }
-        None => {
-            return Err(ApiError::Internal(format!(
-                "MCP server '{id}' was saved but is missing from the pool"
-            )));
-        }
-    };
+            None => {
+                return Err(ApiError::Internal(format!(
+                    "MCP server '{id}' was saved but is missing from the pool"
+                )));
+            }
+        };
 
-    tracing::info!(server = %id, "MCP server saved by the control plane");
-    Ok(Json(view))
+        tracing::info!(server = %id, "MCP server saved by the control plane");
+        Ok(Json(view))
+    })
+    .await
+    .map_err(|err| ApiError::Internal(format!("MCP configuration task failed: {err}")))?
 }
 
 /// Removes a server definition, disconnecting it and forgetting its switch.
@@ -168,38 +182,50 @@ async fn remove_server(
     State(state): State<ApiState>,
     AxumPath(server_id): AxumPath<String>,
 ) -> Result<Json<McpStateResponse>, ApiError> {
-    let id = validate_server_id(&server_id)?;
-    if state.mcp_config().get(&id).await.is_none() {
-        return Err(ApiError::NotFound(format!(
-            "No MCP server '{id}' is configured on this node"
-        )));
-    }
+    // Own the durable change and its runtime publication even if the HTTP request is canceled.
+    tokio::spawn(async move {
+        let id = validate_server_id(&server_id)?;
+        // Serialize one identifier through durable changes and runtime publication; unrelated
+        // servers remain independently editable while a slow connection is being established.
+        let _mutation = state.mcp_config().lock_server(&id).await;
+        // Persist first: a failed write must not disconnect a server whose definition still exists.
+        let removed = state
+            .mcp_config()
+            .remove(&id)
+            .await
+            .map_err(|err| ApiError::Internal(err.to_string()))?;
+        if !removed {
+            return Err(ApiError::NotFound(format!(
+                "No MCP server '{id}' is configured on this node"
+            )));
+        }
+        state.mcp().sync_from_config(state.mcp_config()).await;
 
-    if let Some(server) = state.mcp().get(&id).await {
-        server.disconnect().await;
-    }
-    state
-        .mcp_config()
-        .remove(&id)
-        .await
-        .map_err(|err| ApiError::Internal(err.to_string()))?;
-    state.mcp().sync_from_config(state.mcp_config()).await;
+        // Drop the recorded switch with the definition: keeping it would silently disable a future
+        // server that happens to reuse the identifier.
+        let warning = state
+            .plugin_state()
+            .set_enabled(MCP_SECTION, &id, true)
+            .await
+            .err()
+            .map(|err| {
+                format!("MCP server '{id}' was removed, but its saved switch could not be cleared: {err}")
+            });
+        if let Some(warning) = &warning {
+            tracing::warn!(server = %id, %warning, "MCP removal cleanup failed");
+        }
 
-    // Drop the recorded switch with the definition: keeping it would silently disable a future
-    // server that happens to reuse the identifier.
-    state
-        .plugin_state()
-        .set_enabled(MCP_SECTION, &id, true)
-        .await
-        .map_err(ApiError::Internal)?;
-
-    tracing::info!(server = %id, "MCP server removed by the control plane");
-    Ok(Json(McpStateResponse {
-        applied: true,
-        message: format!("MCP server '{id}' removed"),
-        server_id: id,
-        enabled: false,
-    }))
+        tracing::info!(server = %id, "MCP server removed by the control plane");
+        Ok(Json(McpStateResponse {
+            applied: true,
+            message: format!("MCP server '{id}' removed"),
+            server_id: id,
+            enabled: false,
+            warning,
+        }))
+    })
+    .await
+    .map_err(|err| ApiError::Internal(format!("MCP configuration task failed: {err}")))?
 }
 
 /// Enables or disables one server node-wide.
@@ -211,44 +237,53 @@ async fn set_server_enabled(
     AxumPath(server_id): AxumPath<String>,
     Json(body): Json<SetEnabledRequest>,
 ) -> Result<Json<McpStateResponse>, ApiError> {
-    let id = validate_server_id(&server_id)?;
-    if state.mcp_config().get(&id).await.is_none() {
-        return Err(ApiError::NotFound(format!(
-            "No MCP server '{id}' is configured on this node"
-        )));
-    }
-
-    let changed = state
-        .plugin_state()
-        .set_enabled(MCP_SECTION, &id, body.enabled)
-        .await
-        .map_err(ApiError::Internal)?;
-
-    match state.mcp().get(&id).await {
-        Some(server) if body.enabled => {
-            if let Err(err) = server.connect().await {
-                tracing::warn!(server = %id, error = %err, "Enabled MCP server could not be reached");
-            }
+    // Own the durable change and its runtime publication even if the HTTP request is canceled.
+    tokio::spawn(async move {
+        let id = validate_server_id(&server_id)?;
+        // Serialize one identifier through durable changes and runtime publication; unrelated
+        // servers remain independently editable while a slow connection is being established.
+        let _mutation = state.mcp_config().lock_server(&id).await;
+        if state.mcp_config().get(&id).await.is_none() {
+            return Err(ApiError::NotFound(format!(
+                "No MCP server '{id}' is configured on this node"
+            )));
         }
-        Some(server) => server.disconnect().await,
-        None => {}
-    }
 
-    Ok(Json(McpStateResponse {
-        applied: changed,
-        message: if !changed {
-            format!(
-                "MCP server '{id}' is already {}",
-                if body.enabled { "enabled" } else { "disabled" }
-            )
-        } else if body.enabled {
-            format!("MCP server '{id}' enabled")
-        } else {
-            format!("MCP server '{id}' disabled")
-        },
-        server_id: id,
-        enabled: body.enabled,
-    }))
+        let changed = state
+            .plugin_state()
+            .set_enabled(MCP_SECTION, &id, body.enabled)
+            .await
+            .map_err(ApiError::Internal)?;
+
+        match state.mcp().get(&id).await {
+            Some(server) if body.enabled => {
+                if let Err(err) = server.connect().await {
+                    tracing::warn!(server = %id, error = %err, "Enabled MCP server could not be reached");
+                }
+            }
+            Some(server) => server.disconnect().await,
+            None => {}
+        }
+
+        Ok(Json(McpStateResponse {
+            applied: changed,
+            message: if !changed {
+                format!(
+                    "MCP server '{id}' is already {}",
+                    if body.enabled { "enabled" } else { "disabled" }
+                )
+            } else if body.enabled {
+                format!("MCP server '{id}' enabled")
+            } else {
+                format!("MCP server '{id}' disabled")
+            },
+            server_id: id,
+            enabled: body.enabled,
+            warning: None,
+        }))
+    })
+    .await
+    .map_err(|err| ApiError::Internal(format!("MCP configuration task failed: {err}")))?
 }
 
 /// Builds a view from a live pool entry, resolving the node-wide switch.
