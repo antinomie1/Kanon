@@ -396,6 +396,36 @@ fn persisted_settings_use_the_same_policy_and_provider_validation_as_updates() {
             "outside",
         ),
         (
+            serde_json::json!({"providers": [
+                {"name": "local", "protocol": "openai", "base_url": "http://localhost/v1", "temperature": 5}
+            ]}),
+            "outside",
+        ),
+        (
+            serde_json::json!({"providers": [
+                {"name": "local", "protocol": "openai", "base_url": "http://localhost/v1", "max_tokens": 0}
+            ]}),
+            "greater than zero",
+        ),
+        (
+            serde_json::json!({
+                "providers": [{"name": "local", "protocol": "openai", "base_url": "http://localhost/v1"}],
+                "models": [{"provider": "local", "model": "model", "context_length": 0}]
+            }),
+            "greater than zero",
+        ),
+        (
+            serde_json::json!({
+                "providers": [{"name": "local", "protocol": "openai", "base_url": "http://localhost/v1"}],
+                "models": [{"provider": "local", "model": "model", "max_output_tokens": 0}]
+            }),
+            "greater than zero",
+        ),
+        (
+            serde_json::json!({"bash_policy": {"local": {"review_model": "gone/model"}}}),
+            "not configured",
+        ),
+        (
             serde_json::json!({"reply_policy": {"mode": "probability", "probability": 5}}),
             "outside",
         ),

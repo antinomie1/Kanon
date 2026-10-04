@@ -123,6 +123,30 @@ async fn chat_completion_validates_request() {
     .await;
     assert_eq!(status, 400);
 
+    // Partial explicit coordinates must not fall back to the configured provider; an endpoint
+    // also needs a real model instead of an invented "default" sent to the remote service.
+    for fields in [
+        json!({"protocol": "openai"}),
+        json!({"base_url": "http://127.0.0.1:9/v1"}),
+        json!({"api_key": "replacement"}),
+        json!({"protocol": "openai", "base_url": ""}),
+        json!({"protocol": "openai", "base_url": "http://127.0.0.1:9/v1"}),
+    ] {
+        let mut request = json!({"session_id": "webui:invalid", "message": "must not be sent"});
+        request
+            .as_object_mut()
+            .unwrap()
+            .extend(fields.as_object().unwrap().clone());
+        let (status, body) = send_json(
+            &app,
+            Method::POST,
+            "/api/v1/chat/completions",
+            Some(request),
+        )
+        .await;
+        assert_eq!(status, 400, "invalid endpoint was accepted: {body}");
+    }
+
     // An unknown persona override must not silently fall back to the default persona.
     let (status, body) = send_json(
         &app,
@@ -175,24 +199,30 @@ async fn chat_completion_applies_persona_override() {
 async fn chat_completion_with_dynamic_provider_succeeds_without_node_agent() {
     let mock_app = axum::Router::new().route(
         "/v1/chat/completions",
-        axum::routing::post(|| async {
-            axum::Json(serde_json::json!({
-                "id": "chatcmpl-test",
-                "choices": [{
-                    "index": 0,
-                    "message": {
-                        "role": "assistant",
-                        "content": "dynamic provider reply"
-                    },
-                    "finish_reason": "stop"
-                }],
-                "usage": {
-                    "prompt_tokens": 10,
-                    "completion_tokens": 5,
-                    "total_tokens": 15
-                }
-            }))
-        }),
+        axum::routing::post(
+            |axum::Json(request): axum::Json<serde_json::Value>| async move {
+                assert_eq!(
+                    request["model"], "anthropic/claude",
+                    "explicit endpoint model IDs must reach upstream intact"
+                );
+                axum::Json(serde_json::json!({
+                    "id": "chatcmpl-test",
+                    "choices": [{
+                        "index": 0,
+                        "message": {
+                            "role": "assistant",
+                            "content": "dynamic provider reply"
+                        },
+                        "finish_reason": "stop"
+                    }],
+                    "usage": {
+                        "prompt_tokens": 10,
+                        "completion_tokens": 5,
+                        "total_tokens": 15
+                    }
+                }))
+            },
+        ),
     );
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
@@ -212,7 +242,7 @@ async fn chat_completion_with_dynamic_provider_succeeds_without_node_agent() {
             "message": "hello dynamic",
             "protocol": "openai",
             "base_url": format!("http://{addr}/v1"),
-            "model": "deepseek/deepseek-chat"
+            "model": "anthropic/claude"
         })),
     )
     .await;

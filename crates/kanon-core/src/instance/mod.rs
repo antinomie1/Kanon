@@ -24,7 +24,7 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 use kanon_llm::prompt::{Persona, PersonaError, PersonaRegistry};
-use kanon_llm::{SessionManager, error::MemoryError};
+use kanon_llm::{ProviderRegistry, SessionManager, error::MemoryError};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use tokio::sync::RwLock;
@@ -585,13 +585,14 @@ impl InstanceRegistry {
         self.instances.read().await.is_empty()
     }
 
-    /// Creates an instance, validating and publishing personas under the instance write lock.
+    /// Creates an instance, checking model and persona references under the instance write lock.
     ///
-    /// `None` keeps standalone in-memory catalogs independent of a node persona registry.
+    /// `None` keeps standalone catalogs independent of node registries. Node callers supply the
+    /// runtime context so referenced providers and personas must exist before publication.
     pub async fn create(
         &self,
         draft: InstanceDraft,
-        runtime: Option<(&PersonaRegistry, &SessionManager)>,
+        runtime: Option<(&PersonaRegistry, &SessionManager, &ProviderRegistry)>,
     ) -> Result<BotInstance, InstanceError> {
         let mut instances = self.instances.write().await;
 
@@ -599,7 +600,8 @@ impl InstanceRegistry {
         let id = unique_id(&instances, &name);
         let candidate = build_instance(id, name, draft)?;
 
-        Self::validate_persona(&candidate, runtime.map(|(personas, _)| personas))?;
+        Self::validate_persona(&candidate, runtime.map(|(personas, _, _)| personas))?;
+        Self::validate_model(&candidate, runtime.map(|(_, _, providers)| providers))?;
         Self::validate_claims(&instances, &candidate)?;
         let mut next = instances.clone();
         next.insert(candidate.id.clone(), candidate.clone());
@@ -613,7 +615,7 @@ impl InstanceRegistry {
         &self,
         id: &str,
         draft: InstanceDraft,
-        runtime: Option<(&PersonaRegistry, &SessionManager)>,
+        runtime: Option<(&PersonaRegistry, &SessionManager, &ProviderRegistry)>,
     ) -> Result<BotInstance, InstanceError> {
         let mut instances = self.instances.write().await;
 
@@ -629,7 +631,8 @@ impl InstanceRegistry {
             .map(|existing| existing.session_generations.clone())
             .unwrap_or_default();
 
-        Self::validate_persona(&candidate, runtime.map(|(personas, _)| personas))?;
+        Self::validate_persona(&candidate, runtime.map(|(personas, _, _)| personas))?;
+        Self::validate_model(&candidate, runtime.map(|(_, _, providers)| providers))?;
         Self::validate_claims(&instances, &candidate)?;
         let mut next = instances.clone();
         next.insert(candidate.id.clone(), candidate.clone());
@@ -642,7 +645,7 @@ impl InstanceRegistry {
     pub async fn delete(
         &self,
         id: &str,
-        runtime: Option<(&PersonaRegistry, &SessionManager)>,
+        runtime: Option<(&PersonaRegistry, &SessionManager, &ProviderRegistry)>,
     ) -> Result<(), InstanceError> {
         let mut instances = self.instances.write().await;
         let mut next = instances.clone();
@@ -709,6 +712,56 @@ impl InstanceRegistry {
         result
     }
 
+    /// Runs a provider deletion while instance model references cannot be added or changed.
+    ///
+    /// The callback may update node settings and the provider directory synchronously. Lock order
+    /// remains instance catalog -> node settings -> provider directory, matching mutation checks.
+    pub async fn with_model_users<T>(
+        &self,
+        provider: &str,
+        operation: impl FnOnce(Vec<String>) -> T,
+    ) -> T {
+        let instances = self.instances.read().await;
+        let mut users: Vec<String> = instances
+            .values()
+            .filter(|instance| {
+                instance.model.as_deref().is_some_and(|model| {
+                    kanon_llm::ModelRef::parse(model).provider() == Some(provider)
+                })
+            })
+            .map(|instance| instance.id.clone())
+            .collect();
+        users.sort();
+        let result = operation(users);
+        drop(instances);
+        result
+    }
+
+    /// Validates restored references against the configured endpoints before serving messages.
+    pub async fn validate_models(&self, providers: &ProviderRegistry) -> Result<(), InstanceError> {
+        for instance in self.instances.read().await.values() {
+            Self::validate_model(instance, Some(providers))?;
+        }
+        Ok(())
+    }
+
+    /// Checks model ownership under the same instance guard that protects its publication.
+    fn validate_model(
+        candidate: &BotInstance,
+        providers: Option<&ProviderRegistry>,
+    ) -> Result<(), InstanceError> {
+        if let Some(providers) = providers
+            && let Some(model) = candidate.model.as_deref()
+        {
+            providers
+                .resolve(&kanon_llm::ModelRef::parse(model))
+                .map_err(|error| {
+                    InstanceError::Invalid(format!("instance '{}': {error}", candidate.id))
+                })?;
+        }
+        Ok(())
+    }
+
     /// Checks the live persona catalog only after taking the instance write lock.
     fn validate_persona(
         candidate: &BotInstance,
@@ -735,9 +788,9 @@ impl InstanceRegistry {
         live: &mut HashMap<String, BotInstance>,
         next: HashMap<String, BotInstance>,
         id: &str,
-        runtime: Option<(&PersonaRegistry, &SessionManager)>,
+        runtime: Option<(&PersonaRegistry, &SessionManager, &ProviderRegistry)>,
     ) -> Result<(), InstanceError> {
-        let Some((personas, sessions)) = runtime else {
+        let Some((personas, sessions, _)) = runtime else {
             return self.commit(live, next);
         };
         let previous = live.get(id).and_then(generated_persona);
@@ -808,6 +861,7 @@ impl InstanceRegistry {
         &self,
         id: &str,
         model: Option<String>,
+        providers: Option<&ProviderRegistry>,
     ) -> Result<BotInstance, InstanceError> {
         let mut instances = self.instances.write().await;
         let mut next = instances.clone();
@@ -816,6 +870,7 @@ impl InstanceRegistry {
             .ok_or_else(|| InstanceError::NotFound(id.to_string()))?;
 
         instance.model = normalize_model(model)?;
+        Self::validate_model(instance, providers)?;
         let updated = instance.clone();
         self.commit(&mut instances, next)?;
 

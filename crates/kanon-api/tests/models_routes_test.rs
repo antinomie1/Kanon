@@ -411,3 +411,32 @@ async fn the_command_policy_is_validated_normalized_and_persisted() {
     );
     assert!(restored.command_policy.access.contains_key("weather"));
 }
+
+/// Fractional or overflowing upstream limits must stay unknown instead of being truncated.
+#[test]
+fn model_discovery_accepts_only_positive_integral_token_counts() {
+    for (value, expected) in [
+        (json!(0), None),
+        (json!(-1), None),
+        (json!(8192.5), None),
+        (json!(u64::from(u32::MAX) + 1), None),
+        (json!(1e100), None),
+        (json!("4096"), None),
+        (json!(1), Some(1)),
+        (json!(4096.0), Some(4096)),
+        (json!(u32::MAX), Some(u32::MAX)),
+    ] {
+        let models = kanon_api::model_discovery::parse_model_listing(
+            "endpoint",
+            &json!({
+                "data": [{
+                    "id": "model", "context_length": value,
+                    "top_provider": {"max_completion_tokens": value},
+                }]
+            }),
+        );
+        assert_eq!(models.len(), 1);
+        assert_eq!(models[0].context_length, expected, "{value}");
+        assert_eq!(models[0].max_output_tokens, expected, "{value}");
+    }
+}

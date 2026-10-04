@@ -665,3 +665,50 @@ async fn worker_shutdown_has_one_deadline_for_all_running_chats() {
     ids.sort();
     assert_eq!(ids, ["queued", "user:1", "user:2", "user:3"]);
 }
+
+#[tokio::test]
+async fn imported_turns_cannot_create_a_gap_after_an_interrupted_tool_call() {
+    let directory = tempfile::tempdir().unwrap();
+    let node = start(directory.path()).await;
+    let session = current_session(&node).await;
+    let pending = vec![
+        ChatMessage::user("do work"),
+        ChatMessage::assistant_tool_calls(
+            vec![kanon_llm::ToolCall {
+                id: "interrupted".into(),
+                name: "work".into(),
+                arguments: serde_json::json!({}),
+            }],
+            None,
+        ),
+    ];
+    node.sessions
+        .memory()
+        .extend_messages(&session, pending.clone())
+        .await
+        .unwrap();
+    let service =
+        CoreApiService::new(tokio::sync::mpsc::channel(1).0).with_engine(node.engine.clone());
+    let error = service
+        .append_conversation(Request::new(AppendConversationRequest {
+            context: Some(event("import", "")),
+            messages: vec![
+                HistoryMessage {
+                    role: LlmRole::User as i32,
+                    text: "imported".into(),
+                },
+                HistoryMessage {
+                    role: LlmRole::Assistant as i32,
+                    text: "answer".into(),
+                },
+            ],
+        }))
+        .await
+        .unwrap_err();
+    assert_eq!(error.code(), Code::InvalidArgument);
+    assert!(error.message().contains("interrupted"));
+    assert_eq!(
+        node.sessions.memory().get_messages(&session).await.unwrap(),
+        pending
+    );
+}

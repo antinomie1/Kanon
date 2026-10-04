@@ -300,6 +300,17 @@ impl PipelineEngine {
         let _writing = sessions
             .try_write(&session_id)
             .map_err(|_| ConversationError::Busy(session_id.clone()))?;
+        let history = sessions
+            .memory()
+            .get_messages(&session_id)
+            .await
+            .map_err(|err| ConversationError::Storage(err.to_string()))?;
+        if !history.is_empty() && !kanon_llm::compaction::ends_cleanly(&history) {
+            return Err(ConversationError::Invalid(
+                "resume or clear the interrupted conversation before appending imported turns"
+                    .into(),
+            ));
+        }
         let turns = messages.len() / 2;
         sessions
             .memory()

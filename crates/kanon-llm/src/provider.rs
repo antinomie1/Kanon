@@ -89,6 +89,14 @@ impl ProviderEntry {
                 self.name
             ));
         }
+        if let Some(temperature) = self.temperature
+            && !(0.0..=2.0).contains(&temperature)
+        {
+            return Err(format!("temperature {temperature} is outside 0.0..=2.0"));
+        }
+        if self.max_tokens == Some(0) {
+            return Err("max_tokens must be greater than zero".into());
+        }
         if self.protocol.trim().is_empty() {
             return Err(format!("provider '{}' has no protocol", self.name));
         }

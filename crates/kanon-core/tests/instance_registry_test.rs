@@ -2,7 +2,9 @@
 
 use kanon_core::instance::{BotInstance, InstanceDraft, InstanceError, InstanceRegistry};
 use kanon_llm::memory::InMemory;
-use kanon_llm::{Persona, PersonaRegistry, SessionManager, SqliteSessionStore};
+use kanon_llm::{
+    Persona, PersonaRegistry, ProviderEntry, ProviderRegistry, SessionManager, SqliteSessionStore,
+};
 use std::sync::Arc;
 
 fn draft(name: &str, enabled: bool, adapters: &[&str]) -> InstanceDraft {
@@ -31,6 +33,7 @@ async fn startup_restores_generated_personas_without_guessing_binding_ownership(
         .with_store(db.clone())
         .unwrap();
     let personas = PersonaRegistry::new();
+    let providers = ProviderRegistry::new();
     personas
         .register(Persona::custom("custom", "Custom", "", "custom prompt").unwrap())
         .unwrap();
@@ -38,13 +41,13 @@ async fn startup_restores_generated_personas_without_guessing_binding_ownership(
     let mut owner = draft("Owner", false, &[]);
     owner.system_prompt = Some("owned prompt".into());
     instances
-        .create(owner, Some((&personas, &sessions)))
+        .create(owner, Some((&personas, &sessions, &providers)))
         .await
         .unwrap();
     let mut reader = draft("Reader", false, &[]);
     reader.persona_id = Some("instance:owner".into());
     instances
-        .create(reader, Some((&personas, &sessions)))
+        .create(reader, Some((&personas, &sessions, &providers)))
         .await
         .unwrap();
     for (key, persona) in [
@@ -491,15 +494,25 @@ async fn direct_model_changes_require_a_provider_and_preserve_the_previous_choic
         .create(draft("Bot", false, &[]), None)
         .await
         .unwrap();
+    let providers = ProviderRegistry::single(ProviderEntry::new(
+        "endpoint",
+        "openai",
+        "http://127.0.0.1:9/v1",
+    ))
+    .unwrap();
     let updated = registry
-        .set_model(&instance.id, Some(" endpoint / vendor/model ".into()))
+        .set_model(
+            &instance.id,
+            Some(" endpoint / vendor/model ".into()),
+            Some(&providers),
+        )
         .await
         .unwrap();
     assert_eq!(updated.model.as_deref(), Some("endpoint/vendor/model"));
     let before = std::fs::read(&path).unwrap();
     assert!(
         registry
-            .set_model(&instance.id, Some("model".into()))
+            .set_model(&instance.id, Some("model".into()), Some(&providers))
             .await
             .is_err()
     );
@@ -507,13 +520,92 @@ async fn direct_model_changes_require_a_provider_and_preserve_the_previous_choic
         registry.get(&instance.id).await.unwrap().model,
         updated.model
     );
-    assert_eq!(std::fs::read(path).unwrap(), before);
+    assert_eq!(std::fs::read(&path).unwrap(), before);
     assert!(
         registry
-            .set_model(&instance.id, None)
+            .set_model(&instance.id, Some("missing/model".into()), Some(&providers))
+            .await
+            .is_err()
+    );
+    assert_eq!(std::fs::read(&path).unwrap(), before);
+    registry
+        .with_model_users("endpoint", |users| assert_eq!(users, [instance.id.clone()]))
+        .await;
+    let restored = InstanceRegistry::open(&path).await.unwrap();
+    restored.validate_models(&providers).await.unwrap();
+    providers.replace(Vec::new()).unwrap();
+    assert!(restored.validate_models(&providers).await.is_err());
+    assert!(
+        registry
+            .set_model(&instance.id, None, Some(&providers))
             .await
             .unwrap()
             .model
             .is_none()
     );
+}
+
+/// A model selected before endpoint deletion must be rechecked after the instance writer is acquired.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn provider_deletion_prevents_queued_instance_mutations_from_publishing_stale_models() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("instances.json");
+    let registry = Arc::new(InstanceRegistry::open(&path).await.unwrap());
+    let instance = registry
+        .create(draft("Bot", false, &[]), None)
+        .await
+        .unwrap();
+    let before = std::fs::read(&path).unwrap();
+    let providers = Arc::new(
+        ProviderRegistry::single(ProviderEntry::new(
+            "endpoint",
+            "openai",
+            "http://127.0.0.1:9/v1",
+        ))
+        .unwrap(),
+    );
+    let personas = PersonaRegistry::new();
+    let sessions = SessionManager::new(Arc::new(InMemory::new()));
+    let (entered_tx, entered_rx) = tokio::sync::oneshot::channel();
+    let (release_tx, release_rx) = std::sync::mpsc::channel();
+    let deletion = tokio::spawn({
+        let registry = registry.clone();
+        let providers = providers.clone();
+        async move {
+            registry
+                .with_model_users("endpoint", move |users| {
+                    assert!(users.is_empty());
+                    entered_tx.send(()).unwrap();
+                    // Keep the existing deletion guard while all mutation paths queue behind it.
+                    release_rx
+                        .recv_timeout(std::time::Duration::from_secs(5))
+                        .unwrap();
+                    providers.replace(Vec::new()).unwrap();
+                })
+                .await;
+        }
+    });
+    entered_rx.await.unwrap();
+    let runtime = Some((&personas, &sessions, providers.as_ref()));
+    let mut configured = draft("Bot", false, &[]);
+    configured.model = Some("endpoint/model".into());
+    let create = registry.create(configured.clone(), runtime);
+    let update = registry.update(&instance.id, configured, runtime);
+    let select = registry.set_model(
+        &instance.id,
+        Some("endpoint/model".into()),
+        Some(&providers),
+    );
+    tokio::pin!(create, update, select);
+    assert!(futures_util::poll!(&mut create).is_pending());
+    assert!(futures_util::poll!(&mut update).is_pending());
+    assert!(futures_util::poll!(&mut select).is_pending());
+    release_tx.send(()).unwrap();
+    deletion.await.unwrap();
+    for result in [create.await, update.await, select.await] {
+        assert!(matches!(result, Err(InstanceError::Invalid(_))));
+    }
+    assert_eq!(registry.list().await.len(), 1);
+    assert!(registry.get(&instance.id).await.unwrap().model.is_none());
+    assert_eq!(std::fs::read(&path).unwrap(), before);
 }

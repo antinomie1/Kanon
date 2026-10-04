@@ -48,7 +48,7 @@ pub struct ChatCompletionRequest {
     /// Optional persona override applied to the session before this turn.
     #[serde(default)]
     pub persona_id: Option<String>,
-    /// Optional model identifier (overriding active or default).
+    /// Configured `<provider>/<model-id>`, or the exact upstream id for explicit endpoint coordinates.
     #[serde(default)]
     pub model: Option<String>,
     /// Optional protocol (e.g. `openai`, `anthropic`, `openai_responses`).
@@ -129,20 +129,20 @@ async fn completions(
     let writing = state.sessions().try_write(&session_id)?;
     apply_persona_override(&state, &session_id, request.persona_id.as_deref())?;
 
-    // Plugin tools are aggregated from the live supervisor registry on every request so a
-    // hot-reloaded plugin becomes callable without restarting the gateway.
-    let mut hosts: Vec<Arc<dyn kanon_llm::tool_router::ToolHost>> = state
-        .supervisor()
-        .get_all_hosts()
-        .await
-        .into_iter()
-        .map(|host| host as Arc<dyn kanon_llm::tool_router::ToolHost>)
-        .collect();
-
-    // MCP servers reach the agent through the same slice. A sandbox session carries no instance
-    // identifier, so the node-wide switch alone decides which servers are offered. Discovery
-    // connects servers, so skip it when the caller will not expose their tools to the model.
-    if request.tools {
+    // Resolve only enabled tools, and avoid discovery entirely when this turn or model cannot
+    // use them. The same selector serves the pipeline and the management tool catalog.
+    let mut hosts: Vec<Arc<dyn kanon_llm::tool_router::ToolHost>> = Vec::new();
+    if request.tools && agent.config().tool_calling {
+        hosts.extend(
+            kanon_core::supervisor::filter_plugin_hosts(
+                state.supervisor().get_all_hosts().await,
+                Some(state.plugin_state().as_ref()),
+                None,
+            )
+            .await
+            .into_iter()
+            .map(|host| host as Arc<dyn kanon_llm::tool_router::ToolHost>),
+        );
         hosts.extend(state.mcp().hosts_for_instance(None).await);
     }
 
@@ -296,36 +296,37 @@ fn resolve_agent(
     state: &ApiState,
     request: &ChatCompletionRequest,
 ) -> Result<Arc<dyn Agent>, ApiError> {
-    if let (Some(proto), Some(url)) = (&request.protocol, &request.base_url) {
-        let trimmed_url = url.trim().trim_end_matches('/').to_string();
-        if !trimmed_url.is_empty() {
-            let raw_model = request
-                .model
-                .as_deref()
-                .filter(|m| !m.trim().is_empty())
-                .unwrap_or("default");
-            // Strip any provider prefix like "deepseek/deepseek-chat" -> "deepseek-chat"
-            let model = match raw_model.split_once('/') {
-                Some((_prov, actual_model)) if !actual_model.trim().is_empty() => {
-                    actual_model.trim().to_string()
-                }
-                _ => raw_model.trim().to_string(),
-            };
-            let key = request.api_key.clone().filter(|k| !k.trim().is_empty());
-
-            // Built through the shared factory so a protocol accepted here is accepted
-            // everywhere, and so the ephemeral agent still shares the node's memory, sessions,
-            // personas and trace bus.
-            let provider = kanon_llm::build_provider(&proto, trimmed_url, key, model.clone())
-                .map_err(ApiError::BadRequest)?;
-            let mut config = default_agent_config(model);
-            config.max_iterations = state
-                .agent()
-                .map(|agent| agent.config().max_iterations)
-                .unwrap_or(config.max_iterations);
-
-            return Ok(state.agent_factory().build_with(provider, config));
+    if request.protocol.is_some() || request.base_url.is_some() || request.api_key.is_some() {
+        let (Some(protocol), Some(url)) = (&request.protocol, &request.base_url) else {
+            return Err(ApiError::BadRequest(
+                "An explicit endpoint requires both protocol and base_url".into(),
+            ));
+        };
+        let model = request
+            .model
+            .as_deref()
+            .map(str::trim)
+            .filter(|model| !model.is_empty())
+            .ok_or_else(|| {
+                ApiError::BadRequest("An explicit endpoint requires its upstream model id".into())
+            })?;
+        let url = url.trim().trim_end_matches('/');
+        if protocol.trim().is_empty() || url.is_empty() {
+            return Err(ApiError::BadRequest(
+                "protocol and base_url must not be empty".into(),
+            ));
         }
+        // The endpoint is explicit, so the model is already its upstream ID. A slash may be part
+        // of an aggregator ID; guessing a provider prefix would silently select a different model.
+        let key = request.api_key.clone().filter(|key| !key.trim().is_empty());
+        let provider =
+            kanon_llm::build_provider(protocol, url, key, model).map_err(ApiError::BadRequest)?;
+        let mut config = default_agent_config(model.to_string());
+        config.max_iterations = state
+            .agent()
+            .map(|agent| agent.config().max_iterations)
+            .unwrap_or(config.max_iterations);
+        return Ok(state.agent_factory().build_with(provider, config));
     }
 
     if state.agent().is_some() {

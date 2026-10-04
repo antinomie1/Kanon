@@ -253,6 +253,11 @@ async fn main() -> StartupResult<()> {
         .with_bash_tool(bash_tool)
         .build();
 
+    instances
+        .validate_models(state.agent_factory().providers())
+        .await
+        .map_err(|err| format!("Failed to validate instance model references: {err}"))?;
+
     // Publish instance prompts as personas before the first message can arrive.
     restore_instance_personas(&instances.list().await, state.personas(), state.sessions())
         .map_err(|err| {

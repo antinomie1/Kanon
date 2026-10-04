@@ -369,6 +369,8 @@ sequenceDiagram
     Core->>IM: 出站 DeliverMessage 分发至适配器并回复用户
 ```
 
+工具声明与调用共用每轮的名称到目标映射，不重新按分隔符猜测归属；合并内置与插件工具后名称仍重复时明确拒绝。全局插件开关同时约束流水线、沙盒与工具目录。模型不支持工具或本轮禁用工具时，内置与外部工具均不提供、不执行；模型或钩子额外返回的工具调用也不能绕过该限制。
+
 ### 8.6 提示词静态→动态分层与前缀缓存 (Prompt Layout & Prefix Caching)
 
 模型服务商按**前缀**缓存提示词：与历史请求逐 token 相同的最长前缀直接命中缓存，从第一个不同的 token 起全部重算。因此每个请求都严格按“变化频率由低到高”分层，`kanon-llm` 的 `layout` 模块是这条规则的唯一实现：
@@ -396,6 +398,8 @@ sequenceDiagram
 
 **可观测性**：各服务商返回的缓存命中 token 统一进入 `TokenUsage.cached_tokens`（OpenAI `prompt_tokens_details.cached_tokens`、DeepSeek `prompt_cache_hit_tokens`、Responses `input_tokens_details.cached_tokens`、Anthropic `cache_read_input_tokens`；Anthropic 的 `prompt_tokens` 为 `input + cache_read + cache_creation` 之和）。`/api/v1/metrics` 导出 `kanon_llm_prompt_tokens_total` 与 `kanon_llm_cached_prompt_tokens_total`，二者之比即缓存命中率；`llm_response` 追踪事件同时携带 `prompt_tokens` / `cached_tokens`。
 
+会话 Token 计数累计一次完整轮次中的所有模型请求，包括工具轮次与达到迭代上限的请求；有服务商用量时使用报告值，否则估算完整请求与生成内容。流式响应没有用量字段时同样估算。失败或停止的轮次不增加完成轮次和会话 Token 计数，因此该计数不等同于服务商账单。
+
 ### 8.7 会话记忆：仅追加与缓存友好的压缩 (Append-only Memory & Cache-safe Compaction)
 
 **为什么不用滑动窗口**：每轮丢弃最旧一条消息会让其后所有内容的绝对偏移和前缀全部改变，服务商缓存整段历史全部失效、每轮按首次读取计费。因此记忆层（`Memory` trait；节点用 `SqliteMemory`，嵌入式与测试可用 `InMemory`）**只追加**：除 `compact_history` 与 `clear` 外，任何操作都不得删除或重排消息（`clear` 清空整段会话，用于重置与 `/del` 删除对话，见 8.8）。会话历史里只有用户 / 助手 / 工具消息；人设与技能目录每轮准备后复用于本轮请求，不按会话持久化存储（避免系统提示词出现第二个数据源）。摘要与历史并列保存（`MemorySnapshot { summary, messages }` 一次性读取，读者不会看到某次压缩的摘要配上另一次的历史）。
@@ -407,6 +411,8 @@ sequenceDiagram
 2. **在新前缀里挂载摘要**：被覆盖的前 N 条消息替换为摘要，摘要进入静态系统块（人设 → 技能目录 → 摘要）。前缀只在这一刻变化一次（一次缓存未命中），此后重新稳定追加，直到下一次压缩。
 
 **并发语义**：普通轮次、流式生产者与压缩共用同一会话写锁，独立使用 `BuiltinAgent` 时也遵循此约束；外部写入拿不到锁即报忙，流水线与后台压缩可排队。自动压缩在轮次结束前捕获快照与前缀，取得写锁后验证该历史仍是当前历史的前缀；重置或其他压缩已替换历史时丢弃旧任务。`compact_history(covered, summary)` **只移除快照覆盖的前 `covered` 条**，排队期间追加的消息原样保留；同一会话同一时间只有一个压缩任务。SQLite 后端在一个事务内删除前缀并写入摘要，失败不丢历史；旧库（含 `system_prompt` 列）自动补 `summary` 列后继续使用。
+
+进程在工具执行途中退出后，下一轮先为缺失结果追加中断说明，再追加新用户消息；不会重试可能已有副作用的工具，也不删除或重排旧历史。SQLite 将结果补全与结束说明一起提交，失败时保留原记录。外部导入消息不能插入尚未结束的轮次。
 
 **边界**：节点使用 `SqliteMemory`（`data/sessions.db`，见 8.8）；嵌入式场景与测试可换用进程内 `InMemory`。流式聊天（沙盒 `text/event-stream`）复用同一轮次与自动压缩逻辑；`Agent::compact_session_with` 可为显式压缩提供实例人设与工具设置。
 

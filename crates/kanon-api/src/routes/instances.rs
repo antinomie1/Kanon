@@ -303,7 +303,14 @@ async fn create_instance(
     let draft: InstanceDraft = payload.into();
     let instance = state
         .instances()
-        .create(draft, Some((state.personas(), state.sessions())))
+        .create(
+            draft,
+            Some((
+                state.personas(),
+                state.sessions(),
+                state.agent_factory().providers(),
+            )),
+        )
         .await
         .map_err(map_error)?;
 
@@ -330,7 +337,15 @@ async fn update_instance(
     let draft: InstanceDraft = payload.into();
     let instance = state
         .instances()
-        .update(&id, draft, Some((state.personas(), state.sessions())))
+        .update(
+            &id,
+            draft,
+            Some((
+                state.personas(),
+                state.sessions(),
+                state.agent_factory().providers(),
+            )),
+        )
         .await
         .map_err(map_error)?;
 
@@ -356,7 +371,14 @@ async fn delete_instance(
 ) -> Result<Json<InstanceMutationResponse>, ApiError> {
     state
         .instances()
-        .delete(&id, Some((state.personas(), state.sessions())))
+        .delete(
+            &id,
+            Some((
+                state.personas(),
+                state.sessions(),
+                state.agent_factory().providers(),
+            )),
+        )
         .await
         .map_err(map_error)?;
 

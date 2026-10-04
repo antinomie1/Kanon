@@ -164,7 +164,7 @@ impl PipelineEngine {
             .as_ref()
             .map(|event| event.event_id.clone())
             .unwrap_or_default();
-        let tool_hosts = if run.use_tools && capabilities.tool_calling {
+        let tool_hosts = if run.use_tools && agent.config().tool_calling {
             self.tool_hosts(&hosts, instance, &event_id).await
         } else {
             Vec::new()

@@ -425,7 +425,7 @@ impl Sandbox {
                     adapters: vec![PLATFORM.to_string()],
                     ..InstanceDraft::default()
                 },
-                Some((&personas, &sessions)),
+                Some((&personas, &sessions, &kanon_llm::ProviderRegistry::new())),
             )
             .await
             .map_err(|err| setup("sandbox instance", &err))?;

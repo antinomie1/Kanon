@@ -768,3 +768,90 @@ async fn chat_override_selects_its_provider_and_rejects_unresolved_references() 
     assert!(first.lock().unwrap().is_empty());
     assert_eq!(second.lock().unwrap().len(), 1);
 }
+
+/// Deleting an endpoint cannot orphan saved instance or Bash review model references.
+#[tokio::test]
+async fn provider_deletion_preserves_referenced_instances_and_review_models() {
+    let dir = tempfile::tempdir().unwrap();
+    let state = provider_state(dir.path().to_path_buf()).await;
+    let app = kanon_api::app(state.clone());
+    add_provider(&app, "alpha").await;
+    let (status, created) = common::send_json(
+        &app,
+        Method::POST,
+        "/api/v1/instances",
+        Some(json!({"name": "Bot", "enabled": false, "model": "alpha/model"})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{created}");
+    let id = created["instance"]["id"].as_str().unwrap();
+    let before = std::fs::read(dir.path().join("system.json")).unwrap();
+    let (status, body) = common::send_json(
+        &app,
+        Method::POST,
+        "/api/v1/providers/delete",
+        Some(json!({"name": "alpha"})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CONFLICT, "{body}");
+    assert_eq!(state.node_settings().providers.len(), 1);
+    assert_eq!(
+        std::fs::read(dir.path().join("system.json")).unwrap(),
+        before
+    );
+    let (status, body) = common::send_json(
+        &app,
+        Method::PUT,
+        &format!("/api/v1/instances/{id}"),
+        Some(json!({"name": "Bot", "enabled": false, "model": "ghost/model"})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    assert_eq!(
+        state.instances().get(id).await.unwrap().model.as_deref(),
+        Some("alpha/model")
+    );
+    let (status, body) = common::send_json(
+        &app,
+        Method::PUT,
+        &format!("/api/v1/instances/{id}"),
+        Some(json!({"name": "Bot", "enabled": false, "model": null})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    state
+        .update_node_settings(|settings| {
+            settings.bash_policy.local.review_model = Some("alpha/model".into());
+            Ok(())
+        })
+        .unwrap();
+    let before = std::fs::read(dir.path().join("system.json")).unwrap();
+    let (status, body) = common::send_json(
+        &app,
+        Method::POST,
+        "/api/v1/providers/delete",
+        Some(json!({"name": "alpha"})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    assert_eq!(state.node_settings().providers.len(), 1);
+    assert_eq!(
+        std::fs::read(dir.path().join("system.json")).unwrap(),
+        before
+    );
+    state
+        .update_node_settings(|settings| {
+            settings.bash_policy.local.review_model = None;
+            Ok(())
+        })
+        .unwrap();
+    let (status, body) = common::send_json(
+        &app,
+        Method::POST,
+        "/api/v1/providers/delete",
+        Some(json!({"name": "alpha"})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert!(state.node_settings().providers.is_empty());
+}

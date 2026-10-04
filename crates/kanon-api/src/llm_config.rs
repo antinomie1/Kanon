@@ -204,18 +204,31 @@ impl NodeSettings {
             }
         }
 
-        if let Some(model) = self.default_model.as_deref() {
+        for (label, model) in [
+            ("default model", self.default_model.as_deref()),
+            (
+                "Bash review model",
+                self.bash_policy
+                    .local
+                    .review_model
+                    .as_deref()
+                    .filter(|model| !model.trim().is_empty()),
+            ),
+        ] {
+            let Some(model) = model else {
+                continue;
+            };
             let reference = ModelRef::parse(model);
             match reference.provider() {
                 Some(provider) if names.contains(provider) => {}
                 Some(provider) => {
                     return Err(format!(
-                        "default model '{model}' names provider '{provider}', which is not configured"
+                        "{label} '{model}' names provider '{provider}', which is not configured"
                     ));
                 }
                 None => {
                     return Err(format!(
-                        "default model '{model}' must be written as <provider>/<model-id>"
+                        "{label} '{model}' must be written as <provider>/<model-id>"
                     ));
                 }
             }

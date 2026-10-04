@@ -24,8 +24,8 @@ use serde::{Deserialize, Serialize};
 
 /// A model reference of the form `<provider>/<model-id>`.
 ///
-/// A reference without a `/` carries no provider: the node resolves it against its default
-/// provider, which is the documented behaviour for a single-endpoint deployment.
+/// Parsing preserves an unqualified reference without a provider, but node routing rejects it.
+/// Configured model selections must explicitly name their endpoint, even with only one provider.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct ModelRef {
     /// Provider (endpoint) name, when the reference named one.
@@ -223,6 +223,9 @@ impl ModelSpec {
         }
         if self.provider.trim() != self.provider || self.model.trim() != self.model {
             return Err("provider and model must not contain surrounding whitespace".to_string());
+        }
+        if self.context_length == Some(0) || self.max_output_tokens == Some(0) {
+            return Err("context_length and max_output_tokens must be greater than zero".into());
         }
         if let Some(temperature) = self.temperature
             && !(0.0..=2.0).contains(&temperature)

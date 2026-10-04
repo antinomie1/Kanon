@@ -281,32 +281,43 @@ async fn delete_provider(
     Json(payload): Json<DeleteProviderRequest>,
 ) -> Result<Json<ProvidersCatalogResponse>, ApiError> {
     let name = payload.name.trim().to_string();
-    state.update_node_settings(|settings| {
-        let before = settings.providers.len();
-        settings.providers.retain(|entry| entry.name != name);
+    state
+        .instances()
+        .with_model_users(&name, |users| {
+            if !users.is_empty() {
+                return Err(ApiError::Conflict(format!(
+                    "provider '{name}' is used by instance(s) {}; select another model there first",
+                    users.join(", ")
+                )));
+            }
+            state.update_node_settings(|settings| {
+                let before = settings.providers.len();
+                settings.providers.retain(|entry| entry.name != name);
 
-        if settings.providers.len() == before {
-            return Err(ApiError::NotFound(format!(
-                "provider '{name}' is not configured"
-            )));
-        }
+                if settings.providers.len() == before {
+                    return Err(ApiError::NotFound(format!(
+                        "provider '{name}' is not configured"
+                    )));
+                }
 
-        // Models belong to the endpoint that serves them: keeping them would leave references to a
-        // credential that no longer exists.
-        settings.models.retain(|spec| spec.provider != name);
+                // Models belong to the endpoint that serves them: keeping them would leave references to a
+                // credential that no longer exists.
+                settings.models.retain(|spec| spec.provider != name);
 
-        // The global default cannot outlive the endpoint that serves it. The node then has no default
-        // model, which the console reports as such rather than silently picking another one.
-        let serves_default = settings
-            .default_model
-            .as_deref()
-            .is_some_and(|model| ModelRef::parse(model).provider() == Some(name.as_str()));
-        if serves_default {
-            settings.default_model = None;
-        }
+                // The global default cannot outlive the endpoint that serves it. The node then has no default
+                // model, which the console reports as such rather than silently picking another one.
+                let serves_default = settings
+                    .default_model
+                    .as_deref()
+                    .is_some_and(|model| ModelRef::parse(model).provider() == Some(name.as_str()));
+                if serves_default {
+                    settings.default_model = None;
+                }
 
-        Ok(())
-    })?;
+                Ok(())
+            })
+        })
+        .await?;
     list_providers(State(state)).await
 }
 

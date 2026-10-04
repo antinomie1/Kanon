@@ -195,6 +195,17 @@ async fn custom_prompt_is_published_as_a_persona_and_survives_deletion_cleanup()
             .is_none()
     );
 
+    state
+        .update_node_settings(|settings| {
+            settings.providers.push(kanon_llm::ProviderEntry::new(
+                "deepseek",
+                "openai",
+                "http://127.0.0.1:9/v1",
+            ));
+            Ok(())
+        })
+        .unwrap();
+
     // An update may also reshape the fields the console edits.
     let (status, updated) = common::send_json(
         &app,

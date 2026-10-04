@@ -167,34 +167,43 @@ async fn reset_session(
     State(state): State<ApiState>,
     Path(session_id): Path<String>,
 ) -> Result<Json<SessionResetResponse>, ApiError> {
-    // Resetting an unknown session would be a silent no-op; report it instead so console
-    // operators notice stale dashboards or mistyped keys immediately.
-    if state.sessions().get_metadata(&session_id).is_none() {
-        return Err(ApiError::NotFound(format!(
-            "Session '{session_id}' is not tracked; nothing to reset"
-        )));
-    }
+    // The response snapshot belongs to the reset transaction. Do not release its writer and
+    // then recreate metadata that a competing delete may have removed.
+    let writing = state.sessions().try_write(&session_id)?;
+    writing
+        .scope(async {
+            // Resetting an unknown session would be a silent no-op; report it instead so console
+            // operators notice stale dashboards or mistyped keys immediately.
+            if state.sessions().get_metadata(&session_id).is_none() {
+                return Err(ApiError::NotFound(format!(
+                    "Session '{session_id}' is not tracked; nothing to reset"
+                )));
+            }
 
-    state.sessions().reset_session(&session_id).await?;
+            state.sessions().reset_session(&session_id).await?;
 
-    state
-        .observability()
-        .events
-        .publish(TraceEvent::SessionReset {
-            session_id: session_id.clone(),
-        });
+            state
+                .observability()
+                .events
+                .publish(TraceEvent::SessionReset {
+                    session_id: session_id.clone(),
+                });
 
-    let metadata = state.sessions().get_or_create(&session_id);
+            let metadata = state.sessions().get_metadata(&session_id).ok_or_else(|| {
+                ApiError::NotFound(format!("Session '{session_id}' is no longer tracked"))
+            })?;
 
-    tracing::info!(session_id = %session_id, "Session history reset by control plane");
+            tracing::info!(session_id = %session_id, "Session history reset by control plane");
 
-    Ok(Json(SessionResetResponse {
-        session_key: session_id,
-        reset: true,
-        persona_id: metadata.persona_id,
-        variables: metadata.variables,
-        turn_count: metadata.turn_count,
-    }))
+            Ok(Json(SessionResetResponse {
+                session_key: session_id,
+                reset: true,
+                persona_id: metadata.persona_id,
+                variables: metadata.variables,
+                turn_count: metadata.turn_count,
+            }))
+        })
+        .await
 }
 
 /// Hot-swaps the persona bound to a session.

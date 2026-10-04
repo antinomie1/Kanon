@@ -47,7 +47,7 @@ use crate::pipeline::pre_filter::{PreFilterChain, PreFilterOutcome};
 use crate::pipeline::reply::split_reply_lines;
 use crate::supervisor::circuit_breaker::{CircuitBreaker, CircuitState};
 use crate::supervisor::{AdapterRoute, Supervisor};
-use crate::toggle::{PLUGIN_SECTION, ToggleStore};
+use crate::toggle::ToggleStore;
 
 /// Maximum independently running inbound chats; queued work remains bounded by ingest capacity.
 pub const MAX_CONCURRENT_CHATS: usize = 16;
@@ -888,31 +888,13 @@ impl PipelineEngine {
 
     /// The hosts whose plugins `instance` runs, by its plugin policy and the global toggles.
     ///
-    /// Without a toggle store or an instance every host is kept, as the node behaved before
-    /// instances existed.
+    /// Global toggles apply even when there is no instance, as in embedded pipeline callers.
     async fn instance_hosts(
         &self,
         instance: Option<&crate::instance::BotInstance>,
         hosts: Vec<Arc<crate::supervisor::ManagedHost>>,
     ) -> Vec<Arc<crate::supervisor::ManagedHost>> {
-        let (Some(toggles), Some(instance)) = (&self.toggles, instance) else {
-            return hosts;
-        };
-        let mut allowed = Vec::with_capacity(hosts.len());
-        for host in hosts {
-            let plugin_id = host.primary_plugin_id().unwrap_or_default();
-            let globally_enabled = toggles.is_enabled(PLUGIN_SECTION, &plugin_id).await;
-            if instance.allows_plugin(&plugin_id, globally_enabled) {
-                allowed.push(host);
-            } else {
-                tracing::debug!(
-                    instance_id = %instance.id,
-                    plugin_id = %plugin_id,
-                    "Plugin skipped for this instance by its plugin policy"
-                );
-            }
-        }
-        allowed
+        crate::supervisor::filter_plugin_hosts(hosts, self.toggles.as_deref(), instance).await
     }
 
     /// The tool sources a turn of `instance` may use: the hosts of its plugins whose circuit
@@ -960,17 +942,7 @@ impl PipelineEngine {
     /// Plugin hosts for a turn outside any instance: those the node-wide toggles enable.
     pub(crate) async fn enabled_hosts(&self) -> Vec<Arc<crate::supervisor::ManagedHost>> {
         let hosts = self.supervisor.get_all_hosts().await;
-        let Some(toggles) = &self.toggles else {
-            return hosts;
-        };
-        let mut enabled = Vec::with_capacity(hosts.len());
-        for host in hosts {
-            let plugin_id = host.primary_plugin_id().unwrap_or_default();
-            if toggles.is_enabled(PLUGIN_SECTION, &plugin_id).await {
-                enabled.push(host);
-            }
-        }
-        enabled
+        self.instance_hosts(None, hosts).await
     }
 
     /// The plugin hosts `instance` runs, resolved now (see [`Self::instance_hosts`]).
@@ -2212,9 +2184,9 @@ impl PipelineEngine {
                 }),
                 None => None,
             };
-            // A model the catalog marks as not tool-capable is offered no external tools. Native
-            // in-process tools stay available: they never leave the node and cost nothing to offer.
-            let tool_hosts = if capabilities.tool_calling {
+            // Skip discovery for a model that cannot use tools. The agent enforces the same
+            // capability for native tools and dispatch, independently of how the turn is invoked.
+            let tool_hosts = if agent.config().tool_calling {
                 self.tool_hosts(&hosts, instance.as_ref(), &filtered_event.event_id)
                     .await
             } else {
@@ -2751,7 +2723,14 @@ impl PipelineEngine {
             };
         };
 
-        match registry.set_model(&instance.id, Some(target.clone())).await {
+        let providers = self
+            .agent_factory
+            .as_ref()
+            .map(|factory| factory.providers().as_ref());
+        match registry
+            .set_model(&instance.id, Some(target.clone()), providers)
+            .await
+        {
             Ok(_) => {
                 tracing::info!(
                     instance_id = %instance.id,

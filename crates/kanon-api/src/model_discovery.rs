@@ -203,13 +203,11 @@ fn nested_u32(item: &Value, outer: &str, inner: &str) -> Option<u32> {
 
 /// Converts a JSON number into a token count, rejecting non-integers and zero.
 fn value_to_u32(value: &Value) -> Option<u32> {
-    let number = value
-        .as_u64()
-        .or_else(|| value.as_f64().map(|n| n as u64))?;
-    if number == 0 {
+    let number = value.as_f64()?;
+    if !(1.0..=f64::from(u32::MAX)).contains(&number) || number.fract() != 0.0 {
         return None;
     }
-    u32::try_from(number).ok()
+    Some(number as u32)
 }
 
 /// Derives capability flags from an OpenRouter-style modality list.

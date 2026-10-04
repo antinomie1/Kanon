@@ -17,8 +17,8 @@ use kanon_llm::BuiltinAgent;
 use kanon_llm::gateway::types::{ChatMessage, ChatRequest, ChatResponse, Role};
 use kanon_llm::tool_router::ToolRouter;
 use kanon_llm::{
-    GatewayError, LlmProvider, Persona, PersonaRegistry, SessionManager, SqliteMemory,
-    SqliteSessionStore,
+    GatewayError, LlmProvider, Persona, PersonaRegistry, ProviderRegistry, SessionManager,
+    SqliteMemory, SqliteSessionStore,
 };
 use kanon_proto::v1::PipelineEventRequest;
 
@@ -149,6 +149,7 @@ fn draft(name: &str) -> InstanceDraft {
 
 #[tokio::test]
 async fn clearing_instance_personas_restores_the_explicit_session_choice_after_restart() {
+    let providers = ProviderRegistry::new();
     let dir = tempfile::tempdir().unwrap();
     let node = start(dir.path()).await;
     let mut configured = draft("Test Bot");
@@ -156,7 +157,10 @@ async fn clearing_instance_personas_restores_the_explicit_session_choice_after_r
     configured.system_prompt = Some("Instance instructions.".to_string());
     let instance = node
         .registry
-        .create(configured.clone(), Some((&node.personas, &node.sessions)))
+        .create(
+            configured.clone(),
+            Some((&node.personas, &node.sessions, &providers)),
+        )
         .await
         .unwrap();
     let session = instance.conversation_session_id("group:1:user:1");
@@ -174,7 +178,7 @@ async fn clearing_instance_personas_restores_the_explicit_session_choice_after_r
         .update(
             &instance.id,
             configured.clone(),
-            Some((&node.personas, &node.sessions)),
+            Some((&node.personas, &node.sessions, &providers)),
         )
         .await
         .unwrap();
@@ -193,7 +197,7 @@ async fn clearing_instance_personas_restores_the_explicit_session_choice_after_r
         .update(
             &instance.id,
             configured,
-            Some((&node.personas, &node.sessions)),
+            Some((&node.personas, &node.sessions, &providers)),
         )
         .await
         .unwrap();
@@ -222,13 +226,17 @@ async fn clearing_instance_personas_restores_the_explicit_session_choice_after_r
 
 #[tokio::test]
 async fn a_queued_turn_reads_the_current_instance_persona_after_acquiring_its_writer() {
+    let providers = ProviderRegistry::new();
     let dir = tempfile::tempdir().unwrap();
     let node = start(dir.path()).await;
     let mut configured = draft("Test Bot");
     configured.persona_id = Some("pirate".to_string());
     let instance = node
         .registry
-        .create(configured.clone(), Some((&node.personas, &node.sessions)))
+        .create(
+            configured.clone(),
+            Some((&node.personas, &node.sessions, &providers)),
+        )
         .await
         .unwrap();
     let session = instance.conversation_session_id("group:1:user:1");
@@ -247,7 +255,7 @@ async fn a_queued_turn_reads_the_current_instance_persona_after_acquiring_its_wr
         .update(
             &instance.id,
             configured,
-            Some((&node.personas, &node.sessions)),
+            Some((&node.personas, &node.sessions, &providers)),
         )
         .await
         .unwrap();
