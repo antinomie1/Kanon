@@ -870,52 +870,10 @@ impl PipelineEngine {
     /// Builds the console-facing adapter catalog: built-ins first, then plugin adapters,
     /// annotated with real-time outbound circuit breaker states.
     pub async fn adapter_catalog(&self) -> Vec<AdapterDescriptor> {
-        let mut catalog: Vec<AdapterDescriptor> = Vec::new();
-        for adapter in self.supervisor.adapters().list().await {
-            let circuit_state = self.platform_circuit_state(adapter.platform()).await;
-            catalog.push(AdapterDescriptor {
-                platform: adapter.platform().to_string(),
-                display_name: adapter.display_name().to_string(),
-                kind: AdapterKind::Builtin,
-                connected: adapter.is_connected(),
-                circuit_state,
-                plugin_id: None,
-                host_id: None,
-                capabilities: {
-                    let mut capabilities = adapter.capabilities().to_vec();
-                    capabilities.sort();
-                    capabilities
-                },
-            });
+        let mut catalog = self.supervisor.adapter_catalog().await;
+        for adapter in &mut catalog {
+            adapter.circuit_state = self.platform_circuit_state(&adapter.platform).await;
         }
-
-        for host in self.supervisor.get_all_hosts().await {
-            let platforms = host.adapter_platforms();
-            if platforms.is_empty() {
-                continue;
-            }
-
-            let display_name = host
-                .adapter_display_name()
-                .unwrap_or_else(|| host.host_id.clone());
-            let plugin_id = host.adapter_plugin_id();
-
-            for platform in platforms {
-                let circuit_state = self.platform_circuit_state(&platform).await;
-                catalog.push(AdapterDescriptor {
-                    platform,
-                    display_name: display_name.clone(),
-                    kind: AdapterKind::Plugin,
-                    connected: true,
-                    circuit_state,
-                    plugin_id: plugin_id.clone(),
-                    host_id: Some(host.host_id.clone()),
-                    capabilities: host.adapter_capabilities(),
-                });
-            }
-        }
-
-        catalog.sort_by(|a, b| a.platform.cmp(&b.platform));
         catalog
     }
 

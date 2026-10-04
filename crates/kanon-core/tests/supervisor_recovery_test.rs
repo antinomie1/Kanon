@@ -12,7 +12,19 @@ use kanon_proto::v1::*;
 use tonic::{Request, Response, Status};
 
 /// Keeps the handshake independent of the shell child's deliberately failing launch recipe.
-struct MetadataHost;
+#[derive(Default)]
+struct MetadataHost {
+    /// Holds an external attachment inside its metadata RPC while a launch competes with it.
+    handshake: Option<Arc<HandshakeGate>>,
+    /// Exercises a rejected metadata RPC without inventing a fallback declaration.
+    reject: bool,
+}
+
+#[derive(Default)]
+struct HandshakeGate {
+    entered: tokio::sync::Notify,
+    release: tokio::sync::Notify,
+}
 
 #[tonic::async_trait]
 impl PluginHostService for MetadataHost {
@@ -20,6 +32,13 @@ impl PluginHostService for MetadataHost {
         &self,
         _: Request<GetPluginMetaRequest>,
     ) -> Result<Response<GetPluginMetaResponse>, Status> {
+        if let Some(gate) = &self.handshake {
+            gate.entered.notify_one();
+            gate.release.notified().await;
+        }
+        if self.reject {
+            return Err(Status::unavailable("metadata unavailable"));
+        }
         Ok(Response::new(GetPluginMetaResponse {
             plugins: vec![PluginMeta {
                 id: "retry".to_string(),
@@ -61,7 +80,7 @@ async fn watchdog_retries_a_failed_relaunch_after_the_executable_recovers() {
     let listener = kanon_transport::IpcListener::bind(socket).unwrap();
     let server = tokio::spawn(async move {
         tonic::transport::Server::builder()
-            .add_service(PluginHostServiceServer::new(MetadataHost))
+            .add_service(PluginHostServiceServer::new(MetadataHost::default()))
             .serve_with_incoming(listener.incoming())
             .await
             .unwrap();
@@ -117,6 +136,64 @@ async fn watchdog_retries_a_failed_relaunch_after_the_executable_recovers() {
 }
 
 #[tokio::test]
+async fn an_external_handshake_reserves_its_host_until_registration_finishes() {
+    let temp = tempfile::tempdir().unwrap();
+    let run_dir = temp.path().join("run");
+    let supervisor = Arc::new(Supervisor::new(Some(run_dir.clone()), None));
+    let socket = kanon_transport::host_socket_path("retry", Some(&run_dir));
+    let listener = kanon_transport::IpcListener::bind(&socket).unwrap();
+    let gate = Arc::new(HandshakeGate::default());
+    let host = MetadataHost {
+        handshake: Some(gate.clone()),
+        ..Default::default()
+    };
+    let server = tokio::spawn(async move {
+        tonic::transport::Server::builder()
+            .add_service(PluginHostServiceServer::new(host))
+            .serve_with_incoming(listener.incoming())
+            .await
+            .unwrap();
+    });
+    let attaching = supervisor.clone();
+    let registration = tokio::spawn(async move {
+        attaching
+            .register_host_endpoint("retry", "rust", socket.to_str().unwrap(), &[])
+            .await
+    });
+    tokio::time::timeout(Duration::from_secs(2), gate.entered.notified())
+        .await
+        .expect("external metadata handshake started");
+    assert!(supervisor.get_host("retry").await.is_none());
+
+    // The registry is still empty, but the external handshake owns this identity. A process
+    // launch here used to pass the precheck and race the attachment's later publication.
+    assert!(matches!(
+        supervisor
+            .spawn_plugin("retry", temp.path().join("missing-executable"), &[])
+            .await,
+        Err(SupervisorError::HostBusy(_))
+    ));
+    assert!(matches!(
+        supervisor
+            .register_host_endpoint("retry", "rust", "missing.sock", &[])
+            .await,
+        Ok(HostRegistration::Launching)
+    ));
+    gate.release.notify_one();
+    let HostRegistration::Registered(host) = registration.await.unwrap().unwrap() else {
+        panic!("the reservation owner must publish the external host");
+    };
+    assert!(Arc::ptr_eq(
+        &host,
+        &supervisor.get_host("retry").await.unwrap()
+    ));
+    assert!(host.declares_plugin("retry"));
+    supervisor.stop_all().await.unwrap();
+    server.abort();
+    let _ = server.await;
+}
+
+#[tokio::test]
 async fn a_pending_launch_excludes_competitors_and_releases_its_reservation_on_cancel() {
     let temp = tempfile::tempdir().unwrap();
     let supervisor = Arc::new(Supervisor::new(Some(temp.path().join("run")), None));
@@ -151,4 +228,72 @@ async fn a_pending_launch_excludes_competitors_and_releases_its_reservation_on_c
             .await,
         Err(SupervisorError::Io(_))
     ));
+}
+
+#[tokio::test]
+async fn failed_external_metadata_never_publishes_a_host_and_releases_the_reservation() {
+    let temp = tempfile::tempdir().unwrap();
+    let run_dir = temp.path().join("run");
+    let supervisor = Supervisor::new(Some(run_dir.clone()), None);
+    let socket = kanon_transport::host_socket_path("retry", Some(&run_dir));
+    let listener = kanon_transport::IpcListener::bind(&socket).unwrap();
+    let service = MetadataHost {
+        reject: true,
+        ..Default::default()
+    };
+    let server = tokio::spawn(async move {
+        tonic::transport::Server::builder()
+            .add_service(PluginHostServiceServer::new(service))
+            .serve_with_incoming(listener.incoming())
+            .await
+            .unwrap();
+    });
+    // A second attempt must perform the handshake again, not accept a fabricated registry entry
+    // or remain stuck behind the failed attempt's launch reservation.
+    for _ in 0..2 {
+        let result = supervisor
+            .register_host_endpoint("retry", "rust", socket.to_str().unwrap(), &["retry".into()])
+            .await;
+        assert!(matches!(result, Err(SupervisorError::Rpc(status))
+            if status.code() == tonic::Code::Unavailable));
+        assert!(supervisor.get_host("retry").await.is_none());
+    }
+    server.abort();
+    let _ = server.await;
+}
+
+#[tokio::test]
+async fn stalled_external_metadata_times_out_without_leaving_a_reservation() {
+    let temp = tempfile::tempdir().unwrap();
+    let run_dir = temp.path().join("run");
+    let supervisor = Arc::new(Supervisor::new(Some(run_dir.clone()), None));
+    let socket = kanon_transport::host_socket_path("retry", Some(&run_dir));
+    let listener = kanon_transport::IpcListener::bind(&socket).unwrap();
+    let service = MetadataHost {
+        handshake: Some(Arc::new(HandshakeGate::default())),
+        ..Default::default()
+    };
+    let server = tokio::spawn(async move {
+        tonic::transport::Server::builder()
+            .add_service(PluginHostServiceServer::new(service))
+            .serve_with_incoming(listener.incoming())
+            .await
+            .unwrap();
+    });
+    let result = tokio::time::timeout(
+        Duration::from_secs(7),
+        supervisor.register_host_endpoint("retry", "rust", socket.to_str().unwrap(), &[]),
+    )
+    .await
+    .expect("the full handshake must have a finite deadline");
+    assert!(matches!(result, Err(SupervisorError::Timeout(_))));
+    assert!(supervisor.get_host("retry").await.is_none());
+    assert!(matches!(
+        supervisor
+            .spawn_plugin("retry", temp.path().join("missing-executable"), &[])
+            .await,
+        Err(SupervisorError::Io(_))
+    ));
+    server.abort();
+    let _ = server.await;
 }

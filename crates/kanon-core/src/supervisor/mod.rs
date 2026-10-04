@@ -47,7 +47,7 @@ pub enum SupervisorError {
     #[error("RPC error during host communication: {0}")]
     Rpc(Box<tonic::Status>),
     /// Host failed to become ready within the allocated deadline.
-    #[error("Host '{0}' timed out waiting for socket readiness")]
+    #[error("Host '{0}' timed out waiting for readiness or metadata")]
     Timeout(String),
     /// Child process exited prematurely before completing handshake.
     #[error("Host process '{host_id}' exited prematurely with exit status: {status}")]
@@ -181,13 +181,7 @@ impl PluginConfigGuard {
         // enables a tool, for example), so the metadata is asked for again. The configuration
         // itself is already applied, which is why a failed refresh is reported, not rolled back:
         // the previous metadata stays in effect until the next reload or restart.
-        let metadata = tokio::time::timeout(Duration::from_secs(10), host.get_plugin_meta())
-            .await
-            .unwrap_or_else(|_| {
-                Err(tonic::Status::deadline_exceeded(
-                    "Plugin metadata refresh timed out after 10s",
-                ))
-            });
+        let metadata = host.get_plugin_meta().await;
         match metadata {
             Ok(metas) if metas.iter().any(|meta| meta.id == plugin_id) => host.set_metas(metas),
             // A host that stops declaring the plugin it just reconfigured is inconsistent;
@@ -545,7 +539,9 @@ impl ManagedHost {
     /// Queries the host for fresh plugin metadata.
     pub async fn get_plugin_meta(&self) -> Result<Vec<PluginMeta>, tonic::Status> {
         let mut client = self.host_client.clone();
-        let response = client.get_plugin_meta(GetPluginMetaRequest {}).await?;
+        let mut request = tonic::Request::new(GetPluginMetaRequest {});
+        request.set_timeout(Duration::from_secs(10));
+        let response = client.get_plugin_meta(request).await?;
         Ok(response.into_inner().plugins)
     }
 
@@ -789,7 +785,7 @@ pub struct Supervisor {
     typescript_runtime: Option<PathBuf>,
     /// Installs plugins' dependencies before launch; `None` only checks that they are present.
     dependencies: Option<Arc<DependencyInstaller>>,
-    /// Host ids whose process this supervisor is starting right now (see [`LaunchGuard`]).
+    /// Host ids this supervisor is launching or attaching right now (see [`LaunchGuard`]).
     ///
     /// A launched host calls `RegisterHost` while its launch is still waiting for the socket, and
     /// the Rust SDK does so before it even binds the socket. The launch owns that host's handshake
@@ -804,12 +800,11 @@ pub struct Supervisor {
 pub enum HostRegistration {
     /// The host is in the registry: it already was, or it was just attached from its endpoint.
     Registered(Arc<ManagedHost>),
-    /// This supervisor is launching the host; that launch completes the handshake and adds the
-    /// registry entry once the host is serving.
+    /// A launch or external attachment owns the handshake and will publish the registry entry.
     Launching,
 }
 
-/// Marks a host id as being launched for as long as the guard lives.
+/// Reserves a host id throughout process launch or external attachment.
 ///
 /// Dropping clears the mark on every exit of the launch, including early returns and failures,
 /// so a host whose launch failed is never mistaken for one still starting.
@@ -1122,7 +1117,7 @@ impl Supervisor {
             });
         }
 
-        for host in self.hosts.read().await.values() {
+        for host in self.get_all_hosts().await {
             let platforms = host.adapter_platforms();
             if platforms.is_empty() {
                 continue;
@@ -1132,15 +1127,15 @@ impl Supervisor {
                 .adapter_display_name()
                 .unwrap_or_else(|| host.host_id.clone());
             let plugin_id = host.adapter_plugin_id();
+            let connected = host.health().await.state == "running";
 
             for platform in platforms {
                 catalog.push(AdapterDescriptor {
                     platform,
                     display_name: display_name.clone(),
                     kind: AdapterKind::Plugin,
-                    // A host present in the registry is a live process; a crashed host is removed
-                    // by the supervisor, so presence is the connection signal.
-                    connected: true,
+                    // Failed restarts retain their registry entry and recipe for recovery.
+                    connected,
                     circuit_state: CircuitState::Closed,
                     plugin_id: plugin_id.clone(),
                     host_id: Some(host.host_id.clone()),
@@ -1697,17 +1692,20 @@ impl Supervisor {
         endpoint: &str,
         loaded_plugin_ids: &[String],
     ) -> Result<HostRegistration, SupervisorError> {
-        // The launch mark is read before the registry: a launch sets it before spawning and
-        // inserts its host before clearing it, so reading in this order never misses a host that
-        // this supervisor owns. The reverse order could miss both and dial the host a second time,
-        // replacing the launched entry (and its child handle) with an unmanaged one.
-        if lock_launching(&self.launching).contains(host_id) {
-            tracing::info!(
-                host_id = %host_id,
-                "Host is being launched by this Supervisor; the launch completes its registration"
-            );
-            return Ok(HostRegistration::Launching);
-        }
+        // External attachment owns the same reservation as process launch through its entire
+        // handshake. Checking only before the awaits would let a later spawn publish its child,
+        // then have this slower attachment overwrite that child and its restart recipe.
+        let _launching = match LaunchGuard::new(&self.launching, host_id) {
+            Ok(launching) => launching,
+            Err(SupervisorError::HostBusy(_)) => {
+                tracing::info!(
+                    host_id = %host_id,
+                    "Host registration is already in progress; its owner completes the handshake"
+                );
+                return Ok(HostRegistration::Launching);
+            }
+            Err(error) => return Err(error),
+        };
         if let Some(existing) = self.get_host(host_id).await {
             tracing::info!(
                 host_id = %host_id,
@@ -1716,56 +1714,37 @@ impl Supervisor {
             return Ok(HostRegistration::Registered(existing));
         }
 
-        let socket_path = PathBuf::from(endpoint);
-        let channel = connect_ipc(&socket_path).await?;
-        let mut host_client = PluginHostServiceClient::with_interceptor(
-            channel.clone(),
-            kanon_transport::ClientAuthInterceptor(self.ipc_token.clone()),
-        );
-
-        // Attempt initial GetPluginMeta handshake over the established channel.
-        let plugins = match host_client.get_plugin_meta(GetPluginMetaRequest {}).await {
-            Ok(resp) => resp.into_inner().plugins,
-            Err(status) => {
-                tracing::warn!(
-                    host_id = %host_id,
-                    error = %status,
-                    "GetPluginMeta handshake failed on external host; synthesising metadata from declarations"
-                );
-                loaded_plugin_ids
-                    .iter()
-                    .map(|id| PluginMeta {
-                        id: id.clone(),
-                        name: id.clone(),
-                        version: "0.1.0".to_string(),
-                        author: String::new(),
-                        description: String::new(),
-                        commands: vec![],
-                        tools: vec![],
-                        triggers: vec![],
-                        events: vec![],
-                        decorates_replies: false,
-                        prepares_turns: false,
-                        rewrites_system_prompt: false,
-                        serves_http: false,
-                    })
-                    .collect()
+        // Registration is all-or-nothing: an unresponsive or incompatible host must not become
+        // routable with guessed metadata. The deadline includes transport readiness and the RPC.
+        let managed_host = tokio::time::timeout(Duration::from_secs(5), async {
+            let socket_path = PathBuf::from(endpoint);
+            let channel = connect_ipc(&socket_path).await?;
+            let mut managed_host = ManagedHost::new(
+                host_id.to_string(),
+                socket_path,
+                channel.clone(),
+                Vec::new(),
+                500,
+            );
+            managed_host.host_client = PluginHostServiceClient::with_interceptor(
+                channel.clone(),
+                kanon_transport::ClientAuthInterceptor(self.ipc_token.clone()),
+            );
+            managed_host.pipeline_client = MessagePipelineServiceClient::with_interceptor(
+                channel,
+                kanon_transport::ClientAuthInterceptor(self.ipc_token.clone()),
+            );
+            let plugins = managed_host.get_plugin_meta().await?;
+            for id in loaded_plugin_ids {
+                if !plugins.iter().any(|plugin| &plugin.id == id) {
+                    return Err(SupervisorError::PluginNotFound(id.clone()));
+                }
             }
-        };
-
-        let mut managed_host = ManagedHost::new(
-            host_id.to_string(),
-            socket_path,
-            channel.clone(),
-            plugins,
-            500,
-        );
-        managed_host.host_client = host_client;
-        managed_host.pipeline_client = MessagePipelineServiceClient::with_interceptor(
-            channel,
-            kanon_transport::ClientAuthInterceptor(self.ipc_token.clone()),
-        );
-        let managed_host = Arc::new(managed_host);
+            managed_host.set_metas(plugins);
+            Ok::<_, SupervisorError>(Arc::new(managed_host))
+        })
+        .await
+        .map_err(|_| SupervisorError::Timeout(host_id.to_string()))??;
 
         self.hosts
             .write()

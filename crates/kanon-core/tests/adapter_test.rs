@@ -402,7 +402,7 @@ async fn outbound_is_routed_to_plugin_adapter_host() {
         Some("org.kanon.plugin.adapter_fixture")
     );
 
-    let engine = PipelineEngine::new(supervisor);
+    let engine = PipelineEngine::new(supervisor.clone());
     let outcome = engine
         .deliver_outbound(outbound_request("fixture_platform"))
         .await
@@ -411,6 +411,23 @@ async fn outbound_is_routed_to_plugin_adapter_host() {
     assert_eq!(outcome.kind, AdapterKind::Plugin);
     assert_eq!(outcome.platform, "fixture_platform");
     assert_eq!(outcome.message_id, "plugin-chan-1");
+
+    let host = supervisor
+        .get_host("org_kanon_plugin_adapter_fixture")
+        .await
+        .unwrap();
+    for state in ["restarting", "crashed", "disabled", "running"] {
+        host.report_health(state, 1, None).await;
+        assert_eq!(
+            supervisor.adapter_catalog().await[0].connected,
+            state == "running"
+        );
+        assert_eq!(
+            engine.adapter_catalog().await[0].connected,
+            state == "running",
+            "the console shares the supervisor's lifecycle status"
+        );
+    }
 
     let deliveries = recorded.deliveries.lock().await;
     assert_eq!(deliveries.len(), 1);
