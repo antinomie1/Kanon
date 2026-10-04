@@ -569,6 +569,35 @@ impl BuiltinAgent {
                     continue;
                 }
 
+                // Validate once before either dispatch path. Dropping non-object arguments at
+                // the protobuf boundary would turn a malformed call into an empty object; native
+                // tools must receive the same contract. Keep the paired failure in history so
+                // the model can correct its arguments on the next round.
+                if !call.arguments.is_object() {
+                    let err_msg = format!(
+                        "Tool '{}' arguments must be a JSON object; correct the arguments and retry",
+                        call.name
+                    );
+                    for hook in &self.hooks {
+                        hook.on_after_tool_call(session_id, &call, &err_msg, false)
+                            .await?;
+                    }
+                    self.memory
+                        .push_message(session_id, ChatMessage::tool_response(&call.id, &err_msg))
+                        .await?;
+                    executed_tools.push(ExecutedToolCall {
+                        call_id: call.id,
+                        tool_name: call.name,
+                        plugin_id: "validation".to_string(),
+                        host_id: "agent".to_string(),
+                        success: false,
+                    });
+                    if self.config.stop_on_tool_failure {
+                        return Err(GatewayError::InvalidResponse(err_msg).into());
+                    }
+                    continue;
+                }
+
                 // Branch A: Check registered native in-process tools
                 if let Some(native_tool) =
                     self.tools.iter().find(|t| t.definition().name == call.name)
@@ -660,17 +689,15 @@ impl BuiltinAgent {
                     }
                 };
 
-                // Zero-copy in-memory translation from serde_json::Value to prost_types::Struct
-                let structured_args = match &call.arguments {
-                    serde_json::Value::Object(_) => json_to_prost_struct(&call.arguments),
-                    _ => None,
-                };
+                // Translate the validated object directly, without a string round trip.
+                let structured_args = json_to_prost_struct(&call.arguments)
+                    .expect("tool arguments were validated as an object");
 
                 let tool_req = ToolCallRequest {
                     call_id: call.id.clone(),
                     tool_name: actual_tool_name,
                     session_id: session_id.to_string(),
-                    payload: structured_args.map(tool_call_request::Payload::StructuredArgs),
+                    payload: Some(tool_call_request::Payload::StructuredArgs(structured_args)),
                     // The host attaches the platform event of the turn; the agent never knew it.
                     context: None,
                 };

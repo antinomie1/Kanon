@@ -63,6 +63,7 @@ impl LlmProvider for ScriptedLlmProvider {
 struct MockHost {
     host_id: String,
     plugins: Vec<PluginMeta>,
+    received_calls: RwLock<Vec<ToolCallRequest>>,
 }
 
 #[async_trait]
@@ -77,6 +78,7 @@ impl ToolHost for MockHost {
     }
 
     async fn call_tool(&self, req: ToolCallRequest) -> Result<ToolCallResponse, tonic::Status> {
+        self.received_calls.write().await.push(req.clone());
         if req.tool_name == "reverse_string" {
             let structured_args = match req.payload {
                 Some(tool_call_request::Payload::StructuredArgs(s)) => {
@@ -227,6 +229,25 @@ impl AgentHook for TracingHook {
     }
 }
 
+#[derive(Default)]
+struct ToolOutcomeHook {
+    outcomes: RwLock<Vec<(String, bool)>>,
+}
+
+#[async_trait]
+impl AgentHook for ToolOutcomeHook {
+    async fn on_after_tool_call(
+        &self,
+        _session_id: &str,
+        call: &ToolCall,
+        _result: &str,
+        success: bool,
+    ) -> Result<(), AgentError> {
+        self.outcomes.write().await.push((call.id.clone(), success));
+        Ok(())
+    }
+}
+
 // =========================================================================
 // 4. Tests
 // =========================================================================
@@ -278,6 +299,7 @@ async fn test_agent_builder_and_execution_with_custom_memory() {
 
     let host = Arc::new(MockHost {
         host_id: "host_plugin".to_string(),
+        received_calls: RwLock::new(Vec::new()),
         plugins: vec![PluginMeta {
             id: "plugin_rev".to_string(),
             name: "Reverser".to_string(),
@@ -376,6 +398,195 @@ async fn test_agent_native_in_process_tool_and_standalone_run() {
 }
 
 #[tokio::test]
+async fn invalid_tool_argument_shapes_allow_correction_without_dispatch() {
+    let mut invalid_calls = Vec::new();
+    for name in ["native_echo", "reverse_string"] {
+        for (index, arguments) in [
+            serde_json::json!([]),
+            serde_json::json!("text"),
+            serde_json::json!(42),
+            serde_json::json!(true),
+            serde_json::Value::Null,
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            invalid_calls.push(ToolCall {
+                id: format!("invalid_{name}_{index}"),
+                name: name.to_string(),
+                arguments,
+            });
+        }
+    }
+    let provider = Arc::new(ScriptedLlmProvider::new(vec![
+        ChatResponse {
+            tool_calls: invalid_calls.clone(),
+            ..Default::default()
+        },
+        ChatResponse {
+            tool_calls: ["native_echo", "reverse_string"]
+                .into_iter()
+                .map(|name| ToolCall {
+                    id: format!("corrected_{name}"),
+                    name: name.to_string(),
+                    arguments: serde_json::json!({"text": "kanon"}),
+                })
+                .collect(),
+            ..Default::default()
+        },
+        ChatResponse {
+            content: Some("Corrected calls succeeded".to_string()),
+            ..Default::default()
+        },
+    ]));
+    let native_calls = Arc::new(RwLock::new(Vec::new()));
+    let observed_native_calls = native_calls.clone();
+    let native_tool = NativeTool::new(
+        ToolDefinition {
+            name: "native_echo".to_string(),
+            description: "Returns its arguments".to_string(),
+            parameters: serde_json::json!({"type": "object"}),
+        },
+        move |_session_id, arguments| {
+            let observed = observed_native_calls.clone();
+            async move {
+                observed.write().await.push(arguments.clone());
+                Ok(arguments.to_string())
+            }
+        },
+    );
+    let host = Arc::new(MockHost {
+        host_id: "external_host".to_string(),
+        plugins: vec![PluginMeta {
+            id: "external_plugin".to_string(),
+            tools: vec![ToolMeta {
+                name: "reverse_string".to_string(),
+                ..Default::default()
+            }],
+            ..Default::default()
+        }],
+        received_calls: RwLock::new(Vec::new()),
+    });
+    let hook = Arc::new(ToolOutcomeHook::default());
+    let agent = BuiltinAgent::builder("argument_validator", provider.clone())
+        .tool(native_tool)
+        .hook_arc(hook.clone())
+        .compaction(None)
+        .build();
+    let hosts: Vec<Arc<dyn ToolHost>> = vec![host.clone()];
+
+    let output = agent
+        .run("correctable", "Echo kanon", &hosts)
+        .await
+        .unwrap();
+
+    assert_eq!(output.content, "Corrected calls succeeded");
+    assert_eq!(
+        *native_calls.read().await,
+        vec![serde_json::json!({"text": "kanon"})]
+    );
+    let external_calls = host.received_calls.read().await;
+    assert_eq!(external_calls.len(), 1);
+    assert_eq!(external_calls[0].call_id, "corrected_reverse_string");
+    assert!(matches!(
+        external_calls[0].payload.as_ref(),
+        Some(tool_call_request::Payload::StructuredArgs(_))
+    ));
+
+    let requests = provider.received_requests.read().await;
+    assert_eq!(requests.len(), 3);
+    let outcomes = hook.outcomes.read().await;
+    assert_eq!(outcomes.len(), invalid_calls.len() + 2);
+    assert_eq!(output.executed_tools.len(), outcomes.len());
+    for (index, call) in invalid_calls.iter().enumerate() {
+        let failures: Vec<_> = requests[1]
+            .messages
+            .iter()
+            .filter(|message| message.tool_call_id.as_deref() == Some(call.id.as_str()))
+            .collect();
+        assert_eq!(failures.len(), 1);
+        assert_eq!(failures[0].role, Role::Tool);
+        assert!(
+            failures[0]
+                .content
+                .as_deref()
+                .unwrap()
+                .contains("arguments must be a JSON object")
+        );
+        assert_eq!(outcomes[index], (call.id.clone(), false));
+        assert!(!output.executed_tools[index].success);
+        assert_eq!(output.executed_tools[index].plugin_id, "validation");
+    }
+    assert!(
+        outcomes[invalid_calls.len()..]
+            .iter()
+            .all(|(_, success)| *success)
+    );
+    assert!(
+        output.executed_tools[invalid_calls.len()..]
+            .iter()
+            .all(|call| call.success)
+    );
+}
+
+#[tokio::test]
+async fn invalid_tool_arguments_respect_stop_policy_and_close_the_call_once() {
+    let provider = Arc::new(ScriptedLlmProvider::new(vec![ChatResponse {
+        tool_calls: vec![ToolCall {
+            id: "bad_arguments".to_string(),
+            name: "native_tool".to_string(),
+            arguments: serde_json::Value::Null,
+        }],
+        ..Default::default()
+    }]));
+    let hook = Arc::new(ToolOutcomeHook::default());
+    let agent = BuiltinAgent::builder("strict_validator", provider.clone())
+        .tool(NativeTool::new(
+            ToolDefinition {
+                name: "native_tool".to_string(),
+                description: "Must never be called with invalid arguments".to_string(),
+                parameters: serde_json::json!({"type": "object"}),
+            },
+            |_session_id, _arguments| async {
+                panic!("invalid arguments must be rejected before native dispatch")
+            },
+        ))
+        .hook_arc(hook.clone())
+        .stop_on_tool_failure(true)
+        .compaction(None)
+        .build();
+
+    let error = agent
+        .run_standalone("strict", "Call the tool")
+        .await
+        .unwrap_err();
+
+    assert!(matches!(
+        error,
+        AgentError::Gateway(GatewayError::InvalidResponse(_))
+    ));
+    assert_eq!(provider.received_requests.read().await.len(), 1);
+    assert_eq!(
+        *hook.outcomes.read().await,
+        vec![("bad_arguments".to_string(), false)]
+    );
+    let history = agent.memory().get_messages("strict").await.unwrap();
+    let failures: Vec<_> = history
+        .iter()
+        .filter(|message| message.tool_call_id.as_deref() == Some("bad_arguments"))
+        .collect();
+    assert_eq!(failures.len(), 1);
+    assert_eq!(failures[0].role, Role::Tool);
+    assert!(
+        failures[0]
+            .content
+            .as_deref()
+            .unwrap()
+            .contains("arguments must be a JSON object")
+    );
+}
+
+#[tokio::test]
 async fn test_agent_lifecycle_hooks_and_veto() {
     let req_flag = Arc::new(AtomicBool::new(false));
     let resp_flag = Arc::new(AtomicBool::new(false));
@@ -396,7 +607,8 @@ async fn test_agent_lifecycle_hooks_and_veto() {
         tool_calls: vec![ToolCall {
             id: "call_dangerous".to_string(),
             name: "delete_database".to_string(),
-            arguments: serde_json::json!({}),
+            // A policy veto takes precedence over argument validation and emits no finish hook.
+            arguments: serde_json::Value::Null,
         }],
         finish_reason: Some("tool_calls".to_string()),
         usage: None,
