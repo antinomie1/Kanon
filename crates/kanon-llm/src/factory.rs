@@ -169,6 +169,11 @@ impl AgentFactory {
         &self.tools
     }
 
+    /// Lifecycle hooks used by both builtin execution and external agent tool bridges.
+    pub fn hooks(&self) -> &[Arc<dyn AgentHook>] {
+        &self.hooks
+    }
+
     /// Conversation memory shared by every agent.
     pub fn memory(&self) -> &Arc<dyn Memory> {
         &self.memory

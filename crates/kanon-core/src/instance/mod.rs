@@ -301,6 +301,23 @@ impl BotInstance {
         self.session_id_at(conversation, self.session_generation(conversation))
     }
 
+    /// Current session route under the selected complete runtime.
+    pub fn session_for_backend(
+        &self,
+        conversation: &str,
+        backend: &kanon_llm::ConversationBackend,
+    ) -> String {
+        match backend {
+            kanon_llm::ConversationBackend::Builtin(_) => {
+                self.conversation_session_id(conversation)
+            }
+            #[cfg(feature = "dsh")]
+            kanon_llm::ConversationBackend::Dsh(_) => {
+                self.dsh_session_id_at(conversation, self.dsh_session_generation(conversation))
+            }
+        }
+    }
+
     /// Session identifier of one generation of a conversation.
     pub fn session_id_at(&self, conversation: &str, generation: u64) -> String {
         format!(
@@ -950,3 +967,8 @@ impl InstanceRegistry {
         Ok(())
     }
 }
+
+mod tool_scope;
+pub(crate) use tool_scope::tool_instance;
+#[cfg(feature = "dsh")]
+pub(crate) use tool_scope::with_tool_instance;

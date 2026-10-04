@@ -139,16 +139,9 @@ impl PipelineEngine {
 
         let (agent, session_id) = match (&chat, run.in_conversation) {
             (Some(chat), true) => {
-                let session_id = chat.instance.conversation_session_id(&chat.conversation);
-                #[cfg(feature = "dsh")]
-                let session_id = if matches!(&backend, kanon_llm::ConversationBackend::Dsh(_)) {
-                    chat.instance.dsh_session_id_at(
-                        &chat.conversation,
-                        chat.instance.dsh_session_generation(&chat.conversation),
-                    )
-                } else {
-                    session_id
-                };
+                let session_id = chat
+                    .instance
+                    .session_for_backend(&chat.conversation, &backend);
                 (backend, session_id)
             }
             _ => {
@@ -195,7 +188,7 @@ impl PipelineEngine {
         let tool_hosts = if run.use_tools
             && agent
                 .builtin()
-                .is_some_and(|agent| agent.config().tool_calling)
+                .is_none_or(|agent| agent.config().tool_calling)
         {
             self.tool_hosts(&hosts, instance, &event_id).await
         } else {

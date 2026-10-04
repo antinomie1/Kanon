@@ -506,22 +506,7 @@ impl PipelineEngine {
                 .map(kanon_llm::ConversationBackend::Builtin),
         };
 
-        #[cfg(feature = "dsh")]
-        if instance.as_ref().is_some_and(|instance| {
-            instance.conversation_mode == crate::simulation::ConversationMode::Simulation
-        }) && matches!(
-            &resolved_agent,
-            Some(kanon_llm::ConversationBackend::Dsh(_))
-        ) {
-            return PipelineResult::LlmFailed {
-                error: "DSH simulation requires the Kanon agent bridge".into(),
-                replies: vec![text_reply("DSH 群聊仿真桥接尚未就绪。")],
-            };
-        }
         if let Some(instance) = instance.as_ref()
-            && resolved_agent
-                .as_ref()
-                .is_none_or(|agent| agent.builtin().is_some())
             && instance.conversation_mode == crate::simulation::ConversationMode::Simulation
             && notice.is_none()
         {
@@ -604,22 +589,10 @@ impl PipelineEngine {
         // Sessions are namespaced by the instance that owns the conversation, so two bots can
         // never share context. An unpartitioned pipeline keeps the legacy conversation key.
         let session_id = match instance.as_ref() {
-            Some(instance) => {
-                #[cfg(feature = "dsh")]
-                if matches!(
-                    &resolved_agent,
-                    Some(kanon_llm::ConversationBackend::Dsh(_))
-                ) {
-                    instance.dsh_session_id_at(
-                        &conversation,
-                        instance.dsh_session_generation(&conversation),
-                    )
-                } else {
-                    instance.conversation_session_id(&conversation)
-                }
-                #[cfg(not(feature = "dsh"))]
-                instance.conversation_session_id(&conversation)
-            }
+            Some(instance) => match resolved_agent.as_ref() {
+                Some(backend) => instance.session_for_backend(&conversation, backend),
+                None => instance.conversation_session_id(&conversation),
+            },
             None => conversation.clone(),
         };
         let mut filtered_event = filtered_event;
@@ -761,7 +734,7 @@ impl PipelineEngine {
             // capability for native tools and dispatch, independently of how the turn is invoked.
             let tool_hosts = if agent
                 .builtin()
-                .is_some_and(|agent| agent.config().tool_calling)
+                .is_none_or(|agent| agent.config().tool_calling)
             {
                 self.tool_hosts(&hosts, instance.as_ref(), &filtered_event.event_id)
                     .await

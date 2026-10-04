@@ -143,7 +143,7 @@ async fn snapshot(
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct HistoryPage {
-    through_seq: u64,
+    through_seq: i64,
     before_seq: u64,
 }
 

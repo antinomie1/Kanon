@@ -485,3 +485,6 @@ pub mod builtin;
 /// Optional deepseek-harness agent runtime.
 #[cfg(feature = "dsh")]
 pub mod dsh;
+
+/// Shared tool dispatch without builtin memory or model ownership.
+pub mod tool_execution;

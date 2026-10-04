@@ -6,6 +6,9 @@ use serde_json::{Value, json};
 use std::future::Future;
 use std::time::Duration;
 
+// DSH sequence positions are JavaScript safe integers, with -1 for an empty journal.
+const MAX_SESSION_SEQ: i64 = 9_007_199_254_740_991;
+
 /// A DSH catalog row. Projections are owned and versioned by DSH, not copied into SessionStore.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -28,8 +31,8 @@ pub struct DshSession {
 pub struct DshSnapshot {
     /// Durable remote header, including identity and agent preset.
     pub header: Value,
-    /// Inclusive event position against which older pages must be read.
-    pub cursor: u64,
+    /// Inclusive event position, or -1 when no event has been appended yet.
+    pub cursor: i64,
     /// Ordered journal entries; these are never written into Kanon's builtin memory.
     pub records: Vec<Value>,
     /// More history exists before this window.
@@ -104,8 +107,13 @@ impl DshClient {
                 "session follow did not open with its own snapshot".into(),
             ));
         }
-        let snapshot =
+        let snapshot: DshSnapshot =
             serde_json::from_value(value).map_err(|e| DshError::Protocol(e.to_string()))?;
+        if !(-1..=MAX_SESSION_SEQ).contains(&snapshot.cursor)
+            || (snapshot.cursor == -1 && (!snapshot.records.is_empty() || snapshot.has_more))
+        {
+            return Err(DshError::Protocol("invalid session snapshot cursor".into()));
+        }
         Ok((snapshot, stream))
     }
 
@@ -119,10 +127,13 @@ impl DshClient {
     pub async fn page(
         &self,
         session_id: &str,
-        through_seq: u64,
+        through_seq: i64,
         before_seq: u64,
     ) -> Result<Value, DshError> {
         validate_id(session_id)?;
+        if !(-1..=MAX_SESSION_SEQ).contains(&through_seq) || before_seq > MAX_SESSION_SEQ as u64 {
+            return Err(DshError::Config("invalid session page cursor".into()));
+        }
         self.call(
             "session/page",
             json!({"request": {
@@ -344,7 +355,8 @@ impl DshClient {
             }
             let event = &frame["event"];
             let seq = event["seq"]
-                .as_u64()
+                .as_i64()
+                .filter(|seq| (0..=MAX_SESSION_SEQ).contains(seq))
                 .ok_or_else(|| DshError::Protocol("session event has no sequence".into()))?;
             if seq
                 != cursor
@@ -397,7 +409,7 @@ impl DshClient {
                     return Ok(DshTurnOutput {
                         content,
                         turn: target_turn.expect("matched turn"),
-                        through_seq: cursor,
+                        through_seq: cursor as u64,
                     });
                 }
                 Some(_) => {}

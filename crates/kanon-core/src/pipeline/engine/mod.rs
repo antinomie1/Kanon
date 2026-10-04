@@ -14,6 +14,8 @@
 #[cfg(feature = "dsh")]
 mod agent_commands;
 mod commands;
+#[cfg(feature = "dsh")]
+mod dsh;
 mod inbound;
 mod message;
 mod outbound;
@@ -345,6 +347,8 @@ pub struct PipelineEngine {
     turns: crate::pipeline::turns::RunningTurns,
     /// Bounded mailboxes for active conversational participation.
     simulation: simulation_runtime::SimulationHub,
+    #[cfg(feature = "dsh")]
+    dsh_bridge: Arc<crate::agent_bridge::AgentBridge>,
     /// MCP servers contributing tools alongside plugin hosts.
     mcp: Option<Arc<McpPool>>,
     /// Optional lifecycle observer used by the management control plane for tracing.
@@ -384,6 +388,8 @@ impl PipelineEngine {
             captures: CaptureRegistry::default(),
             turns: Default::default(),
             simulation: Default::default(),
+            #[cfg(feature = "dsh")]
+            dsh_bridge: Default::default(),
             mcp: None,
             observer: None,
             dead_letter: Arc::new(DeadLetterWriter::default()),
@@ -643,19 +649,19 @@ impl PipelineEngine {
                 kanon_llm::ConversationBackend::Builtin(agent) => agent,
                 #[cfg(feature = "dsh")]
                 kanon_llm::ConversationBackend::Dsh(client) => {
-                    if options != kanon_llm::TurnOptions::default() {
-                        return Err(kanon_llm::ToolRouterError::InvalidRequest(
-                            "DSH owns turn settings; configure them in DSH".into(),
-                        ));
-                    }
-                    return kanon_llm::dsh::run_message(
-                        &client,
-                        session_id,
-                        &event.event_id,
-                        message,
-                        &running.signal(),
-                    )
-                    .await;
+                    return self
+                        .run_dsh_turn(
+                            client,
+                            running,
+                            session_id,
+                            event,
+                            hosts,
+                            tool_hosts,
+                            bash_caller,
+                            options,
+                            message,
+                        )
+                        .await;
                 }
             };
             if let Some(instance_id) =

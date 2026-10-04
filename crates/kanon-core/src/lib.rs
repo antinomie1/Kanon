@@ -85,3 +85,7 @@ pub use supervisor::{
     circuit_breaker::{CircuitBreaker, CircuitBreakerConfig, CircuitState},
 };
 pub use toggle::{DEFAULT_TOGGLE_STATE, MCP_SECTION, PLUGIN_SECTION, SKILL_SECTION, ToggleStore};
+
+/// Optional external agent tool bridge on the core IPC listener.
+#[cfg(feature = "dsh")]
+pub mod agent_bridge;

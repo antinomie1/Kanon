@@ -4,6 +4,8 @@
 //! communicate with the Core microkernel via [`BotApiService`].
 
 mod agent;
+#[cfg(feature = "dsh")]
+mod bridge;
 mod conversations;
 mod render;
 mod storage;
@@ -772,12 +774,27 @@ impl CoreIpcServer {
     where
         F: Future<Output = ()> + Send + 'static,
     {
+        #[cfg(feature = "dsh")]
+        let bridge = self.service.engine.as_ref().map(|engine| {
+            kanon_proto::agent::v1::agent_bridge_service_server::AgentBridgeServiceServer::with_interceptor(
+                engine.agent_bridge().as_ref().clone(),
+                kanon_transport::AuthInterceptor::new(self.auth_token.clone()),
+            )
+        });
+        #[cfg(feature = "dsh")]
+        let _bridge_token = if bridge.is_some() {
+            bridge::BridgeToken::publish(&self.socket_path, &self.auth_token)?
+        } else {
+            None
+        };
         let service = BotApiServiceServer::with_interceptor(
             self.service,
             kanon_transport::AuthInterceptor::new(self.auth_token),
         );
-        tonic::transport::Server::builder()
-            .add_service(service)
+        let server = tonic::transport::Server::builder().add_service(service);
+        #[cfg(feature = "dsh")]
+        let server = server.add_optional_service(bridge);
+        server
             .serve_with_incoming_shutdown(listener.incoming(), shutdown_signal)
             .await?;
 

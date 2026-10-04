@@ -14,7 +14,7 @@ mod turn;
 use async_trait::async_trait;
 use std::sync::Arc;
 
-use kanon_proto::v1::{ToolCallRequest, tool_call_request, tool_call_response};
+use crate::agent::tool_execution::TurnTools;
 
 use crate::agent::{Agent, AgentConfig, AgentHook, AgentOutput, AgentTool, TurnOptions};
 use crate::compaction::{COMPACTION_INSTRUCTION, CompactionPolicy, ends_cleanly, summary_block};
@@ -28,10 +28,7 @@ use crate::memory::{InMemory, Memory, MemorySnapshot};
 use crate::prompt::Persona;
 use crate::session::{SessionWriteGuard, SessionWriters};
 use crate::stop::{StopSignal, unless_stopped};
-use crate::tool_router::{
-    ExecutedToolCall, ToolAttachment, ToolHost, ensure_unique_tool_names, json_to_prost_struct,
-    prost_struct_to_json, resolve_tools,
-};
+use crate::tool_router::{ToolAttachment, ToolHost, ensure_unique_tool_names};
 use dashmap::DashSet;
 use tokio_stream::StreamExt;
 
@@ -85,23 +82,6 @@ struct PreparedCompaction {
     prefix: Vec<ChatMessage>,
 }
 
-/// The execution target captured with the definition advertised for this turn.
-enum ToolTarget {
-    Native(usize),
-    Plugin {
-        host_index: usize,
-        plugin_id: String,
-        tool_name: String,
-    },
-}
-
-/// Definitions and dispatch share one snapshot even when a host refreshes its metadata mid-turn.
-#[derive(Default)]
-struct TurnTools {
-    definitions: Vec<ToolDefinition>,
-    targets: std::collections::HashMap<String, ToolTarget>,
-}
-
 impl BuiltinAgent {
     /// Returns a new fluent builder for constructing a [`BuiltinAgent`].
     pub fn builder(name: impl Into<String>, provider: Arc<dyn LlmProvider>) -> AgentBuilder {
@@ -142,31 +122,10 @@ impl BuiltinAgent {
         hosts: &[Arc<dyn ToolHost>],
         without_tools: bool,
     ) -> Result<TurnTools, AgentError> {
-        let mut tools = TurnTools::default();
         if !self.config.tool_calling || without_tools {
-            return Ok(tools);
+            return Ok(TurnTools::default());
         }
-        for (index, native) in self.tools.iter().enumerate() {
-            let definition = native.definition();
-            tools
-                .targets
-                .insert(definition.name.clone(), ToolTarget::Native(index));
-            tools.definitions.push(definition);
-        }
-        for resolved in resolve_tools(hosts)? {
-            tools.targets.insert(
-                resolved.definition.name.clone(),
-                ToolTarget::Plugin {
-                    host_index: resolved.host_index,
-                    plugin_id: resolved.plugin_id,
-                    tool_name: resolved.tool_name,
-                },
-            );
-            tools.definitions.push(resolved.definition);
-        }
-        // Never publish a map in which insertion silently selected one of two same-named tools.
-        ensure_unique_tool_names(tools.definitions.iter().map(|tool| tool.name.as_str()))?;
-        Ok(tools)
+        TurnTools::collect(&self.tools, hosts)
     }
 }
 
@@ -245,22 +204,6 @@ impl Agent for BuiltinAgent {
         )
         .await
     }
-}
-
-/// Removes tool-produced filesystem paths from a tool result before it enters memory.
-///
-/// A tool that generated a file reports the attachment (which the pipeline delivers to the platform)
-/// and, very often, the path in its textual result. The path is node-internal: leaving it in the
-/// transcript leaks an absolute location to the model and to anyone reading the console, so it is
-/// replaced by a marker — the file itself is still sent.
-fn redact_tool_paths(mut text: String, paths: &[String]) -> String {
-    for path in paths {
-        let trimmed = path.trim();
-        if !trimmed.is_empty() && text.contains(trimmed) {
-            text = text.replace(trimmed, "[attachment]");
-        }
-    }
-    text
 }
 
 /// Joins the reasoning collected across one turn's rounds, or `None` when there was none.

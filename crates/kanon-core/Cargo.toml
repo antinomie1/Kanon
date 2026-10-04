@@ -7,7 +7,7 @@ description = "Microkernel engine, pipeline router, and process supervisor for K
 
 [features]
 default = []
-dsh = ["kanon-llm/dsh"]
+dsh = ["kanon-llm/dsh", "kanon-proto/dsh"]
 
 [dependencies]
 kanon-proto = { path = "../kanon-proto" }

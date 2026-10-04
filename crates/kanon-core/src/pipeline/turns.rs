@@ -81,6 +81,15 @@ pub(crate) struct TurnGuard<'a> {
 }
 
 impl TurnGuard<'_> {
+    /// Instance captured at admission, independent of a backend's session-id format.
+    #[cfg(feature = "dsh")]
+    pub(crate) fn instance(&self) -> Option<String> {
+        self.turns
+            .lock()
+            .get(&self.id)
+            .and_then(|turn| turn.instance.clone())
+    }
+
     /// The signal to run the turn under, see [`kanon_llm::with_stop_signal`].
     pub(crate) fn signal(&self) -> StopSignal {
         self.signal.clone()

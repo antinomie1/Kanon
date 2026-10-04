@@ -110,6 +110,15 @@ pub enum ConversationBackend {
 }
 
 impl ConversationBackend {
+    /// Stable backend identity, independent of its provider or current model.
+    pub fn id(&self) -> &'static str {
+        match self {
+            Self::Builtin(_) => crate::agent::BUILTIN_AGENT,
+            #[cfg(feature = "dsh")]
+            Self::Dsh(_) => "dsh",
+        }
+    }
+
     /// Returns the builtin runtime only when this route actually selected it.
     pub fn builtin(&self) -> Option<&Arc<dyn Agent>> {
         match self {

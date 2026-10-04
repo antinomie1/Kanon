@@ -1,0 +1,39 @@
+syntax = "proto3";
+package kanon.agent.v1;
+
+import "kanon/v1/plugin.proto";
+import "google/protobuf/struct.proto";
+
+// Optional external-agent bridge on the existing authenticated core IPC endpoint.
+// The trusted DSH plugin supplies its actual execution identity, never model arguments.
+service AgentBridgeService {
+  rpc DescribeTurn(DescribeTurnRequest) returns (DescribeTurnResponse);
+  rpc CallTool(AgentToolRequest) returns (AgentToolResponse);
+}
+
+message DescribeTurnRequest {
+  string session_id = 1;
+  string request_id = 2;
+}
+
+message DescribeTurnResponse {
+  // Valid only while this exact Kanon turn owns the session.
+  string lease_id = 1;
+  repeated kanon.plugin.v1.ToolMeta tools = 2;
+  // Kanon's tool catalog and transport-mode instructions; DSH owns prompt assembly.
+  string instructions = 3;
+}
+
+message AgentToolRequest {
+  string session_id = 1;
+  string lease_id = 2;
+  string call_id = 3;
+  string name = 4;
+  google.protobuf.Struct arguments = 5;
+}
+
+message AgentToolResponse {
+  bool success = 1;
+  string text = 2;
+  // Attachments stay in Kanon for platform delivery; paths never cross into DSH.
+}

@@ -39,15 +39,7 @@ impl BuiltinAgent {
         // conversation the provider accepts, and one that does not ask the model to redo the work
         // that just failed.
         match self
-            .answer(
-                session_id,
-                media,
-                hosts,
-                options,
-                &system_prompt,
-                tools,
-                None,
-            )
+            .answer(session_id, media, options, &system_prompt, tools, None)
             .await
         {
             Ok(output) => Ok(output),
@@ -99,7 +91,6 @@ impl BuiltinAgent {
         &self,
         session_id: &str,
         media: Option<Vec<ContentPart>>,
-        hosts: &[Arc<dyn ToolHost>],
         options: TurnOptions,
         system_prompt: &str,
         tools: TurnTools,
@@ -274,285 +265,25 @@ impl BuiltinAgent {
             // Execute each requested tool call. A turn that ends inside the round leaves the calls
             // after it unanswered; `close_failed_turn` gives each of them a result.
             for call in response.tool_calls {
-                if stop.as_ref().is_some_and(StopSignal::is_stopped) {
-                    return Err(AgentError::Stopped);
-                }
-
-                // Hook: tool call permission / safety check
-                let mut permitted = true;
-                for hook in &self.hooks {
-                    if !hook.on_before_tool_call(session_id, &call).await? {
-                        permitted = false;
-                        break;
+                let output = tools
+                    .execute(session_id, &call, &request.tools, &self.hooks)
+                    .await?;
+                for attachment in output.attachments {
+                    if !attachments.contains(&attachment) {
+                        attachments.push(attachment);
                     }
                 }
-                if !permitted {
-                    tracing::info!(agent = %self.name, tool = %call.name, "Tool call was vetoed by agent hook");
-                    let veto_msg =
-                        format!("Tool '{}' execution was denied by agent policy", call.name);
-                    self.memory
-                        .push_message(session_id, ChatMessage::tool_response(&call.id, &veto_msg))
-                        .await?;
-                    executed_tools.push(ExecutedToolCall {
-                        call_id: call.id,
-                        tool_name: call.name.clone(),
-                        plugin_id: "policy".to_string(),
-                        host_id: "agent_hook".to_string(),
-                        success: false,
-                    });
-                    continue;
-                }
-
-                // Validate once before either dispatch path. Dropping non-object arguments at
-                // the protobuf boundary would turn a malformed call into an empty object; native
-                // tools must receive the same contract. Keep the paired failure in history so
-                // the model can correct its arguments on the next round.
-                if !call.arguments.is_object() {
-                    let err_msg = format!(
-                        "Tool '{}' arguments must be a JSON object; correct the arguments and retry",
-                        call.name
-                    );
-                    for hook in &self.hooks {
-                        hook.on_after_tool_call(session_id, &call, &err_msg, false)
-                            .await?;
-                    }
-                    self.memory
-                        .push_message(session_id, ChatMessage::tool_response(&call.id, &err_msg))
-                        .await?;
-                    executed_tools.push(ExecutedToolCall {
-                        call_id: call.id,
-                        tool_name: call.name,
-                        plugin_id: "validation".to_string(),
-                        host_id: "agent".to_string(),
-                        success: false,
-                    });
-                    if self.config.stop_on_tool_failure {
-                        return Err(GatewayError::InvalidResponse(err_msg).into());
-                    }
-                    continue;
-                }
-
-                // Only dispatch a name advertised in this request, using the turn's original
-                // target. A hook may hide a tool, but cannot alias it to a different provider.
-                let target = tools
-                    .targets
-                    .get(&call.name)
-                    .filter(|_| request.tools.iter().any(|tool| tool.name == call.name));
-
-                // Branch A: the captured native tool index is stable for the agent's lifetime.
-                if let Some(ToolTarget::Native(index)) = target {
-                    let native_tool = &self.tools[*index];
-                    tracing::debug!(agent = %self.name, tool = %call.name, "Executing native tool in-process");
-                    let Some(result) = unless_stopped(
-                        stop.as_ref(),
-                        native_tool.call(session_id, call.arguments.clone()),
+                executed_tools.push(output.record);
+                self.memory
+                    .push_message(
+                        session_id,
+                        ChatMessage::tool_response(&call.id, &output.text),
                     )
-                    .await
-                    else {
-                        return Err(AgentError::Stopped);
-                    };
-                    let (result_str, is_success) = match result {
-                        Ok(output) => {
-                            // Same rule as plugin attachments: deduplicated, in execution
-                            // order, and only from calls that succeeded.
-                            for attachment in output.attachments {
-                                if !attachments.contains(&attachment) {
-                                    attachments.push(attachment);
-                                }
-                            }
-                            (output.text, true)
-                        }
-                        Err(err) => (format!("Error: {err}"), false),
-                    };
-
-                    executed_tools.push(ExecutedToolCall {
-                        call_id: call.id.clone(),
-                        tool_name: call.name.clone(),
-                        plugin_id: "native".to_string(),
-                        host_id: "in_process".to_string(),
-                        success: is_success,
-                    });
-
-                    for hook in &self.hooks {
-                        hook.on_after_tool_call(session_id, &call, &result_str, is_success)
-                            .await?;
-                    }
-
-                    self.memory
-                        .push_message(
-                            session_id,
-                            ChatMessage::tool_response(&call.id, &result_str),
-                        )
-                        .await?;
-
-                    if !is_success && self.config.stop_on_tool_failure {
-                        return Err(AgentError::ToolFailed(format!(
-                            "Native tool '{}' failed: {result_str}",
-                            call.name
-                        )));
-                    }
-                    continue;
-                }
-
-                // Branch B: send the original host-local name to its captured provider.
-                let (target_host, plugin_id, actual_tool_name) = match target {
-                    Some(ToolTarget::Plugin {
-                        host_index,
-                        plugin_id,
-                        tool_name,
-                    }) => (&hosts[*host_index], plugin_id, tool_name.clone()),
-                    _ => {
-                        tracing::warn!(tool = %call.name, "Requested tool not declared by any native tool or active host");
-                        let err_msg = format!("Tool '{}' not registered", call.name);
-                        // A call that was attempted is reported finished, failed, so observers
-                        // can pair it with its start; the RPC-failure path below does the same.
-                        // (A vetoed call never started, so it reports nothing.)
-                        for hook in &self.hooks {
-                            hook.on_after_tool_call(session_id, &call, &err_msg, false)
-                                .await?;
-                        }
-                        self.memory
-                            .push_message(
-                                session_id,
-                                ChatMessage::tool_response(&call.id, &err_msg),
-                            )
-                            .await?;
-                        executed_tools.push(ExecutedToolCall {
-                            call_id: call.id,
-                            tool_name: call.name.clone(),
-                            plugin_id: "unknown".to_string(),
-                            host_id: "unknown".to_string(),
-                            success: false,
-                        });
-                        if self.config.stop_on_tool_failure {
-                            return Err(AgentError::ToolNotFound(call.name));
-                        }
-                        continue;
-                    }
-                };
-
-                // Translate the validated object directly, without a string round trip.
-                let structured_args = json_to_prost_struct(&call.arguments)
-                    .expect("tool arguments were validated as an object");
-
-                let tool_req = ToolCallRequest {
-                    call_id: call.id.clone(),
-                    tool_name: actual_tool_name,
-                    session_id: session_id.to_string(),
-                    payload: Some(tool_call_request::Payload::StructuredArgs(structured_args)),
-                    // The host attaches the platform event of the turn; the agent never knew it.
-                    context: None,
-                };
-
-                tracing::debug!(
-                    agent = %self.name,
-                    tool = %call.name,
-                    host_id = %target_host.host_id(),
-                    plugin_id = %plugin_id,
-                    "Agent dispatching tool RPC to host"
-                );
-
-                let Some(result) =
-                    unless_stopped(stop.as_ref(), target_host.call_tool(tool_req)).await
-                else {
-                    return Err(AgentError::Stopped);
-                };
-                match result {
-                    Ok(resp) => {
-                        // Decode before accepting attachments or recording success. A malformed
-                        // result still needs a paired tool response so the session can continue.
-                        let decoded = if !resp.success {
-                            Err(resp.error_message)
-                        } else {
-                            match resp.payload {
-                                Some(tool_call_response::Payload::StructuredResult(s)) => {
-                                    prost_struct_to_json(s)
-                                        .map(|value| value.to_string())
-                                        .map_err(|error| {
-                                            format!("invalid structured tool result: {error}")
-                                        })
-                                }
-                                Some(tool_call_response::Payload::RawBytes(bytes)) => {
-                                    Ok(String::from_utf8_lossy(&bytes).to_string())
-                                }
-                                None => Ok("{}".to_string()),
-                            }
-                        };
-                        let is_success = decoded.is_ok();
-                        let result_str = decoded.unwrap_or_else(|error| format!("Error: {error}"));
-                        executed_tools.push(ExecutedToolCall {
-                            call_id: call.id.clone(),
-                            tool_name: call.name.clone(),
-                            plugin_id: plugin_id.clone(),
-                            host_id: target_host.host_id().to_string(),
-                            success: is_success,
-                        });
-
-                        // Attachment paths are delivery metadata, not conversation content: they are
-                        // collected here so the textual result can be redacted below. A filesystem
-                        // path must never reach the model (or the transcript) through the tool result.
-                        let redactions: Vec<String> = resp
-                            .attachments
-                            .iter()
-                            .filter_map(|attachment| attachment.file_path.clone())
-                            .collect();
-
-                        // Attachments of a failed call are discarded with it: a partial image from
-                        // an errored tool would be sent to the user as if it were a result.
-                        if is_success {
-                            for attachment in resp.attachments {
-                                let attachment = ToolAttachment::from_proto(attachment);
-                                if !attachments.contains(&attachment) {
-                                    attachments.push(attachment);
-                                }
-                            }
-                        }
-
-                        let result_str = redact_tool_paths(result_str, &redactions);
-
-                        for hook in &self.hooks {
-                            hook.on_after_tool_call(session_id, &call, &result_str, is_success)
-                                .await?;
-                        }
-
-                        self.memory
-                            .push_message(
-                                session_id,
-                                ChatMessage::tool_response(&call.id, &result_str),
-                            )
-                            .await?;
-
-                        if !is_success && self.config.stop_on_tool_failure {
-                            tracing::warn!(tool = %call.name, "Tool reported failure and stop_on_tool_failure is enabled");
-                            return Err(AgentError::ToolFailed(format!(
-                                "Plugin tool '{}' failed: {result_str}",
-                                call.name
-                            )));
-                        }
-                    }
-                    Err(status) => {
-                        tracing::error!(tool = %call.name, error = %status, "Tool RPC execution failed");
-                        executed_tools.push(ExecutedToolCall {
-                            call_id: call.id.clone(),
-                            tool_name: call.name.clone(),
-                            plugin_id: plugin_id.clone(),
-                            host_id: target_host.host_id().to_string(),
-                            success: false,
-                        });
-
-                        let err_msg = format!("RPC Error: {}", status.message());
-                        for hook in &self.hooks {
-                            hook.on_after_tool_call(session_id, &call, &err_msg, false)
-                                .await?;
-                        }
-                        self.memory
-                            .push_message(session_id, ChatMessage::tool_response(&call.id, err_msg))
-                            .await?;
-
-                        if self.config.stop_on_tool_failure {
-                            return Err(AgentError::from(status));
-                        }
-                    }
+                    .await?;
+                if self.config.stop_on_tool_failure
+                    && let Some(error) = output.failure
+                {
+                    return Err(error);
                 }
             }
         }
@@ -702,7 +433,6 @@ impl BuiltinAgent {
         let stop = crate::stop::current();
         let agent = self.clone();
         let session_id = session_id.to_string();
-        let hosts = hosts.to_vec();
         let (tx, rx) = tokio::sync::mpsc::channel(32);
         tokio::spawn(async move {
             // The producer, not the SSE reader, owns the writer through failure recovery and
@@ -711,7 +441,6 @@ impl BuiltinAgent {
             let turn = agent.answer(
                 &session_id,
                 media,
-                &hosts,
                 options,
                 &system_prompt,
                 tools,

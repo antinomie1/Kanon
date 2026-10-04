@@ -479,9 +479,14 @@ impl ReadSkillTool {
             .and_then(|value| value.as_str())
             .ok_or_else(|| "Missing required argument 'name'".to_string())?;
 
-        let instance_id = crate::instance::BotInstance::instance_id_from_session(session_id);
-        let allowed =
-            allowed_skills(&self.store, &self.toggles, &self.instances, instance_id).await;
+        let instance_id = crate::instance::tool_instance(session_id);
+        let allowed = allowed_skills(
+            &self.store,
+            &self.toggles,
+            &self.instances,
+            instance_id.as_deref(),
+        )
+        .await;
 
         // Enforced here as well as in the catalog: the model may invent a skill name, and an
         // instance that disabled a skill must not receive it through a guessed name.
@@ -533,9 +538,14 @@ impl kanon_llm::agent::AgentHook for SkillCatalogHook {
         if !tools.iter().any(|tool| tool.name == "read_skill") {
             return Ok(());
         }
-        let instance_id = crate::instance::BotInstance::instance_id_from_session(session_id);
-        let allowed =
-            allowed_skills(&self.store, &self.toggles, &self.instances, instance_id).await;
+        let instance_id = crate::instance::tool_instance(session_id);
+        let allowed = allowed_skills(
+            &self.store,
+            &self.toggles,
+            &self.instances,
+            instance_id.as_deref(),
+        )
+        .await;
 
         // Debug-level: the console shows the effective catalog through /api/v1/skills, but an
         // operator chasing "why does the model not know my skill" needs the request-time view.
