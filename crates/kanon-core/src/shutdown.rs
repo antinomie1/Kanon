@@ -6,6 +6,38 @@
 //! fresh node then spawns *new* hosts, so two processes serve every message and the user sees
 //! duplicate replies while nothing looks broken in the console.
 
+/// Time reserved for HTTP/IPC connections after conversation work has drained.
+const SERVER_DRAIN_GRACE: std::time::Duration = std::time::Duration::from_secs(2);
+
+/// Finishes a signalled server without letting a stalled request prevent process shutdown.
+///
+/// Callers signal graceful shutdown first and keep dependent services alive until this returns.
+/// The runtime closes remaining connection tasks when the process exits; aborting the serving
+/// task after this grace lets the caller finish stopping adapters and owned child processes.
+pub async fn finish_server<E: std::fmt::Display>(
+    name: &str,
+    mut task: tokio::task::JoinHandle<Result<(), E>>,
+) -> Result<(), String> {
+    let result = match tokio::time::timeout(SERVER_DRAIN_GRACE, &mut task).await {
+        Ok(result) => result,
+        Err(_) => {
+            tracing::warn!(
+                server = name,
+                "Server drain deadline reached; forcing shutdown"
+            );
+            task.abort();
+            let result = task.await;
+            if result.as_ref().is_err_and(|error| error.is_cancelled()) {
+                return Ok(());
+            }
+            result
+        }
+    };
+    result
+        .map_err(|error| format!("{name} task failed: {error}"))?
+        .map_err(|error| format!("{name} failed: {error}"))
+}
+
 /// Completes when the process is asked to stop, by SIGINT or (on Unix) SIGTERM.
 pub async fn shutdown_signal() {
     #[cfg(unix)]

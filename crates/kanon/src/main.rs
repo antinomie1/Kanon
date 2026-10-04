@@ -427,17 +427,25 @@ async fn main() -> StartupResult<()> {
     let _ = api_shutdown_tx.send(());
     engine.drain(pipeline_worker, outbound_dispatcher).await;
     let _ = core_shutdown_tx.send(());
-    if let Err(err) = core_task.await? {
-        tracing::error!(error = %err, "Core IPC server terminated with an error");
-    }
-    if let Err(err) = api_task.await? {
-        tracing::error!(error = %err, "Management gateway terminated with an error");
+    let (core_result, api_result) = tokio::join!(
+        kanon_core::shutdown::finish_server("Core IPC server", core_task),
+        kanon_core::shutdown::finish_server("Management gateway", api_task),
+    );
+    for error in [&core_result, &api_result]
+        .into_iter()
+        .filter_map(|result| result.as_ref().err())
+    {
+        tracing::error!(%error, "Server shutdown failed");
     }
 
     for (platform, error) in supervisor.adapters().stop_all().await {
         tracing::warn!(platform = %platform, error = %error, "Adapter failed to stop cleanly");
     }
     supervisor.stop_all().await?;
+
+    // A server failure must not skip adapter/host cleanup, but still makes process failure visible.
+    core_result?;
+    api_result?;
 
     tracing::info!("Kanon node shut down gracefully");
     Ok(())

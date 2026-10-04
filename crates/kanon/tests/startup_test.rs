@@ -19,7 +19,7 @@ impl Drop for Node {
 }
 
 #[test]
-fn api_serves_and_shutdown_cancels_a_pending_plugin_install() {
+fn api_serves_and_shutdown_cancels_pending_clients_and_plugin_install() {
     let root = tempfile::tempdir().unwrap();
     let plugin = root.path().join("plugins/slow");
     std::fs::create_dir_all(&plugin).unwrap();
@@ -101,6 +101,17 @@ fn api_serves_and_shutdown_cancels_a_pending_plugin_install() {
         std::thread::sleep(Duration::from_millis(25));
     }
 
+    // A client can stop sending a request body indefinitely. The 100-continue response proves
+    // the server is already waiting in its body reader before shutdown is requested.
+    let mut stalled = TcpStream::connect(address).unwrap();
+    stalled
+        .set_read_timeout(Some(Duration::from_secs(2)))
+        .unwrap();
+    stalled.write_all(b"POST /api/v1/chat/completions HTTP/1.1\r\nHost: localhost\r\nContent-Type: application/json\r\nContent-Length: 100\r\nExpect: 100-continue\r\n\r\n").unwrap();
+    let mut response = [0; 128];
+    let read = stalled.read(&mut response).unwrap();
+    assert!(String::from_utf8_lossy(&response[..read]).contains("100 Continue"));
+
     assert!(
         Command::new("kill")
             .args(["-TERM", &node.0.id().to_string()])
@@ -116,7 +127,7 @@ fn api_serves_and_shutdown_cancels_a_pending_plugin_install() {
         }
         assert!(
             Instant::now() < deadline,
-            "shutdown waited for optional dependency installation"
+            "shutdown waited for optional dependency installation or an unfinished HTTP body"
         );
         std::thread::sleep(Duration::from_millis(25));
     }

@@ -365,7 +365,7 @@ struct Sandbox {
     host: Arc<ManagedHost>,
     worker: JoinHandle<()>,
     dispatcher: Option<JoinHandle<()>>,
-    server: JoinHandle<()>,
+    server: JoinHandle<Result<(), String>>,
     server_shutdown: oneshot::Sender<()>,
     next_event: u64,
     /// Holds sockets, databases and plugin data; removed when the sandbox is dropped.
@@ -478,11 +478,12 @@ impl Sandbox {
         let core_server = CoreIpcServer::new(&core_sock, service);
         let (server_shutdown, shutdown_rx) = oneshot::channel();
         let server = tokio::spawn(async move {
-            let _ = core_server
+            core_server
                 .run(async move {
                     let _ = shutdown_rx.await;
                 })
-                .await;
+                .await
+                .map_err(|error| error.to_string())
         });
         // The host connects back to the core socket during its handshake.
         for _ in 0..50 {
@@ -628,7 +629,9 @@ impl Sandbox {
             println!("[sandbox] stopping the plugin host failed: {err}");
         }
         let _ = self.server_shutdown.send(());
-        let _ = self.server.await;
+        if let Err(error) = kanon_core::shutdown::finish_server("Sandbox core", self.server).await {
+            println!("[sandbox] {error}");
+        }
     }
 }
 
