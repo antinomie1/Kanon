@@ -47,12 +47,14 @@ class ToolSignature:
         parameters: JSON Schema of the model's arguments (an object schema).
         arguments: Names passed as keyword arguments, in signature order.
         wants_event: Whether the handler takes an ``event`` parameter.
+        optional_without_default: Omitted nullable parameters that must receive ``None``.
     """
 
     description: str
     parameters: Dict[str, Any]
     arguments: List[str] = field(default_factory=list)
     wants_event: bool = False
+    optional_without_default: List[str] = field(default_factory=list)
 
 
 def infer_tool(handler: Callable) -> ToolSignature:
@@ -73,9 +75,14 @@ def infer_tool(handler: Callable) -> ToolSignature:
     required: List[str] = []
     arguments: List[str] = []
     wants_event = False
+    optional_without_default: List[str] = []
     for index, (name, parameter) in enumerate(signature.parameters.items()):
         if index == 0 and name in ("self", "cls"):
             continue
+        if parameter.kind is parameter.POSITIONAL_ONLY:
+            raise TypeError(
+                f"tool {function.__name__}: positional-only parameter {name!r} cannot be passed by keyword"
+            )
         if name == EVENT_PARAMETER:
             wants_event = True
             continue
@@ -96,8 +103,11 @@ def infer_tool(handler: Callable) -> ToolSignature:
         has_default = parameter.default is not inspect.Parameter.empty
         if has_default and _is_json_scalar(parameter.default) and parameter.default is not None:
             schema["default"] = parameter.default
-        if not has_default and not optional:
-            required.append(name)
+        if not has_default:
+            if optional:
+                optional_without_default.append(name)
+            else:
+                required.append(name)
         properties[name] = schema
         arguments.append(name)
 
@@ -109,6 +119,7 @@ def infer_tool(handler: Callable) -> ToolSignature:
         parameters=parameters,
         arguments=arguments,
         wants_event=wants_event,
+        optional_without_default=optional_without_default,
     )
 
 

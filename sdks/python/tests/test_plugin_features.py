@@ -179,6 +179,21 @@ class TestCommandGroups(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(commands["notes"].description, "Personal notes")
         self.assertEqual([s.name for s in commands["notes"].subcommands], ["list"])
 
+    async def test_omitted_nullable_tool_arguments_match_the_advertised_schema(self) -> None:
+        class Nullable(Plugin):
+            @tool
+            def lookup(self, key: Optional[str], count: int = 3) -> dict:
+                return {"key": key, "count": count}
+
+        plugin = Nullable()
+        schema = MessageToDict(plugin.meta().tools[0].parameters)
+        self.assertNotIn("key", schema.get("required", []))
+        for arguments, expected in [({}, {"key": None, "count": 3}),
+                                    ({"key": "tea", "count": 5}, {"key": "tea", "count": 5})]:
+            response = await plugin.on_call_tool(tool_call("lookup", arguments))
+            self.assertTrue(response.success, response.error_message)
+            self.assertEqual(MessageToDict(response.structured_result), expected)
+
     async def test_the_subcommand_handler_sees_only_its_own_arguments(self) -> None:
         plugin = Features()
         response = await plugin.on_execute_command(request("todo", "add buy milk"))

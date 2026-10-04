@@ -84,7 +84,12 @@ class TestInferTool(unittest.TestCase):
 
         def unsupported(when: complex) -> None: ...
 
-        for handler, needle in [(unannotated, "'city'"), (varargs, "*cities"), (unsupported, "complex")]:
+        def positional(city: str, /) -> None: ...
+
+        for handler, needle in [
+            (unannotated, "'city'"), (varargs, "*cities"), (unsupported, "complex"),
+            (positional, "positional-only"),
+        ]:
             with self.subTest(handler=handler.__name__):
                 with self.assertRaises(TypeError) as raised:
                     infer_tool(handler)

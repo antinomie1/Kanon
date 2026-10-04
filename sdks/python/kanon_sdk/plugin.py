@@ -418,7 +418,10 @@ class _Tool:
         if unknown:
             # Said plainly so the model can correct itself instead of seeing a Python error.
             raise TypeError(f"unexpected arguments {unknown}; expected {self.signature.arguments}")
-        kwargs = dict(args)
+        # The schema advertises nullable parameters as optional even without a Python default.
+        # Supply None only for those omissions, preserving explicit values and declared defaults.
+        kwargs = dict.fromkeys(self.signature.optional_without_default)
+        kwargs.update(args)
         if self.signature.wants_event:
             kwargs["event"] = event
         result = self.handler(**kwargs)
