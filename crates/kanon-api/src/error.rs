@@ -169,3 +169,27 @@ impl From<kanon_proto::json::NonFiniteNumber> for ApiError {
         ApiError::Upstream(format!("Invalid plugin payload: {err}"))
     }
 }
+
+#[cfg(feature = "dsh")]
+impl From<kanon_llm::dsh::DshError> for ApiError {
+    /// Maps native failures consistently for management and console operations.
+    fn from(error: kanon_llm::dsh::DshError) -> Self {
+        use kanon_llm::dsh::DshError;
+        match error {
+            DshError::Config(message) => ApiError::BadRequest(message),
+            DshError::Timeout(operation) => ApiError::Timeout(format!("DSH {operation} timed out")),
+            DshError::Stopped => ApiError::Conflict("DSH turn stopped".into()),
+            DshError::Remote { code, message } if code.contains("not-found") => {
+                ApiError::NotFound(message)
+            }
+            DshError::Remote { code, message }
+                if code.contains("conflict")
+                    || code.contains("busy")
+                    || code == "session/writer-held" =>
+            {
+                ApiError::Conflict(message)
+            }
+            other => ApiError::Upstream(other.to_string()),
+        }
+    }
+}

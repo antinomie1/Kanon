@@ -6,7 +6,7 @@
 use super::*;
 use axum::extract::{Path, Query};
 use axum::routing::post;
-use kanon_llm::dsh::{DshClient, DshConfig, DshError, DshSession, DshSnapshot};
+use kanon_llm::dsh::{DshClient, DshConfig, DshSession, DshSnapshot};
 use serde_json::Value;
 use std::sync::Arc;
 
@@ -40,23 +40,6 @@ fn client(state: &ApiState) -> Result<Arc<DshClient>, ApiError> {
         .agent_factory()
         .dsh_client()
         .ok_or_else(|| ApiError::Unavailable("DSH connection is not configured".into()))
-}
-
-fn remote_error(error: DshError) -> ApiError {
-    match error {
-        DshError::Config(message) => ApiError::BadRequest(message),
-        DshError::Timeout(operation) => ApiError::Timeout(format!("DSH {operation} timed out")),
-        DshError::Stopped => ApiError::Conflict("DSH turn stopped".into()),
-        DshError::Remote { code, message } if code.contains("not-found") => {
-            ApiError::NotFound(message)
-        }
-        DshError::Remote { code, message }
-            if code.contains("conflict") || code.contains("busy") =>
-        {
-            ApiError::Conflict(message)
-        }
-        other => ApiError::Upstream(other.to_string()),
-    }
 }
 
 /// Returns only connection coordinates; never reads the browser credential file.
@@ -96,7 +79,7 @@ async fn settings(State(state): State<ApiState>) -> Result<Json<Value>, ApiError
         .settings()
         .await
         .map(Json)
-        .map_err(remote_error)
+        .map_err(ApiError::from)
 }
 
 #[derive(Deserialize)]
@@ -115,7 +98,7 @@ async fn update_settings(
         .update_settings(&request.namespace, request.patch, request.revision)
         .await
         .map(Json)
-        .map_err(remote_error)
+        .map_err(ApiError::from)
 }
 
 async fn models(State(state): State<ApiState>) -> Result<Json<Value>, ApiError> {
@@ -123,7 +106,7 @@ async fn models(State(state): State<ApiState>) -> Result<Json<Value>, ApiError> 
         .models()
         .await
         .map(Json)
-        .map_err(remote_error)
+        .map_err(ApiError::from)
 }
 
 async fn sessions(State(state): State<ApiState>) -> Result<Json<Vec<DshSession>>, ApiError> {
@@ -131,7 +114,7 @@ async fn sessions(State(state): State<ApiState>) -> Result<Json<Vec<DshSession>>
         .sessions()
         .await
         .map(Json)
-        .map_err(remote_error)
+        .map_err(ApiError::from)
 }
 
 async fn snapshot(
@@ -142,7 +125,7 @@ async fn snapshot(
         .snapshot(&id)
         .await
         .map(Json)
-        .map_err(remote_error)
+        .map_err(ApiError::from)
 }
 
 #[derive(Deserialize)]
@@ -161,7 +144,7 @@ async fn history(
         .page(&id, page.through_seq, page.before_seq)
         .await
         .map(Json)
-        .map_err(remote_error)
+        .map_err(ApiError::from)
 }
 
 async fn attachment(
@@ -172,7 +155,7 @@ async fn attachment(
         .attachment(&id, &attachment)
         .await
         .map(Json)
-        .map_err(remote_error)
+        .map_err(ApiError::from)
 }
 
 #[derive(Deserialize)]
@@ -197,7 +180,7 @@ async fn select_model(
         .select_model(&id, &model.provider, &model.model, model.effort.as_deref())
         .await
         .map(Json)
-        .map_err(remote_error)
+        .map_err(ApiError::from)
 }
 
 #[derive(Deserialize)]
@@ -215,7 +198,7 @@ async fn rename(
         .rename_session(&id, &title.title)
         .await
         .map(Json)
-        .map_err(remote_error)
+        .map_err(ApiError::from)
 }
 
 async fn stop(
@@ -225,7 +208,7 @@ async fn stop(
     client(&state)?
         .stop_session(&id)
         .await
-        .map_err(remote_error)?;
+        .map_err(ApiError::from)?;
     Ok(Json(serde_json::json!({"stopped": true})))
 }
 
@@ -242,7 +225,7 @@ async fn archive(
         .archive_session(&id)
         .await
         .map(Json)
-        .map_err(remote_error)
+        .map_err(ApiError::from)
 }
 
 async fn restore(
@@ -253,5 +236,5 @@ async fn restore(
         .restore_session(&id)
         .await
         .map(Json)
-        .map_err(remote_error)
+        .map_err(ApiError::from)
 }

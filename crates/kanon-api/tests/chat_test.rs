@@ -123,6 +123,22 @@ async fn chat_completion_validates_request() {
     .await;
     assert_eq!(status, 400);
 
+    // An instance journal cannot discard its target and inherit node-wide tool permissions.
+    let (status, body) = send_json(
+        &app,
+        Method::POST,
+        "/api/v1/chat/completions",
+        Some(json!({
+            "session_id": "instance:bot:webui:chat#0", "message": "hello", "tools": true
+        })),
+    )
+    .await;
+    assert_eq!(
+        status, 400,
+        "unscoped instance journal was accepted: {body}"
+    );
+    assert_eq!(error_code(&body), "bad_request");
+
     // Partial explicit coordinates must not fall back to the configured provider; an endpoint
     // also needs a real model instead of an invented "default" sent to the remote service.
     for fields in [

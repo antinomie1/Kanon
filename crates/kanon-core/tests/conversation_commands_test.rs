@@ -120,7 +120,10 @@ async fn start(dir: &Path) -> Node {
         registry,
         personas,
         persona_store,
-        chat: format!("instance:{}:group:1:user:1#", instance.id),
+        chat: format!(
+            "instance:{}:chat:2:qq:private:u:7:group:1:6:user:1#",
+            instance.id
+        ),
     }
 }
 
@@ -173,7 +176,7 @@ async fn command(node: &Node, id: &str, text: &str) -> String {
 /// The session the chat's next message goes to.
 async fn current_session(node: &Node) -> String {
     let instance = node.registry.list().await.remove(0);
-    instance.conversation_session_id("group:1:user:1")
+    instance.conversation_session_id("chat:2:qq:private:u:7:group:1:6:user:1")
 }
 
 #[tokio::test]

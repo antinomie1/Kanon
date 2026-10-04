@@ -52,6 +52,7 @@ class ChatStore {
 
   /** Session the node keeps this conversation in. */
   get sessionId(): string {
+    if (this.target.startsWith('i:')) return `instance:${this.target.slice(2)}:webui:chat#0`;
     return this.target ? `webui:chat:${this.target}` : 'webui:chat';
   }
 

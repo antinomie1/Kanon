@@ -224,6 +224,11 @@ pub struct BotInstance {
     /// Per-MCP-server overrides; absent identifiers inherit the node-wide switch.
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     pub mcp: HashMap<String, ItemPolicy>,
+    /// Whether chat routes include platform and unambiguous component lengths.
+    /// Older single-adapter catalogs retain their existing histories; once qualified, routing
+    /// never reverts when an adapter is removed. New instances always use qualified routes.
+    #[serde(default)]
+    pub(crate) platform_sessions: bool,
     /// Conversation key -> current session generation, chosen by `/new`, `/switch` and `/del`.
     ///
     /// Kept on the instance so a restart does not silently continue the conversation an operator
@@ -548,9 +553,12 @@ impl InstanceRegistry {
     pub async fn open(path: impl Into<PathBuf>) -> Result<Self, InstanceError> {
         let path = path.into();
         let mut instances = HashMap::new();
+        let mut migrated_routing = false;
         if let Some(document) = Self::read_document(&path)? {
             for instance in document.instances {
+                let previously_qualified = instance.platform_sessions;
                 let instance = prepare_instance(instance)?;
+                migrated_routing |= instance.platform_sessions != previously_qualified;
                 let id = instance.id.clone();
                 if instances.insert(id.clone(), instance).is_some() {
                     return Err(InstanceError::Invalid(format!(
@@ -568,6 +576,9 @@ impl InstanceRegistry {
 
         // Refuse to run on an ambiguous document instead of routing arbitrarily.
         registry.validate_all().await?;
+        if migrated_routing {
+            Self::persist(registry.path.as_deref(), &*registry.instances.read().await)?;
+        }
         Ok(registry)
     }
 
@@ -694,6 +705,10 @@ impl InstanceRegistry {
         }
         let name = normalize_name(&draft.name)?;
         let mut candidate = build_instance(id.to_string(), name, draft)?;
+        // Preserve legacy single-platform continuity. Adding a second adapter permanently
+        // qualifies future routes; an ambiguous old history is never assigned by guesswork.
+        candidate.platform_sessions =
+            instances[id].platform_sessions || candidate.adapters.len() > 1;
         // Session generations are runtime state owned by the instance, never by a form submit.
         candidate.session_generations = instances
             .get(id)

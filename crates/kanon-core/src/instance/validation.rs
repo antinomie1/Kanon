@@ -45,6 +45,7 @@ pub(super) fn build_instance(
         plugins: draft.plugins,
         skills: draft.skills,
         mcp: draft.mcp,
+        platform_sessions: true,
         session_generations: HashMap::new(),
     })
 }
@@ -110,6 +111,7 @@ pub(super) fn prepare_instance(mut instance: BotInstance) -> Result<BotInstance,
         .transpose()
         .map_err(InstanceError::Invalid)?;
 
+    instance.platform_sessions |= adapters.len() > 1;
     instance.adapters = adapters;
     Ok(instance)
 }

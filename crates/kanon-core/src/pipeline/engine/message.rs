@@ -89,17 +89,34 @@ pub(crate) fn conversation_key(event: &PipelineEventRequest, shared: bool) -> St
     }
 }
 
-/// Resolves the conversation once for commands, history access, workers and model turns.
-/// Simulation has its own platform-qualified namespace; identical group IDs on two adapters
-/// must never share a mailbox or transcript. Existing assistant session IDs remain unchanged.
+/// Resolves one identity for commands, history, workers and model turns.
+/// New instances qualify both platform and component lengths so group/user ids containing
+/// separators cannot collide. Legacy single-adapter catalogs keep their original routing.
 pub(crate) fn instance_conversation_key(
     event: &PipelineEventRequest,
     instance: Option<&crate::instance::BotInstance>,
 ) -> String {
-    let key = conversation_key(event, shares_session(instance, event));
-    if instance.is_some_and(|instance| {
+    let shared = shares_session(instance, event);
+    let simulation = instance.is_some_and(|instance| {
         instance.conversation_mode == crate::simulation::ConversationMode::Simulation
-    }) {
+    });
+    if instance.is_some_and(|instance| instance.platform_sessions) {
+        let mode = if simulation { "simulation" } else { "chat" };
+        let kind = ConversationKind::from_metadata(event.metadata.as_ref()).as_str();
+        let scope = if shared { "g" } else { "u" };
+        let sender = if shared { "" } else { event.sender_id.as_str() };
+        return format!(
+            "{mode}:{}:{}:{kind}:{scope}:{}:{}:{}:{}",
+            event.platform.len(),
+            event.platform,
+            event.channel_id.len(),
+            event.channel_id,
+            sender.len(),
+            sender
+        );
+    }
+    let key = conversation_key(event, shared);
+    if simulation {
         format!(
             "simulation:{}:{}:{key}",
             event.platform.len(),

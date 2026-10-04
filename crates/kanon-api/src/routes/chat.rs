@@ -118,7 +118,7 @@ impl From<ExecutedToolCall> for ToolCallView {
 /// Serves a sandbox completion in JSON or SSE form.
 async fn completions(
     State(state): State<ApiState>,
-    Json(request): Json<ChatCompletionRequest>,
+    Json(mut request): Json<ChatCompletionRequest>,
 ) -> Result<Response, ApiError> {
     let session_id = request.session_id.trim().to_string();
     if session_id.is_empty() {
@@ -165,6 +165,23 @@ async fn completions(
     {
         return dsh::completion(state, client, request).await;
     }
+    // Both coordinates must agree, including when the caller omits instance_id. Otherwise
+    // an instance journal could run with node-wide tool permissions by dropping its target.
+    if kanon_core::instance::BotInstance::instance_id_from_session(&session_id)
+        != instance.as_ref().map(|instance| instance.id.as_str())
+    {
+        return Err(ApiError::BadRequest(
+            "Console session must belong to the selected instance".into(),
+        ));
+    }
+    if let Some(instance) = &instance {
+        if request.model.is_none() && request.protocol.is_none() && request.base_url.is_none() {
+            request.model = instance.model.clone();
+        }
+        if request.persona_id.is_none() {
+            request.persona_id = instance.effective_persona_id();
+        }
+    }
     let agent = resolve_agent(&state, &request)?;
     MetricsRegistry::incr(&state.observability().metrics.chat_completions);
 
@@ -179,13 +196,13 @@ async fn completions(
             kanon_core::supervisor::filter_plugin_hosts(
                 state.supervisor().get_all_hosts().await,
                 Some(state.plugin_state().as_ref()),
-                None,
+                instance.as_ref(),
             )
             .await
             .into_iter()
             .map(|host| host as Arc<dyn kanon_llm::tool_router::ToolHost>),
         );
-        hosts.extend(state.mcp().hosts_for_instance(None).await);
+        hosts.extend(state.mcp().hosts_for_instance(instance.as_ref()).await);
     }
 
     if request.stream {
@@ -323,10 +340,9 @@ fn map_agent_error(err: AgentError) -> ApiError {
         AgentError::Gateway(gateway) => {
             ApiError::Upstream(format!("Model provider failure: {gateway}"))
         }
-        // Console turns carry no stop signal today; should one be stopped, it is a conflict with
-        // whoever stopped it, not a server fault.
         #[cfg(feature = "dsh")]
-        AgentError::Dsh(error) => ApiError::Upstream(error.to_string()),
+        AgentError::Dsh(error) => ApiError::from(error),
+        // A deliberate stop conflicts with this completion rather than indicating a server fault.
         AgentError::Stopped => ApiError::Conflict("The turn was stopped before it finished".into()),
     }
 }

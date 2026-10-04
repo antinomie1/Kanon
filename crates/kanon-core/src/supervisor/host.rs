@@ -411,7 +411,6 @@ impl ManagedHost {
 }
 
 #[tonic::async_trait]
-#[tonic::async_trait]
 impl kanon_llm::tool_router::ToolHost for ManagedHost {
     fn host_id(&self) -> &str {
         &self.host_id

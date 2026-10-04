@@ -26,7 +26,6 @@ use crate::memory::Memory;
 ///
 /// Implemented by `ManagedHost` in `kanon-core` and mock hosts in unit tests.
 #[async_trait]
-#[async_trait::async_trait]
 pub trait ToolHost: Send + Sync {
     /// Unique identifier of the host process (e.g. `host_demo_rust`).
     fn host_id(&self) -> &str;

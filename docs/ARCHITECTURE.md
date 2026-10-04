@@ -123,6 +123,7 @@ kanon/
 │   ├── kanon-core/                 # 核心事件循环、消息流水线、Supervisor 进程监管 (库)
 │   ├── kanon-storage/              # 嵌入式持久化支持与插件安全目录隔离管理器 (库)
 │   ├── kanon-llm/                  # LLM 多端点路由、静态优先提示词分层、仅追加会话记忆与缓存友好的上下文压缩、Tool Calling 状态机 (库)
+│   ├── kanon-dsh/                  # Optional standalone deepseek-harness client library
 │   ├── kanon-api/                  # Axum RESTful API 与实时 WebSocket 驱动 (库，供独立前端连接)
 │   └── kanon-dev/                  # 官方专用 CLI：项目管理、模板脚手架、开发热重载与沙盒测试
 ├── sdks/
@@ -299,18 +300,60 @@ SDK 只是协议的封装：三语言提供同一套能力（命令、正则触�
 ## 8. LLM 编排与 Tool Calling 状态机规范 (LLM Orchestration Spec)
 
 ### 8.1 核心职责与架构定位
-Rust 核心全权主导 LLM 的生命周期与推理编排，确保高并发下的 Token 预算控制与流式吞吐：
+Rust 核心管理平台入口、权限与投递；所选 agent 管理自己的模型推理、上下文与会话：
 - **对话参与模式**：实例可在助手模式与[仿真对话模式](./SIMULATION.md)之间选择。仿真模式独立于人设，按批观察消息，通过 `conversation_say` / `conversation_wait` / `conversation_leave` 决定发言、监听或退出，复用原有 Agent、会话写锁与停止信号。群会话共享，普通模型结束语不直接发送，时限与发言数可配置。
-- **Agent 抽象**：流水线、控制台聊天与插件网关从不直接驱动模型，而是把一轮对话交给 `kanon_llm::Agent`（trait：`run_message_with` / `run_stream` / `compact_session`，以及 `config`、`provider`、`memory`；`run_message` 是不带 `TurnOptions` 的便捷形式，`TurnOptions` 可限制工具轮次或不提供工具），并只依据其 `AgentOutput` 行事。节点目前只有一个实现——内置的 `BuiltinAgent`（`kanon-llm/src/agent/builtin/mod.rs`，基于 `LlmProvider` 的工具循环）；将来换用外部 Agent SDK 时只需新增实现并在 `AgentFactory` 中构建，流水线不变。实现必须遵守同一会话契约：历史仅追加、失败轮次留下可续接的历史、停止信号触发时及时结束、在每次模型请求前与每次工具调用前后调用 `AgentHook`。
+- **Agent 后端**：`AgentFactory::conversation_backend` 返回 `builtin` 或 `dsh`。Builtin 通过 `kanon_llm::Agent` 驱动本地工具循环；DSH 通过独立的可选 crate `kanon-dsh` 驱动原生运行时，拥有模型、设置、历史、记忆、上下文与会话。两者复用 `TurnTools` 的工具目录、验证与执行逻辑，禁止实现第二份工具调度器。详见 [AGENT_BACKENDS.md](./AGENT_BACKENDS.md)。
 - **插件进入智能体的轮次**：流水线回答一条消息的每一轮都由 `PipelineEngine::run_conversation_turn` 驱动——发出 `AGENT_BEGIN` / `AGENT_DONE` 事件、登记 `/stop`，并在 `with_turn` 任务作用域内运行，作用域记录入站消息与该实例启用的插件宿主。节点为每个 Agent 注册 `PluginAgentHook`（`kanon-core/src/pipeline/agent_hook.rs`），它从作用域中找到插件：模型请求前调用 `OnLlmRequest` 改写系统提示（见 8.6），工具调用前后发出 `TOOL_CALL` / `TOOL_RESULT`。作用域是任务本地的而不是 Agent 的字段，因为同一个 Agent 同时服务多个聊天的轮次；作用域之外（控制台聊天、插件的私有运行、后台压缩）从不调用插件，插件在钩子里调用模型因此不会递归。
 - **插件调用智能体 (`RunAgent`)**：插件可以让节点的智能体回答一个提示（`kanon-core/src/pipeline/agent_run.rs`）。在某个聊天的对话中运行时，它就是该对话的一轮，同样经 `run_conversation_turn`，且像其他外部写入者一样只在能立即拿到会话写锁时进行；默认则用 `AgentFactory::private_agent` 构建一次性 Agent（独立的内存记忆、不压缩、无插件钩子作用域），会话名为 `plugin:<plugin_id>:<n>`，结束即丢弃。两种运行都不执行 Bash。
 - **统一模型网关**：内置支持 OpenAI-compatible、DeepSeek、Claude、Ollama 等多端点协议，支持动态权重与故障自动重试。
 - **全局会话上下文管理 (Session Memory)**：
-  - 基于 `channel_id:sender_id` 分配会话上下文，实例会话键为 `instance:<id>:<会话>#<代数>`：一个会话（私聊、群成员或共享的群）可以有多段对话，每段是一个代数，实例记录当前代数；`/new` 开新对话，`/ls`、`/switch`、`/del` 列出、切换、删除（见 9.5 的“多段对话”）。
+  - 新实例按平台、会话类型、共享范围与带长度的频道/发送者标识分配上下文，避免跨平台与分隔符碰撞；旧单适配器实例保留原有续接。实例会话键为 `instance:<id>:<会话>#<代数>`：一个会话（私聊、群成员或共享的群）可以有多段对话，每段是一个代数，实例记录当前代数；`/new` 开新对话，`/ls`、`/switch`、`/del` 列出、切换、删除（见 9.5 的“多段对话”）。
   - 会话记忆**仅追加**、不做滑动窗口：上下文增长到模型窗口的一定比例时，才做一次缓存友好的摘要压缩（见 8.7）。
   - **会话持久化**：历史、摘要与会话记录（人设绑定、计数器、状态）统一落盘至 `./data/sessions.db`，重启节点或编辑实例后对话原地续接（见 8.8）。
 - **人设 (Persona)**：人设是放在每次请求最前面的**固定文本**，由运营者在控制台「人设」页增删（`data/personas.json`）；节点只自带一个极简的基础助手（`assistant`，只读、不可删除，未选择其他人设时使用）。人设不再支持模板变量，也不再自带预设库（见 8.6）。
 - **模型选择**：提供商只是端点（协议、地址、密钥）；节点只有**一个全局默认模型**（`<provider>/<model-id>`），实例可单独覆盖。不存在“默认提供商/当前生效提供商”这类第二个决定（见 9.2）。
+
+### 8.1.1 Optional native agent boundary
+
+The `dsh` Cargo feature is explicit on both product binaries. The independent `kanon-dsh`
+crate has no Kanon dependencies and supplies no executable. Default product builds compile
+only the builtin agent; `--workspace` deliberately checks the optional library as well.
+Selecting an unavailable backend fails before builtin provider or persona lookup.
+
+| Responsibility | Owner for a DSH instance |
+| --- | --- |
+| Platform identity, instance access and delivery | Kanon core |
+| Backend connection coordinates | Kanon system configuration |
+| Model catalog and session model selection | DSH |
+| Persona, settings schema, redactions and revisions | DSH |
+| Journal, attachments, memory and compaction | DSH |
+| Current instance-to-chat generation pointer | Kanon instance catalog |
+| Plugin, MCP, skill and native tool execution | Shared `TurnTools` |
+
+The native bridge is a plugin installed in DSH's profile. It uses that profile's service
+registries, with no second DSH package scope. Preparation installs only the core-admitted
+tool catalog and checks the actual native prompt source before each step.
+
+```mermaid
+sequenceDiagram
+    participant Core as Kanon pipeline
+    participant Native as DSH native loop
+    participant Tools as Kanon shared executor
+    Core->>Native: Prepare scoped lease, then submit current input
+    Native->>Tools: Call permitted tool with execution identity
+    Tools-->>Native: Validated result without local attachment paths
+    Native-->>Core: Durable completion for the exact admitted request
+    Core->>Core: Deliver explicit speech and permitted attachments
+```
+
+Core retains only active capabilities and routing identities. The native journal is never
+copied into builtin SessionStore. Human history views exclude model-only replacement copies;
+archived journals remain readable and continue to reserve their generation numbers.
+
+Console ids bind to their encoded instance target. Private runs own preparation, execution and
+archive through caller disconnect. Shutdown closes bridge admission, signals native owners and
+waits for remote cleanup concurrently with the existing event grace, including disconnected
+callers and clients replaced by a configuration edit. Failures remain observable.
 
 ### 8.2 模型推理通道的可见性边界 (Reasoning Visibility)
 

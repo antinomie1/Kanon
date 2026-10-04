@@ -168,7 +168,7 @@ async fn clearing_instance_personas_restores_the_explicit_session_choice_after_r
         )
         .await
         .unwrap();
-    let session = instance.conversation_session_id("group:1:user:1");
+    let session = instance.conversation_session_id("chat:2:qq:private:u:7:group:1:6:user:1");
     node.sessions.set_persona(&session, "concise").unwrap();
 
     let first = say(&node, "e1", "first").await;
@@ -259,7 +259,7 @@ async fn a_queued_turn_reads_the_current_instance_persona_after_acquiring_its_wr
         )
         .await
         .unwrap();
-    let session = instance.conversation_session_id("group:1:user:1");
+    let session = instance.conversation_session_id("chat:2:qq:private:u:7:group:1:6:user:1");
     let writing = node.sessions.try_write(&session).unwrap();
     let turn = node.engine.process_event(event("e1", "hello"));
     tokio::pin!(turn);
@@ -321,7 +321,10 @@ async fn a_restarted_node_continues_the_conversation_it_was_having() {
         node.sessions.set_persona(&session_id, "pirate").unwrap();
         (session_id, id)
     };
-    assert_eq!(session, format!("instance:{id}:group:1:user:1#1"));
+    assert_eq!(
+        session,
+        format!("instance:{id}:chat:2:qq:private:u:7:group:1:6:user:1#1")
+    );
 
     // ---- the process restarts ----
     let node = start(dir.path()).await;
@@ -334,7 +337,9 @@ async fn a_restarted_node_continues_the_conversation_it_was_having() {
         .map(|meta| meta.session_key)
         .collect();
     assert!(listed.contains(&session), "{listed:?}");
-    assert!(listed.contains(&format!("instance:{id}:group:1:user:1#0")));
+    assert!(listed.contains(&format!(
+        "instance:{id}:chat:2:qq:private:u:7:group:1:6:user:1#0"
+    )));
     assert_eq!(
         node.sessions.get_persona(&session).as_deref(),
         Some("pirate")

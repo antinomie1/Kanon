@@ -383,7 +383,7 @@ async fn start(dir: &Path) -> Node {
         plugin,
         rewriter,
         supervisor,
-        session: instance.conversation_session_id("group:1:user:1"),
+        session: instance.conversation_session_id("chat:2:qq:private:u:7:group:1:6:user:1"),
     }
 }
 

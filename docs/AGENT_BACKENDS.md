@@ -95,6 +95,22 @@ retired journals. Archives remain visible in the native UI and reserve their gen
 Chat management operations share a fail-fast routing lock; publication checks its instance snapshot
 under the catalog write lock. Startup restores builtin personas only for builtin instances.
 
+New instances use platform-qualified, length-delimited routing keys with distinct private, group
+and channel identities. Older single-adapter catalogs preserve their existing conversation ids.
+Adding a second adapter permanently enables qualified routing, including after that adapter is
+removed. Ambiguous old histories are retained for inspection and are never assigned to a platform
+by guesswork. The existing session continuity and instance suites verify persistence.
+
+Console requests must match their encoded instance target. Builtin console sessions also retain
+instance identity so the shared skill/tool selector observes the same permissions as ingress.
+Native conflicts, including `session/writer-held`, use one HTTP error mapping across management
+and completions instead of being misreported as upstream failures.
+
+Shutdown closes bridge admission and cancels native work before releasing IPC dependencies.
+Clients whose cleanup outlives a disconnected caller or an endpoint replacement remain retained
+until idle. Cleanup shares the existing aggregate event grace; it adds no serial shutdown delay.
+Timeouts are logged explicitly so an unreachable remote endpoint cannot be mistaken for a clean stop.
+
 Human history retains original append messages and excludes model-only context replacement copies.
 Neither the legacy text projection nor the console transcript is used as model context. Images are
 read through DSH's session-authorized attachment endpoint, using the durable `attachmentId`.
@@ -123,6 +139,34 @@ shared. Native frozen model requests are never replaced with a builtin context a
   tests and native bridge checking/build pass; WebUI checking reports zero errors or warnings,
   and its production build retains the existing bundle-size advisory.
 
-The native probes do not contact external models or real IM platforms. Final workspace tests and
-the general bug audit remain in progress, including the three baseline notice assertions and
-cross-platform assistant routing. Windows runtime behavior requires execution on Windows.
+The notice assertions include the required conversation metadata prefix. Duplicate async-trait
+expansions were removed. Routing fixtures use the actual qualified keys, including the
+stop-before-writer case. Console validation also rejects an instance journal without its target,
+preventing node-wide tool permissions from being applied to that instance's context.
+
+Final verification on Linux:
+
+| Check | Result |
+| --- | --- |
+| `cargo test --workspace --no-fail-fast -j 1` | 953 passed, 0 failed, 24 existing ignored |
+| `cargo test --workspace --all-features --no-fail-fast -j 1` | 953 passed, 0 failed, 24 existing ignored |
+| `cargo check --workspace -j 1` | 0 errors, 0 warnings |
+| `cargo check --workspace --all-features -j 1` | 0 errors, 0 warnings |
+| Rust test attributes, before and after | 968 in both versions |
+| Python SDK suite | 73 passed; test function count unchanged |
+| TypeScript SDK suite | 39 passed; test function count unchanged |
+| WebUI `bun run check` | 0 errors, 0 warnings |
+| WebUI `bun run build` | Passed; existing bundle-size advisory |
+| Native bridge `bun run check` / `bun run build` | Passed |
+| Default product dependency tree | No `kanon-dsh` dependency |
+| Tracked source lengths / inline Rust tests | No source at 1000+ lines; no tests in `src/` |
+| `cargo fmt --all --check` / `git diff --check` | Passed |
+
+Workspace suites run after building the Rust example host fixtures and installing the Python
+demo's local environment with the native package tool. No additional repository test functions
+or ignored tests were introduced. The native deployment also verifies model discovery, explicit
+missing-settings-provider errors, cancellation during node drain and rejection of later admission.
+
+The native probes use a deterministic local model adapter and do not contact external models or
+real IM platforms. Settings writes require a native Loader/settings composition and were not
+exercised in that deployment. Windows runtime behavior requires execution on Windows.

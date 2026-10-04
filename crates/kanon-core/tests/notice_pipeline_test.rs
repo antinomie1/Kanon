@@ -197,8 +197,14 @@ async fn an_enabled_notice_is_answered_even_under_a_mention_only_policy() {
     );
 
     let turns = turns.lock().unwrap();
-    assert_eq!(turns[0], "[事件] 小明 戳了戳你");
-    assert_eq!(turns[1], "[事件] 小红 加入了群聊");
+    assert_eq!(
+        turns[0],
+        "[会话信息：平台=\"qq\"，会话类型=群聊；发送者（未提供显示名）] [事件] 小明 戳了戳你"
+    );
+    assert_eq!(
+        turns[1],
+        "[会话信息：平台=\"qq\"，会话类型=群聊；发送者（未提供显示名）] [事件] 小红 加入了群聊"
+    );
 }
 
 #[tokio::test]
@@ -236,12 +242,18 @@ async fn a_recall_of_a_seen_message_is_noted_on_the_next_turn_only() {
 
     let turns = turns.lock().unwrap();
     assert_eq!(turns.len(), 4, "the recall itself is not a turn: {turns:?}");
-    assert_eq!(turns[1], "路过");
+    assert_eq!(
+        turns[1],
+        "[会话信息：平台=\"qq\"，会话类型=群聊；发送者（未提供显示名）] 路过"
+    );
     assert_eq!(
         turns[2],
-        "[通知] 小明撤回了之前的消息「我的密码是 hunter2」 刚才发错了"
+        "[会话信息：平台=\"qq\"，会话类型=群聊；发送者（未提供显示名）] [通知] 小明撤回了之前的消息「我的密码是 hunter2」 刚才发错了"
     );
-    assert_eq!(turns[3], "在吗");
+    assert_eq!(
+        turns[3],
+        "[会话信息：平台=\"qq\"，会话类型=群聊；发送者（未提供显示名）] 在吗"
+    );
 }
 
 #[tokio::test]
@@ -264,7 +276,12 @@ async fn a_recall_of_an_unseen_message_reveals_nothing() {
         .process_event(message("m2", "u1", "@bot 你好", true))
         .await;
 
-    assert_eq!(*turns.lock().unwrap(), vec!["@bot 你好".to_string()]);
+    assert_eq!(
+        *turns.lock().unwrap(),
+        vec![
+            "[会话信息：平台=\"qq\"，会话类型=群聊；发送者（未提供显示名）] @bot 你好".to_string()
+        ]
+    );
 }
 
 #[tokio::test]

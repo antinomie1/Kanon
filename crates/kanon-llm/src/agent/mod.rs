@@ -460,7 +460,6 @@ pub trait AgentHook: Send + Sync {
 pub struct NoopHost;
 
 #[async_trait]
-#[async_trait::async_trait]
 impl ToolHost for NoopHost {
     fn host_id(&self) -> &str {
         "noop"

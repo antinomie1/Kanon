@@ -54,3 +54,9 @@ Private journals are archived after completion, stop or preparation failure. Kan
 contributions use native context snapshots when a complete DSH system prompt excludes sections;
 disabling both contribution surfaces fails explicitly. See [the integration record](../../docs/AGENT_BACKENDS.md)
 for ownership, lifecycle rules and the scope of native deployment verification.
+
+Native settings access requires `dsh-settings`, `dsh-config-editor` and
+`dsh-api-settings-controller` in the selected DSH profile. Configure that profile through
+DSH's native Loader so schema and revision writes
+remain authoritative. A missing native settings provider is reported explicitly, without using
+Kanon's builtin settings as a substitute.

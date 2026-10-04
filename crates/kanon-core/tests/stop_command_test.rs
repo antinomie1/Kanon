@@ -155,7 +155,9 @@ async fn an_admins_stop_ends_the_running_turn_and_the_chat_goes_on() {
     engine.drain(tokio::spawn(async {}), dispatcher).await;
 
     let history = memory
-        .get_messages(&instance.conversation_session_id("conversation:user"))
+        .get_messages(
+            &instance.conversation_session_id("chat:9:stop-test:private:u:12:conversation:4:user"),
+        )
         .await
         .expect("stored history");
     let texts: Vec<Option<&str>> = history
@@ -218,7 +220,8 @@ async fn stop_cancels_a_turn_waiting_for_the_session_writer() {
         admins: vec![format!("{PLATFORM}:admin")],
         ..Default::default()
     })));
-    let session_id = instance.conversation_session_id("conversation:user");
+    let session_id =
+        instance.conversation_session_id("chat:9:stop-test:private:u:12:conversation:4:user");
     let writer = sessions.try_write(&session_id).unwrap();
     let mut turn =
         Box::pin(engine.process_event(message("waiting", "user", "work").event.unwrap()));

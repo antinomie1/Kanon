@@ -15,9 +15,28 @@ impl PipelineEngine {
         use_tools: bool,
         native_model: Option<&str>,
     ) -> Result<ToolRouterOutput, AgentError> {
-        if !session_id.starts_with("kanon-console-") {
+        // The durable id carries only its routing target. A caller cannot adopt another
+        // instance's native context by supplying a different instance_id for the same journal.
+        let route = session_id.strip_prefix("kanon-console-").and_then(|rest| {
+            let uuid = rest.get(..36)?;
+            if !uuid.bytes().enumerate().all(|(index, byte)| {
+                if matches!(index, 8 | 13 | 18 | 23) {
+                    byte == b'-'
+                } else {
+                    byte.is_ascii_hexdigit()
+                }
+            }) || rest.get(36..37)? != "-"
+            {
+                return None;
+            }
+            rest.get(37..)
+        });
+        let expected = instance_id
+            .map(|id| format!("i%3A{id}"))
+            .unwrap_or_default();
+        if route != Some(expected.as_str()) {
             return Err(AgentError::InvalidRequest(
-                "DSH console sessions must use the kanon-console- namespace".into(),
+                "DSH console session must encode its selected instance target".into(),
             ));
         }
         let factory = self.agent_factory().ok_or_else(|| {

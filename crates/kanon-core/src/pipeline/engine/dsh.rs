@@ -66,6 +66,7 @@ impl PipelineEngine {
         let guard = self.dsh_bridge.register(
             session_id,
             BridgeTurn {
+                client: client.clone(),
                 request_id: request_id.clone(),
                 lease_id: lease_id.clone(),
                 instance: running.instance(),

@@ -499,6 +499,30 @@ async fn restored_instances_normalize_policy_without_resetting_session_generatio
     let policy = restored.command_policy.unwrap();
     assert_eq!(policy.admins, ["onebot:42"]);
     assert!(policy.access.contains_key("help"));
+    assert_eq!(
+        serde_json::to_value(registry.get("bot").await.unwrap()).unwrap()["platform_sessions"],
+        false
+    );
+    registry
+        .update("bot", draft("Bot", true, &["onebot", "telegram"]), None)
+        .await
+        .unwrap();
+    registry
+        .update("bot", draft("Bot", true, &["onebot"]), None)
+        .await
+        .unwrap();
+    let reloaded = InstanceRegistry::open(&path)
+        .await
+        .unwrap()
+        .get("bot")
+        .await
+        .unwrap();
+    assert_eq!(
+        serde_json::to_value(&reloaded).unwrap()["platform_sessions"],
+        true,
+        "removing an adapter must not reopen an ambiguous legacy transcript"
+    );
+    assert_eq!(reloaded.session_generation("c2c:user"), 9);
 }
 
 #[tokio::test]

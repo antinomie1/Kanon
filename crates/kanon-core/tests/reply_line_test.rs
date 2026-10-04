@@ -190,7 +190,10 @@ async fn delivered_lines(
         .expect("worker succeeds");
     engine.drain(tokio::spawn(async {}), dispatcher).await;
     let history = memory
-        .get_messages(&instance.conversation_session_id("conversation:sender"))
+        .get_messages(
+            &instance
+                .conversation_session_id("chat:9:line-test:private:u:12:conversation:6:sender"),
+        )
         .await
         .expect("stored history");
     assert_eq!(

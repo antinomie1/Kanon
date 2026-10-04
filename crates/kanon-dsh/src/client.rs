@@ -39,6 +39,17 @@ impl DshClient {
         &self.config
     }
 
+    /// Whether this endpoint has no admitted mutation or cleanup owner remaining.
+    pub fn is_idle(&self) -> bool {
+        self.writers.is_idle()
+    }
+
+    /// Waits for already admitted owners to finish remote cancellation and retirement.
+    /// Admission must be closed by the caller first; this never retries remote mutations.
+    pub async fn wait_idle(&self) {
+        self.writers.wait_idle().await;
+    }
+
     /// Calls one public unary method with its exact named argument object.
     ///
     /// No mutation is retried automatically: a lost response may follow an accepted commit.

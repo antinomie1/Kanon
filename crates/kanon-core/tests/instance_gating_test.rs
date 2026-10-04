@@ -195,7 +195,7 @@ async fn a_disabled_instance_still_answers_nothing() {
 #[tokio::test]
 async fn an_enabled_instance_answers_and_namespaces_the_session() {
     let registry = Arc::new(InstanceRegistry::default());
-    let id = instance(&registry, true, &["qqofficial"]).await;
+    let id = instance(&registry, true, &["qqofficial", "telegram"]).await;
     let (engine, calls, memory) = harness(registry).await;
 
     let result = engine
@@ -214,7 +214,7 @@ async fn an_enabled_instance_answers_and_namespaces_the_session() {
     assert_eq!(calls.load(Ordering::SeqCst), 1);
 
     // The conversation lives in a session namespaced by the instance.
-    let session_id = format!("instance:{id}:group:1:user:1#0");
+    let session_id = format!("instance:{id}:chat:10:qqofficial:private:u:7:group:1:6:user:1#0");
     let history = memory
         .get_messages(&session_id)
         .await
@@ -222,6 +222,38 @@ async fn an_enabled_instance_answers_and_namespaces_the_session() {
     assert!(
         !history.is_empty(),
         "the instance session must hold the turn"
+    );
+    // Equal ids on another platform and ambiguous legacy separators are separate transcripts.
+    assert!(matches!(
+        engine
+            .process_event(event("telegram", "other-platform", "elsewhere"))
+            .await,
+        PipelineResult::LlmReplied { .. }
+    ));
+    let mut separated = event("qqofficial", "separators", "different chat");
+    separated.channel_id = "group".into();
+    separated.sender_id = "1:user:1".into();
+    assert!(matches!(
+        engine.process_event(separated).await,
+        PipelineResult::LlmReplied { .. }
+    ));
+    let mut grouped = event("qqofficial", "same-id-group", "group context");
+    grouped.metadata = kanon_llm::tool_router::json_to_prost_struct(&serde_json::json!({
+        "kanon.conversation_kind": "group", "kanon.bot_mentioned": true,
+    }));
+    assert!(matches!(
+        engine.process_event(grouped).await,
+        PipelineResult::LlmReplied { .. }
+    ));
+    let stored = memory
+        .list_sessions(&format!("instance:{id}:"))
+        .await
+        .unwrap();
+    assert_eq!(stored.len(), 4);
+    assert_eq!(
+        memory.get_messages(&session_id).await.unwrap(),
+        history,
+        "foreign platform and separator aliases must not append to this transcript"
     );
 }
 
@@ -235,7 +267,7 @@ async fn new_command_rotates_the_session_without_touching_the_model() {
     engine
         .process_event(event("qqofficial", "evt-4", "你好"))
         .await;
-    let first_session = format!("instance:{id}:group:1:user:1#0");
+    let first_session = format!("instance:{id}:chat:10:qqofficial:private:u:7:group:1:6:user:1#0");
     let first_history = memory
         .get_messages(&first_session)
         .await
@@ -264,7 +296,10 @@ async fn new_command_rotates_the_session_without_touching_the_model() {
         1,
         "the built-in command must never reach the LLM"
     );
-    assert_eq!(session_id, format!("instance:{id}:group:1:user:1#1"));
+    assert_eq!(
+        session_id,
+        format!("instance:{id}:chat:10:qqofficial:private:u:7:group:1:6:user:1#1")
+    );
 
     // The next message continues in the new session, while the old one is retained intact.
     engine
