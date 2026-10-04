@@ -24,12 +24,20 @@ const PLUGIN_SOURCE = `
 export default class {
   meta() {
     return {
-      id: "${PLUGIN_ID}", name: "Config", version: "0.1.0", author: "", commands: [], tools: [],
+      id: "${PLUGIN_ID}", name: "Config", version: "0.1.0", author: this.reloading ? "reloading" : "ready", commands: [], tools: [],
       description: JSON.stringify(this.ctx ? this.ctx.config : null),
     };
   }
   async onLoad(ctx) { this.ctx = ctx; }
-  async onConfigReload(config) { if (config.reject) throw new Error("rejected"); }
+  async onConfigReload(config) {
+    if (config.wait) {
+      this.reloading = true;
+      await new Promise((resolve) => { this.releaseReload = resolve; });
+      this.reloading = false;
+    }
+    if (config.reject) throw new Error("rejected");
+  }
+  async onInvokeAction() { this.releaseReload?.(); return { success: true }; }
   async onUnload() {}
 }
 `;
@@ -112,6 +120,49 @@ test("stored and reloaded configuration reach the plugin", async () => {
     });
     assert.equal(retried.success, true, retried.error_message);
     assert.equal(await description(), JSON.stringify({ city: "Tokyo" }));
+
+    // Core cancels a reload when its transaction times out. A callback still running in the
+    // host must neither commit that abandoned version nor race the corrected retry.
+    let pendingCall: grpc.ClientUnaryCall | undefined;
+    const cancelled = assert.rejects(new Promise((resolve, reject) => {
+      pendingCall = client.ReloadPluginConfig({
+        plugin_id: PLUGIN_ID,
+        config: toProtoStruct({ city: "abandoned", wait: true }),
+        version: 3,
+      }, (error: grpc.ServiceError | null, value: any) => error ? reject(error) : resolve(value));
+    }), { code: grpc.status.CANCELLED });
+    for (let attempt = 0; attempt < 100; attempt++) {
+      if ((await unary(client, "GetPluginMeta", {})).plugins[0].author === "reloading") break;
+      await sleep(10);
+    }
+    assert.equal((await unary(client, "GetPluginMeta", {})).plugins[0].author, "reloading");
+    pendingCall!.cancel();
+    await cancelled;
+    for (let attempt = 0; attempt < 100 && await description() !== JSON.stringify({ city: "Tokyo" }); attempt++) {
+      await sleep(10);
+    }
+    assert.equal(await description(), JSON.stringify({ city: "Tokyo" }));
+    const overlapping = await unary(client, "ReloadPluginConfig", {
+      plugin_id: PLUGIN_ID,
+      config: toProtoStruct({ city: "too soon" }),
+      version: 3,
+    });
+    assert.equal(overlapping.success, false);
+    assert.match(overlapping.error_message, /still running/);
+    assert.equal(Number(overlapping.applied_version), 2);
+    await unary(client, "InvokeAction", { plugin_id: PLUGIN_ID, action: "release_reload" });
+    for (let attempt = 0; attempt < 100; attempt++) {
+      if ((await unary(client, "GetPluginMeta", {})).plugins[0].author === "ready") break;
+      await sleep(10);
+    }
+    assert.equal(await description(), JSON.stringify({ city: "Tokyo" }));
+    const corrected = await unary(client, "ReloadPluginConfig", {
+      plugin_id: PLUGIN_ID,
+      config: toProtoStruct({ city: "Oslo" }),
+      version: 3,
+    });
+    assert.equal(corrected.success, true, corrected.error_message);
+    assert.equal(await description(), JSON.stringify({ city: "Oslo" }));
     client.close();
   } finally {
     host.kill("SIGKILL");

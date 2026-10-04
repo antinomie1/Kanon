@@ -90,21 +90,26 @@ test("recovers from a transient failure without stopping", async () => {
   assert.deepEqual(reasons, []);
 });
 
-test("stopping the watchdog halts probing", async () => {
+test("serializes in-flight probes and ignores their failure after stop", async () => {
   let pings = 0;
+  let failProbe: ((error: Error) => void) | undefined;
+  const reasons: string[] = [];
   const stop = startCoreWatchdog(
     {
       ping: async () => {
         pings += 1;
+        await new Promise<void>((_resolve, reject) => { failProbe = reject; });
       },
     },
-    { intervalMs: 5, onLost: () => {}, log: () => {} },
+    { intervalMs: 5, failuresBeforeStop: 1, onLost: (reason) => reasons.push(reason), log: () => {} },
   );
 
   await sleep(40);
   stop();
-  const afterStop = pings;
+  assert.equal(pings, 1, "an unfinished probe must not start another RPC");
+  failProbe!(new Error("channel closed during shutdown"));
   await sleep(60);
 
-  assert.equal(pings, afterStop, "no probe may run after stop()");
+  assert.equal(pings, 1, "no probe may run after stop()");
+  assert.deepEqual(reasons, [], "a stopped watchdog must not trigger another shutdown");
 });

@@ -49,9 +49,11 @@ export function startCoreWatchdog(
 
   let failures = 0;
   let stopped = false;
+  let probing = false;
 
   const timer = setInterval(() => {
-    if (stopped) return;
+    if (stopped || probing) return;
+    probing = true;
 
     void target
       .ping()
@@ -59,6 +61,7 @@ export function startCoreWatchdog(
         failures = 0;
       })
       .catch((err: unknown) => {
+        if (stopped) return;
         failures += 1;
         const message = err instanceof Error ? err.message : String(err);
         log(
@@ -72,7 +75,8 @@ export function startCoreWatchdog(
             `core unreachable for ${failures} consecutive probes; stopping this host so it cannot serve its platform without a core`,
           );
         }
-      });
+      })
+      .finally(() => { probing = false; });
   }, intervalMs);
 
   // Probing must never be the reason the process stays alive.

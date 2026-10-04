@@ -23,6 +23,9 @@ import {
 /** Startup budget for the Core endpoint to become reachable before standalone mode. */
 const CORE_READY_TIMEOUT_MS = 2000;
 
+/** One budget covers plugin teardown and draining in-flight RPCs before a forced stop. */
+const SHUTDOWN_TIMEOUT_MS = 5000;
+
 /**
  * Builds the Core handle that this host process hands to its plugin.
  *
@@ -246,6 +249,8 @@ async function main(): Promise<void> {
 
   // 5. Initialize gRPC server and register services
   const server = new grpc.Server({ interceptors: process.platform === "win32" || !!process.env.KANON_IPC_TOKEN ? [serverAuth(ipcToken())] : [] });
+  let configVersion = 0;
+  let reloadingConfig = false;
 
   server.addService(kanonV1.PluginHostService.service, {
     Ping: (call: any, callback: any) => {
@@ -253,7 +258,15 @@ async function main(): Promise<void> {
     },
     ReloadPluginConfig: async (call: any, callback: any) => {
       const version = Number(call.request.version || 0);
-      const currentVersion = Number((plugin as any)._configVersion || 0);
+      const currentVersion = configVersion;
+      if (reloadingConfig) {
+        callback(null, {
+          success: false,
+          error_message: "A configuration reload is still running",
+          applied_version: currentVersion,
+        });
+        return;
+      }
       if (version > 0 && version <= currentVersion) {
         callback(null, {
           success: false,
@@ -262,24 +275,43 @@ async function main(): Promise<void> {
         });
         return;
       }
-      if (call.request.config) {
-        const previous = ctx.config;
-        try {
+      const previous = ctx.config;
+      let cancelled = call.cancelled;
+      const onCancelled = () => {
+        cancelled = true;
+        ctx.config = previous;
+      };
+      if (cancelled) return;
+      // JavaScript cannot cancel a running plugin Promise. Restore the cache immediately,
+      // but keep this reload exclusive until its callback settles, so a late completion or
+      // rejection cannot overwrite a newer candidate after Core has rolled this one back.
+      reloadingConfig = true;
+      call.once("cancelled", onCancelled);
+      try {
+        if (call.request.config) {
           ctx.config = fromProtoStruct(call.request.config);
           await plugin.onConfigReload(ctx.config);
-        } catch (err: any) {
-          // A rejected reload leaves the plugin on the configuration it accepted last.
+        }
+        if (cancelled || call.cancelled) {
           ctx.config = previous;
+          return;
+        }
+        configVersion = version;
+        callback(null, { success: true, error_message: "", applied_version: version });
+      } catch (err: any) {
+        // A rejected reload leaves the plugin on the configuration it accepted last.
+        ctx.config = previous;
+        if (!cancelled && !call.cancelled) {
           callback(null, {
             success: false,
             error_message: `onConfigReload failed: ${err?.message || err}`,
             applied_version: currentVersion,
           });
-          return;
         }
+      } finally {
+        call.removeListener("cancelled", onCancelled);
+        reloadingConfig = false;
       }
-      (plugin as any)._configVersion = version;
-      callback(null, { success: true, error_message: "", applied_version: version });
     },
     GetPluginMeta: (call: any, callback: any) => {
       callback(null, { plugins: [plugin.meta()] });
@@ -428,11 +460,54 @@ async function main(): Promise<void> {
     process.exit(1);
   }
 
-  // 7. Announce this host to the Core, now that the endpoint is actually serving:
-  //    the Core may connect back to `socketPath` as soon as it learns about it, so
-  //    registering before the bind would advertise an endpoint that refuses calls.
-  //    A failure here is not fatal for ingestion — the channel was verified READY in
-  //    step 2 and stays usable — so it is logged rather than escalated.
+  // Install shutdown before registration: even a Core that never answers must not prevent a
+  // signal from unloading the plugin and releasing the endpoint.
+  let shuttingDown = false;
+  let stopWatchdog: (() => void) | undefined;
+  const shutdown = async (exitCode = 0) => {
+    // Signals and the watchdog can race; the plugin must be unloaded exactly once.
+    if (shuttingDown) return;
+    shuttingDown = true;
+    stopWatchdog?.();
+
+    let finished = false;
+    const finish = () => {
+      if (finished) return;
+      finished = true;
+      clearTimeout(timeout);
+      try {
+        // The host owns the shared channel, so it is closed here and nowhere else.
+        coreHandle?.close();
+        if (fs.existsSync(socketPath)) {
+          const current = fs.lstatSync(socketPath);
+          if (current.ino === endpointIdentity.ino && current.dev === endpointIdentity.dev) fs.unlinkSync(socketPath);
+        }
+      } catch (error) {
+        console.error("[kanon-host] shutdown cleanup failed:", error);
+      } finally {
+        process.exit(exitCode);
+      }
+    };
+    // A hung onUnload or outstanding RPC must not keep an orphan platform adapter alive.
+    const timeout = setTimeout(() => {
+      console.warn(`[kanon-host] shutdown did not finish within ${SHUTDOWN_TIMEOUT_MS}ms; forcing stop`);
+      server.forceShutdown();
+      finish();
+    }, SHUTDOWN_TIMEOUT_MS);
+
+    try {
+      await plugin.onUnload();
+    } catch (error) {
+      console.error("[kanon-host] plugin teardown failed:", error);
+    }
+    server.tryShutdown(finish);
+  };
+
+  process.on("SIGINT", () => void shutdown(0));
+  process.on("SIGTERM", () => void shutdown(0));
+
+  // Announce only once the endpoint serves callbacks. Registration has a finite RPC deadline;
+  // failure is logged because the supervisor may already know this host independently.
   if (coreHandle) {
     try {
       await coreHandle.registerHost(hostId, socketPath, [meta.id]);
@@ -441,34 +516,11 @@ async function main(): Promise<void> {
       console.warn(`Failed to register with Core: ${err?.message || err}`);
     }
   }
-
-  // 8. Handle graceful shutdown: unload the plugin, then stop serving and release the endpoint.
-  let shuttingDown = false;
-  const shutdown = async (exitCode = 0) => {
-    // Signals and the watchdog can race; the plugin must be unloaded exactly once.
-    if (shuttingDown) return;
-    shuttingDown = true;
-
-    try {
-      await plugin.onUnload();
-    } catch (_) {}
-
-    stopWatchdog?.();
-
-    server.tryShutdown(() => {
-      // The host owns the shared channel, so it is closed here and nowhere else.
-      coreHandle?.close();
-      if (fs.existsSync(socketPath)) {
-        const current = fs.lstatSync(socketPath);
-        if (current.ino === endpointIdentity.ino && current.dev === endpointIdentity.dev) fs.unlinkSync(socketPath);
-      }
-      process.exit(exitCode);
-    });
-  };
+  if (shuttingDown) return;
 
   // 9. Watch the Core: a host whose Core is gone must stop, otherwise it keeps serving its
   //    platform and double-handles every message once a new Core starts.
-  const stopWatchdog = coreHandle
+  stopWatchdog = coreHandle
     ? startCoreWatchdog(coreHandle, {
         onLost: (reason) => {
           console.warn(`[kanon-host] ${reason}`);
@@ -476,9 +528,6 @@ async function main(): Promise<void> {
         },
       })
     : undefined;
-
-  process.on("SIGINT", () => void shutdown(0));
-  process.on("SIGTERM", () => void shutdown(0));
 }
 
 main().catch((err) => {

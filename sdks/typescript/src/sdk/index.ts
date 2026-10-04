@@ -132,6 +132,7 @@ interface BotApiServiceClient {
   ): grpc.ClientUnaryCall;
   RegisterHost(
     request: RegisterHostRequestPayload,
+    options: grpc.CallOptions,
     callback: (
       error: grpc.ServiceError | null,
       response?: RawRegisterHostResponse,
@@ -139,6 +140,7 @@ interface BotApiServiceClient {
   ): grpc.ClientUnaryCall;
   Ping(
     request: { timestamp: number },
+    options: grpc.CallOptions,
     callback: (error: grpc.ServiceError | null) => void,
   ): grpc.ClientUnaryCall;
   waitForReady(deadline: grpc.Deadline, callback: (error?: Error) => void): void;
@@ -760,6 +762,7 @@ export class CoreHandle {
             endpoint,
             loaded_plugin_ids: loadedPluginIds,
           },
+          { deadline: Date.now() + 3000 },
           (error, value) => {
             if (error) {
               reject(error);
@@ -794,6 +797,9 @@ export class CoreHandle {
     await new Promise<void>((resolve, reject) => {
       this.client.Ping(
         { timestamp: Date.now() },
+        // A connected Core can stop answering without dropping HTTP/2. Bound the RPC itself
+        // so the watchdog observes a failure and does not retain unfinished probes forever.
+        { deadline: Date.now() + 5000 },
         (error) => (error ? reject(error) : resolve()),
       );
     });

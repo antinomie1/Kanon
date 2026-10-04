@@ -7,6 +7,25 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { once } from "node:events";
 import { clientAuth, serverAuth, loopbackEndpoint } from "../src/sdk/ipc.js";
+import { CoreHandle, loadKanonProto } from "../src/sdk/index.js";
+
+test("Core ping and registration time out when the connected server never answers", { timeout: 8000 }, async () => {
+  const service = (loadKanonProto() as any).kanon.plugin.v1.BotApiService.service;
+  const server = new grpc.Server();
+  server.addService(service, { Ping: () => {}, RegisterHost: () => {} });
+  const port = await new Promise<number>((resolve, reject) => server.bindAsync("127.0.0.1:0", grpc.ServerCredentials.createInsecure(), (error, port) => error ? reject(error) : resolve(port)));
+  const handle = new CoreHandle(`127.0.0.1:${port}`);
+  try {
+    assert.equal(await handle.waitForReady(1000), true);
+    await Promise.all([
+      assert.rejects(handle.ping(), { code: grpc.status.DEADLINE_EXCEEDED }),
+      assert.rejects(handle.registerHost("test", "host.sock", ["test"]), { code: grpc.status.DEADLINE_EXCEEDED }),
+    ]);
+  } finally {
+    handle.close();
+    server.forceShutdown();
+  }
+});
 
 test("loopback RPC rejects missing/wrong credentials and accepts matching credentials", async () => {
   const token = "ab".repeat(32);
