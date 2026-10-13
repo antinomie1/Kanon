@@ -134,6 +134,7 @@ async fn pages_redirect_directories_to_their_slash_form() {
 async fn pages_refuse_traversal_hidden_files_and_listings() {
     let dir = tempfile::tempdir().unwrap();
     let state = fixture_state(dir.path().to_path_buf(), false).await;
+    #[cfg_attr(not(unix), allow(unused_variables))]
     let plugin_dir = install_pages_plugin(&state);
     #[cfg(unix)]
     std::os::unix::fs::symlink(plugin_dir.join("secret.txt"), plugin_dir.join("pages/link"))

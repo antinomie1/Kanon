@@ -3,10 +3,10 @@ mod common;
 
 use axum::http::{Method, StatusCode};
 use kanon_api::{ApiState, SystemConfigStore};
+#[cfg(unix)]
+use kanon_core::BashCaller;
 use kanon_core::instance::InstanceRegistry;
-use kanon_core::{
-    BashCaller, BashPolicy, BashPolicyStore, BashTool, CommandPolicyStore, Supervisor,
-};
+use kanon_core::{BashPolicy, BashPolicyStore, BashTool, CommandPolicyStore, Supervisor};
 use serde_json::json;
 use std::sync::Arc;
 

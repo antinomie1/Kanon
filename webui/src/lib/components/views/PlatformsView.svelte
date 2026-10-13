@@ -219,7 +219,7 @@ async function save() {
   {/snippet}
 </PageHead>
 
-<p class="m-0 -mt-2 max-w-[68ch] px-1 hint">{t('platforms.intro')}</p>
+<p class="m-0 -mt-2 max-w-[68ch] hint">{t('platforms.intro')}</p>
 
 {#if error}
   <div class="notice notice-bad">{error}</div>
@@ -305,7 +305,7 @@ async function save() {
     {/each}
   </div>
 {:else if !error}
-  <p class="m-0 px-1 hint">{t('common.loading')}</p>
+  <p class="m-0 hint">{t('common.loading')}</p>
 {/if}
 
 <Modal

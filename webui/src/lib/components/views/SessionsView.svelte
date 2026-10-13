@@ -197,7 +197,7 @@ async function applyPersona() {
     </TextField>
   </div>
   {#if loaded && !error}
-    <span class="px-1 text-[13.5px] text-fg2">
+    <span class="text-[13.5px] text-fg2">
       {total > sessions.length
         ? t('sessions.showing', { shown: sessions.length, total })
         : total === 1
@@ -212,7 +212,7 @@ async function applyPersona() {
 {/if}
 
 {#if !loaded}
-  <p class="m-0 px-1 hint">{t('common.loading')}</p>
+  <p class="m-0 hint">{t('common.loading')}</p>
 {:else if sessions.length === 0 && !error}
   <div class="card">
     {#if search.trim()}

@@ -13,7 +13,7 @@ let {
 } = $props();
 </script>
 
-<header class="flex flex-wrap items-center justify-between gap-x-5 gap-y-3 px-1 pt-2">
+<header class="flex flex-wrap items-center justify-between gap-x-5 gap-y-3 pt-2">
   <div class="min-w-0">
     <h1 class="m-0 text-[36px] leading-[44px] font-[560] tracking-[-0.01em]">{title}</h1>
     {#if sub}

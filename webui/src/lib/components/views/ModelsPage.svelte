@@ -113,7 +113,7 @@ function onDeleted() {
   {#if providersStore.error}
     <div class="notice notice-bad">{providersStore.error}</div>
   {:else}
-    <p class="m-0 px-1 hint">{t('common.loading')}</p>
+    <p class="m-0 hint">{t('common.loading')}</p>
   {/if}
 {:else if providers.length === 0}
   <div class="card">

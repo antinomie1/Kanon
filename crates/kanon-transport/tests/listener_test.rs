@@ -1,5 +1,7 @@
 //! Endpoint ownership and address validation regressions.
-use kanon_transport::{IpcListener, generate_ipc_token, read_loopback_endpoint};
+#[cfg(unix)]
+use kanon_transport::IpcListener;
+use kanon_transport::{generate_ipc_token, read_loopback_endpoint};
 
 #[tokio::test]
 #[cfg(unix)]

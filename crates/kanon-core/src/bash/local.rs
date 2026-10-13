@@ -1,9 +1,12 @@
 //! Native host execution with bounded output and process-group cleanup.
 
+#[cfg(unix)]
 use super::MAX_BASH_OUTPUT_BYTES;
 #[cfg(unix)]
 use crate::process::ProcessGroup;
-use std::path::{Path, PathBuf};
+#[cfg(unix)]
+use std::path::Path;
+use std::path::PathBuf;
 
 pub(super) fn bash_executable() -> Option<PathBuf> {
     #[cfg(unix)]

@@ -18,6 +18,8 @@ export default {
     'shell.nav': '主导航',
     'shell.search': '搜索',
     'shell.open_menu': '打开菜单',
+    'shell.collapse_nav': '收起侧栏',
+    'shell.expand_nav': '展开侧栏',
     'shell.node_running': '运行中，已 {time}',
     'shell.node_connecting': '正在连接节点',
     'shell.node_unreachable': '无法连接节点',

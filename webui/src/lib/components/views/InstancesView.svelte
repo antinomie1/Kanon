@@ -109,7 +109,7 @@ function onDeleted() {
   {#if instancesStore.error}
     <div class="notice notice-bad">{instancesStore.error}</div>
   {:else}
-    <p class="m-0 px-1 hint">{t('common.loading')}</p>
+    <p class="m-0 hint">{t('common.loading')}</p>
   {/if}
 {:else if instances.length === 0 && openedFor !== 'new'}
   <div class="card">

@@ -18,6 +18,8 @@ export default {
     'shell.nav': 'Main navigation',
     'shell.search': 'Search',
     'shell.open_menu': 'Open menu',
+    'shell.collapse_nav': 'Collapse sidebar',
+    'shell.expand_nav': 'Expand sidebar',
     'shell.node_running': 'Running for {time}',
     'shell.node_connecting': 'Connecting to the node',
     'shell.node_unreachable': 'Node unreachable',

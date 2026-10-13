@@ -4,6 +4,7 @@
 //! 2. SendMessage routed into PipelineEngine outbound queue
 //! 3. Explicit unimplemented status for storage gRPC endpoints
 
+#[cfg(unix)]
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
@@ -14,7 +15,9 @@ use tonic::Code;
 use kanon_core::adapter::{AdapterError, PlatformAdapter};
 use kanon_core::ipc::{CoreApiService, CoreIpcServer, DEFAULT_INGEST_QUEUE_CAPACITY};
 use kanon_core::pipeline::PipelineEngine;
-use kanon_core::supervisor::{Supervisor, SupervisorError};
+use kanon_core::supervisor::Supervisor;
+#[cfg(unix)]
+use kanon_core::supervisor::SupervisorError;
 use kanon_proto::v1::bot_api_service_client::BotApiServiceClient;
 use kanon_proto::v1::message_pipeline_service_server::{
     MessagePipelineService, MessagePipelineServiceServer,
@@ -29,7 +32,9 @@ use kanon_proto::v1::{
     PreFilterResult, RegisterHostRequest, ReloadPluginConfigRequest, ReloadPluginConfigResponse,
     SendMessageRequest, SetStorageRequest, TextSegment, ToolCallRequest, ToolCallResponse,
 };
-use kanon_transport::{IpcListener, connect_ipc, host_socket_path};
+#[cfg(unix)]
+use kanon_transport::host_socket_path;
+use kanon_transport::{IpcListener, connect_ipc};
 
 /// Mock platform adapter capturing outbound deliveries.
 struct MockAdapter {
@@ -274,6 +279,7 @@ async fn test_unified_host_registration_into_supervisor() {
 }
 
 /// Waits until `path` exists, failing the test after five seconds.
+#[cfg(unix)]
 async fn wait_for_path(path: &Path) {
     for _ in 0..500 {
         if path.exists() {

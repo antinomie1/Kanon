@@ -1,5 +1,7 @@
 //! Security and permission enforcement integration tests for Kanon transport paths.
 
+#![cfg(unix)]
+
 use std::os::unix::fs::PermissionsExt;
 use std::path::PathBuf;
 

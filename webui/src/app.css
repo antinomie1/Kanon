@@ -582,6 +582,14 @@
     --md-sys-color-on-surface: var(--k-on-bar);
   }
 
+  /* A button label is a single line: Chinese text can break between any two characters, so a
+     squeezed button would otherwise stack its label vertically. `white-space` inherits into the
+     shadow roots, so setting it on the hosts covers the labels Google renders inside them. */
+  md-gb-button,
+  md-outlined-segmented-button {
+    white-space: nowrap;
+  }
+
   /* Geometry the console needs beyond Google's sizes. The element exposes the inner button as
      `part="btn"` and sets the geometry tokens there, so that part is the documented hook. */
   md-gb-button.kanon-btn-xs::part(btn) {

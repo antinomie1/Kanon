@@ -100,7 +100,7 @@ const troubled = $derived(
 );
 </script>
 
-<div class="flex flex-wrap items-center justify-between gap-3 px-1">
+<div class="flex flex-wrap items-center justify-between gap-3">
   <p class="m-0 max-w-[68ch] hint">{t('extensions.market_hint')}</p>
   <Button type="button" disabled={loading} onclick={() => void load()}>
     <RefreshCw size={16} strokeWidth={2} class={loading ? 'animate-spin' : ''} />
@@ -216,5 +216,5 @@ const troubled = $derived(
     </div>
   {/if}
 {:else if !error}
-  <p class="m-0 px-1 hint">{t('common.loading')}</p>
+  <p class="m-0 hint">{t('common.loading')}</p>
 {/if}

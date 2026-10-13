@@ -32,7 +32,7 @@ const tab = $derived<Tab>(
   {/snippet}
 </PageHead>
 
-<div class="scroll-thin -mt-1 overflow-x-auto overflow-y-hidden px-1">
+<div class="scroll-thin -mx-1 -mt-1 overflow-x-auto overflow-y-hidden px-1">
   <Seg
     label={t('nav.extensions')}
     value={tab}

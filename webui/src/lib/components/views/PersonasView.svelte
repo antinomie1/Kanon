@@ -139,7 +139,7 @@ function isLong(prompt: string): boolean {
 {/if}
 
 {#if !loaded}
-  {#if !personasStore.error}<p class="m-0 px-1 hint">{t('common.loading')}</p>{/if}
+  {#if !personasStore.error}<p class="m-0 hint">{t('common.loading')}</p>{/if}
 {:else}
   <div class="flex flex-col gap-3">
     {#each personasStore.library as persona (persona.id)}

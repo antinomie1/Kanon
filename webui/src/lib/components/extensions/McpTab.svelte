@@ -255,7 +255,7 @@ const CHIP: Record<Tone, string> = {
 };
 </script>
 
-<div class="flex flex-wrap items-center justify-between gap-3 px-1">
+<div class="flex flex-wrap items-center justify-between gap-3">
   <p class="m-0 max-w-[68ch] hint">{t('extensions.mcp_hint')}</p>
   <div class="flex flex-wrap gap-2.5">
     <Button type="button" disabled={loading} onclick={() => void load()}>
@@ -352,7 +352,7 @@ const CHIP: Record<Tone, string> = {
     {/each}
   </div>
 {:else if !error}
-  <p class="m-0 px-1 hint">{t('common.loading')}</p>
+  <p class="m-0 hint">{t('common.loading')}</p>
 {/if}
 
 <Modal

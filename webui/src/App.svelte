@@ -24,6 +24,32 @@ import { router } from './lib/stores/router.svelte';
 let isCommandOpen = $state(false);
 let isDrawerOpen = $state(false);
 
+const NAV_COLLAPSED_KEY = 'kanon-nav-collapsed';
+
+/**
+ * Whether the desktop sidebar is the icon-only rail. It is a per-browser convenience: storage can be
+ * unavailable (private windows, blocked site data), so a failed read means "expanded" and a failed
+ * write only forgets the choice at the next reload.
+ */
+let isNavCollapsed = $state(readNavCollapsed());
+
+function readNavCollapsed(): boolean {
+  try {
+    return localStorage.getItem(NAV_COLLAPSED_KEY) === '1';
+  } catch {
+    return false;
+  }
+}
+
+function toggleNav() {
+  isNavCollapsed = !isNavCollapsed;
+  try {
+    localStorage.setItem(NAV_COLLAPSED_KEY, isNavCollapsed ? '1' : '0');
+  } catch {
+    // Storage is blocked: the rail still changes for this page.
+  }
+}
+
 // Pages that fill the window themselves (a chat transcript, a live log) instead of scrolling.
 const fullHeight = $derived(
   router.page === 'chat' || router.page === 'activity',
@@ -61,8 +87,16 @@ function handleKeydown(e: KeyboardEvent) {
 <svelte:window onkeydown={handleKeydown} />
 
 <div class="flex h-dvh w-full overflow-hidden bg-rail text-fg">
-  <aside class="hidden w-[256px] shrink-0 rail lg:block">
-    <Sidebar onOpenCommand={() => (isCommandOpen = true)} />
+  <aside
+    class="hidden shrink-0 overflow-hidden rail transition-[width] duration-200 ease-[var(--ease-effects)] lg:block {isNavCollapsed
+      ? 'w-[72px]'
+      : 'w-[256px]'}"
+  >
+    <Sidebar
+      collapsed={isNavCollapsed}
+      onToggleCollapsed={toggleNav}
+      onOpenCommand={() => (isCommandOpen = true)}
+    />
   </aside>
 
   <div class="flex min-w-0 flex-1 flex-col lg:py-3 lg:pr-3">
