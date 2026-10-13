@@ -159,16 +159,12 @@ impl EndpointOwnership {
                             "invalid IPC endpoint file",
                         ));
                     }
-                    let addr = crate::read_loopback_endpoint(path)?;
-                    match std::net::TcpStream::connect_timeout(
-                        &addr,
-                        std::time::Duration::from_millis(100),
-                    ) {
-                        Err(e) if e.kind() == ErrorKind::ConnectionRefused => {}
-                        _ => {
-                            return Err(Error::new(ErrorKind::AddrInUse, "IPC endpoint is active"));
-                        }
-                    }
+                    // No liveness probe here: holding the lock already proves the endpoint is stale,
+                    // because every owner keeps the lock for the listener's lifetime and the OS
+                    // releases it when that process dies. A connect probe is also wrong on Windows:
+                    // a refused loopback connect only fails after the SYN retries (about two
+                    // seconds), and a reused port may answer for an unrelated process, so a killed
+                    // node used to block every later start with "IPC endpoint is active".
                 }
                 if !same_file(&meta, &std::fs::symlink_metadata(path)?) {
                     return Err(Error::new(

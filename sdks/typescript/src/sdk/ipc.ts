@@ -52,6 +52,15 @@ export function serverAuth(token: string): grpc.ServerInterceptor {
 }
 
 
+/**
+ * How long the stale-endpoint probe waits for an answer. A live endpoint accepts at once, so this
+ * only bounds the wait for a dead one. A Unix socket refuses immediately; Windows refuses a
+ * loopback port nobody listens on only after its SYN retries (about two seconds), and the TS host
+ * has no process lock to prove staleness instead, so the probe must outlast those retries or a
+ * crashed host could never restart.
+ */
+const PROBE_TIMEOUT_MS = process.platform === "win32" ? 5000 : 100;
+
 /** Reclaims only a refused socket endpoint; live, unknown, and changed endpoints fail closed. */
 export async function prepareEndpoint(file: string): Promise<void> {
   let previous: fs.Stats;
@@ -73,7 +82,7 @@ export async function prepareEndpoint(file: string): Promise<void> {
     const timer = setTimeout(() => {
       probe.destroy();
       reject(new Error(`IPC endpoint did not refuse the readiness probe: ${file}`));
-    }, 100);
+    }, PROBE_TIMEOUT_MS);
     probe.once("connect", () => {
       clearTimeout(timer);
       probe.destroy();

@@ -89,3 +89,22 @@ test("endpoint preparation preserves live/files/symlinks and recovers a crashed 
     fs.rmSync(directory, { recursive: true });
   }
 });
+
+test("a Windows endpoint left by a killed host is reclaimed", { skip: process.platform !== "win32", timeout: 10000 }, async () => {
+  const { prepareEndpoint } = await import("../src/sdk/ipc.js");
+  const { createServer } = await import("node:net");
+  // A killed host leaves its endpoint file behind, naming a loopback port nobody listens on.
+  const dead = createServer();
+  await new Promise<void>((resolve) => dead.listen(0, "127.0.0.1", resolve));
+  const port = (dead.address() as { port: number }).port;
+  await new Promise<void>((resolve) => dead.close(() => resolve()));
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "kanon-endpoint-"));
+  const file = path.join(directory, "host.sock");
+  try {
+    fs.writeFileSync(file, `127.0.0.1:${port}`);
+    await prepareEndpoint(file);
+    assert.equal(fs.existsSync(file), false);
+  } finally {
+    fs.rmSync(directory, { recursive: true });
+  }
+});

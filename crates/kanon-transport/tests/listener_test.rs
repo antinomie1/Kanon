@@ -1,7 +1,5 @@
 //! Endpoint ownership and address validation regressions.
-#[cfg(unix)]
-use kanon_transport::IpcListener;
-use kanon_transport::{generate_ipc_token, read_loopback_endpoint};
+use kanon_transport::{IpcListener, generate_ipc_token, read_loopback_endpoint};
 
 #[tokio::test]
 #[cfg(unix)]
@@ -41,6 +39,27 @@ async fn stale_socket_is_reclaimed_but_replacement_survives_drop() {
     std::fs::write(&path, "replacement").unwrap();
     drop(incoming);
     assert_eq!(std::fs::read_to_string(&path).unwrap(), "replacement");
+}
+
+#[tokio::test]
+#[cfg(windows)]
+async fn endpoint_left_by_a_killed_owner_is_reclaimed() {
+    let temp = tempfile::tempdir().unwrap();
+    let path = temp.path().join("core.sock");
+    // A killed node leaves its endpoint file behind, naming a loopback port nobody listens on.
+    // Windows answers a connect to such a port only after its SYN retries (about two seconds),
+    // so a short connect probe used to mistake the dead endpoint for a live one.
+    let closed = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let dead = closed.local_addr().unwrap();
+    drop(closed);
+    std::fs::write(&path, dead.to_string()).unwrap();
+
+    let listener = IpcListener::bind(&path).unwrap();
+    assert_ne!(read_loopback_endpoint(&path).unwrap(), dead);
+    // A live owner still holds the lock, so a second node cannot take the endpoint over.
+    assert!(IpcListener::bind(&path).is_err());
+    drop(listener);
+    assert!(!path.exists());
 }
 
 #[test]

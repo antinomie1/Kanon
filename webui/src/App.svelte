@@ -27,7 +27,7 @@ let isDrawerOpen = $state(false);
 const NAV_COLLAPSED_KEY = 'kanon-nav-collapsed';
 
 /**
- * Whether the desktop sidebar is the icon-only rail. It is a per-browser convenience: storage can be
+ * Whether the desktop navigation rail is collapsed to its 96px icon form. It is a per-browser convenience: storage can be
  * unavailable (private windows, blocked site data), so a failed read means "expanded" and a failed
  * write only forgets the choice at the next reload.
  */
@@ -88,13 +88,13 @@ function handleKeydown(e: KeyboardEvent) {
 
 <div class="flex h-dvh w-full overflow-hidden bg-rail text-fg">
   <aside
-    class="hidden shrink-0 overflow-hidden rail transition-[width] duration-200 ease-[var(--ease-effects)] lg:block {isNavCollapsed
-      ? 'w-[72px]'
+    class="hidden shrink-0 overflow-hidden rail transition-[width] duration-300 ease-[var(--md-sys-motion-easing-emphasized)] lg:block {isNavCollapsed
+      ? 'w-24'
       : 'w-[256px]'}"
   >
     <Sidebar
       collapsed={isNavCollapsed}
-      onToggleCollapsed={toggleNav}
+      onToggle={toggleNav}
       onOpenCommand={() => (isCommandOpen = true)}
     />
   </aside>
@@ -182,6 +182,7 @@ function handleKeydown(e: KeyboardEvent) {
             isCommandOpen = true;
           }}
           onNavigate={() => (isDrawerOpen = false)}
+          onToggle={() => (isDrawerOpen = false)}
         />
       </aside>
     </div>

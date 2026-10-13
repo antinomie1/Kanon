@@ -167,7 +167,7 @@ async function remove(skill: SkillItem) {
           </div>
           <p class="m-0 mt-0.5 max-w-[80ch] text-[13.5px] text-fg2">{skill.description}</p>
         </div>
-        <div class="ml-auto flex items-center gap-2.5">
+        <div class="ml-auto flex items-center gap-3">
           <Button
             type="button"
             variant="text" size="sm" square

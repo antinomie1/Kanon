@@ -246,11 +246,17 @@ class EndpointOwner:
                 return
             if stat.S_ISLNK(previous.st_mode) or (os.name != "nt" and not stat.S_ISSOCK(previous.st_mode)):
                 raise FileExistsError(f"IPC endpoint is not a socket: {path}")
-            probe = socket.socket(socket.AF_INET if os.name == "nt" else socket.AF_UNIX)
+            if os.name == "nt":
+                # Holding the lock proves the endpoint file is stale: its owner kept the lock for
+                # as long as it served, and Windows releases it when that process dies. A connect
+                # probe cannot tell instead, because a refused loopback connect only fails after the
+                # SYN retries (about two seconds), so a crashed host could never be restarted.
+                path.unlink()
+                return
+            probe = socket.socket(socket.AF_UNIX)
             probe.settimeout(0.1)
             try:
-                target = loopback_endpoint(path).rsplit(":", 1) if os.name == "nt" else str(path)
-                probe.connect((target[0], int(target[1])) if os.name == "nt" else target)
+                probe.connect(str(path))
             except ConnectionRefusedError:
                 current = path.lstat()
                 if (current.st_dev, current.st_ino) != (previous.st_dev, previous.st_ino):

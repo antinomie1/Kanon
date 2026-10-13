@@ -325,7 +325,7 @@ const CHIP: Record<Tone, string> = {
           {/if}
         </div>
 
-        <div class="ml-auto flex items-center gap-2.5">
+        <div class="ml-auto flex items-center gap-3">
           <Button
             type="button"
             variant="text" size="sm" square

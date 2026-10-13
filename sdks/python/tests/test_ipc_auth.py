@@ -1,5 +1,7 @@
 """Actual loopback calls verify authentication for unary and streaming core RPCs."""
 import asyncio
+import os
+import socket
 import tempfile
 import unittest
 from pathlib import Path
@@ -73,3 +75,21 @@ class IpcAuthentication(unittest.IsolatedAsyncioTestCase):
             # A second owner proves the process lock was released on the exception path.
             owner = EndpointOwner(endpoint)
             owner.close()
+
+
+class StaleEndpoint(unittest.TestCase):
+    @unittest.skipUnless(os.name == "nt", "Windows publishes loopback endpoint files")
+    def test_endpoint_left_by_a_killed_host_is_reclaimed(self):
+        # A killed host leaves its endpoint file behind, naming a port nobody listens on.
+        dead = socket.socket()
+        dead.bind(("127.0.0.1", 0))
+        port = dead.getsockname()[1]
+        dead.close()
+        with tempfile.TemporaryDirectory() as directory:
+            endpoint = Path(directory) / "host.sock"
+            endpoint.write_text(f"127.0.0.1:{port}")
+            owner = EndpointOwner(endpoint)
+            try:
+                self.assertFalse(endpoint.exists())
+            finally:
+                owner.close()

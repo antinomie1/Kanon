@@ -237,7 +237,7 @@ async function save() {
       {@const level = tone(adapter)}
       {@const owner = owners.get(adapter.platform)}
       {@const who = account(builtin)}
-      <article class="flex flex-wrap items-center gap-x-6 gap-y-3 py-5">
+      <article class="flex flex-wrap items-start gap-x-6 gap-y-3 py-5">
         <div class="flex min-w-0 flex-1 basis-[320px] flex-col gap-1.5">
           <div class="flex flex-wrap items-center gap-x-2.5 gap-y-1">
             <h2 class="m-0 text-[17px] font-semibold">{adapter.display_name}</h2>

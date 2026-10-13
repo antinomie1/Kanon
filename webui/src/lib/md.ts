@@ -15,6 +15,7 @@
 // Buttons and selection controls (Material 3 Expressive set).
 import '@material/web/labs/gb/components/button/md-gb-button.js';
 import '@material/web/labs/gb/components/checkbox/md-gb-checkbox.js';
+import '@material/web/labs/gb/components/iconbutton/md-gb-icon-button.js';
 import '@material/web/labs/gb/components/switch/md-gb-switch.js';
 
 // Segmented button (stable set: the expressive tree has no segmented control yet).
