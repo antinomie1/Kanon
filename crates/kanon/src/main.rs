@@ -251,33 +251,18 @@ async fn main() -> StartupResult<()> {
             Arc::new(PluginAgentHook::new()),
         ])
         .with_bash_tool(bash_tool)
-        .try_build()?;
+        .build();
 
     instances
-        .validate_models(
-            state.agent_factory().providers(),
-            &state.node_settings().default_agent,
-        )
+        .validate_models(state.agent_factory().providers())
         .await
         .map_err(|err| format!("Failed to validate instance model references: {err}"))?;
 
     // Publish instance prompts as personas before the first message can arrive.
-    #[cfg(feature = "dsh")]
-    for instance in instances.list().await {
-        state.agent_factory().dsh_for(instance.agent.as_deref())?;
-    }
-
-    let builtin_instances: Vec<_> = instances
-        .list()
-        .await
-        .into_iter()
-        .filter(|instance| {
-            state.agent_factory().agent_id(instance.agent.as_deref()) == kanon_llm::BUILTIN_AGENT
-        })
-        .collect();
-    restore_instance_personas(&builtin_instances, state.personas(), state.sessions()).map_err(
-        |err| format!("Failed to restore instance personas and session bindings: {err}"),
-    )?;
+    restore_instance_personas(&instances.list().await, state.personas(), state.sessions())
+        .map_err(|err| {
+            format!("Failed to restore instance personas and session bindings: {err}")
+        })?;
 
     match state.agent() {
         Some(agent) => tracing::info!(
@@ -325,7 +310,6 @@ async fn main() -> StartupResult<()> {
     );
     let pipeline_worker = engine.clone().start_worker(event_rx);
     let outbound_dispatcher = engine.clone().start_outbound_dispatcher();
-    let state = state.with_pipeline(engine.clone());
 
     let service = CoreApiService::new(ingress.clone())
         .with_supervisor(supervisor.clone())

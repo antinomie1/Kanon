@@ -1,19 +1,5 @@
 /** en settings and shared platform translations. */
 export default {
-    'dsh.continue': 'Continue chat',
-    'dsh.archived': 'Archived sessions',
-    'dsh.restore': 'Restore',
-    'dsh.sessions_hint': 'History, models and session settings are managed by deepseek-harness.',
-    'dsh.no_sessions': 'No DSH sessions yet.',
-    'dsh.archive': 'Archive',
-    'dsh.archive_hint': 'DSH will stop and archive this session. Its history remains restorable in DSH.',
-    'dsh.history': 'History and settings',
-    'dsh.running': 'Running',
-    'dsh.title': 'Session title',
-    'dsh.earlier': 'Load earlier messages',
-    'dsh.image': 'Message image',
-    'dsh.tool': 'Tool',
-    'dsh.session_model': 'Use DSH session settings',
     // Settings
     'settings.theme': 'Theme',
     'settings.theme_system': 'Match system',
@@ -96,21 +82,10 @@ export default {
     'context.none': 'No extras',
     'agents.title': 'Default agent',
     'agents.hint':
-      "The agent used by instances without their own selection. Available backends depend on this node’s build.",
+      'The engine that answers for every bot that does not pick its own. Only the built-in agent exists for now; agents provided by plugins will be listed here.',
     'agents.builtin': 'Built-in agent',
     'agents.builtin_hint':
       "Kanon's own loop: the chosen model, plugin and MCP tools, personas and conversation memory.",
-    "agents.dsh_hint": "DSH owns settings, models, sessions, memory and context for instances that select it.",
-    "agents.dsh_url": "DSH address",
-    "agents.dsh_cookie": "Cookie file on the node (optional)",
-    "agents.dsh_load": "Read DSH settings",
-    "agents.dsh_open": "Open DSH",
-    "agents.dsh_namespace": "Settings section",
-    "agents.dsh_current": "Current settings (secrets hidden)",
-    "agents.dsh_patch": "Changes as a JSON object",
-    "agents.dsh_patch_hint": "Only supplied fields change. Concurrent edits are rejected; reload before retrying.",
-    "agents.dsh_patch_object": "Enter a JSON object.",
-    "agents.dsh_owned": "This instance uses DSH. Configure its models, persona, memory and context in the Agent settings or DSH.",
     'context.title': 'What the model is told',
     'context.hint':
       "What the node adds to the prompt besides the message itself. Ids and time are off by default: ids are personal data and the time isn't something the user said. Merged forwards are expanded by default.",

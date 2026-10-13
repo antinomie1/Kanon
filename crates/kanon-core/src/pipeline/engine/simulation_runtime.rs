@@ -141,8 +141,6 @@ struct ConversationTools {
     signal: StopSignal,
     deadline: Instant,
     session_id: String,
-    backend: kanon_llm::ConversationBackend,
-    factory: Option<Arc<kanon_llm::AgentFactory>>,
 }
 
 impl ConversationTools {
@@ -161,25 +159,17 @@ impl ConversationTools {
             || live.conversation_mode != ConversationMode::Simulation
             || live.conversation_rules != self.instance.conversation_rules
             || live.simulation != self.instance.simulation
-            || live.agent != self.instance.agent
-            || self
-                .factory
-                .as_ref()
-                .is_some_and(|factory| factory.agent_id(live.agent.as_deref()) != self.backend.id())
-            || (self.backend.builtin().is_some()
-                && (live.model != self.instance.model
-                    || live.persona_id != self.instance.persona_id
-                    || live.system_prompt != self.instance.system_prompt))
+            || live.model != self.instance.model
+            || live.persona_id != self.instance.persona_id
+            || live.system_prompt != self.instance.system_prompt
             || live.plugins != self.instance.plugins
             || live.skills != self.instance.skills
             || live.mcp != self.instance.mcp
             || live.command_policy != self.instance.command_policy
             || live.reply_policy != self.instance.reply_policy
             || live.context_policy != self.instance.context_policy
-            || live.session_for_backend(
-                &instance_conversation_key(&event, Some(&live)),
-                &self.backend,
-            ) != self.session_id
+            || live.conversation_session_id(&instance_conversation_key(&event, Some(&live)))
+                != self.session_id
         {
             return Err(
                 "Instance configuration or conversation changed; participation ended".into(),
@@ -543,54 +533,32 @@ impl PipelineEngine {
     ) -> Result<(), kanon_llm::ToolRouterError> {
         use kanon_llm::ToolRouterError as Error;
         let agent = match &self.agent_factory {
-            Some(factory) => factory
-                .conversation_backend(instance.agent.as_deref(), instance.model.as_deref())
-                .map_err(Error::InvalidRequest)?,
-            None => self
-                .agent
-                .current()
-                .map(kanon_llm::ConversationBackend::Builtin),
+            Some(factory) => factory.agent_for_model(instance.model.as_deref()),
+            None => self.agent.current(),
         }
-        .ok_or_else(|| Error::InvalidRequest("Simulation requires a configured agent".into()))?;
-        if agent
-            .builtin()
-            .is_some_and(|agent| !agent.config().tool_calling)
-        {
+        .ok_or_else(|| Error::InvalidRequest("Simulation requires a configured model".into()))?;
+        if !agent.config().tool_calling {
             return Err(Error::InvalidRequest(
                 "Simulation requires a model with tool calling enabled".into(),
             ));
         }
-        let capabilities = match agent.builtin() {
-            Some(agent) => self
-                .agent_factory
-                .as_ref()
-                .map(|factory| {
-                    factory
-                        .models()
-                        .settings_for(&ModelRef::parse(&agent.config().model_ref()))
-                        .capabilities
-                })
-                .unwrap_or_default(),
-            None => kanon_llm::ModelCapabilities {
-                vision: true,
-                ..Default::default()
-            },
-        };
-        let session_id = instance.session_for_backend(conversation, &agent);
+        let capabilities = self
+            .agent_factory
+            .as_ref()
+            .map(|factory| {
+                factory
+                    .models()
+                    .settings_for(&ModelRef::parse(&agent.config().model_ref()))
+                    .capabilities
+            })
+            .unwrap_or_default();
+        let session_id = instance.conversation_session_id(conversation);
         let ledger_key = format!("{}\u{1f}{conversation}", event.platform);
         let running = self.turns.begin(Some(instance.id.clone()));
         let signal = running.signal();
         let deadline =
             Instant::now() + Duration::from_secs(instance.simulation.max_participation_seconds);
-        let sessions = agent
-            .builtin()
-            .and_then(|agent| agent.session_manager())
-            .or_else(|| {
-                self.agent_factory
-                    .as_ref()
-                    .map(|factory| factory.sessions())
-            });
-        let writing = if let Some(sessions) = sessions {
+        let writing = if let Some(sessions) = agent.session_manager() {
             Some(tokio::select! {
                 biased;
                 () = signal.stopped() => return Err(Error::Stopped),
@@ -616,8 +584,6 @@ impl PipelineEngine {
             signal: signal.clone(),
             deadline,
             session_id: session_id.clone(),
-            backend: agent.clone(),
-            factory: self.agent_factory.clone(),
         });
         let mut tool_hosts = prepare_until(
             self.tool_hosts(hosts, Some(instance), &event.event_id),

@@ -159,12 +159,7 @@ async fn clearing_instance_personas_restores_the_explicit_session_choice_after_r
         .registry
         .create(
             configured.clone(),
-            Some(kanon_core::InstanceRuntime {
-                personas: &node.personas,
-                sessions: &node.sessions,
-                providers: &providers,
-                default_agent: "builtin",
-            }),
+            Some((&node.personas, &node.sessions, &providers)),
         )
         .await
         .unwrap();
@@ -183,12 +178,7 @@ async fn clearing_instance_personas_restores_the_explicit_session_choice_after_r
         .update(
             &instance.id,
             configured.clone(),
-            Some(kanon_core::InstanceRuntime {
-                personas: &node.personas,
-                sessions: &node.sessions,
-                providers: &providers,
-                default_agent: "builtin",
-            }),
+            Some((&node.personas, &node.sessions, &providers)),
         )
         .await
         .unwrap();
@@ -207,12 +197,7 @@ async fn clearing_instance_personas_restores_the_explicit_session_choice_after_r
         .update(
             &instance.id,
             configured,
-            Some(kanon_core::InstanceRuntime {
-                personas: &node.personas,
-                sessions: &node.sessions,
-                providers: &providers,
-                default_agent: "builtin",
-            }),
+            Some((&node.personas, &node.sessions, &providers)),
         )
         .await
         .unwrap();
@@ -250,12 +235,7 @@ async fn a_queued_turn_reads_the_current_instance_persona_after_acquiring_its_wr
         .registry
         .create(
             configured.clone(),
-            Some(kanon_core::InstanceRuntime {
-                personas: &node.personas,
-                sessions: &node.sessions,
-                providers: &providers,
-                default_agent: "builtin",
-            }),
+            Some((&node.personas, &node.sessions, &providers)),
         )
         .await
         .unwrap();
@@ -275,12 +255,7 @@ async fn a_queued_turn_reads_the_current_instance_persona_after_acquiring_its_wr
         .update(
             &instance.id,
             configured,
-            Some(kanon_core::InstanceRuntime {
-                personas: &node.personas,
-                sessions: &node.sessions,
-                providers: &providers,
-                default_agent: "builtin",
-            }),
+            Some((&node.personas, &node.sessions, &providers)),
         )
         .await
         .unwrap();

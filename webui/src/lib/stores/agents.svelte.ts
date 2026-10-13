@@ -4,14 +4,15 @@ import { t } from './i18n.svelte';
 
 /** Display name of an agent; an agent the console has no translation for shows its identifier. */
 export function agentName(id: string): string {
-  return id === 'builtin' ? t('agents.builtin') : id === 'dsh' ? 'deepseek-harness' : id;
+  return id === 'builtin' ? t('agents.builtin') : id;
 }
 
 /**
  * Console state for agent selection: which agents exist and which one the node uses by default.
  *
- * Availability comes from the running node, including its optional compiled backends.
- * Instances override the default with their own `agent` field.
+ * Only the built-in agent exists today; the list comes from the node so agents added later (for
+ * instance by plugins) appear here without a console change. Instances override the default with
+ * their own `agent` field.
  */
 class AgentsStore {
   catalog = $state<AgentsResponse | null>(null);

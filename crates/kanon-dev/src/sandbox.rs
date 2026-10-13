@@ -425,12 +425,7 @@ impl Sandbox {
                     adapters: vec![PLATFORM.to_string()],
                     ..InstanceDraft::default()
                 },
-                Some(kanon_core::InstanceRuntime {
-                    personas: &personas,
-                    sessions: &sessions,
-                    providers: &kanon_llm::ProviderRegistry::new(),
-                    default_agent: "builtin",
-                }),
+                Some((&personas, &sessions, &kanon_llm::ProviderRegistry::new())),
             )
             .await
             .map_err(|err| setup("sandbox instance", &err))?;

@@ -9,9 +9,6 @@
 //! - `stream: true` → `text/event-stream` where each `data:` frame carries `delta`, `done` or
 //!   `error` payloads, matching the SSE conventions already used by the LLM providers.
 
-#[cfg(feature = "dsh")]
-mod dsh;
-
 use std::convert::Infallible;
 use std::sync::Arc;
 use std::time::Duration;
@@ -38,12 +35,6 @@ pub fn routes() -> Router<ApiState> {
 /// Request payload for a sandbox completion.
 #[derive(Debug, Deserialize)]
 pub struct ChatCompletionRequest {
-    /// Conversation backend; omitted requests inherit the node default.
-    #[serde(default)]
-    pub agent: Option<String>,
-    /// Optional instance whose backend and tool permissions the console should exercise.
-    #[serde(default)]
-    pub instance_id: Option<String>,
     /// Session key to run the turn against (opaque, provided by the caller).
     pub session_id: String,
     /// User message text.
@@ -118,7 +109,7 @@ impl From<ExecutedToolCall> for ToolCallView {
 /// Serves a sandbox completion in JSON or SSE form.
 async fn completions(
     State(state): State<ApiState>,
-    Json(mut request): Json<ChatCompletionRequest>,
+    Json(request): Json<ChatCompletionRequest>,
 ) -> Result<Response, ApiError> {
     let session_id = request.session_id.trim().to_string();
     if session_id.is_empty() {
@@ -132,56 +123,6 @@ async fn completions(
         ));
     }
 
-    let instance = match request.instance_id.as_deref() {
-        Some(id) => Some(
-            state
-                .instances()
-                .get(id)
-                .await
-                .ok_or_else(|| ApiError::NotFound(format!("Instance '{id}' does not exist")))?,
-        ),
-        None => None,
-    };
-    let selected = state.agent_factory().agent_id(match &instance {
-        Some(instance) => instance.agent.as_deref(),
-        None => request.agent.as_deref(),
-    });
-    if instance.is_some()
-        && request
-            .agent
-            .as_ref()
-            .is_some_and(|agent| agent != &selected)
-    {
-        return Err(ApiError::BadRequest(
-            "Agent must match the selected instance".into(),
-        ));
-    }
-    kanon_llm::check_agent_id(&selected).map_err(ApiError::BadRequest)?;
-    #[cfg(feature = "dsh")]
-    if let Some(client) = state
-        .agent_factory()
-        .dsh_for(Some(&selected))
-        .map_err(ApiError::Unavailable)?
-    {
-        return dsh::completion(state, client, request).await;
-    }
-    // Both coordinates must agree, including when the caller omits instance_id. Otherwise
-    // an instance journal could run with node-wide tool permissions by dropping its target.
-    if kanon_core::instance::BotInstance::instance_id_from_session(&session_id)
-        != instance.as_ref().map(|instance| instance.id.as_str())
-    {
-        return Err(ApiError::BadRequest(
-            "Console session must belong to the selected instance".into(),
-        ));
-    }
-    if let Some(instance) = &instance {
-        if request.model.is_none() && request.protocol.is_none() && request.base_url.is_none() {
-            request.model = instance.model.clone();
-        }
-        if request.persona_id.is_none() {
-            request.persona_id = instance.effective_persona_id();
-        }
-    }
     let agent = resolve_agent(&state, &request)?;
     MetricsRegistry::incr(&state.observability().metrics.chat_completions);
 
@@ -196,13 +137,13 @@ async fn completions(
             kanon_core::supervisor::filter_plugin_hosts(
                 state.supervisor().get_all_hosts().await,
                 Some(state.plugin_state().as_ref()),
-                instance.as_ref(),
+                None,
             )
             .await
             .into_iter()
             .map(|host| host as Arc<dyn kanon_llm::tool_router::ToolHost>),
         );
-        hosts.extend(state.mcp().hosts_for_instance(instance.as_ref()).await);
+        hosts.extend(state.mcp().hosts_for_instance(None).await);
     }
 
     if request.stream {
@@ -340,9 +281,8 @@ fn map_agent_error(err: AgentError) -> ApiError {
         AgentError::Gateway(gateway) => {
             ApiError::Upstream(format!("Model provider failure: {gateway}"))
         }
-        #[cfg(feature = "dsh")]
-        AgentError::Dsh(error) => ApiError::from(error),
-        // A deliberate stop conflicts with this completion rather than indicating a server fault.
+        // Console turns carry no stop signal today; should one be stopped, it is a conflict with
+        // whoever stopped it, not a server fault.
         AgentError::Stopped => ApiError::Conflict("The turn was stopped before it finished".into()),
     }
 }

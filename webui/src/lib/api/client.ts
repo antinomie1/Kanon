@@ -1,13 +1,6 @@
 import type {
   AdaptersResponse,
   AgentsResponse,
-  DshConnection,
-  DshSettings,
-  DshSession,
-  DshSnapshot,
-  DshModels,
-  DshPage,
-  DshAttachment,
   BashPolicy,
   CallPluginToolResponse,
   ChatCompletionRequest,
@@ -202,33 +195,6 @@ export const api = {
       method: 'PUT',
       body: JSON.stringify({ agent }),
     }),
-
-  // DSH is an optional agent; callers expose these routes only when its identifier is available.
-  getDshConnection: () => request<DshConnection | null>('/api/v1/agents/dsh/connection'),
-  setDshConnection: (config: DshConnection | null) => request<DshConnection | null>('/api/v1/agents/dsh/connection', {
-    method: 'PUT', body: JSON.stringify(config),
-  }),
-  getDshSettings: () => request<DshSettings>('/api/v1/agents/dsh/settings'),
-  updateDshSettings: (namespace: string, patch: Record<string, unknown>, revision: number) =>
-    request<unknown>('/api/v1/agents/dsh/settings', { method: 'PUT', body: JSON.stringify({ namespace, patch, revision }) }),
-  getDshSessions: () => request<DshSession[]>('/api/v1/agents/dsh/sessions'),
-  getDshModels: () => request<DshModels>('/api/v1/agents/dsh/models'),
-  getDshSession: (id: string) => request<DshSnapshot>(`/api/v1/agents/dsh/sessions/${encodeURIComponent(id)}`),
-  getDshAttachment: (id: string, attachment: string) =>
-    request<DshAttachment>(`/api/v1/agents/dsh/sessions/${encodeURIComponent(id)}/attachments/${encodeURIComponent(attachment)}`),
-  getDshHistory: (id: string, throughSeq: number, beforeSeq: number) =>
-    request<DshPage>(`/api/v1/agents/dsh/sessions/${encodeURIComponent(id)}/history?through_seq=${throughSeq}&before_seq=${beforeSeq}`),
-  selectDshModel: (id: string, provider: string, model: string) =>
-    request<unknown>(`/api/v1/agents/dsh/sessions/${encodeURIComponent(id)}/model`, {
-      method: 'PUT', body: JSON.stringify({ provider, model }),
-    }),
-  renameDshSession: (id: string, title: string) =>
-    request<unknown>(`/api/v1/agents/dsh/sessions/${encodeURIComponent(id)}/title`, {
-      method: 'PUT', body: JSON.stringify({ title }),
-    }),
-  stopDshSession: (id: string) => request<unknown>(`/api/v1/agents/dsh/sessions/${encodeURIComponent(id)}/stop`, { method: 'POST' }),
-  archiveDshSession: (id: string) => request<unknown>(`/api/v1/agents/dsh/sessions/${encodeURIComponent(id)}/archive`, { method: 'POST' }),
-  restoreDshSession: (id: string) => request<unknown>(`/api/v1/agents/dsh/sessions/${encodeURIComponent(id)}/restore`, { method: 'POST' }),
 
   // Model catalog: per-model context window, modalities and sampling overrides keyed by reference.
   getModels: () => request<ModelsResponse>('/api/v1/models'),

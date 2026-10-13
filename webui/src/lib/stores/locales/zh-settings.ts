@@ -1,19 +1,5 @@
 /** zh settings and shared platform translations. */
 export default {
-    'dsh.continue': '继续对话',
-    'dsh.archived': '已归档会话',
-    'dsh.restore': '恢复',
-    'dsh.sessions_hint': '历史、模型和会话设置由 deepseek-harness 管理。',
-    'dsh.no_sessions': '还没有 DSH 会话。',
-    'dsh.archive': '归档',
-    'dsh.archive_hint': 'DSH 将停止并归档此会话，历史仍可在 DSH 中恢复。',
-    'dsh.history': '历史与设置',
-    'dsh.running': '运行中',
-    'dsh.title': '会话标题',
-    'dsh.earlier': '加载更早的消息',
-    'dsh.image': '消息图片',
-    'dsh.tool': '工具',
-    'dsh.session_model': '使用 DSH 会话设置',
     // Settings
     'settings.theme': '主题',
     'settings.theme_system': '跟随系统',
@@ -93,21 +79,10 @@ export default {
     'context.none': '不附加',
     'agents.title': '默认 Agent',
     'agents.hint':
-      "未单独指定 Agent 的实例使用此选项。可选后端取决于节点编译时启用的模块。",
+      '没有单独指定 Agent 的实例都由它来回答。目前只有内置 Agent，将来插件提供的 Agent 也会列在这里。',
     'agents.builtin': '内置 Agent',
     'agents.builtin_hint':
       'Kanon 自带的对话循环：使用所选模型、插件与 MCP 工具、人设和会话记忆。',
-    "agents.dsh_hint": "选择 DSH 的实例，其设置、模型、会话、记忆与上下文均由 DSH 管理。",
-    "agents.dsh_url": "DSH 地址",
-    "agents.dsh_cookie": "节点上的 Cookie 文件（可选）",
-    "agents.dsh_load": "读取 DSH 设置",
-    "agents.dsh_open": "打开 DSH",
-    "agents.dsh_namespace": "设置分区",
-    "agents.dsh_current": "当前设置（敏感值已隐藏）",
-    "agents.dsh_patch": "要修改的字段（JSON 对象）",
-    "agents.dsh_patch_hint": "仅修改提供的字段。设置若被其他人修改，会拒绝覆盖，请重新读取。",
-    "agents.dsh_patch_object": "请输入 JSON 对象。",
-    "agents.dsh_owned": "此实例使用 DSH，请在 Agent 设置或 DSH 中管理模型、人设、记忆与上下文。",
     'context.title': '发给模型的信息',
     'context.hint':
       '节点在消息本身之外额外加入提示词的内容。ID 和时间默认关闭：ID 属于个人数据，时间也不是用户说的话；合并转发默认展开。',

@@ -319,9 +319,7 @@ impl PipelineEngine {
                         if name.eq_ignore_ascii_case(STOP_COMMAND) {
                             return self.handle_stop_command(instance);
                         }
-                        return self
-                            .handle_model_command(instance, &filtered_event, &parsed.args)
-                            .await;
+                        return self.handle_model_command(instance, &parsed.args).await;
                     }
                 }
 
@@ -475,37 +473,6 @@ impl PipelineEngine {
             context_policy.include_sender_id,
         );
 
-        // Resolve the runtime before simulation or model lookup. A selected external backend
-        // owns the entire conversation and must never reach the builtin loop as a fallback.
-        let resolved_agent = match &self.agent_factory {
-            Some(factory) => match factory.conversation_backend(
-                instance.as_ref().and_then(|i| i.agent.as_deref()),
-                instance.as_ref().and_then(|i| i.model.as_deref()),
-            ) {
-                Ok(agent) => agent,
-                Err(error) => {
-                    return PipelineResult::LlmFailed {
-                        error,
-                        replies: vec![text_reply("Agent 后端未就绪，请检查实例配置。")],
-                    };
-                }
-            },
-            None if instance
-                .as_ref()
-                .and_then(|instance| instance.agent.as_deref())
-                .is_some_and(|agent| agent != kanon_llm::BUILTIN_AGENT) =>
-            {
-                return PipelineResult::LlmFailed {
-                    error: "The selected external agent requires a configured factory".into(),
-                    replies: vec![text_reply("Agent 后端未就绪，请检查实例配置。")],
-                };
-            }
-            None => self
-                .agent
-                .current()
-                .map(kanon_llm::ConversationBackend::Builtin),
-        };
-
         if let Some(instance) = instance.as_ref()
             && instance.conversation_mode == crate::simulation::ConversationMode::Simulation
             && notice.is_none()
@@ -555,12 +522,19 @@ impl PipelineEngine {
         // honoured immediately; an empty slot means "no conversational LLM" and passes through.
         let conversation = instance_conversation_key(&filtered_event, instance.as_ref());
 
+        // The agent is resolved per event: the node provider comes from the shared slot (so a
+        // provider configured at runtime is honoured immediately) and a per-instance model
+        // override comes from the factory, which shares memory, personas and hooks with it.
+        let resolved_agent = match &self.agent_factory {
+            Some(factory) => {
+                factory.agent_for_model(instance.as_ref().and_then(|i| i.model.as_deref()))
+            }
+            None => self.agent.current(),
+        };
+
         // The target model's catalog entry decides which modalities may be attached: an image only
         // when it accepts images, text only when it accepts text.
-        let capabilities = match (
-            self.agent_factory.as_ref(),
-            resolved_agent.as_ref().and_then(|a| a.builtin()),
-        ) {
+        let capabilities = match (self.agent_factory.as_ref(), resolved_agent.as_ref()) {
             (Some(factory), Some(agent)) => {
                 factory
                     .models()
@@ -569,19 +543,6 @@ impl PipelineEngine {
             }
             _ => ModelCapabilities::default(),
         };
-        #[cfg(feature = "dsh")]
-        let capabilities = if matches!(
-            &resolved_agent,
-            Some(kanon_llm::ConversationBackend::Dsh(_))
-        ) {
-            // Intake support belongs to DSH's model configuration, not the builtin catalog.
-            ModelCapabilities {
-                vision: true,
-                ..ModelCapabilities::default()
-            }
-        } else {
-            capabilities
-        };
         // Recall notes waiting for this conversation ride on its next model turn, as leading text
         // of the current user message: runtime facts belong to the current turn, never to the
         // cached prefix. They are only taken when a model will actually read them.
@@ -589,10 +550,7 @@ impl PipelineEngine {
         // Sessions are namespaced by the instance that owns the conversation, so two bots can
         // never share context. An unpartitioned pipeline keeps the legacy conversation key.
         let session_id = match instance.as_ref() {
-            Some(instance) => match resolved_agent.as_ref() {
-                Some(backend) => instance.session_for_backend(&conversation, backend),
-                None => instance.conversation_session_id(&conversation),
-            },
+            Some(instance) => instance.conversation_session_id(&conversation),
             None => conversation.clone(),
         };
         let mut filtered_event = filtered_event;
@@ -713,16 +671,7 @@ impl PipelineEngine {
                 .turns
                 .begin(instance.as_ref().map(|instance| instance.id.clone()));
             let signal = running.signal();
-            let sessions = agent
-                .builtin()
-                .and_then(|agent| agent.session_manager())
-                .cloned()
-                .or_else(|| {
-                    self.agent_factory
-                        .as_ref()
-                        .map(|factory| factory.sessions().clone())
-                });
-            let writing = match sessions.as_ref() {
+            let writing = match agent.session_manager() {
                 Some(sessions) => Some(tokio::select! {
                     biased;
                     () = signal.stopped() => return PipelineResult::Passed(filtered_event),
@@ -732,10 +681,7 @@ impl PipelineEngine {
             };
             // Skip discovery for a model that cannot use tools. The agent enforces the same
             // capability for native tools and dispatch, independently of how the turn is invoked.
-            let tool_hosts = if agent
-                .builtin()
-                .is_none_or(|agent| agent.config().tool_calling)
-            {
+            let tool_hosts = if agent.config().tool_calling {
                 self.tool_hosts(&hosts, instance.as_ref(), &filtered_event.event_id)
                     .await
             } else {

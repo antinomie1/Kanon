@@ -644,12 +644,11 @@ async fn invalid_personas_keep_their_notice_and_event_category_without_calling_t
                 persona_id: Some("missing".to_string()),
                 ..draft.clone()
             },
-            Some(kanon_core::InstanceRuntime {
-                personas: personas.as_ref(),
-                sessions: node.sessions.as_ref(),
-                providers: node.factory.providers(),
-                default_agent: "builtin",
-            }),
+            Some((
+                personas.as_ref(),
+                node.sessions.as_ref(),
+                node.factory.providers(),
+            )),
         )
         .await
         .unwrap();
@@ -668,12 +667,11 @@ async fn invalid_personas_keep_their_notice_and_event_category_without_calling_t
                 .update(
                     instance_id,
                     draft.clone(),
-                    Some(kanon_core::InstanceRuntime {
-                        personas: personas.as_ref(),
-                        sessions: node.sessions.as_ref(),
-                        providers: node.factory.providers(),
-                        default_agent: "builtin",
-                    }),
+                    Some((
+                        personas.as_ref(),
+                        node.sessions.as_ref(),
+                        node.factory.providers(),
+                    )),
                 )
                 .await
                 .unwrap();

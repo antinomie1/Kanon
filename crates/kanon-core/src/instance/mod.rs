@@ -20,12 +20,7 @@
 //! Instances are persisted as one JSON document (`data/instances.json`) so the node comes back
 //! with the same bots after a restart.
 
-#[cfg(feature = "dsh")]
-mod dsh;
-mod routing;
-mod runtime;
 mod validation;
-pub use runtime::InstanceRuntime;
 use validation::*;
 mod persistence;
 use std::collections::HashMap;
@@ -305,23 +300,6 @@ impl BotInstance {
     /// so the previous session keeps its history and stays visible in the console.
     pub fn conversation_session_id(&self, conversation: &str) -> String {
         self.session_id_at(conversation, self.session_generation(conversation))
-    }
-
-    /// Current session route under the selected complete runtime.
-    pub fn session_for_backend(
-        &self,
-        conversation: &str,
-        backend: &kanon_llm::ConversationBackend,
-    ) -> String {
-        match backend {
-            kanon_llm::ConversationBackend::Builtin(_) => {
-                self.conversation_session_id(conversation)
-            }
-            #[cfg(feature = "dsh")]
-            kanon_llm::ConversationBackend::Dsh(_) => {
-                self.dsh_session_id_at(conversation, self.dsh_session_generation(conversation))
-            }
-        }
     }
 
     /// Session identifier of one generation of a conversation.
@@ -653,7 +631,7 @@ impl InstanceRegistry {
     pub async fn create(
         &self,
         draft: InstanceDraft,
-        runtime: Option<InstanceRuntime<'_>>,
+        runtime: Option<(&PersonaRegistry, &SessionManager, &ProviderRegistry)>,
     ) -> Result<BotInstance, InstanceError> {
         let mut instances = self.instances.write().await;
 
@@ -661,18 +639,8 @@ impl InstanceRegistry {
         let id = unique_id(&instances, &name);
         let candidate = build_instance(id, name, draft)?;
 
-        Self::validate_persona(
-            &candidate,
-            runtime
-                .filter(|runtime| runtime.builtin(&candidate))
-                .map(|runtime| runtime.personas),
-        )?;
-        Self::validate_model(
-            &candidate,
-            runtime
-                .filter(|runtime| runtime.builtin(&candidate))
-                .map(|runtime| runtime.providers),
-        )?;
+        Self::validate_persona(&candidate, runtime.map(|(personas, _, _)| personas))?;
+        Self::validate_model(&candidate, runtime.map(|(_, _, providers)| providers))?;
         Self::validate_claims(&instances, &candidate)?;
         let mut next = instances.clone();
         next.insert(candidate.id.clone(), candidate.clone());
@@ -686,7 +654,7 @@ impl InstanceRegistry {
         &self,
         id: &str,
         draft: InstanceDraft,
-        runtime: Option<InstanceRuntime<'_>>,
+        runtime: Option<(&PersonaRegistry, &SessionManager, &ProviderRegistry)>,
     ) -> Result<BotInstance, InstanceError> {
         let mut instances = self.instances.write().await;
 
@@ -715,18 +683,8 @@ impl InstanceRegistry {
             .map(|existing| existing.session_generations.clone())
             .unwrap_or_default();
 
-        Self::validate_persona(
-            &candidate,
-            runtime
-                .filter(|runtime| runtime.builtin(&candidate))
-                .map(|runtime| runtime.personas),
-        )?;
-        Self::validate_model(
-            &candidate,
-            runtime
-                .filter(|runtime| runtime.builtin(&candidate))
-                .map(|runtime| runtime.providers),
-        )?;
+        Self::validate_persona(&candidate, runtime.map(|(personas, _, _)| personas))?;
+        Self::validate_model(&candidate, runtime.map(|(_, _, providers)| providers))?;
         Self::validate_claims(&instances, &candidate)?;
         let mut next = instances.clone();
         next.insert(candidate.id.clone(), candidate.clone());
@@ -739,7 +697,7 @@ impl InstanceRegistry {
     pub async fn delete(
         &self,
         id: &str,
-        runtime: Option<InstanceRuntime<'_>>,
+        runtime: Option<(&PersonaRegistry, &SessionManager, &ProviderRegistry)>,
     ) -> Result<(), InstanceError> {
         let mut instances = self.instances.write().await;
         let mut next = instances.clone();
@@ -831,6 +789,47 @@ impl InstanceRegistry {
         result
     }
 
+    /// Validates restored references against the configured endpoints before serving messages.
+    pub async fn validate_models(&self, providers: &ProviderRegistry) -> Result<(), InstanceError> {
+        for instance in self.instances.read().await.values() {
+            Self::validate_model(instance, Some(providers))?;
+        }
+        Ok(())
+    }
+
+    /// Checks model ownership under the same instance guard that protects its publication.
+    fn validate_model(
+        candidate: &BotInstance,
+        providers: Option<&ProviderRegistry>,
+    ) -> Result<(), InstanceError> {
+        if let Some(providers) = providers
+            && let Some(model) = candidate.model.as_deref()
+        {
+            providers
+                .resolve(&kanon_llm::ModelRef::parse(model))
+                .map_err(|error| {
+                    InstanceError::Invalid(format!("instance '{}': {error}", candidate.id))
+                })?;
+        }
+        Ok(())
+    }
+
+    /// Checks the live persona catalog only after taking the instance write lock.
+    fn validate_persona(
+        candidate: &BotInstance,
+        personas: Option<&PersonaRegistry>,
+    ) -> Result<(), InstanceError> {
+        if let Some(personas) = personas
+            && let Some(id) = candidate.persona_id.as_deref()
+            && personas.get(id).is_none()
+        {
+            return Err(InstanceError::Invalid(format!(
+                "persona '{id}' does not exist on this node"
+            )));
+        }
+        Ok(())
+    }
+
     /// Commits one instance mutation together with its generated persona's lifecycle.
     ///
     /// Lock order is instance write lock -> generated persona shard -> session writers (try only)
@@ -841,12 +840,9 @@ impl InstanceRegistry {
         live: &mut HashMap<String, BotInstance>,
         next: HashMap<String, BotInstance>,
         id: &str,
-        runtime: Option<InstanceRuntime<'_>>,
+        runtime: Option<(&PersonaRegistry, &SessionManager, &ProviderRegistry)>,
     ) -> Result<(), InstanceError> {
-        let Some(InstanceRuntime {
-            personas, sessions, ..
-        }) = runtime
-        else {
+        let Some((personas, sessions, _)) = runtime else {
             return self.commit(live, next);
         };
         let previous = live.get(id).and_then(generated_persona);
@@ -882,6 +878,31 @@ impl InstanceRegistry {
             }
         }
         Ok(())
+    }
+
+    /// Makes `generation` the current session of one conversation and returns its identifier.
+    ///
+    /// Used by `/new` (a generation no session has used), `/switch` (an existing one) and `/del`.
+    /// Other sessions of the conversation are left untouched: their history stays where it is.
+    pub async fn select_session(
+        &self,
+        id: &str,
+        conversation: &str,
+        generation: u64,
+    ) -> Result<String, InstanceError> {
+        let mut instances = self.instances.write().await;
+        let mut next = instances.clone();
+        let instance = next
+            .get_mut(id)
+            .ok_or_else(|| InstanceError::NotFound(id.to_string()))?;
+
+        instance
+            .session_generations
+            .insert(conversation.to_string(), generation);
+        let session_id = instance.conversation_session_id(conversation);
+        self.commit(&mut instances, next)?;
+
+        Ok(session_id)
     }
 
     /// Replaces the model override of one instance and persists the catalog.
@@ -958,8 +979,3 @@ impl InstanceRegistry {
         Ok(())
     }
 }
-
-mod tool_scope;
-pub(crate) use tool_scope::tool_instance;
-#[cfg(feature = "dsh")]
-pub(crate) use tool_scope::with_tool_instance;

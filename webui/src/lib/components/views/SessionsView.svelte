@@ -15,8 +15,6 @@ import Modal from '../ui/Modal.svelte';
 import PageHead from '../ui/PageHead.svelte';
 import Select from '../ui/Select.svelte';
 import TextField from '../ui/TextField.svelte';
-import { agentName, agentsStore } from '../../stores/agents.svelte';
-import DshSessionsView from './DshSessionsView.svelte';
 
 /**
  * Conversations the node remembers, most recently active first.
@@ -27,8 +25,6 @@ import DshSessionsView from './DshSessionsView.svelte';
  */
 
 let sessions = $state<SessionSummary[]>([]);
-let backend = $state('');
-const selectedBackend = $derived(backend || agentsStore.defaultAgent || 'builtin');
 let total = $state(0);
 let loaded = $state(false);
 let loading = $state(false);
@@ -66,7 +62,6 @@ async function load() {
 // Reload as the search changes, a moment after typing stops, so each keystroke is not a request.
 $effect(() => {
   void search;
-  if (selectedBackend === 'dsh') return;
   const timer = window.setTimeout(
     () => untrack(() => void load()),
     loaded ? 250 : 0,
@@ -176,15 +171,6 @@ async function applyPersona() {
   }
 }
 </script>
-
-{#if agentsStore.agents.includes('dsh')}
-  <Select aria-label={t('settings.section_agent')} value={selectedBackend} onchange={(e) => backend = e.currentTarget.value}>
-    {#each agentsStore.agents as agent (agent)}<option value={agent}>{agentName(agent)}</option>{/each}
-  </Select>
-{/if}
-{#if selectedBackend === 'dsh'}
-  <DshSessionsView />
-{:else}
 
 <PageHead title={t('nav.sessions')}>
   {#snippet sub()}
@@ -341,4 +327,3 @@ async function applyPersona() {
     </Button>
   {/snippet}
 </Modal>
-{/if}

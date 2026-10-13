@@ -280,8 +280,6 @@ pub(super) fn tool_names(executed: &[kanon_llm::ExecutedToolCall]) -> Vec<String
 pub(super) fn failure_category(error: &kanon_llm::ToolRouterError) -> &'static str {
     match error {
         kanon_llm::ToolRouterError::Stopped => "stopped",
-        #[cfg(feature = "dsh")]
-        kanon_llm::ToolRouterError::Dsh(_) => "dsh_error",
         kanon_llm::ToolRouterError::Gateway(_) => "model_error",
         kanon_llm::ToolRouterError::Rpc(_)
         | kanon_llm::ToolRouterError::ToolNotFound(_)
@@ -315,8 +313,6 @@ pub(super) fn failure_notice(error: &kanon_llm::ToolRouterError) -> String {
         ToolRouterError::Compaction(_) => "会话压缩失败".to_string(),
         // A stopped turn is answered by `/stop` itself; the caller never asks for this notice.
         ToolRouterError::Stopped => "任务已停止".to_string(),
-        #[cfg(feature = "dsh")]
-        ToolRouterError::Dsh(_) => "DSH 后端执行失败，请查看运行日志".to_string(),
     };
     format!("这次没能回复：{reason}。不会自动重试，可以稍后再发。")
 }
@@ -325,7 +321,6 @@ pub(super) fn failure_notice(error: &kanon_llm::ToolRouterError) -> String {
 pub(super) fn render_model_list(
     options: &[(String, Option<ModelSpec>)],
     current: Option<&str>,
-    scope: &str,
 ) -> String {
     if options.is_empty() {
         return "当前没有可用模型；请先在控制台配置提供商和模型。".to_string();
@@ -342,7 +337,7 @@ pub(super) fn render_model_list(
         }
         rendered.push('\n');
     }
-    rendered.push_str(&format!("回复 /model <序号> 切换当前{scope}模型。"));
+    rendered.push_str("回复 /model <序号> 切换当前实例模型。");
     rendered
 }
 
@@ -398,7 +393,7 @@ pub(super) fn reply_sample(event_id: &str) -> f32 {
 /// One agent turn in a conversation, ready to run (see [`PipelineEngine::run_conversation_turn`]).
 pub(crate) struct ConversationTurn<'a> {
     /// The agent answering the turn.
-    pub(crate) agent: kanon_llm::ConversationBackend,
+    pub(crate) agent: Arc<dyn kanon_llm::Agent>,
     /// Registration created before waiting for the session writer, so `/stop` reaches that wait.
     pub(crate) running: &'a crate::pipeline::turns::TurnGuard<'a>,
     /// The conversation's session.

@@ -50,8 +50,7 @@ pub use conversation::{
 };
 pub use instance::{
     BashScope, BotInstance, DEFAULT_INSTANCE_CATALOG, InstanceDraft, InstanceError,
-    InstanceRegistry, InstanceRuntime, SessionScope, instance_persona_id,
-    restore_instance_personas,
+    InstanceRegistry, SessionScope, instance_persona_id, restore_instance_personas,
 };
 pub use ipc::{CoreApiService, CoreIpcServer};
 pub use manifest::{
@@ -85,7 +84,3 @@ pub use supervisor::{
     circuit_breaker::{CircuitBreaker, CircuitBreakerConfig, CircuitState},
 };
 pub use toggle::{DEFAULT_TOGGLE_STATE, MCP_SECTION, PLUGIN_SECTION, SKILL_SECTION, ToggleStore};
-
-/// Optional external agent tool bridge on the core IPC listener.
-#[cfg(feature = "dsh")]
-pub mod agent_bridge;

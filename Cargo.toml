@@ -9,7 +9,6 @@ members = [
     "crates/kanon-transport",
     "crates/kanon-storage",
     "crates/kanon-llm",
-    "crates/kanon-dsh",
     "crates/kanon-core",
     "crates/kanon-adapter-milky",
     "crates/kanon-adapter-onebot",

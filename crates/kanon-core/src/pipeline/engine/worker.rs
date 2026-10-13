@@ -120,7 +120,6 @@ impl PipelineEngine {
             }
         }
         // Drop futures before recording their events so no canceled lane can append a late reply.
-        drop(running);
         for event in active.into_values().filter_map(|(_, event)| event) {
             self.dead_letter_event(
                 &event,
@@ -432,29 +431,8 @@ impl PipelineEngine {
     /// the rest are recorded. Adapters and plugin hosts must stay up until this returns, because
     /// the final deliveries go through them.
     pub async fn drain(&self, worker: JoinHandle<()>, dispatcher: Option<JoinHandle<()>>) {
-        #[cfg(feature = "dsh")]
-        let native_clients = self.dsh_bridge.shutdown();
         self.shutdown.send_replace(ShutdownPhase::DrainingInbound);
-        #[cfg(feature = "dsh")]
-        let (worker_result, ()) = tokio::join!(worker, async {
-            // Cleanup can outlive its HTTP/worker caller and a replaced endpoint. Keep IPC
-            // dependencies alive for the same aggregate event grace, without adding another
-            // serial shutdown delay after the worker has already used that budget.
-            let idle = futures_util::future::join_all(
-                native_clients.iter().map(|client| client.wait_idle()),
-            );
-            if tokio::time::timeout(SHUTDOWN_EVENT_GRACE, idle)
-                .await
-                .is_err()
-            {
-                tracing::error!(
-                    "DSH remote cleanup exceeded shutdown grace; remote session state must be inspected"
-                );
-            }
-        });
-        #[cfg(not(feature = "dsh"))]
-        let worker_result = worker.await;
-        if let Err(err) = worker_result {
+        if let Err(err) = worker.await {
             tracing::error!(error = %err, "Pipeline worker failed during shutdown");
         }
         self.shutdown.send_replace(ShutdownPhase::DrainingOutbound(
