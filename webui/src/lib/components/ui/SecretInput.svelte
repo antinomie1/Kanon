@@ -36,7 +36,7 @@ let shown = $state(false);
     <Button
       type="button"
       variant="text"
-      size="xs"
+      size="sm"
       square
       aria-label={shown ? t('platforms.hide_secret') : t('platforms.show_secret')}
       aria-pressed={shown}

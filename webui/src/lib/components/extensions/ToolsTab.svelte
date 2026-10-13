@@ -129,7 +129,7 @@ const SOURCE_KEY: Record<ToolSource, string> = {
               </div>
               <Button
                 type="button"
-                variant="text" size="xs"
+                variant="text" size="sm"
                 aria-expanded={open}
                 onclick={() => (expanded = { ...expanded, [tool.name]: !open })}
               >

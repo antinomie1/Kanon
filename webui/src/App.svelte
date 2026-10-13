@@ -27,9 +27,9 @@ let isDrawerOpen = $state(false);
 const NAV_COLLAPSED_KEY = 'kanon-nav-collapsed';
 
 /**
- * Whether the desktop navigation rail is collapsed to its 96px icon form. It is a per-browser convenience: storage can be
- * unavailable (private windows, blocked site data), so a failed read means "expanded" and a failed
- * write only forgets the choice at the next reload.
+ * Whether the desktop sidebar is collapsed to its 80px icon rail. It is a per-browser convenience:
+ * storage can be unavailable (private windows, blocked site data), so a failed read means
+ * "expanded" and a failed write only forgets the choice at the next reload.
  */
 let isNavCollapsed = $state(readNavCollapsed());
 
@@ -89,7 +89,7 @@ function handleKeydown(e: KeyboardEvent) {
 <div class="flex h-dvh w-full overflow-hidden bg-rail text-fg">
   <aside
     class="hidden shrink-0 overflow-hidden rail transition-[width] duration-300 ease-[var(--md-sys-motion-easing-emphasized)] lg:block {isNavCollapsed
-      ? 'w-24'
+      ? 'w-20'
       : 'w-[256px]'}"
   >
     <Sidebar
@@ -117,8 +117,11 @@ function handleKeydown(e: KeyboardEvent) {
       bind:this={scroller}
       class="scroll-thin min-h-0 flex-1 overflow-y-auto rounded-t-[28px] bg-page lg:rounded-[32px]"
     >
+      <!-- On desktop the 26px top padding puts the page title's 44px line (after PageHead's 8px)
+           at 12 + 26 + 8 = 46, centring it 68px from the window top: the rail's menu button sits on
+           the same line, so the rail header and the page header read as one band. -->
       <div
-        class="mx-auto flex w-full max-w-[1320px] flex-col gap-5 px-4 py-5 sm:px-8 lg:px-10 lg:py-[30px] {fullHeight
+        class="mx-auto flex w-full max-w-[1320px] flex-col gap-5 px-4 py-5 sm:px-8 lg:px-10 lg:pt-[26px] lg:pb-[30px] {fullHeight
           ? 'h-full'
           : ''}"
       >

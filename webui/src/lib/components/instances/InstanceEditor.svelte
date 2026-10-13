@@ -348,7 +348,7 @@ function testChat() {
             <Button
               type="button"
               variant="outlined"
-              size="xs"
+              size="sm"
               class="kanon-danger"
               onclick={() => router.navigate('platforms', platform)}
             >
@@ -358,7 +358,7 @@ function testChat() {
           <Button
             type="button"
             variant={state === 'ok' ? 'text' : 'danger'}
-            size="xs"
+            size="sm"
             onclick={() => store.toggleAdapter(platform)}
           >
             {t('instances.platform_remove')}

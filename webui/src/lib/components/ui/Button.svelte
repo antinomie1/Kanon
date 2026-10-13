@@ -13,8 +13,9 @@ import type { HTMLButtonAttributes } from 'svelte/elements';
  *   - `danger`, `danger-filled`, `warn` and the three inverse-surface flavours, which remap
  *     Google's own colour roles on the host (the `.kanon-*` rules in `app.css`) rather than reaching into
  *     the shadow root;
- *   - the console's geometry: circular icon buttons, the 28px `xs` size (Google's smallest is
- *     32px), the 46px composer button and flush padding, all set through the exposed `btn` part;
+ *   - the console's geometry: circular icon buttons, the 46px composer button and flush padding,
+ *     all set through the exposed `btn` part. Heights stay on Material 3 Expressive's scale (32px
+ *     XS and 40px S; Google's element has no smaller size, and neither does the spec);
  *   - `href`, which Google's element turns into a link button (`<a part="btn">`) by itself.
  *
  * Everything else — `disabled`, `type`, `title`, `aria-*`, `data-*`, `onclick` — is passed straight
@@ -32,7 +33,7 @@ export type ButtonVariant =
   | 'inverse'
   | 'inverse-filled'
   | 'inverse-plain';
-export type ButtonSize = 'md' | 'sm' | 'xs';
+export type ButtonSize = 'md' | 'sm';
 
 /** Variants that recolour a text button, or a filled one for `danger-filled` and `inverse-filled`. */
 const COLORED: Partial<
@@ -48,7 +49,7 @@ const COLORED: Partial<
 
 interface Props extends HTMLButtonAttributes {
   variant?: ButtonVariant;
-  /** `md` is 40px (Google's `sm`), `sm` is 32px (Google's `xs`), `xs` is the console's 28px. */
+  /** `md` is 40px (Google's `sm`), `sm` is 32px (Google's `xs`, Material's smallest button). */
   size?: ButtonSize;
   /**
    * Icon-only button: a circle whose width equals its height. Google's own `square` property is
@@ -75,12 +76,11 @@ let {
   ...rest
 }: Props = $props();
 
-/** The element's sizes are one step above the console's; `xs` additionally gets the part rule. */
+/** The element's sizes are one step above the console's names. */
 const elementSize = $derived(size === 'md' ? 'sm' : 'xs');
 const classes = $derived(
   [
     COLORED[variant]?.klass ?? '',
-    size === 'xs' ? 'kanon-btn-xs' : '',
     square ? 'kanon-icon' : '',
     extra,
   ]

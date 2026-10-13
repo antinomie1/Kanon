@@ -585,18 +585,12 @@
   /* A button label is a single line: Chinese text can break between any two characters, so a
      squeezed button would otherwise stack its label vertically. `white-space` inherits into the
      shadow roots, so setting it on the hosts covers the labels Google renders inside them. */
-  md-gb-button,
-  md-outlined-segmented-button {
+  md-gb-button {
     white-space: nowrap;
   }
 
   /* Geometry the console needs beyond Google's sizes. The element exposes the inner button as
      `part="btn"` and sets the geometry tokens there, so that part is the documented hook. */
-  md-gb-button.kanon-btn-xs::part(btn) {
-    --container-height: 28px;
-    --leading-space: 11px;
-    --trailing-space: 11px;
-  }
   md-gb-button.kanon-btn-46::part(btn) {
     --container-height: 46px;
   }
@@ -604,9 +598,38 @@
     --leading-space: 0;
     --trailing-space: 0;
   }
-  /* The segmented control's compact size: 32px instead of Google's 40px. */
-  md-outlined-segmented-button-set.kanon-seg-sm {
-    --md-outlined-segmented-button-container-height: 32px;
+  /* Material 3 Expressive's connected button group (`md.comp.button-group.connected.*`), built from
+     Google's buttons in Seg.svelte. The element gives all four corners one radius, so the group
+     sets each corner on the exposed `btn` part; a `::part()` rule from the page outranks the
+     element's own `border-radius`, and the element's spring transition on `border-radius` still
+     animates every change. Per the tokens: 2px between buttons; outer corners always fully round;
+     inner corners 8px (corner-small), fully round on the selected button, 4px (corner-extra-small)
+     while pressed. Later rules win at equal specificity, so pressed beats selected (as in Compose's
+     toggle buttons) and the outer corners beat both. */
+  .kanon-cg {
+    display: grid;
+    grid-auto-columns: 1fr;
+    grid-auto-flow: column;
+    gap: 2px;
+  }
+  .kanon-cg > md-gb-button::part(btn) {
+    --kanon-cg-round: calc(var(--container-height) / 2);
+    width: 100%;
+    border-radius: var(--md-sys-shape-corner-sm);
+  }
+  .kanon-cg > md-gb-button.kanon-cg-on::part(btn) {
+    border-radius: var(--kanon-cg-round);
+  }
+  .kanon-cg > md-gb-button:active:not([disabled])::part(btn) {
+    border-radius: var(--md-sys-shape-corner-xs);
+  }
+  .kanon-cg > md-gb-button:first-child::part(btn) {
+    border-start-start-radius: var(--kanon-cg-round);
+    border-end-start-radius: var(--kanon-cg-round);
+  }
+  .kanon-cg > md-gb-button:last-child::part(btn) {
+    border-start-end-radius: var(--kanon-cg-round);
+    border-end-end-radius: var(--kanon-cg-round);
   }
 
   /* Google's `square` only rounds the corners to 12px; the console's icon buttons are circles whose

@@ -47,7 +47,7 @@ import Button from './Button.svelte';
       <Button
         type="button"
         variant="inverse-plain"
-        size="xs"
+        size="sm"
         square
         class="opacity-75 hover:opacity-100"
         aria-label={t('common.close')}

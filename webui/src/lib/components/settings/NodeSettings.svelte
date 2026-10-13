@@ -75,7 +75,7 @@ const config = $derived(providersStore.systemConfig);
           <code class="min-w-0 flex-1 truncate text-[13px]" title={value}>{value}</code>
           <Button
             type="button"
-            variant="text" size="xs" square
+            variant="text" size="sm" square
             aria-label={t('settings.copy_value', { label })}
             onclick={() => copy(value)}
           >
